@@ -30,12 +30,15 @@ Included in v1:
 - Signal queue for MT5.
 - MT5 Expert Advisor account registration, heartbeat, polling, execution, and result reporting.
 - Dashboard views for providers, parser results, MT5 accounts, signals, trades, and execution logs.
+- Analytics & Performance: per-provider attribution, account-level KPIs, equity curve, and monthly returns.
+- Equity Guardian: per-account drawdown limit with pause-on-breach for new OPEN_TRADE commands.
+- Provider Strategy Configuration: per-provider message template selection, TP1-TP4 rules, and pip manipulation.
+- Per-trade lifecycle event log.
 
 Deferred until after v1:
 
 - Image signal parsing.
 - AI assistant.
-- Strategy builder.
 - Economic event filter.
 - 100 take-profit levels.
 - Multi-platform execution beyond MT5.
@@ -109,6 +112,7 @@ The backend provides:
   - selected dialog metadata
   - enabled/disabled state
   - parser mode and risk profile selection
+  - channel-owned lot size used for every approved trade from that provider
 - Symbol mapping management:
   - provider-specific symbol aliases
   - account-specific broker symbol mappings
@@ -143,6 +147,22 @@ The backend provides:
   - poll next eligible signals
   - report execution result
   - report trade closed or modified events where available
+- Analytics API:
+  - account-level KPIs: initial balance, total profit, deltas for today, this week, and this month
+  - per-provider attribution rows: pips, W/L %, average drawdown, P/L, profit, gain
+  - equity curve series per account
+  - monthly returns series per account
+  - downloadable provider report (CSV/PDF) for a selected window
+- Equity Guardian API:
+  - read and update per-account threshold and pause-on-breach state
+  - breach event log per account
+  - manual unpause action (audited)
+- Provider Strategy Configuration API:
+  - read and update per-provider message-template choice, TP1-TP4 strategy rules, and pip-manipulation settings
+  - settings change history per provider
+  - configuration test endpoint that applies template plus rules to a sample raw message and returns the would-be parsed signal, without affecting live state
+- Per-trade events API:
+  - chronological lifecycle event log per logical trade
 
 Backend persistence should use SQLite initially but keep models clean enough to move to Postgres later.
 
@@ -161,8 +181,8 @@ V1 supported signal fields:
 - entry price or entry zone.
 - stop loss.
 - take profits: TP1, TP2, TP3, TP4.
-- optional lot size.
-- optional risk hint.
+- optional provider-sent lot size hint, captured for review but not trusted for MT5 execution.
+- optional provider-sent risk hint, captured for review but not trusted for MT5 execution.
 - optional expiry.
 - optional partial-close allocation per TP.
 
@@ -241,6 +261,38 @@ Parser Lab should show symbol resolution inline:
 
 Lifecycle commands must use the same mapping and provider context. For example, a later message saying `Cancel Gold` or `Move SL BE XAUUSD` must resolve to the correct logical trade before an MT5 command is queued.
 
+## Provider Strategy Configuration
+
+Each provider has a configuration record that layers strategy preferences over the deterministic parser output before a signal enters the queue. The deterministic parser remains the source of truth for raw fields; strategy configuration only adjusts what is sent to MT5.
+
+Per-provider configuration includes:
+
+- Channel lot size: the operator-configured execution volume for this Telegram provider. The app must not use lot sizes embedded in provider Telegram messages.
+- Message Template: Automatic, Named template, or Manual override. A Test Message preview applies the chosen template to a recent raw message and shows the resulting parsed signal.
+- TP1-TP4 strategy: when TP1 hits, set SL to ENTRY plus an offset, or multiply SL pips by a factor.
+- TP manipulation: change TP1 to N pips, change TP1 to a 1:R risk-reward target, or only apply when the signal lacks a given TP.
+- Pip add, randomize, or spread on individual TP levels.
+- Settings History: append-only audit log of who changed what and when.
+
+The strategy configuration must round-trip through the queue so the EA receives the modified TP/SL. The configuration test endpoint must run against a sample raw message without affecting live state.
+
+## Equity Guardian
+
+Equity Guardian is a per-MT5Account drawdown limiter that protects the account from cascading losses driven by provider signals.
+
+State per account:
+
+- threshold: maximum acceptable drawdown percentage.
+- current_drawdown: most recent computed drawdown.
+- paused: boolean, true after a breach until manually unpaused.
+- breach history: append-only log of breach events with timestamp, drawdown at breach, and action taken.
+
+Behavioral rule: when current_drawdown is greater than or equal to threshold, the queue rejects new OPEN_TRADE commands for that account. Lifecycle commands on already-open trades (CANCEL_PENDING, CLOSE_TRADE, CLOSE_PARTIAL, MOVE_SL_TO_BE, MODIFY_SL, MODIFY_TP, MARK_TP_HIT) continue to pass so existing exposure can be managed or closed.
+
+Manual unpause is an audited action and is recorded in the breach history.
+
+Equity Guardian is a backend rule, not just a UI display. The queue and EA paths must consult it on every OPEN_TRADE evaluation.
+
 ## Signal Lifecycle and Multi-TP Design
 
 The app must treat provider messages as a lifecycle stream, not as isolated trade entries. A provider can send an open signal first, then later send management instructions such as cancel, close, close partial, move SL to BE, or update TP/SL.
@@ -264,6 +316,7 @@ For TP1-TP4 behavior, the user-facing model is:
 - one shared entry idea and one shared signal history.
 - TP legs with configured allocation, for example 25/25/25/25 or 50/25/15/10.
 - each TP leg has target price, intended close volume, status, and broker execution evidence.
+- intended close volume is derived from the channel-owned lot size, not from Telegram provider text. For example, a `0.20` channel lot with four equal TP targets creates `0.05` per TP leg.
 
 MT5 execution has two implementation modes:
 
@@ -318,6 +371,39 @@ For virtual-TP mode, the EA must continuously manage the active logical trade wh
 For split-order mode, the backend/EA creates child orders or positions for each TP leg. Provider commands still target the logical trade first, then resolve to one or more child broker tickets.
 
 If the app cannot reconcile a command to an open logical trade with enough confidence, it must require manual review instead of sending a blind close/cancel/modify command to MT5.
+
+## Analytics & Performance
+
+The dashboard must surface attribution and account-level performance, not just live operational state.
+
+Per-provider attribution is computed from the join of LogicalTrade, ExecutionReport, and Provider:
+
+- pips
+- W/L percentage
+- average drawdown
+- P/L (currency-denominated)
+- profit
+- gain (return percentage)
+
+Account-level KPIs:
+
+- initial balance
+- total profit
+- delta for today, this week, and this month
+- EA status badge tied to MT5 heartbeat freshness
+
+Time series:
+
+- equity curve: account growth versus trade count, stored either as a derived view over ExecutionReport or as pre-aggregated daily snapshots.
+- drawdown series: aligned with the equity curve.
+- monthly returns: percentage return per calendar month per account.
+
+Filtering and export:
+
+- filter by provider name, by date range, and by enabled/disabled status.
+- "Provider Report" export as CSV or PDF for a selected window.
+
+Performance metrics must match a hand-computed value on a fixture-driven test account, so analytics output is testable without a live broker.
 
 ## MT5 Expert Advisor Design
 
@@ -376,23 +462,43 @@ Core entities:
 - ExecutionReport: result returned by the EA.
 - Trade: opened or pending order known to the app.
 - AuditLog: operational events and errors.
+- EquityGuardian: per-MT5Account threshold, current drawdown, paused state, and breach history.
+- ProviderConfig: per-Provider message-template choice, TP strategy rules, pip-manipulation settings, plus version, author, and timestamp for history.
+- ProviderConfigHistory: append-only changelog rows for ProviderConfig.
+- EquitySnapshot: periodic per-account balance and equity capture used for the equity curve.
+- LogicalTradeEvent: timestamped events (OPEN, SL_MOVED, TP_HIT, PARTIAL_CLOSE, MODIFY, CANCEL, CLOSED) joined to LogicalTrade as an explicit append-only log for the UI feed.
 
 ## Frontend Screens
 
-V1 screens:
+The frontend uses a top-level navigation rail (Home, Linked Accounts, Account Management, Live, Telegram Setup) with the Live workspace organized as tabs.
+
+V1 top-level screens:
 
 - Telegram Setup: API ID, API hash, phone, code, and 2FA flow.
-- Dashboard: system health, active providers, MT5 account status, recent signals.
-- Providers: selected Telegram dialogs and enable/disable controls.
-- Parser Lab: raw message, parsed fields, symbol resolution, confidence, fixture save button, and parser status.
-- Signal Queue: pending, reviewed, ignored, executed, failed, and duplicate signals.
-- Trade Lifecycle: each logical trade, TP legs, close/cancel/BE commands, and execution history.
-- MT5 Accounts: connected accounts, heartbeat status, broker/server, risk defaults.
-- Symbol Mapping: global aliases, provider aliases, account mappings, prefix/suffix, include/exclude rules, and EA symbol validation.
-- Execution Logs: result codes, broker comments, failed requests, and retry status.
-- Settings: symbol mappings, default lot/risk settings, polling intervals, and allowed order behavior.
+- Live workspace (default after setup): the operations console, organized as tabs (see below).
+- Linked Accounts / Account Management: MT5 account registration, heartbeat health, broker/server, and risk defaults.
 
-The visual direction should use a clean dashboard style similar to Rantoniaina's app, with practical operational screens inspired by TSCopier. The first screen after setup should be the usable dashboard, not a marketing page.
+V1 Live-workspace tabs:
+
+- Performance: account KPIs strip (initial balance, total profit, today/week/month deltas), equity-curve chart with growth/drawdown toggle, monthly-returns bar chart, and a small per-account latency strip.
+- Providers: sortable performance table with columns for name, risk, TP count, SL, others, pips, W/L %, average drawdown, P/L, profit, and gain. Filter chips by name, date, and status. Per-row gear opens the Provider Configuration modal. Add Provider opens the dialog picker. Provider Report exports a CSV or PDF for the selected window.
+- History: chronological logical trades. Each row is expandable to a per-trade lifecycle event log (timestamped OPEN, SL_MOVED, TP_HIT, PARTIAL_CLOSE, MODIFY, CANCEL, CLOSED) and a P/L sparkline.
+- Equity Guardian: per-account current drawdown, threshold, pause-on-breach toggle, breach event log, manual unpause action.
+- Symbol Settings: global aliases, provider aliases, account mappings, prefix/suffix, include/exclude rules, and EA symbol validation, presented as editable tables.
+- Signal Strategy Rules: per-provider per-pair rule editor (forward-compatible UI scaffold even if backend per-pair support lags).
+- Logs: combined parser-review queue and MT5 execution logs as a single timestamped feed with type and status filters.
+
+Cross-cutting UI elements:
+
+- Status bar header: brand, health chips, queue count, last-poll clock, refresh action, and live-poll dot.
+- Quick actions: command palette (Cmd/Ctrl+K) for refresh, pause provider, jump-to-tab, and open settings.
+- Settings drawer (Cmd/Ctrl+,): global Telegram credentials and add-provider flow.
+- Per-trade lifecycle event log surfaces in the History tab and inside any expanded logical trade.
+- P/L sparkline appears on each logical trade card.
+
+The first screen after setup is the Live workspace, not a marketing page.
+
+The visual direction is a modern dark terminal: dense, monospace numerics, sharp 1 px borders, a single cyan accent on near-black, with status bar, ticker tape, and tabbed working surface. Color is reserved for direction (green for up, red for down) and warnings (amber). Inspiration is Bloomberg-style operations terminals while keeping the navigability of TSCopier.
 
 ## Testing and Verification
 
@@ -446,3 +552,9 @@ V1 is successful when:
 - An MT5 EA can register, heartbeat, poll, execute a demo signal, and report the result.
 - An MT5 EA can process at least one non-entry lifecycle command in demo mode, such as move SL to BE or cancel pending.
 - Execution logs show enough detail to diagnose failures without guessing.
+- Provider/channel lot size controls MT5 queue volume, and provider-sent lot sizes are ignored for execution.
+- Multi-TP queue payloads include explicit per-leg volumes that add back to the configured channel lot size.
+- Per-provider performance metrics are visible in the Providers tab and match a hand-computed value on a fixture-driven test account.
+- Equity Guardian threshold breach pauses new OPEN_TRADE commands for the affected account while continuing to pass lifecycle commands on already-open trades.
+- Provider Strategy Configuration changes round-trip through the queue and the EA receives the modified TP/SL on demo execution.
+- Per-trade lifecycle event log is populated for every state transition (OPEN, SL_MOVED, TP_HIT, PARTIAL_CLOSE, MODIFY, CANCEL, CLOSED).
