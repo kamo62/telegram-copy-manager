@@ -93,7 +93,7 @@ describe("App dashboard", () => {
   test("renders the usable operations dashboard as the first screen, not a marketing page", () => {
     const view = render(<App initialSnapshot={snapshot} />);
 
-    expect(view.getByRole("heading", { name: "Telegram TC Operations" })).toBeTruthy();
+    expect(view.getByRole("heading", { name: "TG-TC · Operations" })).toBeTruthy();
     expect(view.getAllByText("Telegram Setup").length).toBeGreaterThan(0);
     expect(view.getAllByText("Parser Lab").length).toBeGreaterThan(0);
     expect(view.getAllByText("MT5 Accounts").length).toBeGreaterThan(0);

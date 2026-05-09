@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-05-09 (Account header strip — TSC parity)
+
+Replaced the four "Providers / Parser Review / Queue / MT5 Accounts" metric cards with a TSC-style account header strip at the top of the workspace:
+
+- Added `apps/web/src/components/AccountHeader.tsx` with two regions: left = `Live` heading + Connected Platform card (Platform · Broker · Type · Expert Advisor + EA WORKING/EA OFFLINE badge), right = five KPI columns (Initial Balance, Total Profit, This Month, This Week, Today). Currency, amounts, and Δ% badges are formatted en-US locale-stable.
+- Stub financial KPIs render as `—` with muted Δ chips until backend `/api/account/performance` lands. Connected Platform / EA status are computed from the existing `snapshot.mt5Accounts` (broker derived from server prefix, DEMO/LIVE inferred from server name, EA active = heartbeatStatus online).
+- Removed the duplicate marketing topbar (`Live operations` eyebrow + `Telegram TC Operations` h1) — it was contradicting the StatusBar that already shows the app title.
+- Promoted the StatusBar `<span class="brand">TG-TC · Operations</span>` to an `<h1>` so the page has a single canonical heading. Test updated to assert the new heading.
+- Deleted unused `apps/web/src/components/MetricsGrid.tsx` and trimmed dead lucide-react imports / the unused `metrics` `useMemo`.
+
+Verification:
+
+- `bun test apps/web/` — 9 pass.
+- `bun run --cwd apps/web build` — clean (229 KB JS, 23 KB CSS).
+
 ## 2026-05-09 (Sign-in & light theme)
 
 Polished the first screen so it matches the TSCopier sign-in style instead of the dense dashboard:

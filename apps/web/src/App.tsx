@@ -1,10 +1,10 @@
-import { ClipboardList, RadioTower, RefreshCw, Server, Workflow } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountRow } from "./components/AccountRow";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { DialogPicker, type TelegramDialogSummary } from "./components/DialogPicker";
 import { LogRow } from "./components/LogRow";
-import { MetricsGrid } from "./components/MetricsGrid";
 import { Panel } from "./components/Panel";
 import { ParserResult } from "./components/ParserResult";
 import { ProviderRow } from "./components/ProviderRow";
@@ -125,7 +125,7 @@ export function App({
 }) {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(initialSnapshot ?? emptySnapshot);
   const [availableDialogs, setAvailableDialogs] = useState<TelegramDialogSummary[]>(initialDialogs);
-  const [loading, setLoading] = useState(!initialSnapshot);
+  const [, setLoading] = useState(!initialSnapshot);
   const [refreshing, setRefreshing] = useState(false);
   const [lastPollError, setLastPollError] = useState(false);
   const [activeView, setActiveView] = useState("dashboard");
@@ -215,35 +215,33 @@ export function App({
     }
   }, [snapshot.telegramSessions]);
 
-  const metrics = useMemo(
-    () => [
-      {
-        label: "Providers",
-        value: snapshot.providers.length,
-        detail: `${snapshot.providers.filter((provider) => provider.enabled).length} active`,
-        icon: RadioTower,
+  const accountHeaderData = useMemo<AccountHeaderData>(() => {
+    const primary = snapshot.mt5Accounts[0];
+    const broker = primary ? primary.server.split("-")[0] || primary.server : "—";
+    const accountType = primary
+      ? primary.server.toLowerCase().includes("demo")
+        ? "DEMO"
+        : "LIVE"
+      : "—";
+    const eaActive = primary?.heartbeatStatus === "online";
+    return {
+      connectedPlatform: {
+        platform: primary ? "MT5" : "—",
+        broker: primary ? broker : "—",
+        accountType,
+        expertAdvisorVersion: eaActive ? "Active" : "Idle",
+        eaActive,
       },
-      {
-        label: "Parser Review",
-        value: snapshot.parserResults.filter((result) => result.reviewRequired).length,
-        detail: `${snapshot.parserResults.length} recent parses`,
-        icon: ClipboardList,
+      kpis: {
+        initialBalance: null,
+        totalProfit: { amount: null, deltaPercent: null },
+        thisMonth: { amount: null, deltaPercent: null },
+        thisWeek: { amount: null, deltaPercent: null },
+        today: { amount: null, deltaPercent: null },
       },
-      {
-        label: "Queue",
-        value: snapshot.signalQueue.filter((item) => item.status === "PENDING").length,
-        detail: `${snapshot.signalQueue.length} total items`,
-        icon: Workflow,
-      },
-      {
-        label: "MT5 Accounts",
-        value: snapshot.mt5Accounts.length,
-        detail: `${snapshot.mt5Accounts.filter((account) => account.heartbeatStatus === "online").length} online`,
-        icon: Server,
-      },
-    ],
-    [snapshot],
-  );
+      currency: "$",
+    };
+  }, [snapshot.mt5Accounts]);
 
   const paletteCommands = useMemo<PaletteCommand[]>(
     () => [
@@ -554,16 +552,7 @@ export function App({
       <Sidebar activeView={activeView} onNavigate={setActiveView} />
 
       <section className="workspace">
-        {showDashboard ? (
-          <header className="topbar">
-            <div>
-              <p className="eyebrow">Live operations</p>
-              <h1>Telegram TC Operations</h1>
-            </div>
-          </header>
-        ) : null}
-
-        {showDashboard ? <MetricsGrid loading={loading} metrics={metrics} /> : null}
+        {showDashboard ? <AccountHeader data={accountHeaderData} /> : null}
 
         <section className="content-grid">
           {showTelegram ? (

@@ -21,7 +21,7 @@ export function StatusBar({
 
   return (
     <header className="status-bar">
-      <span className="brand">TG-TC · Operations</span>
+      <h1 className="brand">TG-TC · Operations</h1>
       <div className="chips">
         <span className="chip">
           <span className={`chip-dot ${database === "connected" ? "ok" : "warn"}`} />
