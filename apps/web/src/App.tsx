@@ -2,6 +2,7 @@ import { RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountRow } from "./components/AccountRow";
+import { buildPlaceholderGrowth, GrowthChart } from "./components/GrowthChart";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { DialogPicker, type TelegramDialogSummary } from "./components/DialogPicker";
 import { LogRow } from "./components/LogRow";
@@ -580,15 +581,14 @@ export function App({
         {showPerformance ? (
           <div
             aria-labelledby="tab-performance"
-            className="tab-empty-state"
             id="tabpanel-performance"
             role="tabpanel"
           >
-            <strong>Performance charts coming next</strong>
-            <span>
-              Account growth and monthly returns will land here once the analytics endpoints are
-              wired up.
-            </span>
+            <GrowthChart
+              data={buildPlaceholderGrowth(
+                snapshot.executionLogs.filter((log) => log.status === "EXECUTED").length,
+              )}
+            />
           </div>
         ) : null}
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-05-09 (Performance growth chart — TSC parity)
+
+- New `apps/web/src/components/GrowthChart.tsx` — uplot-backed account-growth chart with a Growth / Drawdown toggle. Indigo line + faint area fill matching the rest of the theme (`#5046e5` for growth, `#ef4444` for drawdown), `tabular-nums` axis labels formatted as `$1,234` and `0.0%`.
+- uplot lives in a dynamic `import()` inside the chart's `useEffect` so it never touches `document` at module-load. This keeps the build splitting clean (uplot becomes its own ~52 KB chunk only fetched when the user lands on the Performance tab) and dodges the happy-dom `doc.createElement` SSR-ish error that broke tests on first attempt.
+- Replaces the "Performance charts coming next" empty state on the Performance tab with the live chart. Stub series generated client-side via `buildPlaceholderGrowth(executedCount)` so the visual lands now; will swap to real `GET /api/equity-curve` when that endpoint ships.
+- Resize observer keeps the canvas sized to the container so the chart re-flows on window resize.
+
+Verification: `bun test apps/web/` 9 pass · `bun run --cwd apps/web build` clean (main chunk 240 KB JS / 31 KB CSS, uplot lazy-loaded as its own 52 KB chunk).
+
 ## 2026-05-09 (Providers data table + config modal — TSC parity)
 
 Replaces the cramped per-row provider cards with a proper TSC-style data table and a deep configuration modal:

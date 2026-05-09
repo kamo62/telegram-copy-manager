@@ -1314,6 +1314,96 @@ code {
   max-width: 360px;
 }
 
+/* Chart card --------------------------------------------------------------- */
+
+.chart-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.chart-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chart-card-title {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.005em;
+}
+
+.chart-card-meta {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+.chart-toggle {
+  display: inline-flex;
+  background: var(--panel-2);
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+}
+
+.chart-toggle button {
+  padding: 5px 12px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-dim);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    color 0.12s;
+}
+
+.chart-toggle button.active {
+  background: var(--panel);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: var(--shadow-sm);
+}
+
+.chart-canvas-wrap {
+  width: 100%;
+  min-height: 320px;
+}
+
+.chart-card-foot {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--ink-faint);
+  text-align: center;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* uplot light-theme overrides */
+.u-wrap {
+  background: transparent;
+}
+.u-legend {
+  display: none !important;
+}
+
 /* Data table --------------------------------------------------------------- */
 
 .data-table-wrap {
