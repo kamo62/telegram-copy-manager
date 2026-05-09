@@ -194,6 +194,7 @@ describe("App dashboard", () => {
 
     const view = render(<App initialSnapshot={snapshot} />);
     clickTab(view, "Providers");
+    fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
       target: { value: "kal-vip" },
     });

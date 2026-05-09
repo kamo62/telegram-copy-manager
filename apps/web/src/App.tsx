@@ -7,7 +7,11 @@ import { DialogPicker, type TelegramDialogSummary } from "./components/DialogPic
 import { LogRow } from "./components/LogRow";
 import { Panel } from "./components/Panel";
 import { ParserResult } from "./components/ParserResult";
-import { ProviderRow } from "./components/ProviderRow";
+import {
+  ProviderConfigModal,
+  type ProviderConfigSubmission,
+} from "./components/ProviderConfigModal";
+import { ProvidersTable, type ProviderRowData } from "./components/ProvidersTable";
 import { QueueItem } from "./components/QueueItem";
 import { SetupFlow, type SetupFormState } from "./components/SetupFlow";
 import { SignIn } from "./components/SignIn";
@@ -131,6 +135,7 @@ export function App({
   const [lastPollError, setLastPollError] = useState(false);
   const [activeView, setActiveView] = useState("dashboard");
   const [activeTab, setActiveTab] = useState<TabId>("performance");
+  const [configProvider, setConfigProvider] = useState<ProviderRowData | null>(null);
   const [parserTab, setParserTab] = useState("Recent Parses");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [setupStep, setSetupStep] = useState<"credentials" | "code" | "password" | "connected">(
@@ -398,20 +403,15 @@ export function App({
   }
 
   async function saveProviderSettings(
-    provider: DashboardSnapshot["providers"][number],
-    event: React.FormEvent<HTMLFormElement>,
+    provider: ProviderRowData,
+    payload: ProviderConfigSubmission,
   ) {
-    event.preventDefault();
-    const formData = new FormData(event.currentTarget);
     await fetch(`/api/providers/${provider.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        parserMode: String(formData.get("parserMode") ?? provider.parserMode),
-        riskProfile: String(formData.get("riskProfile") ?? provider.riskProfile),
-        lotSize: Number(formData.get("lotSize") ?? provider.lotSize),
-      }),
+      body: JSON.stringify(payload),
     });
+    setConfigProvider(null);
     await refreshDashboard();
   }
 
@@ -627,17 +627,12 @@ export function App({
           ) : null}
 
           {showProviders ? (
-            <Panel title="Providers">
-              <div className="list-stack">
-                {snapshot.providers.map((provider) => (
-                  <ProviderRow
-                    key={provider.id}
-                    provider={provider}
-                    onSaveSettings={(event) => void saveProviderSettings(provider, event)}
-                    onToggle={() => void toggleProvider(provider)}
-                  />
-                ))}
-              </div>
+            <Panel className="wide-panel" title="Providers">
+              <ProvidersTable
+                onConfigure={(provider) => setConfigProvider(provider)}
+                onToggle={(provider) => void toggleProvider(provider)}
+                providers={snapshot.providers}
+              />
             </Panel>
           ) : null}
 
@@ -933,6 +928,13 @@ export function App({
           ) : null}
         </section>
       </section>
+
+      <ProviderConfigModal
+        onClose={() => setConfigProvider(null)}
+        onSave={saveProviderSettings}
+        open={configProvider !== null}
+        provider={configProvider}
+      />
 
       <CommandPalette
         commands={paletteCommands}

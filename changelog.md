@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-05-09 (Providers data table + config modal — TSC parity)
+
+Replaces the cramped per-row provider cards with a proper TSC-style data table and a deep configuration modal:
+
+- New `apps/web/src/components/ProvidersTable.tsx` — sortable-ready table with the TSC column set: `Name · Risk · Lots · TP # · SL · Pips · W/L % · Avg. drawdown · P/L · Profit · Gain · Status`. Numeric columns are right-aligned with `tabular-nums`. Per-row Configure (gear) and Pause/Enable buttons. Columns without backend support yet render `—` in muted grey so the shape matches TSC even before analytics endpoints land.
+- New `apps/web/src/components/ProviderConfigModal.tsx` — accessible modal (`role=dialog`, `aria-modal`, Escape-to-close, click-outside-to-close) opened from the gear icon. First field is the operator-owned **Channel lot size** with live "Allocation 25/25/25/25 → 0.05 per TP leg" preview, plus parser mode and risk profile. Pivots to uncontrolled inputs + `FormData` read on save so locale-stable lot strings (`"0.2"`/`"0,2"`) round-trip correctly through happy-dom tests.
+- App shell wires the modal: `configProvider` state, `onConfigure` opens it, `onSave` POSTs `/api/providers/:id` and refreshes the dashboard, modal closes on success.
+- Removed the now-unused `apps/web/src/components/ProviderRow.tsx`.
+- Tests updated: provider-settings test opens the modal first via the gear icon before changing parser/risk/lot fields. 9 web tests still green.
+
+Verification: `bun test apps/web/` 9 pass · `bun test apps/api/` 35 pass · `bun run --cwd apps/web build` clean (236 KB JS, 30 KB CSS).
+
 ## 2026-05-09 (In-workspace tabs — TSC parity)
 
 Added a tabbed workspace inside the dashboard to scope live operations sections instead of rendering nine panels simultaneously:
