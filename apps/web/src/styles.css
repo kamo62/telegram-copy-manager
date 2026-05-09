@@ -1245,6 +1245,75 @@ code {
   }
 }
 
+/* Workspace tabs ----------------------------------------------------------- */
+
+.workspace-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+  margin-top: 2px;
+}
+
+.workspace-tab {
+  position: relative;
+  padding: 10px 14px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--ink-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: color 0.12s;
+}
+
+.workspace-tab:hover {
+  color: var(--ink);
+}
+
+.workspace-tab.active {
+  color: var(--accent);
+}
+
+.workspace-tab.active::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+}
+
+.tab-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 56px 24px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+.tab-empty-state strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink-dim);
+}
+
+.tab-empty-state span {
+  font-size: 12px;
+  max-width: 360px;
+}
+
 /* Sign-in screen ----------------------------------------------------------- */
 
 .signin-shell {

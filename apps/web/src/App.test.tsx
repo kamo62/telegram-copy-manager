@@ -89,6 +89,18 @@ const snapshot: DashboardSnapshot = {
   ],
 };
 
+function clickTab(view: ReturnType<typeof render>, label: string) {
+  fireEvent.click(view.getByRole("tab", { name: label }));
+}
+
+function clickSidebar(view: ReturnType<typeof render>, label: string) {
+  const buttons = view.getAllByRole("button", { name: label });
+  // Sidebar buttons are full-width; pick the first one (sidebar comes before tabs).
+  const sidebarButton = buttons.find((button) => button.closest("aside"));
+  if (!sidebarButton) throw new Error(`No sidebar button labelled ${label}`);
+  fireEvent.click(sidebarButton);
+}
+
 describe("App dashboard", () => {
   test("renders the usable operations dashboard as the first screen, not a marketing page", () => {
     const view = render(<App initialSnapshot={snapshot} />);
@@ -98,11 +110,18 @@ describe("App dashboard", () => {
     expect(view.getAllByText("Parser Lab").length).toBeGreaterThan(0);
     expect(view.getAllByText("MT5 Accounts").length).toBeGreaterThan(0);
     expect(view.queryByText("Get started today")).toBeNull();
+    expect(view.getByRole("tab", { name: "Performance" })).toBeTruthy();
+    expect(view.getByRole("tab", { name: "Providers" })).toBeTruthy();
+    expect(view.getByRole("tab", { name: "Logs" })).toBeTruthy();
   });
 
-  test("shows provider enablement, parser confidence, symbol mapping, and TP leg state together", () => {
+  test("scopes provider, parser, history, and symbol panels behind their tabs", () => {
     const view = render(<App initialSnapshot={snapshot} />);
 
+    clickTab(view, "Providers");
+    expect(view.getByText("Provider paused")).toBeTruthy();
+
+    clickTab(view, "Logs");
     const parserLab = view.getByTestId("parser-lab-panel");
     expect(within(parserLab).getByText("Alpha FX Signals")).toBeTruthy();
     expect(within(parserLab).getByText("94%")).toBeTruthy();
@@ -110,10 +129,14 @@ describe("App dashboard", () => {
     expect(within(parserLab).getByRole("button", { name: "Save fixture" })).toBeTruthy();
     expect(within(parserLab).getByLabelText("Classification for Alpha FX Signals")).toBeTruthy();
 
-    expect(view.getByText("Provider paused")).toBeTruthy();
+    clickTab(view, "History");
     expect(view.getByText("TP1")).toBeTruthy();
     expect(view.getByText("1.105")).toBeTruthy();
+
+    clickTab(view, "Symbol Settings");
     expect(view.getByText("XAUUSD.r")).toBeTruthy();
+
+    clickSidebar(view, "MT5 Accounts");
     expect(view.getByText("1 positions · 0 orders")).toBeTruthy();
   });
 
@@ -138,6 +161,7 @@ describe("App dashboard", () => {
       />,
     );
 
+    clickSidebar(view, "Telegram Setup");
     expect(view.getByText("Available Dialogs")).toBeTruthy();
     expect(view.getByText("Real FX Channel")).toBeTruthy();
     expect(view.getByRole("button", { name: "Select Real FX Channel" })).toBeTruthy();
@@ -151,6 +175,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
+    clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Enable auto-copy for Alpha FX Signals" }));
 
     await view.findByText("Provider paused");
@@ -168,6 +193,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
+    clickTab(view, "Providers");
     fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
       target: { value: "kal-vip" },
     });
@@ -199,6 +225,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
+    clickSidebar(view, "Settings");
     fireEvent.change(view.getByLabelText("Default lot size"), { target: { value: "0.25" } });
     fireEvent.change(view.getByLabelText("Default risk percent"), { target: { value: "0.75" } });
     fireEvent.change(view.getByLabelText("Polling interval seconds"), {
@@ -227,6 +254,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
+    clickTab(view, "Symbol Settings");
     fireEvent.change(view.getByLabelText("Alias raw symbol"), { target: { value: "SILVER" } });
     fireEvent.change(view.getByLabelText("Alias canonical symbol"), {
       target: { value: "XAGUSD" },
@@ -283,6 +311,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
+    clickTab(view, "Logs");
     fireEvent.change(view.getByLabelText("Redacted fixture text for Alpha FX Signals"), {
       target: { value: "BUY EURUSD @ [redacted]" },
     });

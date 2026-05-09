@@ -13,6 +13,7 @@ import { SetupFlow, type SetupFormState } from "./components/SetupFlow";
 import { SignIn } from "./components/SignIn";
 import { navItems, Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
+import { type TabId, tabOptions, WorkspaceTabs } from "./components/WorkspaceTabs";
 import { TradeCard } from "./components/TradeCard";
 import { useHotkeys } from "./hooks/useHotkeys";
 
@@ -129,6 +130,7 @@ export function App({
   const [refreshing, setRefreshing] = useState(false);
   const [lastPollError, setLastPollError] = useState(false);
   const [activeView, setActiveView] = useState("dashboard");
+  const [activeTab, setActiveTab] = useState<TabId>("performance");
   const [parserTab, setParserTab] = useState("Recent Parses");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [setupStep, setSetupStep] = useState<"credentials" | "code" | "password" | "connected">(
@@ -515,14 +517,34 @@ export function App({
   }
 
   const showDashboard = activeView === "dashboard";
-  const showTelegram = showDashboard || activeView === "telegram";
-  const showProviders = showDashboard || activeView === "providers";
-  const showParser = showDashboard || activeView === "parser";
-  const showTrades = showDashboard || activeView === "trades";
-  const showMt5 = showDashboard || activeView === "mt5";
-  const showMapping = showDashboard || activeView === "mapping";
-  const showLogs = showDashboard || activeView === "logs";
-  const showSettings = showDashboard || activeView === "settings";
+  const dashTab = (id: TabId) => showDashboard && activeTab === id;
+  const showTelegram = activeView === "telegram";
+  const showProviders = dashTab("providers") || activeView === "providers";
+  const showParser = dashTab("logs") || activeView === "parser";
+  const showTrades = dashTab("history") || activeView === "trades";
+  const showMt5 = activeView === "mt5";
+  const showMapping = dashTab("symbols") || activeView === "mapping";
+  const showLogs = dashTab("logs") || activeView === "logs";
+  const showSettings = activeView === "settings";
+  const showEquityGuardian = dashTab("equity-guardian");
+  const showPerformance = dashTab("performance");
+
+  function navigateSidebar(viewId: string) {
+    const sidebarToTab: Record<string, TabId> = {
+      dashboard: "performance",
+      providers: "providers",
+      parser: "logs",
+      trades: "history",
+      mapping: "symbols",
+      logs: "logs",
+    };
+    if (viewId in sidebarToTab) {
+      setActiveView("dashboard");
+      setActiveTab(sidebarToTab[viewId]);
+      return;
+    }
+    setActiveView(viewId);
+  }
 
   if (setupStep !== "connected") {
     return (
@@ -549,10 +571,41 @@ export function App({
         telegramAdapter={snapshot.health.telegramAdapter}
       />
 
-      <Sidebar activeView={activeView} onNavigate={setActiveView} />
+      <Sidebar activeView={activeView} onNavigate={navigateSidebar} />
 
       <section className="workspace">
         {showDashboard ? <AccountHeader data={accountHeaderData} /> : null}
+        {showDashboard ? <WorkspaceTabs onChange={setActiveTab} value={activeTab} /> : null}
+
+        {showPerformance ? (
+          <div
+            aria-labelledby="tab-performance"
+            className="tab-empty-state"
+            id="tabpanel-performance"
+            role="tabpanel"
+          >
+            <strong>Performance charts coming next</strong>
+            <span>
+              Account growth and monthly returns will land here once the analytics endpoints are
+              wired up.
+            </span>
+          </div>
+        ) : null}
+
+        {showEquityGuardian ? (
+          <div
+            aria-labelledby="tab-equity-guardian"
+            className="tab-empty-state"
+            id="tabpanel-equity-guardian"
+            role="tabpanel"
+          >
+            <strong>Equity Guardian</strong>
+            <span>
+              Per-account drawdown limits and pause-on-breach controls will live here. Backend
+              support coming soon.
+            </span>
+          </div>
+        ) : null}
 
         <section className="content-grid">
           {showTelegram ? (

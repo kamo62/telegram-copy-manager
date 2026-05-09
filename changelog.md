@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-05-09 (In-workspace tabs — TSC parity)
+
+Added a tabbed workspace inside the dashboard to scope live operations sections instead of rendering nine panels simultaneously:
+
+- New `apps/web/src/components/WorkspaceTabs.tsx` exposing six tabs: `Performance`, `Providers`, `History`, `Equity Guardian`, `Symbol Settings`, `Logs` (proper ARIA `role="tablist"` / `role="tab"`).
+- App shell wires each panel to its tab — Providers panel under `Providers`, Symbol Mapping under `Symbol Settings`, Trade Lifecycle + Signal Queue under `History`, Parser Lab + Execution Logs under `Logs`. Performance and Equity Guardian show empty-state placeholders until charts and threshold controls land.
+- Sidebar items remap onto tabs: clicking `Providers / Parser Lab / Trade Lifecycle / Symbol Mapping / Execution Logs` now switches the dashboard tab instead of rendering a one-off panel. `Telegram Setup`, `MT5 Accounts`, `Settings` keep their dedicated views.
+- Default tab is `Performance` (with a "charts coming next" empty state) so the first thing operators see post-sign-in is calm summary chrome, not a wall of panels.
+- Tests updated to navigate tabs and sidebar before asserting per-panel content; multi-panel "everything together" test split into per-tab assertions. 9 web tests pass.
+
+Verification: `bun test apps/web/` 9 pass · `bun run --cwd apps/web build` clean (231 KB JS, 24 KB CSS).
+
 ## 2026-05-09 (Account header strip — TSC parity)
 
 Replaced the four "Providers / Parser Review / Queue / MT5 Accounts" metric cards with a TSC-style account header strip at the top of the workspace:
