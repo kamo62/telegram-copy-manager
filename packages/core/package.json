@@ -1,0 +1,5 @@
+{
+  "name": "@telegram-tc/core",
+  "private": true,
+  "type": "module"
+}

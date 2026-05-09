@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "types": ["bun"],
+    "baseUrl": ".",
+    "paths": {
+      "@telegram-tc/core": ["packages/core/src/index.ts"],
+      "@telegram-tc/core/*": ["packages/core/src/*"],
+      "@telegram-tc/api/*": ["apps/api/src/*"],
+      "@telegram-tc/web/*": ["apps/web/src/*"]
+    }
+  },
+  "include": ["apps", "packages", "scripts", "mt5", "vite.config.ts"],
+  "exclude": ["node_modules", "dist", "apps/web/dist", "data"]
+}
