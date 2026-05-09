@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-05-09 (Sign-in & light theme)
+
+Polished the first screen so it matches the TSCopier sign-in style instead of the dense dashboard:
+
+- Added a full-viewport `SignIn` component (`apps/web/src/components/SignIn.tsx`) shown while no Telegram session is connected. Telegram-blue header bar, centered circular logo, "Sign in to Telegram" heading + subtitle, Material-style floating-label phone field, primary CTA. Replaces the previous in-dashboard `Telegram Setup` panel for the unauthenticated state.
+- Pivoted the global theme from dark to light. `apps/web/src/styles.css` `:root` tokens now use white panels on `#f5f6fa`, indigo `#5046e5` primary, Telegram-blue `#229ED9` for the sign-in chrome, and Inter UI + JetBrains Mono. Sidebar active state, panel shadows, and card surfaces adjusted for the light palette.
+- Stopped collecting Telegram API ID and API hash in the frontend. The backend `/api/telegram/start` handler now falls back to `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from the server env (`apps/api/src/app.ts`), so secrets never travel through the browser. The SignIn screen exposes only the phone-number field.
+- Added a `setupStep` sync effect in `App.tsx` so the SignIn screen flips to the dashboard automatically once the polled snapshot reports a `CONNECTED` Telegram session.
+
+Verification:
+
+- `bun test apps/web/` — 9 pass.
+- `bun test apps/api/` — 35 pass.
+- `bun run --cwd apps/web build` — clean (228 KB JS, 20 KB CSS).
+
+## 2026-05-09 (Doc work and design spec expansion)
+
+- Added `docs/ui-improvements.md` — critical review of `apps/web` with TSC feature-parity scope, "modern dark terminal" direction, channel-lot-size UI surfaces, three-pass implementation sketch, and detailed file change list.
+- Expanded `docs/superpowers/specs/2026-05-09-telegram-copy-app-design.md` with new sections for Analytics & Performance, Equity Guardian, and Provider Strategy Configuration; reworked Frontend Screens around a top-level rail and Live-workspace tabs; added matching Backend Responsibilities, Data Model entities, Product Scope items, and Success Criteria; replaced the contradictory Rantoniaina visual reference with the dark-terminal direction.
+- Committed the entire MVP working tree (`apps/`, `packages/`, `migrations/`, `mt5/`, `scripts/`, root configs, supporting docs) as `feat: scaffold telegram-tc MVP` so the repo no longer has the bulk of the implementation untracked.
+
 ## 2026-05-09
 
 Implemented and verified the Telegram/KAL VIP parser backtest workflow.

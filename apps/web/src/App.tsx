@@ -10,6 +10,7 @@ import { ParserResult } from "./components/ParserResult";
 import { ProviderRow } from "./components/ProviderRow";
 import { QueueItem } from "./components/QueueItem";
 import { SetupFlow, type SetupFormState } from "./components/SetupFlow";
+import { SignIn } from "./components/SignIn";
 import { navItems, Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { TradeCard } from "./components/TradeCard";
@@ -205,6 +206,15 @@ export function App({
     };
   }, [initialSnapshot]);
 
+  useEffect(() => {
+    const hasConnectedSession = snapshot.telegramSessions.some(
+      (session) => session.status === "CONNECTED",
+    );
+    if (hasConnectedSession) {
+      setSetupStep((current) => (current === "connected" ? current : "connected"));
+    }
+  }, [snapshot.telegramSessions]);
+
   const metrics = useMemo(
     () => [
       {
@@ -309,11 +319,7 @@ export function App({
     const response = await fetch("/api/telegram/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        apiId: form.apiId,
-        apiHash: form.apiHash,
-        phone: form.phone,
-      }),
+      body: JSON.stringify({ phone: form.phone }),
     });
     const data = (await response.json()) as {
       sessionId: string;
@@ -519,6 +525,19 @@ export function App({
   const showMapping = showDashboard || activeView === "mapping";
   const showLogs = showDashboard || activeView === "logs";
   const showSettings = showDashboard || activeView === "settings";
+
+  if (setupStep !== "connected") {
+    return (
+      <SignIn
+        form={form}
+        setForm={setForm}
+        setupStep={setupStep}
+        startTelegramConnection={startTelegramConnection}
+        submitCode={submitCode}
+        submitPassword={submitPassword}
+      />
+    );
+  }
 
   return (
     <main className="app-shell">

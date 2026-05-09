@@ -115,13 +115,25 @@ export function createApi(options: ApiOptions = {}) {
 
   app.post("/api/telegram/start", async (c) => {
     const body = await c.req.json<{
-      apiId: string;
-      apiHash: string;
+      apiId?: string;
+      apiHash?: string;
       phone: string;
     }>();
-    const started = store.startTelegramSession(body);
+    const apiId = body.apiId?.trim() || process.env.TELEGRAM_API_ID;
+    const apiHash = body.apiHash?.trim() || process.env.TELEGRAM_API_HASH;
+    if (!apiId || !apiHash) {
+      return c.json(
+        {
+          error:
+            "Telegram API credentials are not configured. Set TELEGRAM_API_ID and TELEGRAM_API_HASH on the server.",
+        },
+        400,
+      );
+    }
+    const credentials = { apiId, apiHash, phone: body.phone };
+    const started = store.startTelegramSession(credentials);
     const adapterStatus = await telegram.startLogin({
-      ...body,
+      ...credentials,
       appSessionId: started.sessionId,
       profileId: started.profileId,
     });

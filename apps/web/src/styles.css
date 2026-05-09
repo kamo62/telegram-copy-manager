@@ -1,34 +1,44 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
-  --bg: #0c0f12;
-  --bg-elevated: #101419;
-  --panel: #12161b;
-  --panel-2: #161b21;
-  --panel-hover: #1a2028;
-  --line: #232a32;
-  --line-strong: #2f3942;
-  --line-subtle: #1a2028;
+  --bg: #f5f6fa;
+  --bg-elevated: #ffffff;
+  --panel: #ffffff;
+  --panel-2: #f8f9fc;
+  --panel-hover: #eef0f6;
+  --line: #e1e4ed;
+  --line-strong: #c8cdd9;
+  --line-subtle: #eef0f6;
 
-  --ink: #e7ecf2;
-  --ink-dim: #8b96a3;
-  --ink-faint: #5c6773;
+  --ink: #111827;
+  --ink-dim: #4b5563;
+  --ink-faint: #9ca3af;
 
-  --accent: #54b8ff;
-  --accent-dim: #3a8fcc;
-  --up: #37d399;
-  --up-dim: #2a9e72;
-  --down: #ff5d6c;
-  --down-dim: #cc4a56;
-  --warn: #f0b85a;
-  --warn-dim: #bf9338;
+  --accent: #5046e5;
+  --accent-dim: #6c64ea;
+  --accent-soft: #ece9ff;
+  --tg-blue: #229ed9;
+  --tg-blue-dim: #1c87b6;
 
-  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --up: #10b981;
+  --up-dim: #047857;
+  --up-soft: #d1fae5;
+  --down: #ef4444;
+  --down-dim: #b91c1c;
+  --down-soft: #fee2e2;
+  --warn: #f59e0b;
+  --warn-dim: #b45309;
+  --warn-soft: #fef3c7;
+
+  --font-ui:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --font-mono:
-    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    "JetBrains Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
-  --radius: 4px;
-  --radius-sm: 2px;
+  --radius: 8px;
+  --radius-sm: 6px;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --shadow-md: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
 }
 
 * {
@@ -1230,4 +1240,240 @@ code {
   .tp-grid {
     grid-template-columns: repeat(2, 1fr);
   }
+}
+
+/* Sign-in screen ----------------------------------------------------------- */
+
+.signin-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: var(--bg-elevated);
+}
+
+.signin-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 16px;
+  background: var(--tg-blue);
+  color: #ffffff;
+}
+
+.signin-titlebar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.signin-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 64px 24px 48px;
+  text-align: center;
+}
+
+.signin-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 96px;
+  height: 96px;
+  margin-bottom: 32px;
+  border-radius: 50%;
+  background: var(--tg-blue);
+  color: #ffffff;
+  box-shadow: 0 8px 24px rgba(34, 158, 217, 0.25);
+}
+
+.signin-title {
+  margin: 0 0 12px;
+  font-family: var(--font-ui);
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.signin-subtitle {
+  max-width: 380px;
+  margin: 0 0 36px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+  white-space: pre-line;
+}
+
+.signin-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  max-width: 360px;
+}
+
+.signin-cta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 48px;
+  margin-top: 8px;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #ffffff;
+  background: var(--tg-blue);
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition:
+    background 0.12s,
+    transform 0.04s;
+}
+
+.signin-cta:hover:not(:disabled) {
+  background: var(--tg-blue-dim);
+}
+
+.signin-cta:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.signin-cta:disabled {
+  background: #e1e4ed;
+  color: var(--ink-faint);
+  cursor: not-allowed;
+}
+
+.signin-meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.signin-meta a {
+  color: var(--tg-blue);
+  text-decoration: none;
+}
+
+.signin-meta a:hover {
+  text-decoration: underline;
+}
+
+.signin-meta code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.signin-footer {
+  padding: 16px;
+  font-size: 11px;
+  color: var(--ink-faint);
+  text-align: center;
+  border-top: 1px solid var(--line-subtle);
+}
+
+/* Floating-label input (Material-style) */
+.floating-field {
+  position: relative;
+  display: block;
+  text-align: left;
+}
+
+.floating-field input {
+  width: 100%;
+  height: 56px;
+  padding: 22px 14px 8px;
+  font-family: var(--font-ui);
+  font-size: 15px;
+  color: var(--ink);
+  background: var(--bg-elevated);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color 0.12s;
+}
+
+.floating-field input::placeholder {
+  color: transparent;
+}
+
+.floating-field input:focus {
+  border-color: var(--tg-blue);
+  box-shadow: 0 0 0 3px rgba(34, 158, 217, 0.12);
+}
+
+.floating-field-label {
+  position: absolute;
+  left: 12px;
+  top: 18px;
+  padding: 0 4px;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--ink-faint);
+  background: var(--bg-elevated);
+  pointer-events: none;
+  transition:
+    top 0.12s,
+    font-size 0.12s,
+    color 0.12s;
+}
+
+.floating-field input:focus + .floating-field-label,
+.floating-field.has-value .floating-field-label,
+.floating-field input:not(:placeholder-shown) + .floating-field-label {
+  top: -7px;
+  font-size: 11px;
+  color: var(--tg-blue);
+}
+
+/* Older-browser support: also lift label when the wrapping label has has-value */
+.floating-field.has-value .floating-field-label {
+  top: -7px;
+  font-size: 11px;
+  color: var(--tg-blue);
+}
+
+/* Light-mode shadow / border tweaks for existing panels --------------------- */
+
+.panel,
+.metric-card {
+  box-shadow: var(--shadow-sm);
+}
+
+.status-bar {
+  background: var(--panel);
+  color: var(--ink-dim);
+  border-bottom: 1px solid var(--line);
+}
+
+.status-bar > .brand {
+  color: var(--ink);
+}
+
+.sidebar {
+  background: var(--panel);
+}
+
+.sidebar nav button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: transparent;
+}
+
+.sidebar nav button.active::before {
+  background: var(--accent);
 }
