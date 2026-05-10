@@ -410,7 +410,10 @@ export function App({
     await fetch(`/api/providers/${provider.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        parserMode: payload.parserMode,
+        lotSize: payload.lotSize,
+      }),
     });
     setConfigProvider(null);
     await refreshDashboard();
@@ -531,17 +534,9 @@ export function App({
   const showPerformance = dashTab("performance");
 
   function navigateSidebar(viewId: string) {
-    const sidebarToTab: Record<string, TabId> = {
-      dashboard: "performance",
-      providers: "providers",
-      parser: "logs",
-      trades: "history",
-      mapping: "symbols",
-      logs: "logs",
-    };
-    if (viewId in sidebarToTab) {
+    if (viewId === "dashboard") {
       setActiveView("dashboard");
-      setActiveTab(sidebarToTab[viewId]);
+      setActiveTab("performance");
       return;
     }
     setActiveView(viewId);

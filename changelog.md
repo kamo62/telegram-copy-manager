@@ -1,5 +1,22 @@
 # Changelog
 
+## 2026-05-10 (Sidebar dedup + TSC-style Provider Config modal)
+
+Addresses the "sidebar/tabs are duplicated" and "Provider Config modal should look like the TSC screen" feedback:
+
+- **Sidebar shrunk** to four top-level destinations only — `Live`, `Telegram Setup`, `Linked Accounts`, `Settings`. Old per-section items (Providers, Parser Lab, Trade Lifecycle, MT5 Accounts, Symbol Mapping, Execution Logs) are now exclusively in the WorkspaceTabs strip. Sidebar no longer repeats anything tabs already cover. `Dashboard` renamed to `Live`; `MT5 Accounts` renamed to `Linked Accounts` so the sidebar matches the spec.
+- **Provider Config modal redesigned** to match the TSCopier "Configure Providers" screen:
+  - Section 1 — Message Template: parser mode select labelled `Template` plus a `Test message` button.
+  - Section 2 — Risk Management: single value field with two pill toggles ("Use fixed lots" / "Risk a % of your account balance"). Active pill shows the live lot/percent value in green-soft chip.
+  - Section 3 — Take Profit Levels: editable rows with `TP #` / `Percentage` (with − / + steppers) / `Strategy` text input / delete-row button. "Distribute % equally" action splits across rows. "Add a new Take Profit level" appends a row.
+  - Section 3.1 — Order Resume: derived plain-text summary that updates live as the user changes risk amount / TP percentages.
+- **Risk Profile dropped** from the modal and from the PATCH payload. Sizing is now explicit per-channel (lot size or % balance) — no more abstract Balanced/Conservative/Aggressive buckets. Backend retains the column for backward compat but the UI never sends it.
+- **`Risk` column removed** from the Providers table (no longer meaningful) — table is now Name · Lots · TP # · SL · Pips · W/L % · Avg.DD · P/L · Profit · Gain · Status · Actions.
+- Modal save reads numeric inputs directly from `FormData` instead of React state to dodge the controlled-input flush quirks happy-dom showed under fireEvent.
+- Tests adjusted: sidebar text assertions match the new top-level rail (`Linked Accounts` instead of `MT5 Accounts`, `Live` instead of `Dashboard`); provider-settings test no longer touches Risk profile and asserts the new payload `{parserMode, lotSize}`.
+
+Verification: `bun test apps/web/` 9 pass · `bun test apps/api/` 35 pass · `bun run --cwd apps/web build` clean (242 KB JS + 52 KB lazy uplot + 35 KB CSS).
+
 ## 2026-05-10 (Spec sync with shipped UI + design corrections)
 
 Brought `docs/superpowers/specs/2026-05-09-telegram-copy-app-design.md` back in line with what was actually shipped over the last five commits and what was decided in conversation:

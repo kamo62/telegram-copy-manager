@@ -1,26 +1,10 @@
 import type { LucideIcon } from "lucide-react";
-import {
-  Activity,
-  Bot,
-  KeyRound,
-  ListChecks,
-  RadioTower,
-  Server,
-  Settings2,
-  SlidersHorizontal,
-  TerminalSquare,
-  Workflow,
-} from "lucide-react";
+import { Activity, Bot, KeyRound, Server, Settings2 } from "lucide-react";
 
 export const navItems: Array<[string, string, LucideIcon]> = [
-  ["dashboard", "Dashboard", Activity],
+  ["dashboard", "Live", Activity],
   ["telegram", "Telegram Setup", KeyRound],
-  ["providers", "Providers", RadioTower],
-  ["parser", "Parser Lab", ListChecks],
-  ["trades", "Trade Lifecycle", Workflow],
-  ["mt5", "MT5 Accounts", Server],
-  ["mapping", "Symbol Mapping", SlidersHorizontal],
-  ["logs", "Execution Logs", TerminalSquare],
+  ["mt5", "Linked Accounts", Server],
   ["settings", "Settings", Settings2],
 ];
 

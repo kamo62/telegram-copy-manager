@@ -107,8 +107,8 @@ describe("App dashboard", () => {
 
     expect(view.getByRole("heading", { name: "TG-TC · Operations" })).toBeTruthy();
     expect(view.getAllByText("Telegram Setup").length).toBeGreaterThan(0);
-    expect(view.getAllByText("Parser Lab").length).toBeGreaterThan(0);
-    expect(view.getAllByText("MT5 Accounts").length).toBeGreaterThan(0);
+    expect(view.getAllByText("Linked Accounts").length).toBeGreaterThan(0);
+    expect(view.getAllByText("Live").length).toBeGreaterThan(0);
     expect(view.queryByText("Get started today")).toBeNull();
     expect(view.getByRole("tab", { name: "Performance" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Providers" })).toBeTruthy();
@@ -136,7 +136,7 @@ describe("App dashboard", () => {
     clickTab(view, "Symbol Settings");
     expect(view.getByText("XAUUSD.r")).toBeTruthy();
 
-    clickSidebar(view, "MT5 Accounts");
+    clickSidebar(view, "Linked Accounts");
     expect(view.getByText("1 positions · 0 orders")).toBeTruthy();
   });
 
@@ -185,7 +185,7 @@ describe("App dashboard", () => {
     expect(calls.some((call) => call.url === "/api/dashboard")).toBe(true);
   });
 
-  test("lets the operator update provider parser mode, risk profile, and channel lot size", async () => {
+  test("lets the operator update provider parser mode and channel lot size from the modal", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
@@ -197,9 +197,6 @@ describe("App dashboard", () => {
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
       target: { value: "kal-vip" },
-    });
-    fireEvent.change(view.getByLabelText("Risk profile for Alpha FX Signals"), {
-      target: { value: "conservative" },
     });
     fireEvent.change(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
       target: { value: "0.2" },
@@ -213,7 +210,6 @@ describe("App dashboard", () => {
     expect(settingsCall?.init?.method).toBe("PATCH");
     expect(JSON.parse(String(settingsCall?.init?.body))).toEqual({
       parserMode: "kal-vip",
-      riskProfile: "conservative",
       lotSize: 0.2,
     });
   });

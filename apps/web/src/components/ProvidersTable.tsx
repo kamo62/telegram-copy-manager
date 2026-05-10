@@ -6,7 +6,7 @@ export interface ProviderRowData {
   title: string;
   enabled: boolean;
   parserMode: string;
-  riskProfile: string;
+  riskProfile?: string;
   lotSize: number;
   lastMessageAt: string;
 }
@@ -35,7 +35,6 @@ export function ProvidersTable({
         <thead>
           <tr>
             <th scope="col">Name</th>
-            <th scope="col">Risk</th>
             <th className="num" scope="col">
               Lots
             </th>
@@ -70,7 +69,7 @@ export function ProvidersTable({
         <tbody>
           {providers.length === 0 ? (
             <tr className="data-table-empty">
-              <td colSpan={13}>No providers configured yet. Add one from Telegram Setup.</td>
+              <td colSpan={12}>No providers configured yet. Add one from Telegram Setup.</td>
             </tr>
           ) : null}
           {providers.map((provider) => (
@@ -81,7 +80,6 @@ export function ProvidersTable({
                   {provider.parserMode} · {formatRelative(provider.lastMessageAt)}
                 </span>
               </th>
-              <td className="num-cell">{capitalize(provider.riskProfile)}</td>
               <td className="num-cell">{lotsLabel(provider.lotSize)}</td>
               <td className="num-cell muted">—</td>
               <td className="num-cell muted">—</td>
@@ -121,11 +119,6 @@ export function ProvidersTable({
       </table>
     </div>
   );
-}
-
-function capitalize(value: string): string {
-  if (!value) return "—";
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function formatRelative(iso: string): string {
