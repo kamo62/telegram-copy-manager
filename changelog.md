@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-05-10 (Symbol Settings cleanup — Add-Mapping modal)
+
+Replaces the cramped two-form layout above the Symbol Settings table with the same modal-driven UX as Provider Config:
+
+- Removed the inline `Alias raw / canonical` form and the 6-input `Mapping account / canonical / broker / suffix / include / exclude` form.
+- New `apps/web/src/components/SymbolMappingModal.tsx` — accessible (`role="dialog"`, `aria-modal`, Escape, click-outside-to-close), uses the same `modal-form-clean` chrome as the Provider Config modal, with a `Global alias` / `Account-specific` segmented control toggle. Form fields render conditionally per scope, and the Save button label flips to match.
+- Symbol Settings tab is now: `Add mapping` button (primary, top-right) + the `SymbolMappingsTable`. No more dead two-thirds-of-the-screen empty area when the panel was the only thing showing.
+- Modal uses uncontrolled `defaultValue` inputs + `FormData` on save (same pattern as Provider Config) so test assertions for Alias/Mapping field values round-trip correctly.
+- Dropped the now-unused `aliasForm` / `mappingForm` controlled state and the `commaList` helper from `App.tsx`. `useRef` import removed.
+- Test 7 updated: opens the modal twice (once for global alias, once for account mapping switching to the Account-specific tab), asserts the same payloads as before.
+
+Verification: `bun test apps/web/` 9 pass · `bun run --cwd apps/web build` clean (250 KB JS + 52 KB lazy uplot + 43 KB CSS).
+
 ## 2026-05-10 (Provider Config modal redesign + runner + e2e order tracking spec)
 
 Two pieces of feedback addressed in one commit:

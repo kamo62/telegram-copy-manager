@@ -1,5 +1,5 @@
 import { RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountRow } from "./components/AccountRow";
 import { buildPlaceholderGrowth, GrowthChart } from "./components/GrowthChart";
@@ -20,6 +20,7 @@ import { navItems, Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { type TabId, tabOptions, WorkspaceTabs } from "./components/WorkspaceTabs";
 import { HistoryTable } from "./components/HistoryTable";
+import { SymbolMappingModal } from "./components/SymbolMappingModal";
 import { SymbolMappingsTable } from "./components/SymbolMappingsTable";
 import { useHotkeys } from "./hooks/useHotkeys";
 
@@ -154,36 +155,12 @@ export function App({
     sessionId: "",
     profileId: "",
   });
-  const [aliasForm, setAliasForm] = useState({
-    rawSymbol: "",
-    canonicalSymbol: "",
-  });
-  const [mappingForm, setMappingForm] = useState({
-    accountId: snapshot.mt5Accounts[0]?.id ?? "mt5-100200300",
-    canonicalSymbol: "",
-    brokerSymbol: "",
-    suffix: "",
-    includeSymbols: "",
-    excludeSymbols: "",
-  });
+  const [mappingModalOpen, setMappingModalOpen] = useState(false);
   const [fixtureClassifications, setFixtureClassifications] = useState<
     Record<string, "entry" | "management" | "noise" | "unknown">
   >({});
   const [redactedFixtureText, setRedactedFixtureText] = useState<Record<string, string>>({});
   const [fixtureStatus, setFixtureStatus] = useState<Record<string, string>>({});
-
-  // Fix (c): sync mappingForm.accountId when real accounts arrive
-  const hasSyncedMapping = useRef(false);
-  useEffect(() => {
-    if (!hasSyncedMapping.current && snapshot.mt5Accounts.length > 0) {
-      setMappingForm((current) =>
-        current.accountId === "mt5-100200300"
-          ? { ...current, accountId: snapshot.mt5Accounts[0]?.id ?? "mt5-100200300" }
-          : current,
-      );
-      hasSyncedMapping.current = true;
-    }
-  }, [snapshot.mt5Accounts]);
 
   useEffect(() => {
     if (initialSnapshot) return;
@@ -478,46 +455,42 @@ export function App({
     await refreshDashboard();
   }
 
-  async function saveGlobalAlias(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const rawSymbol = String(data.get("rawSymbol") ?? "");
-    const canonicalSymbol = String(data.get("canonicalSymbol") ?? "");
+  async function saveGlobalAlias(payload: { rawSymbol: string; canonicalSymbol: string }) {
     await fetch("/api/symbol-mappings/aliases", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         scope: "global",
-        rawSymbol,
-        canonicalSymbol,
+        rawSymbol: payload.rawSymbol,
+        canonicalSymbol: payload.canonicalSymbol,
       }),
     });
-    setAliasForm({ rawSymbol: "", canonicalSymbol: "" });
+    setMappingModalOpen(false);
     await refreshDashboard();
   }
 
-  async function saveAccountMapping(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const accountId = String(data.get("accountId") ?? "");
-    const canonicalSymbol = String(data.get("canonicalSymbol") ?? "");
-    const brokerSymbol = String(data.get("brokerSymbol") ?? "");
-    const suffix = String(data.get("suffix") ?? "");
-    const includeSymbols = String(data.get("includeSymbols") ?? "");
-    const excludeSymbols = String(data.get("excludeSymbols") ?? "");
-    await fetch(`/api/symbol-mappings/account/${accountId}`, {
+  async function saveAccountMapping(payload: {
+    accountId: string;
+    canonicalSymbol: string;
+    brokerSymbol: string;
+    suffix: string;
+    includeSymbols: string[];
+    excludeSymbols: string[];
+  }) {
+    await fetch(`/api/symbol-mappings/account/${payload.accountId}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        accountId,
+        accountId: payload.accountId,
         canonicalOverrides: {
-          [canonicalSymbol.trim().toUpperCase()]: brokerSymbol.trim(),
+          [payload.canonicalSymbol.trim().toUpperCase()]: payload.brokerSymbol.trim(),
         },
-        suffix: suffix.trim(),
-        includeSymbols: commaList(includeSymbols),
-        excludeSymbols: commaList(excludeSymbols),
+        suffix: payload.suffix,
+        includeSymbols: payload.includeSymbols,
+        excludeSymbols: payload.excludeSymbols,
       }),
     });
+    setMappingModalOpen(false);
     await refreshDashboard();
   }
 
@@ -708,108 +681,14 @@ export function App({
 
           {showMapping ? (
             <Panel className="wide-panel" title="Symbol Mapping">
-              <div className="mapping-controls">
-                <form className="compact-form" onSubmit={saveGlobalAlias}>
-                  <label>
-                    Alias raw symbol
-                    <input
-                      name="rawSymbol"
-                      onChange={(event) =>
-                        setAliasForm((current) => ({ ...current, rawSymbol: event.target.value }))
-                      }
-                      value={aliasForm.rawSymbol}
-                    />
-                  </label>
-                  <label>
-                    Alias canonical symbol
-                    <input
-                      name="canonicalSymbol"
-                      onChange={(event) =>
-                        setAliasForm((current) => ({
-                          ...current,
-                          canonicalSymbol: event.target.value,
-                        }))
-                      }
-                      value={aliasForm.canonicalSymbol}
-                    />
-                  </label>
-                  <button type="submit">Save global alias</button>
-                </form>
-                <form className="compact-form mapping-form" onSubmit={saveAccountMapping}>
-                  <label>
-                    Mapping account ID
-                    <input
-                      name="accountId"
-                      onChange={(event) =>
-                        setMappingForm((current) => ({ ...current, accountId: event.target.value }))
-                      }
-                      value={mappingForm.accountId}
-                    />
-                  </label>
-                  <label>
-                    Mapping canonical symbol
-                    <input
-                      name="canonicalSymbol"
-                      onChange={(event) =>
-                        setMappingForm((current) => ({
-                          ...current,
-                          canonicalSymbol: event.target.value,
-                        }))
-                      }
-                      value={mappingForm.canonicalSymbol}
-                    />
-                  </label>
-                  <label>
-                    Mapping broker symbol
-                    <input
-                      name="brokerSymbol"
-                      onChange={(event) =>
-                        setMappingForm((current) => ({
-                          ...current,
-                          brokerSymbol: event.target.value,
-                        }))
-                      }
-                      value={mappingForm.brokerSymbol}
-                    />
-                  </label>
-                  <label>
-                    Mapping suffix
-                    <input
-                      name="suffix"
-                      onChange={(event) =>
-                        setMappingForm((current) => ({ ...current, suffix: event.target.value }))
-                      }
-                      value={mappingForm.suffix}
-                    />
-                  </label>
-                  <label>
-                    Mapping include symbols
-                    <input
-                      name="includeSymbols"
-                      onChange={(event) =>
-                        setMappingForm((current) => ({
-                          ...current,
-                          includeSymbols: event.target.value,
-                        }))
-                      }
-                      value={mappingForm.includeSymbols}
-                    />
-                  </label>
-                  <label>
-                    Mapping exclude symbols
-                    <input
-                      name="excludeSymbols"
-                      onChange={(event) =>
-                        setMappingForm((current) => ({
-                          ...current,
-                          excludeSymbols: event.target.value,
-                        }))
-                      }
-                      value={mappingForm.excludeSymbols}
-                    />
-                  </label>
-                  <button type="submit">Save account mapping</button>
-                </form>
+              <div className="panel-toolbar panel-toolbar-end">
+                <button
+                  className="btn-primary btn-small"
+                  onClick={() => setMappingModalOpen(true)}
+                  type="button"
+                >
+                  Add mapping
+                </button>
               </div>
               <SymbolMappingsTable mappings={snapshot.symbolMappings} />
             </Panel>
@@ -921,6 +800,14 @@ export function App({
         provider={configProvider}
       />
 
+      <SymbolMappingModal
+        defaultAccountId={snapshot.mt5Accounts[0]?.id ?? ""}
+        onClose={() => setMappingModalOpen(false)}
+        onSaveAccountMapping={saveAccountMapping}
+        onSaveGlobalAlias={saveGlobalAlias}
+        open={mappingModalOpen}
+      />
+
       <CommandPalette
         commands={paletteCommands}
         onClose={() => setCommandPaletteOpen(false)}
@@ -928,13 +815,6 @@ export function App({
       />
     </main>
   );
-}
-
-function commaList(value: string) {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
 
 function defaultClassification(commandType: string): "entry" | "management" | "noise" | "unknown" {

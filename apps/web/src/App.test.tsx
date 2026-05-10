@@ -252,12 +252,16 @@ describe("App dashboard", () => {
 
     const view = render(<App initialSnapshot={snapshot} />);
     clickTab(view, "Symbol Settings");
+
+    fireEvent.click(view.getByRole("button", { name: "Add mapping" }));
     fireEvent.change(view.getByLabelText("Alias raw symbol"), { target: { value: "SILVER" } });
     fireEvent.change(view.getByLabelText("Alias canonical symbol"), {
       target: { value: "XAGUSD" },
     });
     fireEvent.click(view.getByRole("button", { name: "Save global alias" }));
 
+    fireEvent.click(view.getByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByRole("tab", { name: "Account-specific" }));
     fireEvent.change(view.getByLabelText("Mapping account ID"), {
       target: { value: "mt5-demo-1" },
     });

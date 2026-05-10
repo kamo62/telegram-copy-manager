@@ -1170,6 +1170,10 @@ code {
 
 /* Panel toolbar ------------------------------------------------------------ */
 
+.panel-toolbar-end {
+  justify-content: flex-end !important;
+}
+
 .panel-toolbar {
   display: flex;
   align-items: center;
