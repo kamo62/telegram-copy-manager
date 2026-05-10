@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-05-10 (Provider Config modal redesign + runner + e2e order tracking spec)
+
+Two pieces of feedback addressed in one commit:
+
+**Runner support** — operators can now leave a small remainder open after the final TP hits (the classic "let a runner ride with SL on BE" pattern):
+
+- New `Runner` section in the Provider Config modal with: enabled toggle, runner lot size, SL behavior select (Move to break-even / Move to last hit TP / Trail by N pips). When trail is selected a "Trail pips" input appears.
+- Order summary updated: shows total order, lots allocated to TPs, runner reservation, and a per-action timeline ("TP1 hit · close 0.02 lots · Set SL to ENTRY + 0 pips" → "After final TP · keep 0.01 lots open · SL at break-even").
+- `ProviderConfigSubmission` now carries `runner: { enabled, lotSize, slBehavior, trailPips }`. Backend wiring is a follow-up — the UI shape is locked.
+
+**Modal restyled to match the rest of the app**:
+
+- Dropped the "1." / "2." / "3." section numbering, hand-styled green-soft pill toggles, and the gray "Order Resume" tutorial box.
+- Risk-mode toggle is now a segmented control matching the Performance tab's chart toggle (`Fixed lots` / `% of balance`).
+- Section headers use the same uppercase muted-grey label pattern as the data-table headers.
+- TP rows use the same border / hover / monospace tokens as `data-table` rows; the steppers and strategy inputs share input chrome with the rest of the dashboard.
+- Order summary is a compact stat-card (Total order / Allocated to TPs / Runner) above an interleaved timeline of TP closes and the runner finale, all using `tabular-nums` mono numerics.
+- Modal width slightly wider (720 px max) to fit the 3-stat resume grid.
+
+**Spec — End-to-end trade ↔ broker order linkage** (responding to "we need to map and link the trade taken to a orderID so we can track the order e2e"):
+
+- New "End-to-end order tracking" section in the spec under Position State and TP Management, defining the `BrokerOrder` table that joins LogicalTrade ↔ TradeLeg ↔ broker tickets/deals.
+- Captures `order_ticket`, `position_ticket`, `deal_ticket`, requested vs filled volume / price, retcode, broker comment, source (`signal` vs `manual`), and per-action P/L for every open / partial-close / full-close / modify / cancel / trail.
+- Per-leg / per-trade / per-provider P/L are derived deterministically from BrokerOrder aggregation — no re-parsing broker history.
+- EA `/api/mt5/report` payload contract extended to enrich every report with the broker-side identifiers so partial fills are not lost.
+- Manual closes from the MT5 terminal are picked up via snapshot diff and recorded as `BrokerOrder { source: "manual" }` so History reflects reality.
+- New `BrokerOrder` entity in Data Model. New `GET /api/trades/:id/broker-orders` endpoint added under Per-trade events API.
+
+Verification: `bun test apps/web/` 9 pass · `bun run --cwd apps/web build` clean (247 KB JS + 52 KB lazy uplot + 43 KB CSS).
+
 ## 2026-05-10 (History + Symbol Settings tabularised; Signal Queue moved to Logs)
 
 Brought the History and Symbol Settings tabs in line with the rest of the app:

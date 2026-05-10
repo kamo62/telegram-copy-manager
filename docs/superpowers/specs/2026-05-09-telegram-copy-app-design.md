@@ -176,6 +176,7 @@ The backend provides:
   - configuration test endpoint that applies template plus rules to a sample raw message and returns the would-be parsed signal, without affecting live state
 - Per-trade events API:
   - chronological lifecycle event log per logical trade
+  - broker-order trail per logical trade (`GET /api/trades/:id/broker-orders`) returning every BrokerOrder row attached to the trade with broker tickets, deal IDs, fill prices, and per-action P/L attribution
 
 Backend persistence should use SQLite initially but keep models clean enough to move to Postgres later.
 
@@ -372,6 +373,35 @@ The dashboard compares plan vs reality:
 - whether a provider management command has been applied to MT5.
 - whether a logical trade is out of sync with broker state.
 
+## End-to-end order tracking (trade ↔ broker tickets ↔ deals)
+
+Every logical trade must be traceable end-to-end from the provider message that created it through the open broker order, every partial close, every modify, and finally the realized P/L. This is required for accurate per-provider attribution and for the History view's per-trade event log.
+
+Identity and linkage rules:
+
+- Every approved signal that enters the queue carries a stable `logical_trade_id`. The EA must echo this back in every trade comment (and where supported, in the magic-number namespace) so reconciliation does not depend on broker-side comment matching alone.
+- Every broker action that touches a logical trade is recorded in a new `BrokerOrder` table joined to `LogicalTrade` and to the originating `TradeLeg`. The minimum captured fields:
+  - `logical_trade_id`
+  - `leg_id` (which TP leg the action belongs to, or `entry` for the open, `runner` for the runner)
+  - `action`: `OPEN`, `PARTIAL_CLOSE`, `FULL_CLOSE`, `MODIFY_SL`, `MODIFY_TP`, `CANCEL_PENDING`, `TRAIL`
+  - `order_ticket` (broker order ID)
+  - `position_ticket` (broker position ID, where applicable)
+  - `deal_ticket` (broker deal ID for the fill, where applicable)
+  - `requested_volume`, `filled_volume`, `requested_price`, `filled_price`
+  - `retcode`, `retcode_external`, broker comment, broker timestamp
+  - `pnl_currency` (currency P/L attributed to this action), `pnl_pips`
+- Per-leg P/L is computed on the backend by aggregating `BrokerOrder` rows attached to that `leg_id`: open-side fills minus close-side fills, signed by direction, multiplied by symbol point value.
+- Per-trade P/L is the sum of per-leg P/L plus the runner's realized P/L (when the runner ultimately closes).
+- Per-provider P/L is the sum across all logical trades attributed to that provider over the selected window. This is the source for the Providers performance table's `P/L`, `Profit`, `Pips`, `Gain`, `W/L %`, and `Avg. drawdown` columns.
+- The MT5 Expert Advisor must enrich its `/api/mt5/report` payload to include the broker-side identifiers above (`order_ticket`, `position_ticket`, `deal_ticket`, retcode, requested vs filled volume / price). Snapshots already report position tickets; reports must close the loop on every close / modify so partial fills are not lost.
+- Manual operator interventions in the terminal (manual close from MT5 itself) are picked up via the snapshot diff and recorded as `BrokerOrder { action: FULL_CLOSE, source: "manual" }` so the History feed reflects what actually happened, not just what the App requested.
+
+History view consequences:
+
+- The History tab's per-trade event log is the chronologically ordered list of `BrokerOrder` rows for that logical trade, joined with the original `LogicalTradeEvent` planning entries.
+- The P/L sparkline on each trade card is computed from this row stream.
+- Out-of-sync warnings appear when the broker has a position with our `logical_trade_id` comment but no matching open `BrokerOrder` (or vice versa).
+
 Decision split:
 
 - Backend decides what the provider message means and which logical trade it belongs to.
@@ -469,6 +499,7 @@ Core entities:
 - TelegramSession: local Telethon session metadata and state.
 - Provider: selected Telegram dialog/channel/group.
 - AccountSlot: operator-created MT5 account slot (name, link code, paused state, last-known account number, server, broker, currency, balance, equity, heartbeat). One slot maps to at most one EA at a time.
+- BrokerOrder: every broker-side action attributable to a logical trade — open, partial close, full close, modify SL/TP, cancel pending, trail. Captures broker `order_ticket`, `position_ticket`, `deal_ticket`, requested vs filled volume / price, retcode, broker comment, source (`signal` / `manual`), and per-action P/L attribution. Joined to LogicalTrade and to TradeLeg so per-leg, per-trade, and per-provider P/L can be aggregated deterministically without re-parsing broker history.
 - SymbolAlias: global or provider-specific alias from raw provider text to canonical symbol.
 - AccountSymbolMapping: account-specific canonical-to-broker symbol mapping, prefix, suffix, include list, and exclude list.
 - RawMessage: immutable captured Telegram message.

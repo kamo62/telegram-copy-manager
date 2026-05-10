@@ -8,9 +8,19 @@ export interface ProviderConfigSubmission {
   riskMode: "fixed" | "percent";
   riskAmount: number;
   takeProfitLevels: Array<{ leg: number; percentage: number; strategy: string }>;
+  runner: RunnerConfig;
 }
 
 type RiskMode = "fixed" | "percent";
+
+export type RunnerSlBehavior = "break-even" | "last-tp" | "trail";
+
+export interface RunnerConfig {
+  enabled: boolean;
+  lotSize: number;
+  slBehavior: RunnerSlBehavior;
+  trailPips: number;
+}
 
 const DEFAULT_TPS = [
   { leg: 1, percentage: 25, strategy: "Set SL to ENTRY + 0 pips" },
@@ -18,6 +28,18 @@ const DEFAULT_TPS = [
   { leg: 3, percentage: 25, strategy: "Set SL to TP1 + 0 pips" },
   { leg: 4, percentage: 25, strategy: "Set SL to TP2 + 0 pips" },
 ];
+
+const DEFAULT_RUNNER: RunnerConfig = {
+  enabled: false,
+  lotSize: 0.01,
+  slBehavior: "break-even",
+  trailPips: 10,
+};
+
+const numberFmt = new Intl.NumberFormat("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 
 export function ProviderConfigModal({
   provider,
@@ -34,12 +56,14 @@ export function ProviderConfigModal({
   const [riskMode, setRiskMode] = useState<RiskMode>("fixed");
   const [riskAmount, setRiskAmount] = useState("0.10");
   const [tps, setTps] = useState(DEFAULT_TPS);
+  const [runner, setRunner] = useState<RunnerConfig>(DEFAULT_RUNNER);
 
   useEffect(() => {
     if (provider) {
       setRiskMode("fixed");
       setRiskAmount(provider.lotSize.toFixed(2));
       setTps(DEFAULT_TPS);
+      setRunner(DEFAULT_RUNNER);
     }
   }, [provider]);
 
@@ -68,6 +92,7 @@ export function ProviderConfigModal({
       riskMode,
       riskAmount: lotValue,
       takeProfitLevels: tps,
+      runner,
     });
   }
 
@@ -98,6 +123,12 @@ export function ProviderConfigModal({
     ]);
   }
 
+  // --- Resume math --------------------------------------------------------
+  const totalOrder = riskMode === "fixed" ? riskValueNumeric : riskValueNumeric;
+  const reservedRunner = runner.enabled ? Math.min(runner.lotSize, totalOrder) : 0;
+  const tradedPortion = Math.max(0, totalOrder - reservedRunner);
+  const totalPercent = tps.reduce((acc, tp) => acc + tp.percentage, 0);
+
   return (
     <div
       aria-labelledby="provider-config-title"
@@ -114,9 +145,7 @@ export function ProviderConfigModal({
         <header className="modal-head">
           <div>
             <h2 id="provider-config-title">{provider.title}</h2>
-            <button className="modal-link" type="button">
-              Settings History
-            </button>
+            <span className="modal-subtle">Channel configuration</span>
           </div>
           <button
             aria-label="Close configuration"
@@ -129,7 +158,7 @@ export function ProviderConfigModal({
         </header>
 
         <form
-          className="modal-form"
+          className="modal-form modal-form-clean"
           key={provider.id}
           noValidate
           onSubmit={(event) => {
@@ -138,15 +167,11 @@ export function ProviderConfigModal({
           }}
           ref={formRef}
         >
-          <div className="modal-section">
-            <h3 className="modal-section-title">
-              <span className="section-icon" aria-hidden="true">
-                ✈
-              </span>
-              1. Message Template
-            </h3>
-            <div className="modal-row">
-              <label className="floating-field has-value template-select">
+          <section className="config-section">
+            <h3 className="config-section-title">Message template</h3>
+            <div className="config-row">
+              <label className="config-field config-field-grow">
+                <span className="config-label">Template</span>
                 <select
                   aria-label={`Parser mode for ${provider.title}`}
                   defaultValue={provider.parserMode}
@@ -155,23 +180,20 @@ export function ProviderConfigModal({
                   <option value="deterministic">Automatic</option>
                   <option value="kal-vip">KAL VIP tuned</option>
                 </select>
-                <span className="floating-field-label">Template</span>
               </label>
-              <button className="btn-primary btn-small" type="button">
+              <button className="btn-ghost btn-small" type="button">
                 Test message
               </button>
             </div>
-          </div>
+          </section>
 
-          <div className="modal-section">
-            <h3 className="modal-section-title">
-              <span className="section-icon shield" aria-hidden="true">
-                ◯
-              </span>
-              2. Risk Management
-            </h3>
-            <div className="risk-row">
-              <label className="floating-field has-value">
+          <section className="config-section">
+            <h3 className="config-section-title">Risk management</h3>
+            <div className="config-row">
+              <label className="config-field">
+                <span className="config-label">
+                  {riskMode === "fixed" ? "Fixed lots" : "% of balance"}
+                </span>
                 <input
                   aria-label={`Channel lot size for ${provider.title}`}
                   defaultValue={provider.lotSize.toFixed(2)}
@@ -181,69 +203,52 @@ export function ProviderConfigModal({
                   pattern="[0-9]*[.,]?[0-9]*"
                   type="text"
                 />
-                <span className="floating-field-label">
-                  {riskMode === "fixed" ? "Fixed lots" : "% of balance"}
-                </span>
               </label>
-              <div className="risk-mode-options">
+              <div className="segmented-control" role="tablist" aria-label="Risk mode">
                 <button
-                  aria-pressed={riskMode === "fixed"}
-                  className={`risk-mode-pill ${riskMode === "fixed" ? "active" : ""}`}
+                  aria-selected={riskMode === "fixed"}
+                  className={riskMode === "fixed" ? "active" : ""}
                   onClick={() => setRiskMode("fixed")}
+                  role="tab"
                   type="button"
                 >
-                  <span className="risk-mode-label">Use fixed lots</span>
-                  <span className="risk-mode-value">
-                    {riskMode === "fixed" ? riskValueNumeric.toFixed(2) : "0.01"}
-                  </span>
+                  Fixed lots
                 </button>
                 <button
-                  aria-pressed={riskMode === "percent"}
-                  className={`risk-mode-pill ${riskMode === "percent" ? "active" : ""}`}
+                  aria-selected={riskMode === "percent"}
+                  className={riskMode === "percent" ? "active" : ""}
                   onClick={() => setRiskMode("percent")}
+                  role="tab"
                   type="button"
                 >
-                  <span className="risk-mode-label">Risk a % of your account balance</span>
-                  <span className="risk-mode-value">
-                    {riskMode === "percent" ? `${riskValueNumeric.toFixed(2)}%` : "0.5%"}
-                  </span>
+                  % of balance
                 </button>
               </div>
             </div>
-          </div>
+          </section>
 
-          <div className="modal-section">
-            <h3 className="modal-section-title">
-              <span className="section-icon" aria-hidden="true">
-                ╱
-              </span>
-              3. Take Profit Levels
-              <button
-                className="modal-link section-action"
-                onClick={distributeEqually}
-                type="button"
-              >
+          <section className="config-section">
+            <header className="config-section-head">
+              <h3 className="config-section-title">Take profit levels</h3>
+              <button className="config-link" onClick={distributeEqually} type="button">
                 Distribute % equally
               </button>
-            </h3>
-            <div className="tp-table">
-              <div className="tp-table-head">
-                <span>TP #</span>
-                <span>Percentage</span>
+            </header>
+            <div className="config-tp-table">
+              <div className="config-tp-head">
+                <span>TP</span>
+                <span>%</span>
                 <span>Strategy</span>
                 <span aria-hidden="true" />
               </div>
               {tps.map((tp, index) => (
-                <div className="tp-table-row" key={tp.leg}>
-                  <span className="tp-table-cell tp-leg-cell">TP {tp.leg}</span>
-                  <div className="tp-table-cell percent-cell">
+                <div className="config-tp-row" key={tp.leg}>
+                  <span className="config-tp-leg">TP{tp.leg}</span>
+                  <div className="config-stepper">
                     <button
                       aria-label={`Decrease TP${tp.leg} percentage`}
-                      className="step-btn"
                       onClick={() =>
-                        updateTp(index, {
-                          percentage: Math.max(0, tp.percentage - 5),
-                        })
+                        updateTp(index, { percentage: Math.max(0, tp.percentage - 5) })
                       }
                       type="button"
                     >
@@ -251,7 +256,6 @@ export function ProviderConfigModal({
                     </button>
                     <input
                       aria-label={`TP${tp.leg} percentage`}
-                      className="percent-input"
                       inputMode="decimal"
                       onChange={(event) =>
                         updateTp(index, { percentage: Number(event.target.value) || 0 })
@@ -261,11 +265,8 @@ export function ProviderConfigModal({
                     />
                     <button
                       aria-label={`Increase TP${tp.leg} percentage`}
-                      className="step-btn"
                       onClick={() =>
-                        updateTp(index, {
-                          percentage: Math.min(100, tp.percentage + 5),
-                        })
+                        updateTp(index, { percentage: Math.min(100, tp.percentage + 5) })
                       }
                       type="button"
                     >
@@ -274,50 +275,166 @@ export function ProviderConfigModal({
                   </div>
                   <input
                     aria-label={`TP${tp.leg} strategy`}
-                    className="tp-strategy-input"
+                    className="config-strategy-input"
                     onChange={(event) => updateTp(index, { strategy: event.target.value })}
                     type="text"
                     value={tp.strategy}
                   />
                   <button
                     aria-label={`Delete TP${tp.leg}`}
-                    className="icon-btn icon-btn-danger"
+                    className="config-row-delete"
                     onClick={() => deleteTp(index)}
                     type="button"
                   >
-                    <Trash2 size={14} aria-hidden="true" />
+                    <Trash2 size={13} aria-hidden="true" />
                   </button>
                 </div>
               ))}
-              <button className="tp-table-add" onClick={addTp} type="button">
-                <Plus size={14} aria-hidden="true" />
-                Add a new Take Profit level
+              <button className="config-tp-add" onClick={addTp} type="button">
+                <Plus size={13} aria-hidden="true" />
+                Add a take-profit level
               </button>
-            </div>
-          </div>
-
-          <div className="modal-section order-resume">
-            <h3 className="modal-section-title">3.1. Order Resume</h3>
-            <p className="resume-line">
-              <strong>ONE order</strong> with <strong>{riskValueNumeric.toFixed(2)}</strong>{" "}
-              {riskMode === "fixed" ? "lots" : "% of balance"} will be inserted.
-            </p>
-            {tps.map((tp) => {
-              const lots = (riskValueNumeric * tp.percentage) / 100;
-              return (
-                <p className="resume-line" key={tp.leg}>
-                  When <strong>TP{tp.leg}</strong> hits, <strong>{lots.toFixed(2)}</strong>{" "}
-                  {riskMode === "fixed" ? "lots" : "%"} will be closed.
+              {totalPercent !== 100 ? (
+                <p className="config-hint">
+                  TPs total {totalPercent}% — anything that isn't allocated will close on the final
+                  TP unless a runner is configured below.
                 </p>
-              );
-            })}
-            <p className="resume-line resume-foot">
-              For signals with fewer TPs than configured, the lot size stays the same and the
-              position closes fully once the final TP in the signal is reached.
-            </p>
-          </div>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="config-section">
+            <header className="config-section-head">
+              <h3 className="config-section-title">Runner</h3>
+              <label className="config-toggle">
+                <input
+                  aria-label="Enable runner after final TP"
+                  checked={runner.enabled}
+                  onChange={(event) =>
+                    setRunner({ ...runner, enabled: event.target.checked })
+                  }
+                  type="checkbox"
+                />
+                <span>Leave a runner open after the final TP</span>
+              </label>
+            </header>
+            {runner.enabled ? (
+              <div className="config-row config-row-three">
+                <label className="config-field">
+                  <span className="config-label">Lot size</span>
+                  <input
+                    aria-label="Runner lot size"
+                    inputMode="decimal"
+                    onChange={(event) =>
+                      setRunner({
+                        ...runner,
+                        lotSize: Number(event.target.value.replace(",", ".")) || 0,
+                      })
+                    }
+                    type="text"
+                    value={numberFmt.format(runner.lotSize)}
+                  />
+                </label>
+                <label className="config-field config-field-grow">
+                  <span className="config-label">SL behaviour</span>
+                  <select
+                    aria-label="Runner SL behaviour"
+                    onChange={(event) =>
+                      setRunner({
+                        ...runner,
+                        slBehavior: event.target.value as RunnerSlBehavior,
+                      })
+                    }
+                    value={runner.slBehavior}
+                  >
+                    <option value="break-even">Move SL to break-even</option>
+                    <option value="last-tp">Move SL to last hit TP</option>
+                    <option value="trail">Trail by N pips</option>
+                  </select>
+                </label>
+                {runner.slBehavior === "trail" ? (
+                  <label className="config-field config-field-narrow">
+                    <span className="config-label">Trail pips</span>
+                    <input
+                      aria-label="Runner trail pips"
+                      inputMode="numeric"
+                      onChange={(event) =>
+                        setRunner({
+                          ...runner,
+                          trailPips: Number(event.target.value) || 0,
+                        })
+                      }
+                      type="text"
+                      value={runner.trailPips}
+                    />
+                  </label>
+                ) : null}
+              </div>
+            ) : (
+              <p className="config-hint config-hint-soft">
+                Off — when the final TP hits, the position closes fully.
+              </p>
+            )}
+          </section>
+
+          <section className="config-resume">
+            <h3 className="config-resume-title">Order summary</h3>
+            <div className="config-resume-grid">
+              <div className="config-resume-stat">
+                <span>Total order</span>
+                <strong>{numberFmt.format(totalOrder)}</strong>
+                <small>{riskMode === "fixed" ? "lots" : "% of balance"}</small>
+              </div>
+              <div className="config-resume-stat">
+                <span>Allocated to TPs</span>
+                <strong>{numberFmt.format(tradedPortion)}</strong>
+                <small>{tps.length} levels · {totalPercent}%</small>
+              </div>
+              <div className="config-resume-stat">
+                <span>Runner</span>
+                <strong>
+                  {runner.enabled ? numberFmt.format(reservedRunner) : "—"}
+                </strong>
+                <small>
+                  {runner.enabled
+                    ? runner.slBehavior === "trail"
+                      ? `Trail ${runner.trailPips} pips`
+                      : runner.slBehavior === "last-tp"
+                        ? "SL → last TP"
+                        : "SL → break-even"
+                    : "Disabled"}
+                </small>
+              </div>
+            </div>
+            <ol className="config-resume-list">
+              {tps.map((tp) => {
+                const closed = (tradedPortion * tp.percentage) / 100;
+                return (
+                  <li key={tp.leg}>
+                    <strong>TP{tp.leg}</strong> hit · close{" "}
+                    <span className="num">{numberFmt.format(closed)}</span> lots
+                    <span className="config-resume-strategy"> · {tp.strategy}</span>
+                  </li>
+                );
+              })}
+              {runner.enabled ? (
+                <li className="config-resume-runner">
+                  <strong>After final TP</strong> · keep{" "}
+                  <span className="num">{numberFmt.format(reservedRunner)}</span> lots open ·{" "}
+                  {runner.slBehavior === "trail"
+                    ? `trailing ${runner.trailPips} pips`
+                    : runner.slBehavior === "last-tp"
+                      ? "SL at last hit TP"
+                      : "SL at break-even"}
+                </li>
+              ) : null}
+            </ol>
+          </section>
 
           <div className="modal-foot">
+            <button className="btn-ghost" onClick={onClose} type="button">
+              Close
+            </button>
             <button
               aria-label={`Save provider settings for ${provider.title}`}
               className="btn-primary"
@@ -325,9 +442,6 @@ export function ProviderConfigModal({
               type="button"
             >
               Save changes
-            </button>
-            <button className="btn-ghost" onClick={onClose} type="button">
-              Close
             </button>
           </div>
         </form>

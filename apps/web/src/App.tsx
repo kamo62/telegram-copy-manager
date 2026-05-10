@@ -707,7 +707,7 @@ export function App({
           ) : null}
 
           {showMapping ? (
-            <Panel title="Symbol Mapping">
+            <Panel className="wide-panel" title="Symbol Mapping">
               <div className="mapping-controls">
                 <form className="compact-form" onSubmit={saveGlobalAlias}>
                   <label>
