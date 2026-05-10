@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-05-10 (History + Symbol Settings tabularised; Signal Queue moved to Logs)
+
+Brought the History and Symbol Settings tabs in line with the rest of the app:
+
+- **History tab**: replaced the per-trade card-with-grid wall (`TradeCard` × N) with a single `HistoryTable` (`apps/web/src/components/HistoryTable.tsx`). Columns: Trade · Symbol · Side · Mode · Status · TPs · TP progress. Each row has tabular-nums monospaced cells, a green/red side chip, and an inline TP-progress strip showing each leg as a pill (HIT green / OPEN indigo / CLOSED faded / PLANNED neutral) with the target price + allocation %.
+- **Symbol Settings tab**: replaced the bespoke `mapping-row` divs with `SymbolMappingsTable` (`apps/web/src/components/SymbolMappingsTable.tsx`) — same `data-table` styling as Providers. Columns: Raw symbol · Canonical · Broker symbol · Status. The two add-mapping forms above the table stay for now.
+- **Signal Queue moved to Logs tab**: the queue panel previously lived under History but the spec (and the user's mental model) treats queue / parser / exec logs as the live operational feed. Logs tab now renders Parser Lab + Signal Queue + Execution Logs.
+- **Single-panel views go full width**: Telegram Setup, Linked Accounts, and Settings (sidebar destinations) now use `wide-panel` so they fill the workspace instead of leaving two-thirds of the screen empty.
+- Linked Accounts panel renamed from `MT5 Accounts` to match the sidebar label.
+- Removed the now-unused `TradeCard.tsx`.
+
+Verification: `bun test apps/web/` 9 pass · `bun run --cwd apps/web build` clean (244 KB JS + 52 KB lazy uplot + 36 KB CSS).
+
 ## 2026-05-10 (Sidebar dedup + TSC-style Provider Config modal)
 
 Addresses the "sidebar/tabs are duplicated" and "Provider Config modal should look like the TSC screen" feedback:

@@ -19,7 +19,8 @@ import { SignIn } from "./components/SignIn";
 import { navItems, Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
 import { type TabId, tabOptions, WorkspaceTabs } from "./components/WorkspaceTabs";
-import { TradeCard } from "./components/TradeCard";
+import { HistoryTable } from "./components/HistoryTable";
+import { SymbolMappingsTable } from "./components/SymbolMappingsTable";
 import { useHotkeys } from "./hooks/useHotkeys";
 
 export interface DashboardSnapshot {
@@ -604,7 +605,7 @@ export function App({
 
         <section className="content-grid">
           {showTelegram ? (
-            <Panel className="setup-panel" title="Telegram Setup">
+            <Panel className="setup-panel wide-panel" title="Telegram Setup">
               <SetupFlow
                 form={form}
                 setForm={setForm}
@@ -690,25 +691,13 @@ export function App({
           ) : null}
 
           {showTrades ? (
-            <Panel title="Signal Queue">
-              <div className="queue-board">
-                {snapshot.signalQueue.map((item) => (
-                  <QueueItem key={item.id} item={item} />
-                ))}
-              </div>
-            </Panel>
-          ) : null}
-
-          {showTrades ? (
             <Panel className="wide-panel" title="Trade Lifecycle">
-              {snapshot.logicalTrades.map((trade) => (
-                <TradeCard key={trade.id} trade={trade} />
-              ))}
+              <HistoryTable trades={snapshot.logicalTrades} />
             </Panel>
           ) : null}
 
           {showMt5 ? (
-            <Panel title="MT5 Accounts">
+            <Panel className="wide-panel" title="Linked Accounts">
               <div className="list-stack">
                 {snapshot.mt5Accounts.map((account) => (
                   <AccountRow key={account.id} account={account} />
@@ -822,17 +811,18 @@ export function App({
                   <button type="submit">Save account mapping</button>
                 </form>
               </div>
-              <div className="mapping-table">
-                {snapshot.symbolMappings.map((mapping) => (
-                  <div className="mapping-row" key={`${mapping.rawSymbol}-${mapping.brokerSymbol}`}>
-                    <code>{mapping.rawSymbol}</code>
-                    <span>{mapping.canonicalSymbol}</span>
-                    <strong>{mapping.brokerSymbol}</strong>
-                    <span className={`tag ${mapping.status === "mapped" ? "good" : "warn"}`}>
-                      {mapping.status}
-                    </span>
-                  </div>
-                ))}
+              <SymbolMappingsTable mappings={snapshot.symbolMappings} />
+            </Panel>
+          ) : null}
+
+          {showLogs ? (
+            <Panel className="wide-panel" title="Signal Queue">
+              <div className="queue-board">
+                {snapshot.signalQueue.length === 0 ? (
+                  <div className="empty-state">Queue is empty</div>
+                ) : (
+                  snapshot.signalQueue.map((item) => <QueueItem key={item.id} item={item} />)
+                )}
               </div>
             </Panel>
           ) : null}
@@ -850,7 +840,7 @@ export function App({
           ) : null}
 
           {showSettings ? (
-            <Panel title="Settings">
+            <Panel className="wide-panel" title="Settings">
               <form className="compact-form settings-form" onSubmit={saveExecutionSettings}>
                 <label>
                   Default lot size
