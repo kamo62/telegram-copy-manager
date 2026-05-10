@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-05-10 (Spec sync with shipped UI + design corrections)
+
+Brought `docs/superpowers/specs/2026-05-09-telegram-copy-app-design.md` back in line with what was actually shipped over the last five commits and what was decided in conversation:
+
+- **Visual direction** rewritten — replaced the "modern dark terminal: cyan on near-black" wording with the actual implementation: light theme, body `#f5f6fa`, white panels, indigo `#5046e5` primary, Telegram-blue `#229ED9` reserved for sign-in chrome, green/red for direction, amber for warnings. Inter UI + JetBrains Mono for numerics, light shadows, 6–8 px radius, `uplot` for charts.
+- **Frontend Screens** restructured into Sign-in screen + Live workspace, with the explicit non-duplication rule between sidebar and tabs (sidebar holds Live / Telegram Setup / Linked Accounts / Settings; everything else lives in WorkspaceTabs). Each tab now has a dedicated description.
+- **Provider Configuration modal** description rewritten to match the TSC modal screen — Risk Management is a single-field with a fixed-lots / %-of-balance toggle (no abstract "Risk profile"), TP Levels are an editable per-row list with strategy lines, plus a derived Order Resume summary. Spec now explicitly states "There is no abstract Risk profile (Balanced/Conservative/Aggressive) — sizing is explicit per channel."
+- **Telegram /api/telegram/start** documented to fall back to server-side `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` env so the browser never sees secrets.
+- **Architecture** section now mentions the actual stack — React + Vite + Inter / JetBrains Mono, `uplot` lazy-loaded, served static from the API origin.
+- New **MT5 ↔ EA account linking** section: link-code workflow (App pre-creates a named slot with a short code → operator pastes the code into the EA's `LinkCode` Input → EA includes `linkCode` in every register/heartbeat → backend matches to the slot). Removes the smoke-test pollution by giving each EA pairing an explicit, named, code-mediated slot.
+- New `AccountSlot` entity in Data Model.
+
+Verification: `bun test apps/web/` 9 pass · `bun test apps/api/` 35 pass · spec compiles to 627 lines.
+
 ## 2026-05-09 (Performance growth chart — TSC parity)
 
 - New `apps/web/src/components/GrowthChart.tsx` — uplot-backed account-growth chart with a Growth / Drawdown toggle. Indigo line + faint area fill matching the rest of the theme (`#5046e5` for growth, `#ef4444` for drawdown), `tabular-nums` axis labels formatted as `$1,234` and `0.0%`.

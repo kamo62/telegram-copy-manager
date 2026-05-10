@@ -49,11 +49,24 @@ Deferred until after v1:
 
 The application has three main parts:
 
-- Frontend web app: setup, review, monitoring, and operations.
-- Backend API and workers: Telegram sessions, provider monitoring, parsing, persistence, queueing, and reporting.
+- Frontend web app: setup, review, monitoring, and operations. React + Vite, Inter UI font, JetBrains Mono for numerics, `uplot` for charts (lazy-loaded). Light theme with indigo primary; Telegram-branded sign-in chrome for the unauthenticated state. Built static and served by the API process at the same origin.
+- Backend API and workers: Telegram sessions, provider monitoring, parsing, persistence, queueing, and reporting. Bun + Hono, SQLite for persistence, server-side env for Telegram credentials.
 - MT5 Expert Advisor: account registration, broker-specific validation, order execution, and trade result reporting.
 
 The backend owns Telegram and normalized signal state. The EA owns MT5 execution reality. The EA must not parse Telegram text; it receives clean trade instructions only.
+
+## MT5 ↔ EA account linking
+
+Because the same broker account number can appear under different EA setups (demo, live, multiple terminals) and because automated test runs would otherwise pollute the linked-accounts list with anonymous duplicates, every EA-to-app pairing is mediated by an explicit **link code**:
+
+1. The operator creates a named slot in the App's "Linked Accounts" view (e.g. "Main Demo", "Live · Raw Trading"). The App generates a short alphanumeric link code per slot.
+2. The operator pastes the link code into the EA's `LinkCode` Input parameter and attaches the EA to the chart.
+3. The EA includes `linkCode` in every `/api/mt5/register` and `/api/mt5/heartbeat` payload. The backend matches incoming `linkCode` to the pre-created slot and updates that slot's account number, server, broker, currency, and heartbeat. If the code does not match any slot the registration is rejected with a 404 and the EA logs a clear "unlinked" message.
+4. A slot may be re-keyed (rotate link code) or unlinked from the EA. Unlinking does not delete history; it simply detaches the slot from a specific EA.
+
+A slot in `paused` state (because Equity Guardian threshold breached, or operator-paused) accepts heartbeats but rejects new OPEN_TRADE leases.
+
+For backward compatibility during migration, registrations without a `linkCode` continue to create an unlabelled slot, but the UI surfaces these as "Unlinked smoke / legacy" so the operator can rename or delete them.
 
 ## Frontend Flow
 
@@ -102,7 +115,7 @@ Telegram API credentials, OTP codes, 2FA passwords, and `.session` files must no
 The backend provides:
 
 - Telegram connection endpoints:
-  - start connection
+  - start connection: accepts `{ phone, apiId?, apiHash? }`. When `apiId` / `apiHash` are absent or empty, the server falls back to `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from its own environment so secrets never leave the machine through the browser bundle. Returns 400 if neither the body nor the env supplies the credentials.
   - submit verification code
   - submit 2FA password when needed
   - disconnect session
@@ -267,11 +280,17 @@ Each provider has a configuration record that layers strategy preferences over t
 
 Per-provider configuration includes:
 
-- Channel lot size: the operator-configured execution volume for this Telegram provider. The app must not use lot sizes embedded in provider Telegram messages.
+- Risk Management (single field with two modes):
+  - Fixed lots: a literal lot value (for example `0.08`) applied to every approved trade from this channel.
+  - Risk percent of balance: a percentage of the linked account balance (for example `0.5%`) converted to lots at queue time using broker-reported balance and symbol contract size.
+  - The app must not use lot sizes embedded in provider Telegram messages. Provider-sent lot/risk hints stay captured for review only.
+  - There is no abstract "Risk profile" (Balanced/Conservative/Aggressive) — sizing is explicit per channel.
 - Message Template: Automatic, Named template, or Manual override. A Test Message preview applies the chosen template to a recent raw message and shows the resulting parsed signal.
-- TP1-TP4 strategy: when TP1 hits, set SL to ENTRY plus an offset, or multiply SL pips by a factor.
+- Take Profit Levels: editable list of TP rows. Each row has TP number, percentage of total volume, and a strategy line ("Set SL to ENTRY + N pips", "Set SL to TP1 + N pips", etc.). The total percentage across rows should sum to 100 (a "Distribute % equally" action splits evenly). New rows can be added; existing rows can be deleted.
+- TP1-TP4 strategy details: when TP1 hits, set SL to ENTRY plus an offset, or multiply SL pips by a factor. Same pattern at TP2 (SL → TP1 + offset), TP3 (SL → TP2 + offset), TP4 (SL → TP3 + offset).
 - TP manipulation: change TP1 to N pips, change TP1 to a 1:R risk-reward target, or only apply when the signal lacks a given TP.
 - Pip add, randomize, or spread on individual TP levels.
+- Order Resume summary: derived plain-text summary that restates the chosen risk + TP allocation in operator-readable form (for example "ONE order with 0.08 lots will be inserted. When TP1 hits, 0.02 lots will be closed.") so misconfigured channels are obvious before saving.
 - Settings History: append-only audit log of who changed what and when.
 
 The strategy configuration must round-trip through the queue so the EA receives the modified TP/SL. The configuration test endpoint must run against a sample raw message without affecting live state.
@@ -449,6 +468,7 @@ Core entities:
 - AppProfile: local application profile for one user/operator.
 - TelegramSession: local Telethon session metadata and state.
 - Provider: selected Telegram dialog/channel/group.
+- AccountSlot: operator-created MT5 account slot (name, link code, paused state, last-known account number, server, broker, currency, balance, equity, heartbeat). One slot maps to at most one EA at a time.
 - SymbolAlias: global or provider-specific alias from raw provider text to canonical symbol.
 - AccountSymbolMapping: account-specific canonical-to-broker symbol mapping, prefix, suffix, include list, and exclude list.
 - RawMessage: immutable captured Telegram message.
@@ -470,35 +490,74 @@ Core entities:
 
 ## Frontend Screens
 
-The frontend uses a top-level navigation rail (Home, Linked Accounts, Account Management, Live, Telegram Setup) with the Live workspace organized as tabs.
+The frontend has two top-level routes: a full-viewport **Sign-in screen** while no Telegram session is connected, and the **Live workspace** once authenticated. The sidebar inside the Live workspace must NOT duplicate the in-workspace tabs — it is reserved for true top-level destinations only (Live, Telegram Setup, Linked Accounts, Settings). All operational navigation happens in the tabs.
 
-V1 top-level screens:
+### Sign-in screen (no session)
 
-- Telegram Setup: API ID, API hash, phone, code, and 2FA flow.
-- Live workspace (default after setup): the operations console, organized as tabs (see below).
-- Linked Accounts / Account Management: MT5 account registration, heartbeat health, broker/server, and risk defaults.
+- Telegram-branded chrome: thin Telegram-blue (`#229ED9`) titlebar with the app name, white body, centered circular Telegram-blue logo medallion.
+- Heading "Sign in to Telegram" with a "Please confirm your country code and enter your phone number." subtitle, mirroring the official Telegram Desktop sign-in.
+- Single Material-style floating-label phone-number field; the API ID and API hash are NOT collected from the user — the backend reads them from server-side env (`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`) and falls back to any values supplied in the request body.
+- Primary CTA "Next" — disabled until the phone field has content.
+- Footer reminding the operator that credentials live on the server.
+- After "Next" the same screen progresses through code-verification and (when required) two-factor password steps with the same chrome.
+- The screen automatically flips to the Live workspace once the polled snapshot reports a `CONNECTED` Telegram session.
 
-V1 Live-workspace tabs:
+### Live workspace (post-sign-in)
+
+Sidebar (top-level only — no overlap with in-workspace tabs):
+
+- Live (default): renders the AccountHeader strip + WorkspaceTabs.
+- Telegram Setup: re-authentication flow + DialogPicker.
+- Linked Accounts: MT5 account registration, link-code, heartbeat health, broker/server, account-naming.
+- Settings: app-wide settings (polling interval, allowed order types, fallback default lot/risk).
+
+Live-workspace tabs (six):
 
 - Performance: account KPIs strip (initial balance, total profit, today/week/month deltas), equity-curve chart with growth/drawdown toggle, monthly-returns bar chart, and a small per-account latency strip.
-- Providers: sortable performance table with columns for name, risk, TP count, SL, others, pips, W/L %, average drawdown, P/L, profit, and gain. Filter chips by name, date, and status. Per-row gear opens the Provider Configuration modal. Add Provider opens the dialog picker. Provider Report exports a CSV or PDF for the selected window.
+- Providers: sortable performance table with columns for name, risk, lots, TP count, SL, pips, W/L %, average drawdown, P/L, profit, and gain. Filter chips by name, date, and status. Per-row gear opens the Provider Configuration modal. Add Provider opens the dialog picker. Provider Report exports a CSV or PDF for the selected window.
 - History: chronological logical trades. Each row is expandable to a per-trade lifecycle event log (timestamped OPEN, SL_MOVED, TP_HIT, PARTIAL_CLOSE, MODIFY, CANCEL, CLOSED) and a P/L sparkline.
 - Equity Guardian: per-account current drawdown, threshold, pause-on-breach toggle, breach event log, manual unpause action.
 - Symbol Settings: global aliases, provider aliases, account mappings, prefix/suffix, include/exclude rules, and EA symbol validation, presented as editable tables.
-- Signal Strategy Rules: per-provider per-pair rule editor (forward-compatible UI scaffold even if backend per-pair support lags).
 - Logs: combined parser-review queue and MT5 execution logs as a single timestamped feed with type and status filters.
+
+Top chrome on every Live route:
+
+- Status bar (28 px slim header): brand `<h1>` ("TG-TC · Operations"), DB / Telegram / Queue chips, UTC clock, live pulse dot, command-palette button, and refresh button (wired).
+- Account header strip: left side has a "Live" title plus a Connected Platform card (Platform, Broker, Type, Expert Advisor) with an `EA WORKING` / `EA OFFLINE` heartbeat badge; right side has five KPI columns (Initial Balance, Total Profit, This Month, This Week, Today) with green/red Δ% chips. Numbers render with `Intl.NumberFormat("en-US")` to dodge `0.10` ↔ `0,10` slippage on EU systems.
+- WorkspaceTabs strip (six tabs above) renders directly under the account header and does not repeat sidebar items.
+
+Provider Configuration modal (opened by the gear icon on a Providers-tab row):
+
+- Header: provider title plus a "Settings History" link.
+- Section 1 — Message Template: Automatic / Named template / Manual override + Test Message + Update Templates link.
+- Section 2 — Risk Management: single value with toggle between "Use fixed lots" and "Risk a % of your account balance"; provider-sent lot/risk hints stay visible elsewhere as `CAPTURED · NOT EXECUTED` chips.
+- Section 3 — Take Profit Levels: editable rows with TP number, percentage of total volume, and a strategy line. "Distribute % equally" splits across rows. Add / delete row controls.
+- Section 3.1 — Order Resume: plain-text summary derived from the above settings ("ONE order with 0.08 lots will be inserted. When TP1 hits, 0.02 lots will be closed.").
+- Footer: Save Changes / Close.
+- Modal must be accessible (`role="dialog"`, `aria-modal="true"`, Escape closes, click-outside-to-close).
 
 Cross-cutting UI elements:
 
-- Status bar header: brand, health chips, queue count, last-poll clock, refresh action, and live-poll dot.
 - Quick actions: command palette (Cmd/Ctrl+K) for refresh, pause provider, jump-to-tab, and open settings.
 - Settings drawer (Cmd/Ctrl+,): global Telegram credentials and add-provider flow.
 - Per-trade lifecycle event log surfaces in the History tab and inside any expanded logical trade.
 - P/L sparkline appears on each logical trade card.
 
-The first screen after setup is the Live workspace, not a marketing page.
+The first screen after sign-in is the Live workspace at the Performance tab, not a marketing page.
 
-The visual direction is a modern dark terminal: dense, monospace numerics, sharp 1 px borders, a single cyan accent on near-black, with status bar, ticker tape, and tabbed working surface. Color is reserved for direction (green for up, red for down) and warnings (amber). Inspiration is Bloomberg-style operations terminals while keeping the navigability of TSCopier.
+### Visual direction
+
+The visual direction is a **modern light operations dashboard** with measured information density, NOT a retro Bloomberg amber-on-black terminal. Concrete tokens:
+
+- Theme: light. Body `#f5f6fa`, white panels `#ffffff`, light borders `#e1e4ed`, ink `#111827`.
+- Primary accent: indigo `#5046e5` (selected tab underline, primary buttons, active links, table row-head). Telegram-blue `#229ED9` is reserved for the Sign-in screen chrome and primary sign-in CTA so the unauthenticated state visibly belongs to Telegram.
+- Direction colour: green `#10b981` (up / EA working / Auto-copy enabled), red `#ef4444` (down / drawdown / errors), amber `#f59e0b` (warnings).
+- Typography: `Inter` for UI chrome, `JetBrains Mono` for any numeric column or code surface; `font-variant-numeric: tabular-nums` is required on every numeric data cell so columns align without forcing a true monospace.
+- Geometry: 6–8 px corner radius, 1 px borders, very light shadows (`0 1px 2px rgba(15,23,42,0.05)`), no heavy drop-shadows.
+- Charts: `uplot` (lazy-loaded as its own bundle chunk). Series tinted with the same indigo / red so charts read as part of the same product, not a third-party widget.
+- Material-style floating-label inputs are reserved for the Sign-in screen and the Provider Config modal; everywhere else uses tight stacked label + input.
+
+Inspiration is TSCopier's product UI (light, indigo, sortable tables with gear-icon modals, KPI strip + charts), with the operational rigor of a Bloomberg terminal (status bar, monospace numerics, precise alignment) layered on top of it.
 
 ## Testing and Verification
 
