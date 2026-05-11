@@ -1,0 +1,120 @@
+/* Design tokens — modern editorial finance palette. Light theme; dark theme
+   can override these values without touching component classes. */
+
+:root {
+  color-scheme: light;
+
+  /* ── Surfaces ─────────────────────────────────────────────────────── */
+  --bg: hsl(40 35% 98%);
+  --bg-elevated: hsl(0 0% 100%);
+  --panel: hsl(0 0% 100%);
+  --panel-2: hsl(40 25% 96%);
+  --panel-hover: hsl(40 22% 94%);
+
+  /* ── Lines ────────────────────────────────────────────────────────── */
+  --line: hsl(220 18% 90%);
+  --line-strong: hsl(220 14% 82%);
+  --line-subtle: hsl(40 22% 94%);
+
+  /* ── Ink (text) ───────────────────────────────────────────────────── */
+  --ink: hsl(220 28% 11%);
+  --ink-2: hsl(220 14% 28%);
+  --ink-dim: hsl(220 12% 38%);
+  --ink-3: hsl(220 10% 46%);
+  --ink-faint: hsl(220 8% 62%);
+
+  /* ── Accent (deep cobalt — not Tailwind indigo, not purple-on-white) */
+  --accent: hsl(218 85% 42%);
+  --accent-9: hsl(218 85% 42%);
+  --accent-10: hsl(218 88% 36%);
+  --accent-dim: hsl(218 85% 42%);
+  --accent-soft: hsl(218 85% 42% / 0.08);
+  --accent-ring: hsl(218 85% 42% / 0.25);
+
+  /* ── Telegram brand (sign-in chrome only) ─────────────────────────── */
+  --tg-blue: hsl(199 75% 49%);
+  --tg-blue-deep: hsl(199 80% 40%);
+  --tg-blue-dim: hsl(199 80% 40%);
+
+  /* ── Direction (up / down / warn) ─────────────────────────────────── */
+  --up: hsl(155 62% 32%);
+  --up-9: hsl(155 62% 32%);
+  --up-dim: hsl(155 62% 26%);
+  --up-soft: hsl(155 62% 32% / 0.12);
+  --down: hsl(355 78% 46%);
+  --down-9: hsl(355 78% 46%);
+  --down-dim: hsl(355 78% 38%);
+  --down-soft: hsl(355 78% 46% / 0.12);
+  --warn: hsl(35 88% 46%);
+  --warn-9: hsl(35 88% 46%);
+  --warn-dim: hsl(35 88% 36%);
+  --warn-soft: hsl(35 88% 46% / 0.14);
+
+  /* ── Typography ───────────────────────────────────────────────────── */
+  --font-display:
+    "Fraunces", "Iowan Old Style", "Apple Garamond", Georgia, "Times New Roman", serif;
+  --font-ui:
+    "Geist", "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
+  --font-mono:
+    "JetBrains Mono", "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    monospace;
+
+  /* Type scale (ratio ~1.2) */
+  --fs-1: 11px;
+  --fs-2: 12px;
+  --fs-3: 13px;
+  --fs-4: 14px;
+  --fs-5: 16px;
+  --fs-6: 19px;
+  --fs-7: 24px;
+  --fs-8: 32px;
+  --fs-9: 44px;
+
+  --lh-tight: 1.15;
+  --lh-normal: 1.45;
+  --lh-loose: 1.6;
+
+  /* ── Spacing ──────────────────────────────────────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+
+  /* ── Radius ───────────────────────────────────────────────────────── */
+  --radius-1: 4px;
+  --radius-2: 8px;
+  --radius-3: 12px;
+  --radius-pill: 999px;
+  /* Legacy aliases used by existing rules */
+  --radius: 8px;
+  --radius-sm: 6px;
+
+  /* ── Motion ───────────────────────────────────────────────────────── */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-1: 120ms;
+  --duration-2: 200ms;
+  --duration-3: 320ms;
+
+  /* ── Shadows (HSL alpha for depth without colour cast) ────────────── */
+  --shadow-1: 0 1px 2px hsl(220 30% 12% / 0.04);
+  --shadow-2: 0 1px 2px hsl(220 30% 12% / 0.04), 0 4px 12px hsl(220 30% 12% / 0.06);
+  --shadow-3: 0 8px 24px hsl(220 30% 12% / 0.1), 0 2px 6px hsl(220 30% 12% / 0.06);
+  --shadow-glass: inset 0 1px 0 hsl(0 0% 100% / 0.8), 0 1px 2px hsl(220 30% 12% / 0.06);
+  /* Legacy aliases used by existing rules */
+  --shadow-sm: var(--shadow-1);
+  --shadow-md: var(--shadow-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-1: 0ms;
+    --duration-2: 0ms;
+    --duration-3: 0ms;
+  }
+}
