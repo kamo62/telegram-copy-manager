@@ -1,4 +1,4 @@
-import { CheckCircle2, RefreshCw, Search } from "lucide-react";
+import { CheckCircle2, RefreshCw, Search, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { EmptyState } from "./EmptyState";
 
@@ -15,12 +15,14 @@ export function DialogPicker({
   dialogs,
   onRefresh,
   onSelect,
+  onRemove,
   selectedDialogIds = [],
   loading = false,
 }: {
   dialogs: TelegramDialogSummary[];
   onRefresh: () => Promise<void>;
   onSelect: (dialog: TelegramDialogSummary) => Promise<void>;
+  onRemove?: (dialog: TelegramDialogSummary) => Promise<void> | void;
   selectedDialogIds?: string[];
   loading?: boolean;
 }) {
@@ -102,13 +104,7 @@ export function DialogPicker({
             const isSelected = selected.has(dialog.id);
             return (
               <li className="dialog-list-item" key={dialog.id}>
-                <button
-                  aria-label={`${isSelected ? "Selected" : "Select"} ${dialog.title}`}
-                  className={`dialog-row dialog-row-button ${isSelected ? "is-selected" : ""}`}
-                  disabled={isSelected}
-                  onClick={() => void onSelect(dialog)}
-                  type="button"
-                >
+                <div className={`dialog-row ${isSelected ? "is-selected" : ""}`}>
                   <div className="dialog-row-icon" aria-hidden="true">
                     {dialog.title.trim().charAt(0).toUpperCase() || "?"}
                   </div>
@@ -127,11 +123,36 @@ export function DialogPicker({
                       )}
                     </span>
                   </div>
-                  <span className={`dialog-row-action ${isSelected ? "is-selected" : ""}`}>
-                    <CheckCircle2 aria-hidden="true" size={13} />
-                    {isSelected ? "Added" : "Add provider"}
-                  </span>
-                </button>
+                  {isSelected ? (
+                    <div className="dialog-row-actions">
+                      <span className="dialog-row-action is-selected" aria-label="Provider added">
+                        <CheckCircle2 aria-hidden="true" size={13} />
+                        Added
+                      </span>
+                      {onRemove ? (
+                        <button
+                          aria-label={`Remove ${dialog.title} as a provider`}
+                          className="btn btn-ghost btn-small btn-destructive-subtle"
+                          onClick={() => void onRemove(dialog)}
+                          type="button"
+                        >
+                          <X aria-hidden="true" size={12} />
+                          Remove
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <button
+                      aria-label={`Add ${dialog.title} as a provider`}
+                      className="dialog-row-action dialog-row-action-add"
+                      onClick={() => void onSelect(dialog)}
+                      type="button"
+                    >
+                      <CheckCircle2 aria-hidden="true" size={13} />
+                      Add provider
+                    </button>
+                  )}
+                </div>
               </li>
             );
           })}

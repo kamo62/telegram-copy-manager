@@ -15,10 +15,17 @@ export interface SidebarAccount {
   online: boolean;
 }
 
+export interface SidebarPendingSlot {
+  id: string;
+  name: string;
+  linkCode: string;
+}
+
 export function Sidebar({
   activeView,
   onNavigate,
   accounts = [],
+  pendingSlots = [],
   selectedAccountId,
   onSelectAccount,
   onAddAccount,
@@ -26,6 +33,7 @@ export function Sidebar({
   activeView: string;
   onNavigate: (id: string) => void;
   accounts?: SidebarAccount[];
+  pendingSlots?: SidebarPendingSlot[];
   selectedAccountId?: string | null;
   onSelectAccount?: (accountId: string | null) => void;
   onAddAccount?: () => void;
@@ -63,7 +71,7 @@ export function Sidebar({
                   </span>
                 ) : null}
               </button>
-              {isLive && (accounts.length > 0 || onAddAccount) ? (
+              {isLive && (accounts.length > 0 || pendingSlots.length > 0 || onAddAccount) ? (
                 <ul className="sidebar-children" aria-label="MT5 accounts">
                   {accounts.map((account) => {
                     const accountActive = isActive && selectedAccountId === account.id;
@@ -88,6 +96,23 @@ export function Sidebar({
                       </li>
                     );
                   })}
+                  {pendingSlots.map((slot) => (
+                    <li key={`slot-${slot.id}`}>
+                      <button
+                        className="sidebar-child sidebar-child-pending"
+                        onClick={() => onNavigate("mt5")}
+                        title={`Waiting for EA · link code ${slot.linkCode}`}
+                        type="button"
+                      >
+                        <span
+                          aria-hidden="true"
+                          className="sidebar-child-dot pending"
+                        />
+                        <span className="sidebar-child-label">{slot.name || "Pending slot"}</span>
+                        <span className="sidebar-child-meta">{slot.linkCode}</span>
+                      </button>
+                    </li>
+                  ))}
                   {onAddAccount ? (
                     <li>
                       <button

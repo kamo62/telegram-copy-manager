@@ -150,11 +150,11 @@ describe("App dashboard", () => {
     expect(view.getByRole("tab", { name: "Logs" })).toBeTruthy();
   });
 
-  test("shows MT5 link-slot setup directly on Live when no account is connected", () => {
+  test("shows an empty-state CTA on Live when no account is connected", () => {
     const view = render(<App initialSnapshot={{ ...snapshot, mt5Accounts: [], accountSlots: [] }} />);
 
-    expect(view.getByText("Connect your first MT5 Expert Advisor")).toBeTruthy();
-    expect(view.getByRole("button", { name: "Create link slot" })).toBeTruthy();
+    expect(view.getByText("No MT5 account connected yet")).toBeTruthy();
+    expect(view.getByRole("button", { name: "Open Linked Accounts" })).toBeTruthy();
   });
 
   test("scopes provider, parser, history, and symbol panels behind their tabs", () => {
@@ -206,7 +206,9 @@ describe("App dashboard", () => {
     clickSidebar(view, "Telegram Setup");
     expect(view.getByText("Available dialogs")).toBeTruthy();
     expect(view.getByText("Real FX Channel")).toBeTruthy();
-    expect(view.getByRole("button", { name: "Select Real FX Channel" })).toBeTruthy();
+    expect(
+      view.getByRole("button", { name: "Add Real FX Channel as a provider" }),
+    ).toBeTruthy();
   });
 
   test("lets the operator enable provider auto-copy from the dashboard", async () => {

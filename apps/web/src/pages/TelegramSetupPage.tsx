@@ -16,6 +16,7 @@ export function TelegramSetupPage({
   dialogs,
   onRefreshDialogs,
   onSelectDialog,
+  onRemoveDialog,
   selectedDialogIds,
 }: {
   form: SetupFormState;
@@ -30,6 +31,7 @@ export function TelegramSetupPage({
   dialogs: TelegramDialogSummary[];
   onRefreshDialogs: () => Promise<void>;
   onSelectDialog: (dialog: TelegramDialogSummary) => Promise<void>;
+  onRemoveDialog?: (dialog: TelegramDialogSummary) => Promise<void> | void;
   selectedDialogIds: string[];
 }) {
   const isConnected = setupStep === "connected";
@@ -72,6 +74,7 @@ export function TelegramSetupPage({
           <DialogPicker
             dialogs={dialogs}
             onRefresh={onRefreshDialogs}
+            onRemove={onRemoveDialog}
             onSelect={onSelectDialog}
             selectedDialogIds={selectedDialogIds}
           />

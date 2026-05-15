@@ -1,3 +1,4 @@
+import { Server } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
@@ -420,6 +421,13 @@ export function App({
       })),
     [snapshot.mt5Accounts],
   );
+
+  const sidebarPendingSlots = useMemo(() => {
+    const linkedAccountIds = new Set(snapshot.mt5Accounts.map((account) => account.id));
+    return (snapshot.accountSlots ?? [])
+      .filter((slot) => !slot.accountNumber && !linkedAccountIds.has(slot.id))
+      .map((slot) => ({ id: slot.id, name: slot.name, linkCode: slot.linkCode }));
+  }, [snapshot.accountSlots, snapshot.mt5Accounts]);
 
   const paletteCommands = useMemo<PaletteCommand[]>(
     () => [
@@ -1002,24 +1010,32 @@ export function App({
         onAddAccount={() => setActiveView("mt5")}
         onNavigate={navigateSidebar}
         onSelectAccount={(id) => setSelectedAccountId(id)}
+        pendingSlots={sidebarPendingSlots}
         selectedAccountId={selectedAccountId}
       />
 
       <ErrorBoundary fallbackLabel="This view hit an unexpected error">
         <section className="workspace" id="main-content" tabIndex={-1}>
         {showDashboard ? <AccountHeader data={accountHeaderData} loading={initialLoading} /> : null}
-        {showDashboard ? (
-          <LinkedAccountsPage
-            accounts={snapshot.mt5Accounts}
-            slots={snapshot.accountSlots ?? []}
-            onCreateSlot={(event) => void createAccountSlot(event)}
-            providers={snapshot.providers}
-            providerLinks={snapshot.accountProviderLinks ?? []}
-            onToggleProviderLink={(accountId: string, providerId: string, enabled: boolean) =>
-              void toggleAccountProviderLink(accountId, providerId, enabled)
-            }
-            variant="live"
-          />
+        {showDashboard && snapshot.mt5Accounts.length === 0 ? (
+          <section className="live-empty">
+            <div className="live-empty-glyph" aria-hidden="true">
+              <Server size={28} />
+            </div>
+            <div className="live-empty-body">
+              <strong>No MT5 account connected yet</strong>
+              <p>
+                Create a link slot in <button className="live-empty-link" onClick={() => setActiveView("mt5")} type="button">Linked Accounts</button>, paste the code into your EA's <code>LinkCode</code> input, and the account will appear here.
+              </p>
+            </div>
+            <button
+              className="btn btn-primary"
+              onClick={() => setActiveView("mt5")}
+              type="button"
+            >
+              Open Linked Accounts
+            </button>
+          </section>
         ) : null}
         {showDashboard ? <WorkspaceTabs onChange={setActiveTab} value={activeTab} /> : null}
 
@@ -1049,6 +1065,10 @@ export function App({
               submitPassword={submitPassword}
               dialogs={availableDialogs}
               onRefreshDialogs={loadDialogs}
+              onRemoveDialog={(dialog) => {
+                const provider = snapshot.providers.find((p) => p.dialogId === dialog.id);
+                if (provider) return deleteProvider(provider);
+              }}
               onSelectDialog={selectDialog}
               selectedDialogIds={snapshot.providers.map((provider) => provider.dialogId)}
             />

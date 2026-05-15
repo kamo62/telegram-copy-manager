@@ -375,6 +375,117 @@ h3 {
   font-style: italic;
 }
 
+.sidebar-child-pending {
+  color: var(--ink-2);
+}
+
+.sidebar-child-dot.pending {
+  background: hsl(35 90% 55%);
+  box-shadow: 0 0 0 2px hsl(35 90% 55% / 0.18);
+  animation: pulse-soft 1.6s var(--ease-in-out) infinite;
+}
+
+.sidebar-child-meta {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-3);
+  padding: 1px 4px;
+  background: var(--panel-2);
+  border-radius: 3px;
+}
+
+.live-empty {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 22px;
+  margin: 16px 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-2);
+}
+
+.live-empty-glyph {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.live-empty-body {
+  display: grid;
+  gap: 4px;
+}
+
+.live-empty-body strong {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.live-empty-body p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+.live-empty-body code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  background: var(--panel-2);
+  border-radius: 3px;
+  color: var(--ink);
+}
+
+.live-empty-link {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.live-empty-link:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+  border-radius: 2px;
+}
+
+.dialog-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dialog-row-action-add {
+  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  transition: background var(--duration-1) var(--ease-out),
+              color var(--duration-1) var(--ease-out);
+}
+
+.dialog-row-action-add:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.dialog-row-action-add:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
 .sidebar nav button.active::before {
   content: "";
   position: absolute;
