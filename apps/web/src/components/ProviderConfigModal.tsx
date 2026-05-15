@@ -1,5 +1,6 @@
+import { Play, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { Plus, Trash2, X } from "lucide-react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { ProviderRowData } from "./ProvidersTable";
 
 export interface ProviderConfigSubmission {
@@ -9,6 +10,11 @@ export interface ProviderConfigSubmission {
   riskAmount: number;
   takeProfitLevels: Array<{ leg: number; percentage: number; strategy: string }>;
   runner: RunnerConfig;
+}
+
+export interface ProviderConfigTestResult {
+  ok: boolean;
+  summary: string;
 }
 
 type RiskMode = "fixed" | "percent";
@@ -29,6 +35,9 @@ const DEFAULT_TPS = [
   { leg: 4, percentage: 25, strategy: "Set SL to TP2 + 0 pips" },
 ];
 
+const MAX_TP_LEVELS = 4;
+const DEFAULT_TEST_MESSAGE = "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950";
+
 const DEFAULT_RUNNER: RunnerConfig = {
   enabled: false,
   lotSize: 0.01,
@@ -46,17 +55,26 @@ export function ProviderConfigModal({
   open,
   onClose,
   onSave,
+  onTest,
 }: {
   provider: ProviderRowData | null;
   open: boolean;
   onClose: () => void;
   onSave: (provider: ProviderRowData, payload: ProviderConfigSubmission) => Promise<void> | void;
+  onTest?: (
+    provider: ProviderRowData,
+    payload: ProviderConfigSubmission,
+    rawText: string,
+  ) => Promise<ProviderConfigTestResult>;
 }) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const [riskMode, setRiskMode] = useState<RiskMode>("fixed");
   const [riskAmount, setRiskAmount] = useState("0.10");
   const [tps, setTps] = useState(DEFAULT_TPS);
   const [runner, setRunner] = useState<RunnerConfig>(DEFAULT_RUNNER);
+  const [testRawText, setTestRawText] = useState(DEFAULT_TEST_MESSAGE);
+  const [testResult, setTestResult] = useState<ProviderConfigTestResult | null>(null);
+  const [testBusy, setTestBusy] = useState(false);
 
   useEffect(() => {
     if (provider) {
@@ -64,36 +82,60 @@ export function ProviderConfigModal({
       setRiskAmount(provider.lotSize.toFixed(2));
       setTps(DEFAULT_TPS);
       setRunner(DEFAULT_RUNNER);
+      setTestRawText(DEFAULT_TEST_MESSAGE);
+      setTestResult(null);
+      setTestBusy(false);
     }
   }, [provider]);
 
-  useEffect(() => {
-    if (!open) return;
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(dialogRef, open && Boolean(provider), onClose);
 
   if (!open || !provider) return null;
 
   const riskValueNumeric = Number(riskAmount.replace(",", ".")) || 0;
 
-  function performSave() {
+  function buildPayload() {
     const form = formRef.current;
-    if (!form || !provider) return;
+    if (!form || !provider) return null;
     const data = new FormData(form);
     const lotRaw = String(data.get("lotSize") ?? "0").replace(",", ".");
     const lotValue = Number(lotRaw) || provider.lotSize;
-    void onSave(provider, {
+    return {
       parserMode: String(data.get("parserMode") ?? provider.parserMode),
       lotSize: riskMode === "fixed" ? lotValue : provider.lotSize,
       riskMode,
       riskAmount: lotValue,
       takeProfitLevels: tps,
       runner,
-    });
+    };
+  }
+
+  function performSave() {
+    if (!provider) return;
+    const payload = buildPayload();
+    if (!payload) return;
+    void onSave(provider, payload);
+  }
+
+  async function performTest() {
+    if (!provider || !onTest) return;
+    const payload = buildPayload();
+    const rawText = testRawText.trim();
+    if (!payload || !rawText) return;
+
+    setTestBusy(true);
+    setTestResult(null);
+    try {
+      setTestResult(await onTest(provider, payload, rawText));
+    } catch (error) {
+      setTestResult({
+        ok: false,
+        summary: error instanceof Error ? error.message : "Provider config test failed",
+      });
+    } finally {
+      setTestBusy(false);
+    }
   }
 
   function distributeEqually() {
@@ -112,7 +154,7 @@ export function ProviderConfigModal({
   }
 
   function addTp() {
-    if (tps.length >= 6) return;
+    if (tps.length >= MAX_TP_LEVELS) return;
     setTps([
       ...tps,
       {
@@ -130,17 +172,15 @@ export function ProviderConfigModal({
   const totalPercent = tps.reduce((acc, tp) => acc + tp.percentage, 0);
 
   return (
-    <div
-      aria-labelledby="provider-config-title"
-      aria-modal="true"
-      className="modal-overlay"
-      onClick={onClose}
-      role="dialog"
-    >
+    <div className="modal-overlay" onClick={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
       <div
+        aria-labelledby="provider-config-title"
+        aria-modal="true"
         className="modal modal-wide"
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => event.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
       >
         <header className="modal-head">
           <div>
@@ -181,10 +221,32 @@ export function ProviderConfigModal({
                   <option value="kal-vip">KAL VIP tuned</option>
                 </select>
               </label>
-              <button className="btn-ghost btn-small" type="button">
+              <button
+                aria-label={`Test provider config for ${provider.title}`}
+                className="btn btn-ghost btn-small"
+                disabled={!onTest || testBusy || !testRawText.trim()}
+                onClick={performTest}
+                type="button"
+              >
+                <Play aria-hidden="true" size={13} />
                 Test message
               </button>
             </div>
+            <label className="config-field">
+              <span className="config-label">Test message</span>
+              <textarea
+                aria-label={`Provider test message for ${provider.title}`}
+                className="config-test-message"
+                onInput={(event) => setTestRawText(event.currentTarget.value)}
+                rows={4}
+                value={testRawText}
+              />
+            </label>
+            {testResult ? (
+              <p className={testResult.ok ? "config-test-result ok" : "config-test-result error"}>
+                {testResult.summary}
+              </p>
+            ) : null}
           </section>
 
           <section className="config-section">
@@ -290,10 +352,12 @@ export function ProviderConfigModal({
                   </button>
                 </div>
               ))}
-              <button className="config-tp-add" onClick={addTp} type="button">
-                <Plus size={13} aria-hidden="true" />
-                Add a take-profit level
-              </button>
+              {tps.length < MAX_TP_LEVELS ? (
+                <button className="config-tp-add" onClick={addTp} type="button">
+                  <Plus size={13} aria-hidden="true" />
+                  Add a take-profit level
+                </button>
+              ) : null}
               {totalPercent !== 100 ? (
                 <p className="config-hint">
                   TPs total {totalPercent}% — anything that isn't allocated will close on the final
@@ -310,9 +374,7 @@ export function ProviderConfigModal({
                 <input
                   aria-label="Enable runner after final TP"
                   checked={runner.enabled}
-                  onChange={(event) =>
-                    setRunner({ ...runner, enabled: event.target.checked })
-                  }
+                  onChange={(event) => setRunner({ ...runner, enabled: event.target.checked })}
                   type="checkbox"
                 />
                 <span>Leave a runner open after the final TP</span>
@@ -388,13 +450,13 @@ export function ProviderConfigModal({
               <div className="config-resume-stat">
                 <span>Allocated to TPs</span>
                 <strong>{numberFmt.format(tradedPortion)}</strong>
-                <small>{tps.length} levels · {totalPercent}%</small>
+                <small>
+                  {tps.length} levels · {totalPercent}%
+                </small>
               </div>
               <div className="config-resume-stat">
                 <span>Runner</span>
-                <strong>
-                  {runner.enabled ? numberFmt.format(reservedRunner) : "—"}
-                </strong>
+                <strong>{runner.enabled ? numberFmt.format(reservedRunner) : "—"}</strong>
                 <small>
                   {runner.enabled
                     ? runner.slBehavior === "trail"
@@ -432,12 +494,12 @@ export function ProviderConfigModal({
           </section>
 
           <div className="modal-foot">
-            <button className="btn-ghost" onClick={onClose} type="button">
+            <button className="btn btn-ghost" onClick={onClose} type="button">
               Close
             </button>
             <button
               aria-label={`Save provider settings for ${provider.title}`}
-              className="btn-primary"
+              className="btn btn-primary"
               onClick={performSave}
               type="button"
             >

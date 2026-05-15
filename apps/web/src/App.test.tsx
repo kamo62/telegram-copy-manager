@@ -10,13 +10,17 @@ const snapshot: DashboardSnapshot = {
   appSettings: {
     defaultLotSize: 0.1,
     defaultRiskPercent: 1,
+    defaultStopLossPips: 50,
+    defaultTakeProfitPips: 200,
     pollingIntervalSeconds: 2,
     allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
+    azureOpenAIKeyConfigured: false,
   },
   telegramSessions: [{ id: "session-1", phone: "+27821234567", status: "CONNECTED" }],
   providers: [
     {
       id: "provider-alpha",
+      dialogId: "dialog-alpha",
       title: "Alpha FX Signals",
       enabled: false,
       parserMode: "deterministic",
@@ -102,6 +106,37 @@ function clickSidebar(view: ReturnType<typeof render>, label: string) {
 }
 
 describe("App dashboard", () => {
+  test("lets the operator restart Telegram login after entering the wrong phone number", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url) === "/api/telegram/start") {
+        return Response.json({
+          sessionId: "tg-pending",
+          profileId: "profile-pending",
+          status: "CODE_REQUIRED",
+        });
+      }
+      return Response.json({ ...snapshot, telegramSessions: [] });
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={{ ...snapshot, telegramSessions: [] }} />);
+    const phoneInput = view.getByLabelText("Phone number") as HTMLInputElement;
+    phoneInput.value = "+27726308524";
+    const signInForm = phoneInput.closest("form");
+    if (!signInForm) throw new Error("Sign-in form not found");
+    fireEvent.submit(signInForm);
+
+    await view.findByRole("heading", { name: "Enter the verification code" });
+    expect(view.getByRole("button", { name: "Wrong phone number? Start over" })).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Wrong phone number? Start over" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/telegram/disconnect")).toBe(true),
+    );
+    expect(view.getByRole("heading", { name: "Sign in to Telegram" })).toBeTruthy();
+  });
+
   test("renders the usable operations dashboard as the first screen, not a marketing page", () => {
     const view = render(<App initialSnapshot={snapshot} />);
 
@@ -113,6 +148,13 @@ describe("App dashboard", () => {
     expect(view.getByRole("tab", { name: "Performance" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Providers" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Logs" })).toBeTruthy();
+  });
+
+  test("shows MT5 link-slot setup directly on Live when no account is connected", () => {
+    const view = render(<App initialSnapshot={{ ...snapshot, mt5Accounts: [], accountSlots: [] }} />);
+
+    expect(view.getByText("Connect your first MT5 Expert Advisor")).toBeTruthy();
+    expect(view.getByRole("button", { name: "Create link slot" })).toBeTruthy();
   });
 
   test("scopes provider, parser, history, and symbol panels behind their tabs", () => {
@@ -137,7 +179,7 @@ describe("App dashboard", () => {
     expect(view.getByText("XAUUSD.r")).toBeTruthy();
 
     clickSidebar(view, "Linked Accounts");
-    expect(view.getByText("1 positions · 0 orders")).toBeTruthy();
+    expect(view.getAllByText("positions").length).toBeGreaterThan(0);
   });
 
   test("does not persist Telegram API hash, OTP code, or 2FA password in browser storage", () => {
@@ -162,7 +204,7 @@ describe("App dashboard", () => {
     );
 
     clickSidebar(view, "Telegram Setup");
-    expect(view.getByText("Available Dialogs")).toBeTruthy();
+    expect(view.getByText("Available dialogs")).toBeTruthy();
     expect(view.getByText("Real FX Channel")).toBeTruthy();
     expect(view.getByRole("button", { name: "Select Real FX Channel" })).toBeTruthy();
   });
@@ -208,10 +250,63 @@ describe("App dashboard", () => {
     await waitFor(() => expect(calls.some((call) => call.url === "/api/dashboard")).toBe(true));
     const settingsCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
     expect(settingsCall?.init?.method).toBe("PATCH");
-    expect(JSON.parse(String(settingsCall?.init?.body))).toEqual({
+    expect(JSON.parse(String(settingsCall?.init?.body))).toMatchObject({
       parserMode: "kal-vip",
       lotSize: 0.2,
+      riskMode: "fixed",
+      riskAmount: 0.2,
+      takeProfitLevels: [
+        { leg: 1, percentage: 25 },
+        { leg: 2, percentage: 25 },
+        { leg: 3, percentage: 25 },
+        { leg: 4, percentage: 25 },
+      ],
     });
+  });
+
+  test("lets the operator test the current provider configuration before saving", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url) === "/api/providers/provider-alpha/test-config") {
+        return Response.json({
+          parsed: {
+            commandType: "OPEN_TRADE",
+            brokerSymbol: "EURUSD.raw",
+            takeProfits: [
+              { allocationPercent: 25 },
+              { allocationPercent: 25 },
+              { allocationPercent: 25 },
+              { allocationPercent: 25 },
+            ],
+          },
+        });
+      }
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+    clickTab(view, "Providers");
+    fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
+    fireEvent.input(view.getByLabelText("Provider test message for Alpha FX Signals"), {
+      target: { value: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910" },
+    });
+    fireEvent.click(
+      view.getByRole("button", { name: "Test provider config for Alpha FX Signals" }),
+    );
+
+    expect(await view.findByText("OPEN_TRADE · EURUSD.raw · 4 TPs")).toBeTruthy();
+    const testCall = calls.find((call) => call.url === "/api/providers/provider-alpha/test-config");
+    expect(testCall?.init?.method).toBe("POST");
+    const body = JSON.parse(String(testCall?.init?.body));
+    expect(body.rawText).toBe("BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910");
+    expect(body.config).toMatchObject({
+      riskMode: "fixed",
+      riskAmount: 0.1,
+    });
+    expect(body.config.takeProfitLevels.map((level: { leg: number }) => level.leg)).toEqual([
+      1, 2, 3, 4,
+    ]);
   });
 
   test("lets the operator update default execution settings", async () => {
@@ -225,7 +320,7 @@ describe("App dashboard", () => {
     clickSidebar(view, "Settings");
     fireEvent.change(view.getByLabelText("Default lot size"), { target: { value: "0.25" } });
     fireEvent.change(view.getByLabelText("Default risk percent"), { target: { value: "0.75" } });
-    fireEvent.change(view.getByLabelText("Polling interval seconds"), {
+    fireEvent.change(view.getByLabelText("Polling interval (seconds)"), {
       target: { value: "5" },
     });
     fireEvent.click(view.getByLabelText("Allow limit orders"));
@@ -238,6 +333,9 @@ describe("App dashboard", () => {
     expect(JSON.parse(String(settingsCall?.init?.body))).toEqual({
       defaultLotSize: 0.25,
       defaultRiskPercent: 0.75,
+      defaultStopLossPips: 50,
+      defaultTakeProfitPips: 200,
+      azureOpenAIApiKey: "",
       pollingIntervalSeconds: 5,
       allowedOrderTypes: ["MARKET"],
     });
@@ -325,6 +423,68 @@ describe("App dashboard", () => {
       classification: "entry",
       redacted: true,
       redactedRawText: "BUY EURUSD @ [redacted]",
+    });
+  });
+
+  test("shows the History empty state when there are no trades", () => {
+    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json(snapshot)) as typeof fetch;
+    const view = render(
+      <App initialSnapshot={{ ...snapshot, logicalTrades: [] }} />,
+    );
+    clickTab(view, "History");
+    expect(view.getByText("No trades yet. Approved signals will appear here.")).toBeTruthy();
+  });
+
+  test("shows the Logs empty states when queue + execution logs are empty", () => {
+    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json(snapshot)) as typeof fetch;
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          signalQueue: [],
+          executionLogs: [],
+          parserResults: [],
+        }}
+      />,
+    );
+    clickTab(view, "Logs");
+    expect(view.getByText("Queue is empty")).toBeTruthy();
+    expect(view.getByText("No MT5 reports yet")).toBeTruthy();
+  });
+
+  test("renders the SmallViewportNotice below 768px and continues anyway on click", () => {
+    const originalWidth = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      value: 375,
+    });
+    window.localStorage.removeItem("tg-tc.viewport-override");
+    try {
+      const view = render(<App initialSnapshot={snapshot} />);
+      expect(view.getByText("Use a larger screen")).toBeTruthy();
+      fireEvent.click(view.getByRole("button", { name: "Continue anyway" }));
+      expect(window.localStorage.getItem("tg-tc.viewport-override")).toBe("1");
+      // After continue-anyway, the workspace renders.
+      expect(view.getByRole("heading", { name: /TG-TC/ })).toBeTruthy();
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalWidth,
+      });
+      window.localStorage.removeItem("tg-tc.viewport-override");
+    }
+  });
+
+  test("StatusBar live-dot flips to error state when the dashboard poll fails", async () => {
+    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
+      new Response("nope", { status: 500 })) as typeof fetch;
+    const view = render(<App initialSnapshot={snapshot} />);
+    fireEvent.click(view.getByRole("button", { name: "Refresh dashboard" }));
+    await waitFor(() => {
+      const dot = document.querySelector(".status-bar .live-dot");
+      expect(dot?.className).toContain("error");
     });
   });
 });

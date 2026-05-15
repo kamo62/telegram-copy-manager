@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { SkeletonChart } from "./Skeleton";
 
 export type GrowthSeries = {
   growth: [number[], number[]];
@@ -7,12 +8,19 @@ export type GrowthSeries = {
   numberOfTrades: number;
 };
 
-export function GrowthChart({ data }: { data: GrowthSeries }) {
+export function GrowthChart({
+  data,
+  loading = false,
+}: { data: GrowthSeries; loading?: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const plotRef = useRef<{ destroy: () => void; setSize: (s: { width: number; height: number }) => void } | null>(null);
+  const plotRef = useRef<{
+    destroy: () => void;
+    setSize: (s: { width: number; height: number }) => void;
+  } | null>(null);
   const [view, setView] = useState<"growth" | "drawdown">("growth");
 
   useEffect(() => {
+    if (loading) return;
     let cancelled = false;
     let observer: ResizeObserver | null = null;
 
@@ -95,7 +103,7 @@ export function GrowthChart({ data }: { data: GrowthSeries }) {
       plotRef.current?.destroy();
       plotRef.current = null;
     };
-  }, [data, view]);
+  }, [data, view, loading]);
 
   return (
     <section className="chart-card" aria-label="Account growth chart">
@@ -127,7 +135,7 @@ export function GrowthChart({ data }: { data: GrowthSeries }) {
           </button>
         </div>
       </header>
-      <div className="chart-canvas-wrap" ref={containerRef} />
+      {loading ? <SkeletonChart /> : <div className="chart-canvas-wrap" ref={containerRef} />}
       <footer className="chart-card-foot">Number of trades</footer>
     </section>
   );

@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export interface GlobalAliasPayload {
   rawSymbol: string;
   canonicalSymbol: string;
+  providerId?: string;
 }
 
 export interface AccountMappingPayload {
@@ -15,7 +17,7 @@ export interface AccountMappingPayload {
   excludeSymbols: string[];
 }
 
-type Scope = "global" | "account";
+type Scope = "global" | "provider" | "account";
 
 function commaList(value: string): string[] {
   return value
@@ -27,31 +29,27 @@ function commaList(value: string): string[] {
 export function SymbolMappingModal({
   open,
   defaultAccountId,
+  defaultProviderId,
   onClose,
   onSaveGlobalAlias,
   onSaveAccountMapping,
 }: {
   open: boolean;
   defaultAccountId: string;
+  defaultProviderId?: string;
   onClose: () => void;
   onSaveGlobalAlias: (payload: GlobalAliasPayload) => Promise<void> | void;
   onSaveAccountMapping: (payload: AccountMappingPayload) => Promise<void> | void;
 }) {
   const formRef = useRef<HTMLFormElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
   const [scope, setScope] = useState<Scope>("global");
 
   useEffect(() => {
     if (open) setScope("global");
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+  useFocusTrap(dialogRef, open, onClose);
 
   if (!open) return null;
 
@@ -59,10 +57,11 @@ export function SymbolMappingModal({
     const form = formRef.current;
     if (!form) return;
     const data = new FormData(form);
-    if (scope === "global") {
+    if (scope === "global" || scope === "provider") {
       void onSaveGlobalAlias({
         rawSymbol: String(data.get("aliasRaw") ?? "").trim(),
         canonicalSymbol: String(data.get("aliasCanonical") ?? "").trim(),
+        providerId: scope === "provider" ? String(data.get("providerId") ?? "").trim() : undefined,
       });
     } else {
       void onSaveAccountMapping({
@@ -78,13 +77,18 @@ export function SymbolMappingModal({
 
   return (
     <div
-      aria-labelledby="symbol-mapping-title"
-      aria-modal="true"
       className="modal-overlay"
-      onClick={onClose}
-      role="dialog"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
     >
-      <div className="modal modal-wide" onClick={(event) => event.stopPropagation()}>
+      <div
+        aria-labelledby="symbol-mapping-title"
+        aria-modal="true"
+        className="modal modal-wide"
+        ref={dialogRef}
+        role="dialog"
+      >
         <header className="modal-head">
           <div>
             <h2 id="symbol-mapping-title">Add symbol mapping</h2>
@@ -92,12 +96,7 @@ export function SymbolMappingModal({
               Layer aliases or per-account overrides on top of the parser
             </span>
           </div>
-          <button
-            aria-label="Close mapping"
-            className="icon-btn"
-            onClick={onClose}
-            type="button"
-          >
+          <button aria-label="Close mapping" className="icon-btn" onClick={onClose} type="button">
             <X size={14} aria-hidden="true" />
           </button>
         </header>
@@ -125,6 +124,15 @@ export function SymbolMappingModal({
                 Global alias
               </button>
               <button
+                aria-selected={scope === "provider"}
+                className={scope === "provider" ? "active" : ""}
+                onClick={() => setScope("provider")}
+                role="tab"
+                type="button"
+              >
+                Provider alias
+              </button>
+              <button
                 aria-selected={scope === "account"}
                 className={scope === "account" ? "active" : ""}
                 onClick={() => setScope("account")}
@@ -137,13 +145,28 @@ export function SymbolMappingModal({
             <p className="config-hint config-hint-soft">
               {scope === "global"
                 ? "Maps a raw provider symbol to the app's canonical symbol everywhere. Example: GOLD → XAUUSD."
-                : "Overrides the broker symbol for a specific MT5 account, plus its suffix and include/exclude rules."}
+                : scope === "provider"
+                  ? "Maps a raw symbol for one Telegram provider only."
+                  : "Overrides the broker symbol for a specific MT5 account, plus its suffix and include/exclude rules."}
             </p>
           </section>
 
-          {scope === "global" ? (
+          {scope === "global" || scope === "provider" ? (
             <section className="config-section">
-              <h3 className="config-section-title">Global alias</h3>
+              <h3 className="config-section-title">
+                {scope === "provider" ? "Provider alias" : "Global alias"}
+              </h3>
+              {scope === "provider" ? (
+                <label className="config-field">
+                  <span className="config-label">Provider ID</span>
+                  <input
+                    aria-label="Provider alias provider ID"
+                    defaultValue={defaultProviderId ?? ""}
+                    name="providerId"
+                    type="text"
+                  />
+                </label>
+              ) : null}
               <div className="config-row">
                 <label className="config-field config-field-grow">
                   <span className="config-label">Alias raw symbol</span>
@@ -251,12 +274,12 @@ export function SymbolMappingModal({
           )}
 
           <div className="modal-foot">
-            <button className="btn-ghost" onClick={onClose} type="button">
+            <button className="btn btn-ghost" onClick={onClose} type="button">
               Close
             </button>
             <button
               aria-label={scope === "global" ? "Save global alias" : "Save account mapping"}
-              className="btn-primary"
+              className="btn btn-primary"
               onClick={performSave}
               type="button"
             >

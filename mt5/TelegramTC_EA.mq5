@@ -3,11 +3,13 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "0.1"
+#property version   "1.001"
 #property strict
 
-input string BackendBaseUrl = "http://127.0.0.1:8787/api";
-input int    PollSeconds    = 2;
+input string BackendBaseUrl = "https://your-api-host.example.com/api";
+input int    PollSeconds    = 1;
+input string LinkCode       = "";
+input int    HistoryLookbackHours = 168;
 input double DefaultLots    = 0.10;
 input int    DeviationPoints = 20;
 input ulong  MagicNumber    = 26050901;
@@ -27,11 +29,18 @@ struct SignalCommand
    double entryFrom;
    double entryTo;
    double stopLoss;
+   double defaultStopLossValue;
+   string defaultStopLossUnit;
    double newStopLoss;
+   double defaultTakeProfitValue;
+   string defaultTakeProfitUnit;
    double trailingStopValue;
    string trailingStopUnit;
    string partialCloseKind;
    double partialCloseValue;
+   ulong targetOrderTicket;
+   ulong targetPositionTicket;
+   ulong targetDealTicket;
    double tp[4];
    double tpAllocation[4];
    double tpVolume[4];
@@ -58,6 +67,8 @@ int CurrentPollSeconds = 0;
 int OnInit()
 {
    CurrentPollSeconds = MathMax(1, PollSeconds);
+   if(StringFind(BackendBaseUrl, "your-api-host.example.com") >= 0 || BackendBaseUrl == "")
+      Print("Telegram TC: set BackendBaseUrl to your deployed API /api URL before enabling live polling.");
    EventSetTimer(CurrentPollSeconds);
    RegisterAccount();
    return(INIT_SUCCEEDED);
@@ -72,6 +83,7 @@ void OnTimer()
 {
    SendHeartbeat();
    SendSnapshot();
+   SendHistoryDeals();
    ManageVirtualTakeProfits();
    PollAndExecute();
 }
@@ -86,11 +98,12 @@ void RegisterAccount()
 void SendHeartbeat()
 {
    string body = StringFormat(
-      "{\"accountId\":\"mt5-%I64d\",\"balance\":%.2f,\"equity\":%.2f,\"availableSymbols\":%s}",
+      "{\"accountId\":\"mt5-%I64d\",\"balance\":%.2f,\"equity\":%.2f,\"availableSymbols\":%s,\"linkCode\":\"%s\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
-      SymbolsJson()
+      SymbolsJson(),
+      JsonEscape(LinkCode)
    );
    string response = "";
    HttpPost("/mt5/heartbeat", body, response);
@@ -107,6 +120,21 @@ void SendSnapshot()
    );
    string response = "";
    HttpPost("/mt5/snapshot", body, response);
+}
+
+void SendHistoryDeals()
+{
+   datetime toTime = TimeCurrent();
+   datetime fromTime = toTime - MathMax(1, HistoryLookbackHours) * 3600;
+   if(!HistorySelect(fromTime, toTime))
+      return;
+   string body = StringFormat(
+      "{\"accountId\":\"mt5-%I64d\",\"deals\":%s}",
+      AccountInfoInteger(ACCOUNT_LOGIN),
+      HistoryDealsJson()
+   );
+   string response = "";
+   HttpPost("/mt5/history", body, response);
 }
 
 void PollAndExecute()
@@ -188,6 +216,11 @@ bool ExecuteOpenTrade(SignalCommand &command)
          : SymbolInfoDouble(command.brokerSymbol, SYMBOL_BID);
    }
 
+   if(command.stopLoss <= 0.0)
+      command.stopLoss = DefaultStopLossPrice(command, request.price);
+   if(command.tp[0] <= 0.0)
+      command.tp[0] = DefaultTakeProfitPrice(command, request.price);
+
    request.sl = command.stopLoss;
    request.tp = command.executionMode == "SPLIT_ORDER" ? command.tp[0] : 0.0;
 
@@ -199,6 +232,7 @@ bool ExecuteOpenTrade(SignalCommand &command)
       result.retcode_external,
       result.comment,
       result.order,
+      FindPositionTicket(command),
       result.deal,
       request.price,
       result.price,
@@ -216,6 +250,11 @@ bool ExecuteSplitOrders(SignalCommand &command)
    bool anySent = false;
    bool allSucceeded = true;
    double baseVolume = CommandBaseVolume(command);
+   double referencePrice = command.entryFrom > 0.0 ? command.entryFrom : MarketReferencePrice(command);
+   if(command.stopLoss <= 0.0)
+      command.stopLoss = DefaultStopLossPrice(command, referencePrice);
+   if(command.tp[0] <= 0.0)
+      command.tp[0] = DefaultTakeProfitPrice(command, referencePrice);
 
    for(int leg = 0; leg < 4; leg++)
    {
@@ -267,6 +306,7 @@ bool ExecuteSplitOrders(SignalCommand &command)
          result.retcode_external,
          result.comment,
          result.order,
+         FindPositionTicket(command),
          result.deal,
          request.price,
          result.price,
@@ -283,6 +323,11 @@ bool ExecuteSplitOrders(SignalCommand &command)
 
 void ExecuteCancelPending(SignalCommand &command)
 {
+   if(command.targetOrderTicket > 0)
+   {
+      RemovePendingOrder(command, command.targetOrderTicket);
+      return;
+   }
    bool found = false;
    for(int index = OrdersTotal() - 1; index >= 0; index--)
    {
@@ -293,18 +338,23 @@ void ExecuteCancelPending(SignalCommand &command)
          continue;
 
       found = true;
-      MqlTradeRequest request = {};
-      MqlTradeResult result = {};
-      request.action = TRADE_ACTION_REMOVE;
-      request.order = ticket;
-      request.symbol = command.brokerSymbol;
-      bool sent = OrderSend(request, result);
-      Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, result.deal, 0, result.price, 0.0, sent ? "" : IntegerToString(GetLastError()));
+      RemovePendingOrder(command, ticket);
       return;
    }
 
    if(!found)
       ReportFailure(command.queueItemId, "No matching pending order found", command.brokerSymbol);
+}
+
+void RemovePendingOrder(SignalCommand &command, ulong ticket)
+{
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   request.action = TRADE_ACTION_REMOVE;
+   request.order = ticket;
+   request.symbol = command.brokerSymbol;
+   bool sent = OrderSend(request, result);
+   Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, 0, result.deal, 0, result.price, 0.0, sent ? "" : IntegerToString(GetLastError()));
 }
 
 void ExecuteMoveSlToBreakeven(SignalCommand &command)
@@ -410,7 +460,7 @@ void ModifyPositionSl(SignalCommand &command, ulong ticket, double stopLoss)
    request.magic = MagicNumber;
 
    bool sent = OrderSend(request, result);
-   Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, result.deal, request.sl, result.price, PositionGetDouble(POSITION_VOLUME), sent ? "" : IntegerToString(GetLastError()));
+    Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.sl, result.price, PositionGetDouble(POSITION_VOLUME), sent ? "" : IntegerToString(GetLastError()));
 }
 
 void ModifyPositionTp(SignalCommand &command, ulong ticket, double takeProfit)
@@ -431,7 +481,7 @@ void ModifyPositionTp(SignalCommand &command, ulong ticket, double takeProfit)
    request.magic = MagicNumber;
 
    bool sent = OrderSend(request, result);
-   Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, result.deal, request.tp, result.price, PositionGetDouble(POSITION_VOLUME), sent ? "" : IntegerToString(GetLastError()));
+    Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.tp, result.price, PositionGetDouble(POSITION_VOLUME), sent ? "" : IntegerToString(GetLastError()));
 }
 
 void ExecuteClose(SignalCommand &command)
@@ -465,7 +515,7 @@ void ExecuteClose(SignalCommand &command)
    request.comment = StringFormat("telegram-tc-close:%s", command.logicalTradeId);
 
    bool sent = OrderSend(request, result);
-   Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, result.deal, request.price, result.price, request.volume, sent ? "" : IntegerToString(GetLastError()));
+    Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.price, result.price, request.volume, sent ? "" : IntegerToString(GetLastError()));
 }
 
 void TrackVirtualTakeProfits(SignalCommand &command, MqlTradeResult &result)
@@ -575,6 +625,7 @@ bool CloseVirtualTpLeg(int stateIndex, int leg)
       result.retcode_external,
       result.comment,
       result.order,
+      ticket,
       result.deal,
       request.price,
       result.price,
@@ -586,6 +637,8 @@ bool CloseVirtualTpLeg(int stateIndex, int leg)
 
 ulong FindPositionTicket(SignalCommand &command)
 {
+   if(command.targetPositionTicket > 0 && PositionSelectByTicket(command.targetPositionTicket))
+      return command.targetPositionTicket;
    for(int index = PositionsTotal() - 1; index >= 0; index--)
    {
       ulong ticket = PositionGetTicket(index);
@@ -688,6 +741,45 @@ string OrdersJson()
    return json;
 }
 
+string HistoryDealsJson()
+{
+   string json = "[";
+   bool first = true;
+   int total = HistoryDealsTotal();
+   for(int index = 0; index < total; index++)
+   {
+      ulong ticket = HistoryDealGetTicket(index);
+      if(ticket == 0)
+         continue;
+      string comment = HistoryDealGetString(ticket, DEAL_COMMENT);
+      long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
+      if((ulong)magic != MagicNumber && StringFind(comment, "telegram-tc") < 0)
+         continue;
+
+      if(!first)
+         json += ",";
+      first = false;
+      json += StringFormat(
+         "{\"dealTicket\":\"%I64u\",\"orderTicket\":\"%I64u\",\"positionTicket\":\"%I64u\",\"entry\":\"%d\",\"type\":\"%d\",\"symbol\":\"%s\",\"price\":%.8f,\"volume\":%.2f,\"profit\":%.2f,\"commission\":%.2f,\"swap\":%.2f,\"comment\":\"%s\",\"time\":\"%s\"}",
+         ticket,
+         (ulong)HistoryDealGetInteger(ticket, DEAL_ORDER),
+         (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID),
+         (int)HistoryDealGetInteger(ticket, DEAL_ENTRY),
+         (int)HistoryDealGetInteger(ticket, DEAL_TYPE),
+         JsonEscape(HistoryDealGetString(ticket, DEAL_SYMBOL)),
+         HistoryDealGetDouble(ticket, DEAL_PRICE),
+         HistoryDealGetDouble(ticket, DEAL_VOLUME),
+         HistoryDealGetDouble(ticket, DEAL_PROFIT),
+         HistoryDealGetDouble(ticket, DEAL_COMMISSION),
+         HistoryDealGetDouble(ticket, DEAL_SWAP),
+         JsonEscape(comment),
+         TimeToString((datetime)HistoryDealGetInteger(ticket, DEAL_TIME), TIME_DATE|TIME_SECONDS)
+      );
+   }
+   json += "]";
+   return json;
+}
+
 string SymbolsMarketJson()
 {
    string json = "[";
@@ -755,11 +847,18 @@ bool ParseCommand(string body, SignalCommand &command)
    command.entryFrom = StringToDouble(ValueFor(body, "entryFrom"));
    command.entryTo = StringToDouble(ValueFor(body, "entryTo"));
    command.stopLoss = StringToDouble(ValueFor(body, "stopLoss"));
+   command.defaultStopLossValue = StringToDouble(ValueFor(body, "defaultStopLossValue"));
+   command.defaultStopLossUnit = ValueFor(body, "defaultStopLossUnit");
    command.newStopLoss = StringToDouble(ValueFor(body, "newStopLoss"));
+   command.defaultTakeProfitValue = StringToDouble(ValueFor(body, "defaultTakeProfitValue"));
+   command.defaultTakeProfitUnit = ValueFor(body, "defaultTakeProfitUnit");
    command.trailingStopValue = StringToDouble(ValueFor(body, "trailingStopValue"));
    command.trailingStopUnit = ValueFor(body, "trailingStopUnit");
    command.partialCloseKind = ValueFor(body, "partialCloseKind");
    command.partialCloseValue = StringToDouble(ValueFor(body, "partialCloseValue"));
+   command.targetOrderTicket = (ulong)StringToInteger(ValueFor(body, "targetOrderTicket"));
+   command.targetPositionTicket = (ulong)StringToInteger(ValueFor(body, "targetPositionTicket"));
+   command.targetDealTicket = (ulong)StringToInteger(ValueFor(body, "targetDealTicket"));
 
    for(int index = 0; index < 4; index++)
    {
@@ -834,7 +933,15 @@ bool ValidatePendingOrderPrice(SignalCommand &command)
 
 double CommandBaseVolume(SignalCommand &command)
 {
-   return command.volume > 0.0 ? command.volume : DefaultLots;
+   if(command.volume > 0.0)
+      return command.volume;
+   if(command.riskPercent > 0.0)
+   {
+      double riskVolume = RiskPercentVolume(command);
+      if(riskVolume > 0.0)
+         return riskVolume;
+   }
+   return DefaultLots;
 }
 
 double CommandVolume(SignalCommand &command)
@@ -850,6 +957,24 @@ double LegVolume(SignalCommand &command, int leg, double baseVolume)
    return NormalizeVolume(command.brokerSymbol, requested);
 }
 
+double RiskPercentVolume(SignalCommand &command)
+{
+   double referencePrice = command.entryFrom > 0.0 ? command.entryFrom : MarketReferencePrice(command);
+   double sl = command.stopLoss > 0.0 ? command.stopLoss : DefaultStopLossPrice(command, referencePrice);
+   double stopDistance = MathAbs(referencePrice - sl);
+   if(stopDistance <= 0.0)
+      return 0.0;
+   double tickSize = SymbolInfoDouble(command.brokerSymbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(command.brokerSymbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize <= 0.0 || tickValue <= 0.0)
+      return 0.0;
+   double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE) * command.riskPercent / 100.0;
+   double lossPerLot = stopDistance / tickSize * tickValue;
+   if(lossPerLot <= 0.0)
+      return 0.0;
+   return riskMoney / lossPerLot;
+}
+
 double TrailingStopDistance(SignalCommand &command)
 {
    double point = SymbolInfoDouble(command.brokerSymbol, SYMBOL_POINT);
@@ -860,13 +985,52 @@ double TrailingStopDistance(SignalCommand &command)
    return command.trailingStopValue * point;
 }
 
+double DefaultDistance(string symbol, double value, string unit)
+{
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(point <= 0.0 || value <= 0.0)
+      return 0.0;
+   if(unit == "PIPS")
+      return value * point * 10.0;
+   if(unit == "POINTS")
+      return value * point;
+   return value;
+}
+
+double DefaultStopLossPrice(SignalCommand &command, double referencePrice)
+{
+   double distance = DefaultDistance(command.brokerSymbol, command.defaultStopLossValue, command.defaultStopLossUnit);
+   if(referencePrice <= 0.0 || distance <= 0.0)
+      return 0.0;
+   if(command.direction == "BUY")
+      return referencePrice - distance;
+   return referencePrice + distance;
+}
+
+double DefaultTakeProfitPrice(SignalCommand &command, double referencePrice)
+{
+   double distance = DefaultDistance(command.brokerSymbol, command.defaultTakeProfitValue, command.defaultTakeProfitUnit);
+   if(referencePrice <= 0.0 || distance <= 0.0)
+      return 0.0;
+   if(command.direction == "BUY")
+      return referencePrice + distance;
+   return referencePrice - distance;
+}
+
+double MarketReferencePrice(SignalCommand &command)
+{
+   if(command.direction == "BUY")
+      return SymbolInfoDouble(command.brokerSymbol, SYMBOL_ASK);
+   return SymbolInfoDouble(command.brokerSymbol, SYMBOL_BID);
+}
+
 bool EnsureSymbol(string symbol)
 {
    if(symbol == "")
       return false;
    if(!SymbolSelect(symbol, true))
       return false;
-   return SymbolInfoInteger(symbol, SYMBOL_SELECT);
+   return SymbolInfoInteger(symbol, SYMBOL_SELECT) != 0;
 }
 
 double NormalizeVolume(string symbol, double requested)
@@ -887,7 +1051,7 @@ bool IsTradeSuccess(uint retcode)
 
 void ReportFailure(string queueItemId, string brokerComment, string errorText)
 {
-   Report(queueItemId, "FAILED", 0, 0, brokerComment, 0, 0, 0.0, 0.0, 0.0, errorText);
+   Report(queueItemId, "FAILED", 0, 0, brokerComment, 0, 0, 0, 0.0, 0.0, 0.0, errorText);
 }
 
 void Report(
@@ -897,6 +1061,7 @@ void Report(
    int retcodeExternal,
    string brokerComment,
    ulong orderTicket,
+   ulong positionTicket,
    ulong dealTicket,
    double requestedPrice,
    double filledPrice,
@@ -905,7 +1070,7 @@ void Report(
 )
 {
    string body = StringFormat(
-      "{\"accountId\":\"mt5-%I64d\",\"queueItemId\":\"%s\",\"status\":\"%s\",\"retcode\":%u,\"retcodeExternal\":%d,\"brokerComment\":\"%s\",\"orderTicket\":\"%I64u\",\"dealTicket\":\"%I64u\",\"requestedPrice\":%.8f,\"filledPrice\":%.8f,\"volume\":%.2f,\"errorText\":\"%s\"}",
+      "{\"accountId\":\"mt5-%I64d\",\"queueItemId\":\"%s\",\"status\":\"%s\",\"retcode\":%u,\"retcodeExternal\":%d,\"brokerComment\":\"%s\",\"orderTicket\":\"%I64u\",\"positionTicket\":\"%I64u\",\"dealTicket\":\"%I64u\",\"requestedPrice\":%.8f,\"filledPrice\":%.8f,\"volume\":%.2f,\"errorText\":\"%s\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       JsonEscape(queueItemId),
       status,
@@ -913,6 +1078,7 @@ void Report(
       retcodeExternal,
       JsonEscape(brokerComment),
       orderTicket,
+      positionTicket,
       dealTicket,
       requestedPrice,
       filledPrice,
@@ -929,7 +1095,7 @@ string AccountPayload()
       ? "HEDGING"
       : "NETTING";
    return StringFormat(
-      "{\"accountNumber\":\"%I64d\",\"server\":\"%s\",\"company\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"marginMode\":\"%s\",\"availableSymbols\":%s}",
+      "{\"accountNumber\":\"%I64d\",\"server\":\"%s\",\"company\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"marginMode\":\"%s\",\"availableSymbols\":%s,\"linkCode\":\"%s\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       JsonEscape(AccountInfoString(ACCOUNT_SERVER)),
       JsonEscape(AccountInfoString(ACCOUNT_COMPANY)),
@@ -937,7 +1103,8 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       marginMode,
-      SymbolsJson()
+      SymbolsJson(),
+      JsonEscape(LinkCode)
    );
 }
 

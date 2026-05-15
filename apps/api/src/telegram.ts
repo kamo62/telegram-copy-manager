@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export type TelegramSessionStatus =
@@ -25,6 +25,7 @@ export interface TelegramCapturedMessage {
 export interface TelegramFetchOptions {
   dateFrom?: string;
   dateTo?: string;
+  offsetDate?: string;
 }
 
 export interface TelegramLoginStartInput {
@@ -113,6 +114,8 @@ interface GramjsClient {
     onError: (error: Error) => void;
   }): Promise<void>;
   disconnect(): Promise<void>;
+  isUserAuthorized(): Promise<boolean>;
+  getMe(): Promise<{ phone?: string | number | bigint }>;
   getDialogs(params: { limit: number }): Promise<GramjsDialog[]>;
   iterMessages(entity: unknown, params: { limit: number }): AsyncIterable<GramjsMessage>;
 }
@@ -151,11 +154,20 @@ class GramjsTelegramAdapter implements TelegramAdapter {
       import("telegram"),
       import("telegram/sessions"),
     ]);
-    const sessionString = await this.readSession(input.appSessionId);
-    const session = new StringSession(sessionString);
-    const client = new TelegramClient(session, Number(input.apiId), input.apiHash, {
+    let sessionString = await this.readSession(input.appSessionId);
+    let session = new StringSession(sessionString);
+    let client = new TelegramClient(session, Number(input.apiId), input.apiHash, {
       connectionRetries: 5,
     }) as unknown as GramjsClient;
+
+    if (sessionString && !(await this.sessionMatchesPhone(client, input.phone))) {
+      await client.disconnect().catch(() => undefined);
+      sessionString = "";
+      session = new StringSession("");
+      client = new TelegramClient(session, Number(input.apiId), input.apiHash, {
+        connectionRetries: 5,
+      }) as unknown as GramjsClient;
+    }
 
     const pending: PendingLogin = {
       client,
@@ -232,11 +244,13 @@ class GramjsTelegramAdapter implements TelegramAdapter {
 
   async disconnect(sessionId: string) {
     const pending = this.pending.get(sessionId);
-    if (pending?.client?.disconnect) {
-      await pending.client.disconnect();
+    const client = pending?.client ?? this.clients.get(sessionId);
+    if (client?.disconnect) {
+      await client.disconnect();
     }
     this.pending.delete(sessionId);
     this.clients.delete(sessionId);
+    await unlink(join(this.sessionDir, `${sessionId}.json`)).catch(() => undefined);
   }
 
   async listDialogs(sessionId: string): Promise<TelegramDialog[]> {
@@ -268,7 +282,11 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     const messages: TelegramCapturedMessage[] = [];
     const fromTime = options.dateFrom ? new Date(options.dateFrom).getTime() : undefined;
     const toTime = options.dateTo ? new Date(options.dateTo).getTime() : undefined;
-    for await (const message of client.iterMessages(entity, { limit })) {
+    const offsetDate = options.offsetDate ?? options.dateTo;
+    for await (const message of client.iterMessages(entity, {
+      limit,
+      offsetDate: offsetDate ? Math.floor(new Date(offsetDate).getTime() / 1000) : undefined,
+    } as { limit: number; offsetDate?: number })) {
       const rawText = String(message.message ?? "").trim();
       if (!rawText) continue;
       const messageDate = message.date
@@ -355,7 +373,39 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     try {
       return await readFile(join(this.sessionDir, `${sessionId}.json`), "utf8");
     } catch {
+      return await this.importExistingSession(sessionId);
+    }
+  }
+
+  private async importExistingSession(sessionId: string) {
+    const explicitPath = process.env.TELEGRAM_SESSION_FILE;
+    if (explicitPath) {
+      const sessionString = await readFile(explicitPath, "utf8");
+      await this.writeSession(sessionId, sessionString.trim());
+      return sessionString.trim();
+    }
+
+    if (process.env.TELEGRAM_IMPORT_EXISTING_SESSION !== "true") return "";
+
+    try {
+      const files = (await readdir(this.sessionDir)).filter((file) => file.endsWith(".json"));
+      if (files.length !== 1) return "";
+      const sessionString = (await readFile(join(this.sessionDir, files[0]!), "utf8")).trim();
+      await this.writeSession(sessionId, sessionString);
+      return sessionString;
+    } catch {
       return "";
+    }
+  }
+
+  private async sessionMatchesPhone(client: GramjsClient, requestedPhone: string) {
+    try {
+      await client.connect();
+      if (!(await client.isUserAuthorized())) return false;
+      const me = await client.getMe();
+      return normalizePhone(String(me.phone ?? "")) === normalizePhone(requestedPhone);
+    } catch {
+      return false;
     }
   }
 
@@ -392,4 +442,8 @@ export function demoMessages(): TelegramCapturedMessage[] {
     rawText,
     senderName: "Alpha FX Signals",
   }));
+}
+
+function normalizePhone(phone: string) {
+  return phone.replace(/\D/g, "").replace(/^00/, "");
 }

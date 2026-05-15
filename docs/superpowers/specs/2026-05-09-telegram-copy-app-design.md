@@ -35,6 +35,37 @@ Included in v1:
 - Provider Strategy Configuration: per-provider message template selection, TP1-TP4 rules, and pip manipulation.
 - Per-trade lifecycle event log.
 
+## MVP Outstanding Status
+
+Status labels used below:
+
+- `DONE`: implemented and wired end-to-end locally.
+- `UI ONLY`: frontend surface exists, but backend/data contract is placeholder or partial.
+- `MVP OUTSTANDING`: required before the first honest copy-trading MVP.
+- `POST-MVP`: useful after the first validated Telegram-to-MT5 loop.
+
+Current MVP status after the frontend redesign:
+
+- `DONE`: Telegram sign-in shell, code/2FA flow wiring, pending-auth recovery/retry for wrong phone numbers, dialog/provider selection with confirmation and channel/group prioritization, provider removal, raw message capture, deterministic parser, fixture save controls and saved-fixtures view, parser approve/ignore controls, provider enable/pause, account slot/link-code API/UI/EA payloads, Live tab account onboarding and live account cards, account-to-provider routing controls for connected MT5 accounts, provider open-signal fan-out to every linked account, Equity Guardian persistence/API/queue enforcement/basic UI with audited unpause, basic MT5 register/heartbeat/poll/report contract, broker-history ingestion from EA, queue lease timeout recovery/expiry, dynamic heartbeat freshness, TP1-TP4 queue payloads, split-order/virtual-TP EA source support, risk-percent sizing support in EA, Symbol Settings add-mapping modal with real persisted rows plus global/provider alias deletion, provider execution-config persistence/history/test endpoint for risk/TP allocation, broker-order trail storage from execution reports and broker history, lifecycle queue payload target tickets from `BrokerOrder`, snapshot-based manual close reconciliation, execution-log drilldown endpoint, History broker-trail expansion, basic account/provider performance data with chart binding, Azure GPT key entry in Settings, configurable EA API URL with 1-second default polling, page-level frontend extraction, sortable Providers table, skeleton/empty-state components, real GramJS sessions do not auto-create demo providers or fall back to mock dialogs, demo data is explicit via `SEED_DEMO_DATA=true` only, and light operations dashboard shell.
+- `MVP OUTSTANDING`: lifecycle command fan-out edge cases when multiple same-provider same-symbol trades are open per account, richer Symbol Settings edit UI, richer performance calculations, demo/live MT5 validation of broker-history reconciliation under real broker conditions, execution-log drilldown UI polish, and production security hardening if the API is exposed outside a trusted network.
+- `UI ONLY`: no major MVP tab is placeholder-only, but several screens are still minimal and need richer detail views.
+- `POST-MVP`: image/OCR parsing, AI assistant, payment/licensing, PDF exports, economic event filter, cloud broker APIs, and multi-platform execution beyond MT5.
+- `MVP SUPPORTING`: optional GPT extraction assistance for parser outputs that need additional normalization. This is not an autonomous AI assistant and must never run for parser outputs that are already safe or already ignored.
+
+Parser baseline from the latest available 6-month KAL VIP import/backtest:
+
+- Date window: 2025-11-08 to 2026-05-10.
+- Total messages scanned: 4,610.
+- `NO_SIGNAL`: 2,790.
+- `OPEN_TRADE`: 946.
+- `TRADE_SETUP`: 60.
+- Lifecycle commands: 897.
+- Actionable messages (`OPEN_TRADE` + `TRADE_SETUP` + lifecycle): 1,843.
+- Auto-actionable after parser rules: 1,710.
+- Actionable requiring GPT extraction/operator confirmation: 133, or 7.22% of actionable.
+- Main normalization causes: low confidence, unmapped/unavailable symbols, missing broker symbol, and a small number of missing direction cases.
+- The raw examples now preserve KAL VIP commentary as `TRADE_SETUP` instead of discarding it as noise. These are valid trading setups, but conditional/multi-scenario posts require operator review before any MT5 queue action.
+
 Deferred until after v1:
 
 - Image signal parsing.
@@ -109,6 +140,8 @@ Fixture storage should include:
 - expected parser confidence and warnings.
 
 Telegram API credentials, OTP codes, 2FA passwords, and `.session` files must not be committed. Development auth should use local environment variables or the frontend setup flow, with generated session files ignored by git.
+
+Interim local development may import an existing GramJS session file through `TELEGRAM_SESSION_FILE`, or auto-import the only `.json` session in `TELEGRAM_SESSION_DIR`. Imported sessions must still remain local-only and ignored by git.
 
 ## Backend Responsibilities
 
@@ -200,6 +233,15 @@ V1 supported signal fields:
 - optional expiry.
 - optional partial-close allocation per TP.
 
+Default execution distances:
+
+- The app has default missing-field rules for providers such as KAL VIP that regularly send short market commands.
+- Default SL is 50 pips when an otherwise valid open signal has no explicit SL.
+- Default TP is 200 pips when an otherwise valid open signal has no explicit TP.
+- Defaults are configurable at global and provider level; provider-level values override global values.
+- Defaults apply only when the provider message omits the field. Explicit Telegram SL/TP values always win.
+- Defaults are sent to the EA as distances (`PIPS`, `POINTS`, or `PRICE`) when the exact market fill price is unknown at parse time. The EA converts the distance to the actual broker-side SL/TP price using the execution price and broker symbol metadata.
+
 The first parser should be deterministic and test-driven. It should support varied but common text formats such as:
 
 - `BUY EURUSD @ 1.0850`
@@ -234,7 +276,21 @@ Every parser result should include:
 - warnings
 - original raw message
 
-Signals with low confidence or missing execution-critical fields must require manual review instead of entering the live MT5 queue.
+Quote/reply context:
+
+- Telegram replies must be captured with the replied-to message text when available.
+- Lifecycle replies such as `Close half`, `Close 50%`, `TP 1`, `Cancel this`, or `Move SL BE` inherit symbol and provider context from the quoted signal.
+- After an open signal has been sent to MT5 and an execution report has returned a broker order/deal/position ID, later quote-based lifecycle messages must resolve to the logical trade first, then to its attached broker order trail. The frontend should never treat `Close half` as a blind symbol-level close when a quoted logical trade can be identified.
+- If a quote reply cannot be matched to exactly one active logical trade and broker-order trail, it requires GPT extraction or operator confirmation before queueing.
+
+AI review guardrail:
+
+- GPT extraction may be called only for parsed signals where deterministic parsing needs additional normalization.
+- GPT extraction must return explicit `ENTRY`, `SL`, and `TP` fields where present, plus one classification: `EXECUTABLE_SIGNAL`, `TRADE_SETUP`, `LIFECYCLE_COMMAND`, `RESULT_UPDATE`, `PROVIDER_STRATEGY_NOTE`, or `NOISE`.
+- GPT extraction is advisory. It must not directly enqueue MT5 work. The operator or deterministic backend rules must still approve the final action.
+- KAL VIP-specific prompt context states that KAL VIP trades Gold/XAUUSD only, but conditional or multi-scenario commentary still requires review before execution.
+
+Signals with low confidence or missing execution-critical fields must require GPT extraction or operator confirmation instead of entering the live MT5 queue.
 
 ## Symbol Mapping Design
 
@@ -262,7 +318,7 @@ The dashboard must let the user configure:
 - account mappings for broker-specific symbols.
 - prefix and suffix per MT5 account.
 - include/exclude symbol lists.
-- whether unmapped symbols require manual review or are rejected.
+- whether unmapped symbols require GPT extraction/operator confirmation or are rejected.
 
 The EA should report available MT5 symbols to the backend when possible. The dashboard should use that list to show whether a mapped broker symbol is currently available in the connected terminal. If no EA symbol list is available, mapping can still be configured but must show as unverified.
 
@@ -419,7 +475,7 @@ For virtual-TP mode, the EA must continuously manage the active logical trade wh
 
 For split-order mode, the backend/EA creates child orders or positions for each TP leg. Provider commands still target the logical trade first, then resolve to one or more child broker tickets.
 
-If the app cannot reconcile a command to an open logical trade with enough confidence, it must require manual review instead of sending a blind close/cancel/modify command to MT5.
+If the app cannot reconcile a command to an open logical trade with enough confidence, it must require GPT extraction or operator confirmation instead of sending a blind close/cancel/modify command to MT5.
 
 ## Analytics & Performance
 
@@ -468,6 +524,7 @@ The EA must:
 - apply the backend-provided broker symbol for each command and reject mismatches.
 - optionally report available terminal symbols to the backend for mapping validation.
 - report current open positions and pending orders for active logical trades.
+- report recent broker history deals for EA-owned/manual-closed logical trades so the backend can capture close price, profit, commission, swap, and deal ticket even when a position disappears from snapshots.
 - validate symbol availability through Market Watch.
 - validate market and pending order prices against current bid/ask.
 - normalize volume to broker constraints.
@@ -484,6 +541,15 @@ The EA must:
 - tag broker orders/positions with logical trade IDs in comments and/or magic-number strategy.
 - inspect `MqlTradeResult.retcode`, not just the boolean return from `OrderSend`.
 - report retcode, retcode_external, broker comment, order ticket, deal ticket, requested price, filled price, volume, and error text.
+- receive default SL/TP distances when the parser used provider defaults, convert pips/points using broker symbol metadata, and place the resulting absolute SL/TP prices with the order.
+
+Pip/point conversion rule for MVP:
+
+- The backend stores defaults as pips by default (`defaultStopLossPips = 50`, `defaultTakeProfitPips = 200`).
+- For common 5-digit forex symbols, 1 pip is typically 10 MT5 points (`SYMBOL_POINT * 10`).
+- For 3-digit JPY symbols, 1 pip is typically 10 MT5 points (`SYMBOL_POINT * 10`).
+- For common 2-digit XAUUSD/Gold symbols, 1 pip is treated as 10 MT5 points, so 50 pips is 5.00 price units when `SYMBOL_POINT = 0.01`.
+- The EA must use `SymbolInfoDouble(symbol, SYMBOL_POINT)` and `SymbolInfoInteger(symbol, SYMBOL_DIGITS)` at execution time, not browser locale formatting or hardcoded decimal strings.
 
 The EA should use `EventSetTimer` for polling and heartbeat. The backend URL must be added to MT5 allowed WebRequest URLs by the user.
 

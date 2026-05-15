@@ -1,5 +1,5 @@
 import type { LucideIcon } from "lucide-react";
-import { Activity, Bot, KeyRound, Server, Settings2 } from "lucide-react";
+import { Activity, Bot, ChevronRight, KeyRound, Plus, Server, Settings2 } from "lucide-react";
 
 export const navItems: Array<[string, string, LucideIcon]> = [
   ["dashboard", "Live", Activity],
@@ -8,12 +8,27 @@ export const navItems: Array<[string, string, LucideIcon]> = [
   ["settings", "Settings", Settings2],
 ];
 
+export interface SidebarAccount {
+  id: string;
+  label: string;
+  status: string;
+  online: boolean;
+}
+
 export function Sidebar({
   activeView,
   onNavigate,
+  accounts = [],
+  selectedAccountId,
+  onSelectAccount,
+  onAddAccount,
 }: {
   activeView: string;
   onNavigate: (id: string) => void;
+  accounts?: SidebarAccount[];
+  selectedAccountId?: string | null;
+  onSelectAccount?: (accountId: string | null) => void;
+  onAddAccount?: () => void;
 }) {
   return (
     <aside className="sidebar" aria-label="Primary">
@@ -27,17 +42,72 @@ export function Sidebar({
         </div>
       </div>
       <nav>
-        {navItems.map(([id, label, Icon]) => (
-          <button
-            className={activeView === id ? "active" : ""}
-            key={id}
-            onClick={() => onNavigate(id)}
-            type="button"
-          >
-            <Icon size={15} aria-hidden="true" />
-            {label}
-          </button>
-        ))}
+        {navItems.map(([id, label, Icon]) => {
+          const isLive = id === "dashboard";
+          const isActive = activeView === id;
+          return (
+            <div className="sidebar-group" key={id}>
+              <button
+                className={isActive ? "active" : ""}
+                onClick={() => {
+                  onNavigate(id);
+                  if (isLive && onSelectAccount) onSelectAccount(null);
+                }}
+                type="button"
+              >
+                <Icon size={15} aria-hidden="true" />
+                {label}
+                {isLive && accounts.length > 0 ? (
+                  <span className="sidebar-count" aria-label={`${accounts.length} accounts`}>
+                    {accounts.length}
+                  </span>
+                ) : null}
+              </button>
+              {isLive && (accounts.length > 0 || onAddAccount) ? (
+                <ul className="sidebar-children" aria-label="MT5 accounts">
+                  {accounts.map((account) => {
+                    const accountActive = isActive && selectedAccountId === account.id;
+                    return (
+                      <li key={account.id}>
+                        <button
+                          aria-current={accountActive ? "true" : undefined}
+                          className={`sidebar-child ${accountActive ? "active" : ""}`}
+                          onClick={() => {
+                            onNavigate("dashboard");
+                            onSelectAccount?.(account.id);
+                          }}
+                          type="button"
+                        >
+                          <span
+                            aria-hidden="true"
+                            className={`sidebar-child-dot ${account.online ? "ok" : "off"}`}
+                          />
+                          <span className="sidebar-child-label">{account.label}</span>
+                          <ChevronRight aria-hidden="true" size={11} />
+                        </button>
+                      </li>
+                    );
+                  })}
+                  {onAddAccount ? (
+                    <li>
+                      <button
+                        className="sidebar-child sidebar-child-add"
+                        onClick={() => {
+                          onNavigate("mt5");
+                          onAddAccount();
+                        }}
+                        type="button"
+                      >
+                        <Plus aria-hidden="true" size={11} />
+                        <span className="sidebar-child-label">Add account</span>
+                      </button>
+                    </li>
+                  ) : null}
+                </ul>
+              ) : null}
+            </div>
+          );
+        })}
       </nav>
     </aside>
   );

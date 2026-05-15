@@ -9,6 +9,7 @@ data/
 *.sqlite
 *.sqlite3
 *.db
+*.ex5
 .DS_Store
 .worktrees/
 worktrees/

@@ -1,4 +1,7 @@
 import { CheckCircle2, Server } from "lucide-react";
+import { useLocale } from "../contexts/LocaleContext";
+import { formatNumber, formatPercent } from "../lib/format";
+import { SkeletonStat } from "./Skeleton";
 
 export interface AccountHeaderData {
   connectedPlatform: {
@@ -18,26 +21,26 @@ export interface AccountHeaderData {
   currency: string;
 }
 
-const fmtMoney = new Intl.NumberFormat("en-US", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-function formatAmount(amount: number | null): string {
-  if (amount === null) return "—";
-  return `${amount < 0 ? "-" : ""}${fmtMoney.format(Math.abs(amount))}`;
-}
-
-function formatDelta(deltaPercent: number | null): { text: string; tone: "up" | "down" | "muted" } {
+function formatDelta(
+  deltaPercent: number | null,
+  locale: string,
+): { text: string; tone: "up" | "down" | "muted" } {
   if (deltaPercent === null) return { text: "—", tone: "muted" };
   const sign = deltaPercent >= 0 ? "▲" : "▼";
   const tone: "up" | "down" | "muted" =
     deltaPercent > 0 ? "up" : deltaPercent < 0 ? "down" : "muted";
-  return { text: `${sign} ${Math.abs(deltaPercent).toFixed(2)}%`, tone };
+  return {
+    text: `${sign} ${formatPercent(Math.abs(deltaPercent), { locale, signDisplay: "never" })}`,
+    tone,
+  };
 }
 
-export function AccountHeader({ data }: { data: AccountHeaderData }) {
+export function AccountHeader({
+  data,
+  loading = false,
+}: { data: AccountHeaderData; loading?: boolean }) {
   const { connectedPlatform, kpis, currency } = data;
+  const { locale } = useLocale();
 
   const kpiList: Array<{
     label: string;
@@ -95,20 +98,28 @@ export function AccountHeader({ data }: { data: AccountHeaderData }) {
         </div>
       </div>
 
-      <div className="account-kpis">
-        {kpiList.map((kpi) => {
-          const delta = formatDelta(kpi.delta);
-          return (
-            <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
-              <span className="kpi-label">{kpi.label}</span>
-              <strong className="kpi-amount">
-                <span className="kpi-currency">{currency}</span>
-                {formatAmount(kpi.amount)}
-              </strong>
-              <span className={`kpi-delta kpi-delta-${delta.tone}`}>{delta.text}</span>
-            </div>
-          );
-        })}
+      <div className="account-kpis anim-stagger">
+        {loading && kpis.initialBalance === null
+          ? Array.from({ length: 5 }, (_, index) => (
+              <div className="kpi" key={`kpi-skeleton-${index}`}>
+                <SkeletonStat />
+              </div>
+            ))
+          : null}
+        {!(loading && kpis.initialBalance === null) &&
+          kpiList.map((kpi) => {
+            const delta = formatDelta(kpi.delta, locale);
+            return (
+              <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
+                <span className="kpi-label">{kpi.label}</span>
+                <strong className="kpi-amount">
+                  <span className="kpi-currency">{currency}</span>
+                  {formatNumber(kpi.amount, { locale })}
+                </strong>
+                <span className={`kpi-delta kpi-delta-${delta.tone}`}>{delta.text}</span>
+              </div>
+            );
+          })}
       </div>
     </section>
   );

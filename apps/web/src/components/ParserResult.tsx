@@ -1,3 +1,4 @@
+import { Check, Sparkles, X } from "lucide-react";
 import { useRef } from "react";
 import { Field } from "./Field";
 import { Tag } from "./Tag";
@@ -16,6 +17,10 @@ export function ParserResult({
   redactedText,
   onRedactedChange,
   onSaveFixture,
+  onAiReview,
+  onApprove,
+  onIgnore,
+  aiReview,
   status,
 }: {
   result: {
@@ -36,6 +41,10 @@ export function ParserResult({
   redactedText: string;
   onRedactedChange: (value: string) => void;
   onSaveFixture: (redactedText: string) => void;
+  onAiReview?: () => void;
+  onApprove?: () => void;
+  onIgnore?: () => void;
+  aiReview?: string;
   status?: string;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -56,12 +65,47 @@ export function ParserResult({
       </div>
       <div className="parser-actions">
         <Tag tone={result.reviewRequired ? "warn" : "good"}>
-          {result.reviewRequired ? "Manual review" : result.mappingStatus}
+          {result.reviewRequired ? "Needs GPT extraction" : result.mappingStatus}
         </Tag>
+        {result.reviewRequired && onAiReview ? (
+          <button
+            className="btn btn-ghost btn-small"
+            onClick={onAiReview}
+            title="Extract entry, SL, and TPs"
+            type="button"
+          >
+            <Sparkles aria-hidden="true" size={13} />
+            Extract with GPT
+          </button>
+        ) : null}
+        {onApprove ? (
+          <button
+            className="btn btn-primary btn-small"
+            onClick={onApprove}
+            title="Approve this parser output for the MT5 queue"
+            type="button"
+          >
+            <Check aria-hidden="true" size={13} />
+            Approve
+          </button>
+        ) : null}
+        {onIgnore ? (
+          <button
+            className="btn btn-ghost btn-small btn-destructive-subtle"
+            onClick={onIgnore}
+            title="Ignore this parser output"
+            type="button"
+          >
+            <X aria-hidden="true" size={13} />
+            Ignore
+          </button>
+        ) : null}
+        {aiReview ? <small className="ai-review-note">{aiReview}</small> : null}
         {result.rawMessageId ? (
           <div className="fixture-controls">
             <select
               aria-label={`Classification for ${result.providerTitle}`}
+              className="settings-input"
               onChange={(event) =>
                 onClassify(event.target.value as "entry" | "management" | "noise" | "unknown")
               }
@@ -74,12 +118,14 @@ export function ParserResult({
             </select>
             <textarea
               aria-label={`Redacted fixture text for ${result.providerTitle}`}
+              className="settings-input fixture-textarea"
               onChange={(event) => onRedactedChange(event.target.value)}
               placeholder="Optional redacted fixture text"
               ref={textareaRef}
               value={redactedText}
             />
             <button
+              className="btn btn-ghost btn-small"
               onClick={() => {
                 const text = textareaRef.current?.value.trim() ?? "";
                 void onSaveFixture(text);
@@ -89,7 +135,7 @@ export function ParserResult({
             >
               Save fixture
             </button>
-            {status ? <small>{status}</small> : null}
+            {status ? <small className="fixture-status">{status}</small> : null}
           </div>
         ) : null}
       </div>

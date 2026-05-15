@@ -1,4 +1,6 @@
 import { RefreshCw, TerminalSquare } from "lucide-react";
+import { useEffect, useState } from "react";
+import { formatUtcClock } from "../lib/format";
 
 export function StatusBar({
   database,
@@ -17,7 +19,26 @@ export function StatusBar({
   refreshing: boolean;
   telegramAdapter: string;
 }) {
-  const now = new Date().toISOString().slice(11, 19);
+  const now = formatUtcClock();
+  const [errorFlash, setErrorFlash] = useState(false);
+
+  useEffect(() => {
+    if (!lastPollError) return;
+    setErrorFlash(true);
+    const timer = window.setTimeout(() => setErrorFlash(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [lastPollError]);
+
+  const liveDotClass = errorFlash
+    ? "live-dot error"
+    : refreshing
+      ? "live-dot refreshing"
+      : "live-dot";
+  const liveDotLabel = errorFlash
+    ? "Last poll failed"
+    : refreshing
+      ? "Refreshing dashboard"
+      : "Live updates active";
 
   return (
     <header className="status-bar">
@@ -36,14 +57,14 @@ export function StatusBar({
         <span className="chip">Queue {queuePending}</span>
         <span className="chip">{now} UTC</span>
         {lastPollError ? (
-          <span className="chip">
+          <span aria-live="polite" className="chip" role="status">
             <span className="chip-dot error" />
             Poll failed
           </span>
         ) : null}
       </div>
       <div>
-        <span className="live-dot" aria-hidden="true" title="Live updates active" />
+        <span aria-label={liveDotLabel} className={liveDotClass} role="img" title={liveDotLabel} />
         <button
           aria-label="Open command palette"
           className="refresh-btn"

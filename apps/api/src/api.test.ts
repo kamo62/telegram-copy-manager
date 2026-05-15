@@ -78,6 +78,88 @@ describe("Telegram TC API", () => {
     expect(duplicate.status).toBe(409);
   });
 
+  test("uses Azure GPT extraction only for parser outputs needing normalization", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const previousFetch = globalThis.fetch;
+    const previousKey = process.env.AZURE_OPENAI_API_KEY;
+    process.env.AZURE_OPENAI_API_KEY = "test-key";
+
+    const providersResponse = await app.request("/api/providers");
+    const providers = await json<{ providers: Array<{ id: string }> }>(providersResponse);
+    const providerId = providers.providers[0]!.id;
+
+    const needsExtraction = await json<{ parsedSignalId: string; reviewRequired: boolean }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId, rawText: "Buy 45-44" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(needsExtraction.reviewRequired).toBe(true);
+
+    let azureCalled = false;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      azureCalled = true;
+      const body = JSON.parse(String(init?.body));
+      expect(body.model).toBe("gpt-5.4-mini");
+      expect(body.messages[0].content).toContain("ENTRY, SL, and TP");
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                verdict: "EXECUTABLE_SIGNAL",
+                shouldQueue: true,
+                needsConfirmation: false,
+                confidence: 0.91,
+                reason: "Short KAL VIP gold buy with defaults applied.",
+                symbol: "XAUUSD",
+                direction: "BUY",
+                entry: "45-44",
+                stopLoss: "50 pips default",
+                takeProfits: ["200 pips default"],
+                lifecycleAction: "",
+              }),
+            },
+          },
+        ],
+      });
+    }) as typeof fetch;
+
+    const review = await app.request(`/api/signals/${needsExtraction.parsedSignalId}/ai-review`, {
+      method: "POST",
+    });
+    expect(review.status).toBe(200);
+    const reviewed = await json<{
+      review: { entry: string; stopLoss: string; takeProfits: string[]; shouldQueue: boolean };
+    }>(review);
+    expect(azureCalled).toBe(true);
+    expect(reviewed.review.entry).toBe("45-44");
+    expect(reviewed.review.stopLoss).toBe("50 pips default");
+    expect(reviewed.review.takeProfits).toEqual(["200 pips default"]);
+    expect(reviewed.review.shouldQueue).toBe(true);
+
+    const safeParse = await json<{ parsedSignalId: string; reviewRequired: boolean }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          rawText: "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(safeParse.reviewRequired).toBe(false);
+    const rejected = await app.request(`/api/signals/${safeParse.parsedSignalId}/ai-review`, {
+      method: "POST",
+    });
+    expect(rejected.status).toBe(409);
+
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.AZURE_OPENAI_API_KEY;
+    else process.env.AZURE_OPENAI_API_KEY = previousKey;
+  });
+
   test("registers an MT5 account, leases queue work, accepts execution reports, and updates logs", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
 
@@ -116,6 +198,7 @@ describe("Telegram TC API", () => {
         retcodeExternal: 0,
         brokerComment: "Request completed",
         orderTicket: "50001",
+        positionTicket: "70001",
         dealTicket: "60001",
         requestedPrice: 1.085,
         filledPrice: 1.0851,
@@ -127,7 +210,64 @@ describe("Telegram TC API", () => {
     expect(report.status).toBe(200);
 
     const logs = await app.request("/api/execution-logs");
-    expect((await json<{ logs: Array<{ retcode: number }> }>(logs)).logs[0]?.retcode).toBe(10009);
+    const executionLogs = await json<{ logs: Array<{ retcode: number; positionTicket: string }> }>(
+      logs,
+    );
+    expect(executionLogs.logs[0]?.retcode).toBe(10009);
+    expect(executionLogs.logs[0]?.positionTicket).toBe("70001");
+
+    const brokerTrail = await json<{
+      orders: Array<{
+        action: string;
+        orderTicket: string;
+        positionTicket: string;
+        dealTicket: string;
+      }>;
+    }>(await app.request("/api/trades/trade-demo-1/broker-orders"));
+    expect(brokerTrail.orders[0]).toMatchObject({
+      action: "OPEN",
+      orderTicket: "50001",
+      positionTicket: "70001",
+      dealTicket: "60001",
+    });
+
+    const history = await app.request("/api/mt5/history", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: account.accountId,
+        deals: [
+          {
+            dealTicket: "60002",
+            orderTicket: "50002",
+            positionTicket: "70001",
+            entry: "OUT",
+            symbol: "EURUSD.raw",
+            price: 1.0861,
+            volume: 0.1,
+            profit: 10.5,
+            commission: -0.5,
+            swap: 0,
+            comment: "telegram-tc:trade-demo-1",
+            time: "2026-05-10T12:00:00.000Z",
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(history.status).toBe(200);
+    expect((await json<{ recorded: number }>(history)).recorded).toBe(1);
+
+    const brokerTrailAfterHistory = await json<{
+      orders: Array<{ action: string; dealTicket: string; pnlCurrency?: number; pnlPips?: number }>;
+    }>(await app.request("/api/trades/trade-demo-1/broker-orders"));
+    expect(
+      brokerTrailAfterHistory.orders.some(
+        (order) => order.action === "FULL_CLOSE" && order.dealTicket === "60002",
+      ),
+    ).toBe(true);
+    expect(
+      brokerTrailAfterHistory.orders.find((order) => order.dealTicket === "60002")?.pnlCurrency,
+    ).toBe(10);
 
     const accountLogs = await json<{
       accountId: string;
@@ -145,6 +285,124 @@ describe("Telegram TC API", () => {
       accountId: account.accountId,
       retcode: 10009,
     });
+  });
+
+  test("links MT5 registration through account slots and blocks new opens when Equity Guardian is paused", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+
+    const slotResponse = await app.request("/api/account-slots", {
+      method: "POST",
+      body: JSON.stringify({ name: "Main Demo" }),
+      headers: { "content-type": "application/json" },
+    });
+    const slot = await json<{ slot: { id: string; linkCode: string; status: string } }>(
+      slotResponse,
+    );
+    expect(slot.slot.status).toBe("waiting");
+
+    const badRegister = await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "777",
+        server: "MetaQuotes-Demo",
+        company: "MetaQuotes Ltd",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        linkCode: "BADCODE",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(badRegister.status).toBe(404);
+
+    const register = await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "777",
+        server: "MetaQuotes-Demo",
+        company: "MetaQuotes Ltd",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        linkCode: slot.slot.linkCode,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(register.status).toBe(200);
+    const linkedSlots = await json<{
+      slots: Array<{ id: string; accountNumber: string; status: string }>;
+    }>(await app.request("/api/account-slots"));
+    expect(linkedSlots.slots.find((item) => item.id === slot.slot.id)).toMatchObject({
+      accountNumber: "777",
+      status: "linked",
+    });
+
+    await app.request("/api/equity-guardian/mt5-100200300", {
+      method: "PATCH",
+      body: JSON.stringify({ threshold: 1, paused: true }),
+      headers: { "content-type": "application/json" },
+    });
+    const pollLine = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+    expect(pollLine).toContain("status=NO_WORK");
+    const dashboard = await json<{ signalQueue: Array<{ status: string }> }>(
+      await app.request("/api/dashboard"),
+    );
+    expect(dashboard.signalQueue.some((item) => item.status === "FAILED")).toBe(true);
+  });
+
+  test("fans out approved provider signals to every linked MT5 account", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const selected = await json<{ provider: { id: string } }>(
+      await app.request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({ profileId: "profile-real", dialogId: "dialog-gold", title: "Gold Room London" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    for (const accountNumber of ["100200300", "200300400"]) {
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber,
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes Ltd",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["EURUSD.raw", "XAUUSD.r"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-${accountNumber}/${selected.provider.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: selected.provider.id,
+          rawText: "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ queueItems: string[]; logicalTradeIds: string[] }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    expect(approval.queueItems).toHaveLength(2);
+    expect(approval.logicalTradeIds).toHaveLength(2);
+
+    const firstPoll = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+    const secondPoll = await (await app.request("/api/mt5/poll-line?accountId=mt5-200300400")).text();
+    expect(firstPoll).toContain("status=WORK");
+    expect(secondPoll).toContain("status=WORK");
   });
 
   test("reconciles MT5 execution reports back into logical trade TP leg state", async () => {
@@ -560,6 +818,11 @@ describe("Telegram TC API", () => {
       settings: {
         defaultLotSize: number;
         defaultRiskPercent: number;
+        defaultStopLossPips: number;
+        defaultTakeProfitPips: number;
+        azureOpenAIKeyConfigured: boolean;
+        leaseTimeoutSeconds: number;
+        maxLeaseAttempts: number;
         pollingIntervalSeconds: number;
         allowedOrderTypes: string[];
       };
@@ -567,6 +830,11 @@ describe("Telegram TC API", () => {
     expect(defaults.settings).toEqual({
       defaultLotSize: 0.1,
       defaultRiskPercent: 1,
+      defaultStopLossPips: 50,
+      defaultTakeProfitPips: 200,
+      azureOpenAIKeyConfigured: false,
+      leaseTimeoutSeconds: 15,
+      maxLeaseAttempts: 3,
       pollingIntervalSeconds: 2,
       allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
     });
@@ -575,6 +843,8 @@ describe("Telegram TC API", () => {
       settings: {
         defaultLotSize: number;
         defaultRiskPercent: number;
+        defaultStopLossPips: number;
+        defaultTakeProfitPips: number;
         pollingIntervalSeconds: number;
         allowedOrderTypes: string[];
       };
@@ -645,6 +915,40 @@ describe("Telegram TC API", () => {
 
     const payload = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
     expect(payload).toContain("volume=0.25");
+  });
+
+  test("caps provider take-profit config at TP1 through TP4", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+
+    const oversizedLevels = Array.from({ length: 6 }, (_, index) => ({
+      leg: index + 1,
+      percentage: 10,
+      strategy: `TP${index + 1} strategy`,
+    }));
+
+    const update = await app.request("/api/providers/provider-alpha", {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.2,
+        takeProfitLevels: oversizedLevels,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(update.status).toBe(200);
+
+    const saved = await json<{
+      config: {
+        takeProfitLevels: Array<{ leg: number; percentage: number; strategy: string }>;
+      };
+    }>(await app.request("/api/providers/provider-alpha/config"));
+
+    expect(saved.config.takeProfitLevels).toEqual([
+      { leg: 1, percentage: 25, strategy: "TP1 strategy" },
+      { leg: 2, percentage: 25, strategy: "TP2 strategy" },
+      { leg: 3, percentage: 25, strategy: "TP3 strategy" },
+      { leg: 4, percentage: 25, strategy: "TP4 strategy" },
+    ]);
   });
 
   test("uses provider channel lot size and ignores Telegram-provided lot and risk hints", async () => {

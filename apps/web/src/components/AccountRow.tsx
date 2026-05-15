@@ -1,3 +1,4 @@
+import { CheckCircle2, CircleSlash } from "lucide-react";
 import { Tag } from "./Tag";
 
 export function AccountRow({
@@ -13,20 +14,31 @@ export function AccountRow({
     pendingOrderCount?: number;
   };
 }) {
+  const online = account.heartbeatStatus === "online";
   return (
-    <div className="row-item" key={account.id}>
-      <div>
-        <strong>{account.accountNumber}</strong>
-        <span>
-          {account.server} · {account.marginMode}
+    <header className="account-row" key={account.id}>
+      <div className="account-row-icon" aria-hidden="true">
+        {online ? <CheckCircle2 size={14} /> : <CircleSlash size={14} />}
+      </div>
+      <div className="account-row-body">
+        <strong>{account.accountNumber || account.id}</strong>
+        <span className="account-row-meta">
+          <span>{account.server}</span>
+          <span className="dot-sep" aria-hidden="true">
+            ·
+          </span>
+          <span>{account.marginMode}</span>
         </span>
-        <span>
-          {account.openPositionCount ?? 0} positions · {account.pendingOrderCount ?? 0} orders
+        <span className="account-row-stats">
+          <span>
+            <strong>{account.openPositionCount ?? 0}</strong> positions
+          </span>
+          <span>
+            <strong>{account.pendingOrderCount ?? 0}</strong> pending
+          </span>
         </span>
       </div>
-      <Tag tone={account.heartbeatStatus === "online" ? "good" : "warn"}>
-        {account.heartbeatStatus}
-      </Tag>
-    </div>
+      <Tag tone={online ? "good" : "warn"}>{account.heartbeatStatus}</Tag>
+    </header>
   );
 }

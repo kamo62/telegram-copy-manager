@@ -1,3 +1,567 @@
+# Frontend UI Improvements
+
+Last updated: 2026-05-11 · Branch: `feat/telegram-copy-mvp`
+
+Sections in this document:
+
+1. **[Premium UI overhaul — May 2026 roadmap](#premium-ui-overhaul--may-2026-roadmap)** — current plan. Supersedes the original "modern dark terminal" recommendation. Reflects what shipped in P1 and details P2 → P5.
+2. **[Original audit (2026-05-09, historical)](#frontend-ui-improvements--proposal-historical-2026-05-09)** — the first review that recommended a Bloomberg-dark direction. Left in place for traceability. Many of its recommendations have been delivered already; others have been deliberately reversed (we are not pursuing a dark theme).
+
+---
+
+## Premium UI overhaul — May 2026 roadmap
+
+### 0. Status & direction lock-in
+
+**What was decided** in the most recent planning round:
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Styling | Polished **vanilla CSS + design tokens** | Full aesthetic control, no framework dep, smallest bundle, easiest to keep on-brand. |
+| Theme | **Light only** for now (tokens designed dark-ready) | Backend-facing operators run during market hours; dark theme can flip on later by overriding tokens at `[data-theme="dark"]`. |
+| App.tsx scope | **Extract per-tab page components** | App.tsx is ~870 LOC and every tab change touches it. Page extraction unlocks per-tab iteration. |
+| Aesthetic | **"Modern editorial finance"** | Editorial typography (variable serif headings + characterful grotesque body) + restrained palette + measured motion. Distinct from generic React SaaS dashboards. Avoids the `frontend-design` skill's explicit anti-patterns: Inter/Roboto/Arial, purple-on-white gradients, predictable component patterns. |
+
+**Aesthetic specifics already shipped in P1** (`4d2d45a feat(web): P1 — HSL token system + editorial typography (Fraunces + Geist)`):
+
+- Fonts loaded via Google Fonts in `apps/web/index.html`:
+  - **Fraunces** (variable serif, `opsz 9..144`, `wght 400/500/600`) for `h1/h2/h3` defaults and explicit display selectors.
+  - **Geist** (`wght 400/500/600/700`) for body UI chrome, with `font-feature-settings: "ss01" "cv11" "cv05"` so the otherwise neutral grotesque shows its character.
+  - **JetBrains Mono** (`wght 400/500/600`) for every numeric / tabular cell, with `font-variant-numeric: tabular-nums slashed-zero`.
+- Token system at `apps/web/src/styles/tokens.css` (HSL split-channel, three surface layers, deep cobalt accent `hsl(218 85% 42%)` replacing indigo, motion tokens, four shadow levels including `--shadow-glass`, prefers-reduced-motion neutralisation).
+- Stylesheet moved `apps/web/src/styles.css` → `apps/web/src/styles/base.css`. `:root` stripped (tokens.css owns it). Component classes preserved so tests + JSX kept working unchanged.
+- `:focus-visible` defaults globally to `2px solid var(--accent-ring)` with 2 px outline-offset.
+- Heading swaps already in place: `.signin-title`, `.account-header-title`, `.chart-card-title`, plus all bare `h1/h2/h3`. Selectors that should stay grotesque (uppercase section labels, button labels, tab labels, table data, input chrome) keep their explicit `--font-ui` override.
+- Verified: `bun test apps/web/` 10/10 · `bun run --cwd apps/web build` 45 KB CSS + 261 KB JS.
+
+**Out of scope for the rest of this roadmap** (you're owning these in parallel):
+
+- Link-code workflow backend / EA payload changes.
+- BrokerOrder schema migration + EA report enrichment.
+- Account-scope filtering on the dashboard endpoint.
+- Equity Guardian threshold endpoints.
+- Parser, EA, and migration changes.
+
+The UI work below assumes existing class names and JSX prop shapes stay stable. Where new product surfaces have already landed during the parallel backend pass (Azure GPT key field in Settings, Saved Fixtures view, Approve/Ignore parser actions, Wrong-phone-number recovery, broker-trail expansion, provider aliases scope toggle, link-code Linked Accounts UI), they will inherit the new tokens automatically. The P2 polish pass below audits each new surface so nothing reads as second-class.
+
+---
+
+### 1. P2 — Component polish + motion (CSS-only, no JSX changes)
+
+**Goal:** the dashboard feels alive without changing component logic. Every change in this pass is CSS, which means it cannot conflict with any in-flight component edits and the test suite stays green by construction.
+
+**File touched:** only `apps/web/src/styles/base.css`, plus a new `apps/web/src/styles/motion.css`. `apps/web/src/main.tsx` adds the motion import.
+
+#### 1.1 Motion vocabulary
+
+New file: `apps/web/src/styles/motion.css`. Defines five keyframes and three utility classes.
+
+```css
+@keyframes reveal-up   { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes fade-in     { from { opacity: 0; } to { opacity: 1; } }
+@keyframes scale-in    { from { opacity: 0; transform: scale(.96) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }
+@keyframes shimmer     { from { background-position: 200% 0; } to { background-position: -100% 0; } }
+@keyframes pulse-soft  { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
+@keyframes live-pulse  { 0%,100% { transform: scale(.95); box-shadow: 0 0 0 0 hsl(155 62% 32% / .6); } 70% { transform: scale(1); box-shadow: 0 0 0 4px hsl(155 62% 32% / 0); } }
+```
+
+Utility classes — opt-in, no automatic application that could break tests:
+
+- `.anim-reveal` — runs `reveal-up` once on mount.
+- `.anim-fade` — runs `fade-in` once on mount.
+- `.anim-stagger > *` — applies `reveal-up` with `animation-delay: calc(var(--i, 0) * 60ms)`. Fallback delays for nth-child(1..8) so components don't need inline styles to benefit.
+
+`@media (prefers-reduced-motion: reduce)` sets `animation: none !important` on all three utility classes, on top of the token-level duration neutralisation in `tokens.css`.
+
+#### 1.2 Glass StatusBar
+
+**Selector:** `.status-bar` (sticky brand chrome at the top of the Live workspace).
+
+Changes from current rules:
+
+- Add `position: sticky; top: 0; z-index: 30` so the bar floats over scrolled content (currently it just sits at the top of the grid).
+- Background: `hsl(0 0% 100% / 0.72)` plus `backdrop-filter: blur(14px) saturate(140%)`. Vendor-prefix `-webkit-backdrop-filter` for older Safari.
+- `box-shadow: var(--shadow-glass)` for the inner 1 px highlight + 1 px outer shadow combo.
+- Height 28 px → 32 px, padding 12 px → 14 px so the brand and chips don't crowd.
+- `letter-spacing: 0.03em` (was `0.02em`) for tighter typographic colour at small sizes.
+
+`.status-bar > .brand`: swap to `var(--font-display)`, `font-size: 13px`, `font-weight: 500`, `letter-spacing: 0.01em`, drop the uppercase transform so the serif actually reads as a serif (uppercase + Fraunces is hostile).
+
+`.status-bar .live-dot`: replace the simple `opacity` pulse with the `live-pulse` keyframe — pulse expands a ring of `hsl(155 62% 32% / .6)` outward, matching the green "EA WORKING" semantic. 2.4 s loop with `var(--ease-in-out)`.
+
+`.status-bar .refresh-btn:focus-visible`: explicit ring using `box-shadow: 0 0 0 3px var(--accent-ring)` so the keyboard target is unambiguous.
+
+#### 1.3 Sidebar
+
+**Selector:** `.sidebar` and `.sidebar nav button`.
+
+Changes:
+
+- `.sidebar nav button` — padding raised to `8px 10px 8px 14px` (extra left padding to make room for the active-state rail without shifting label position), `font-size: 12px` (was 11 px), `gap: 10px` (was 8 px) so the icon and label have room. Transitions for `background / color / border-color / transform` all use `var(--duration-1) var(--ease-out)`.
+- `.sidebar nav button:hover` — background `var(--panel-2)`, no border colour change, just background.
+- `.sidebar nav button:focus-visible` — `box-shadow: 0 0 0 3px var(--accent-ring)`, border `var(--accent)`. Outline removed since the shadow ring is the visible affordance.
+- `.sidebar nav button.active` — `color: var(--accent)`, `background: var(--accent-soft)`, transparent border (was a hard border). The active state now communicates through a token-soft fill instead of a heavy line.
+- `.sidebar nav button.active::before` — left rail bumped to `3px` wide, `18px` tall, centred via `top: 50%; transform: translateY(-50%)`, animates in with `reveal-up var(--duration-2) var(--ease-out)` so the rail "slides in" rather than appearing instantly. The pseudo-element is anchored at `left: 0` and is positioned relative to the button (already `position: relative`).
+
+#### 1.4 Tab strip
+
+**Selector:** `.workspace-tabs`, `.workspace-tab`.
+
+- Replace the per-tab underline (`.workspace-tab.active::after` currently 2 px under each tab) with a single moving slider element implemented via the existing per-tab pseudo-element, but with `transition: transform var(--duration-2) var(--ease-out)` on `.workspace-tab` so the colour swap eases in instead of snapping.
+- Active tab text → `var(--accent)` with `font-weight: 600`. Inactive tabs → `var(--ink-3)`. Hover → `var(--ink)`.
+- Tab labels get `letter-spacing: 0.005em` and an explicit Geist `font-feature-settings: "ss01"` so the active state has typographic weight (not just colour weight).
+
+#### 1.5 Account header & KPIs
+
+**Selector:** `.account-header`, `.account-header-title`, `.account-platform-card`, `.account-kpis`, `.kpi`, `.kpi-label`, `.kpi-amount`, `.kpi-delta`.
+
+- `.account-header` — `padding: 22px 24px`, `border-radius: var(--radius-3)` (12 px), `box-shadow: var(--shadow-2)` (was `--shadow-sm`), `border: 1px solid var(--line-subtle)`. Lifts the whole card a half-step above the workspace.
+- `.account-header-title` already display-serif from P1. Bump to `28px / weight 500 / letter-spacing: -0.015em` for newspaper-headline feel; size at small viewports clamps via `clamp(22px, 2.6vw, 28px)`.
+- `.account-platform-card` — `background: linear-gradient(180deg, var(--bg-elevated), var(--bg))`, `border-radius: var(--radius-2)`. Subtle vertical gradient gives the card depth without a hard shadow.
+- `.account-platform-card-icon` — 32 × 32 instead of 28 × 28, `background: linear-gradient(135deg, var(--accent-9), var(--accent-10))`, white icon. Replaces today's flat accent-soft fill.
+- `.ea-badge.ea-on` — keeps green pill but adds a 4 px `outline: 1px solid hsl(155 62% 32% / .25)` and a tiny `live-pulse` dot before the label text for "alive" feedback.
+- `.account-kpis` — gets `class="account-kpis anim-stagger"` (the `anim-stagger` class added in markup — minimal JSX touch). Inline `style={{ "--i": i }}` not needed because nth-child fallbacks in motion.css cover 1..8.
+  - Falls back to no animation under reduced motion.
+  - First-mount-only via `animation-fill-mode: backwards`; no looping.
+- `.kpi-amount` — `font-size: 24px` for non-primary KPIs (was 22 px), `26px` for `.kpi-primary` (was 26 px). Slight bump so they read as headline numbers.
+- `.kpi-delta` — adds a 1 px outline using the soft tone of the direction colour (`outline: 1px solid hsl(155 62% 32% / .2)` for up, `.../.2` for down). Currently fills are flat — the outline gives them definition against the white card.
+
+(One tiny JSX touch needed: append `anim-stagger` class to the `.account-kpis` wrapping div. This is the only JSX change in P2 and is a one-line edit.)
+
+#### 1.6 Data tables — sticky head + hover-lift
+
+**Selectors:** `.data-table-wrap`, `.data-table thead`, `.data-table thead th`, `.data-table tbody tr`.
+
+- `.data-table-wrap` — `max-height: calc(100vh - 240px)` so tables scroll inside the panel instead of pushing the whole workspace down. `overflow: auto` on the wrap; the table inside stays at natural height.
+- `.data-table thead` — `position: sticky; top: 0; z-index: 5; background: var(--panel-2)`. So when you scroll a long Providers list, headers stay anchored.
+- `.data-table thead th` — `backdrop-filter: blur(8px)` on top of the panel-2 fill so the sticky head still feels layered when content scrolls behind. Add `box-shadow: 0 1px 0 var(--line)` for a hairline that survives the sticky.
+- `.data-table tbody tr` — already has `transition: background 0.08s`. Bump to `transition: background var(--duration-1) var(--ease-out)` so hover matches the motion vocabulary.
+- `.data-table tbody tr:hover` — `background: var(--panel-2)`. Resist the temptation to use `transform: translateY(-1px)` on `<tr>` (illegal on tbody rows in many browsers); the background swap is enough.
+- `.data-table-row-head strong` — keep monospaced when it's a numeric ID (Trade IDs in History). When it's a provider name (Providers tab), use `var(--font-display)` at `font-size: 14px / font-weight: 500 / letter-spacing: -0.005em` so the canonical column reads with editorial character. Distinguish via the existing `data-table-row-head` class plus a new modifier (`.data-table-row-head--name` for prose, plain for codes). No JSX change required if the existing markup already uses the same class — we just add a CSS-only descendant selector that targets `strong` when the parent has the name-like content. Simpler approach: keep all `data-table-row-head strong` mono for now and revisit if it reads poorly.
+- Per-row gear icons (`.data-table-actions .icon-btn`) — currently visible always. Switch to `opacity: 0; transition: opacity var(--duration-1) var(--ease-out)` and `tr:hover .icon-btn { opacity: 1 }`. Keeps tables visually quiet until you intend to act. **`:focus-within` override** so keyboard nav still shows them.
+
+#### 1.7 Modal
+
+**Selectors:** `.modal-overlay`, `.modal`.
+
+- `.modal-overlay` — change `background: rgba(15, 23, 42, 0.35)` to `background: hsl(220 30% 12% / .28); backdrop-filter: blur(8px) saturate(110%); -webkit-backdrop-filter: ...`. Cinematic scrim, on-brand for a finance product.
+- `.modal-overlay` — `animation: fade-in var(--duration-2) var(--ease-out)`.
+- `.modal` — `animation: scale-in var(--duration-3) var(--ease-out)` for a 96→100 % scale + 8 px slide-up. `transform-origin: center`. `box-shadow: var(--shadow-3)` (was `--shadow-md`).
+- `.modal-head` — sticky inside the scrollable modal: `position: sticky; top: 0; background: hsl(0 0% 100% / .94); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line-subtle)`. So if a modal grows tall (Provider Config with runner + many TP rows), the title and close stay visible.
+- `.modal-head h2` — `font-family: var(--font-display); font-optical-sizing: auto; font-size: 18px; font-weight: 500; letter-spacing: -0.005em`. Inherits from the global `h1/h2/h3` rule already, but we re-state with the size adjustment because the global rule only sets the family.
+- Footer CTAs: ensure `.btn-primary:hover { box-shadow: var(--shadow-2) }` so the primary action has a visible lift on hover.
+
+#### 1.8 Sign-in screen polish
+
+**Selectors:** `.signin-shell`, `.signin-main`, `.signin-logo`, `.signin-title`, `.floating-field`.
+
+- `.signin-shell` — body background gets `radial-gradient(circle at top, hsl(199 75% 96%) 0%, var(--bg) 60%)`. Atmospheric tint that subtly references Telegram blue without overdoing it.
+- `.signin-logo` — `box-shadow: inset 0 0 0 1px hsl(0 0% 100% / .25), 0 8px 28px hsl(199 75% 49% / .25)`. Inner ring for definition, soft Telegram-blue glow for warmth.
+- `.signin-title` already display-serif from P1. Pull `letter-spacing: -0.02em` tighter and bump weight to 500 (was 600) — Fraunces at 34 px wants thinner strokes for elegance.
+- `.signin-subtitle` — `max-width: 380px`, `line-height: 1.55`, `color: var(--ink-3)`. Slightly more breathable than today.
+- `.floating-field input:focus` — switch the focus ring from current `box-shadow: 0 0 0 3px rgba(34, 158, 217, 0.12)` to `box-shadow: 0 0 0 4px hsl(199 75% 49% / .15)`. Slightly thicker, softer.
+- `.signin-cta` — `letter-spacing: 0.06em` (was `0.04em`). `font-weight: 600` (was 700) — the heavier weight reads as small-caps once uppercase-d, lighter weight feels more refined.
+- `.signin-cta:hover:not(:disabled)` — `box-shadow: 0 8px 20px hsl(199 75% 49% / .25)`. Lift on hover so the CTA feels pressable.
+
+#### 1.9 Buttons — token-driven system
+
+**Selectors today:** `.btn-primary`, `.btn-ghost`, `.btn-small`, `.row-btn`, `.icon-btn`, `.icon-btn-danger`, `.config-row-delete`, scattered button styles inside `.modal-form`, `.panel-toolbar button`, etc.
+
+Goal: one source of truth, no per-component button styles.
+
+New base class `.btn` (defined in `base.css`):
+
+```css
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border: 1px solid transparent;
+  border-radius: var(--radius-1);
+  cursor: pointer;
+  transition: background var(--duration-1) var(--ease-out),
+              color var(--duration-1) var(--ease-out),
+              border-color var(--duration-1) var(--ease-out),
+              box-shadow var(--duration-1) var(--ease-out),
+              transform var(--duration-1) var(--ease-out);
+}
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-ring); }
+```
+
+Variants:
+
+- `.btn-primary` — accent fill, white text, `var(--shadow-1)` resting, `var(--shadow-2)` on hover, hover bg `var(--accent-10)`.
+- `.btn-ghost` — transparent, `var(--ink-2)` text, `var(--line)` border on hover only, hover bg `var(--panel-2)`.
+- `.btn-destructive` — `var(--down-9)` text, `var(--down-soft)` fill, hover fills slightly stronger.
+- `.btn-icon` — square 32 × 32, padding 0, used by gear / X / refresh. `.btn-icon-sm` 28 × 28 for table-row gears.
+- `.btn-small` — height 28 px, padding `0 12px`. Used in modal toolbars.
+
+Migration path: rules are added without removing the legacy classes. Each component-level button keeps working. P3 sweeps through and consolidates JSX `className="btn-primary"` etc. to the canonical names.
+
+#### 1.10 Empty states (preview for P4)
+
+Not built in P2, but P2 establishes the visual mould:
+
+- `.empty-state` — currently a flat `<div className="empty-state">Queue is empty</div>`. Update CSS to: `display: grid; gap: 6px; place-items: center; padding: 40px 24px; color: var(--ink-3); text-align: center; min-height: 120px`. Plus an SVG glyph slot.
+
+P4 wraps this in a proper React component.
+
+---
+
+### 2. P3 — Page extraction + sortable tables
+
+**Goal:** App.tsx becomes a routing shell ≤ 200 LOC. Per-tab JSX moves into discrete files so each tab can be iterated without rebuilding the whole tree. Tables get sortable headers without per-component logic.
+
+This is a **JSX restructure** — coordinated against your concurrent backend pass. If you have other component edits in flight when P3 lands, we cherry-pick instead of rebasing.
+
+#### 2.1 New hook: `useSortableTable`
+
+`apps/web/src/hooks/useSortableTable.ts`
+
+```ts
+type Direction = "asc" | "desc";
+
+export function useSortableTable<T, K extends keyof T>(
+  rows: T[],
+  defaultKey: K,
+  defaultDir: Direction = "asc",
+): {
+  sortedRows: T[];
+  sortKey: K;
+  sortDir: Direction;
+  toggle: (key: K) => void;
+  sortAria: (key: K) => "ascending" | "descending" | "none";
+};
+```
+
+Implementation notes:
+
+- Stable sort via `[...rows].sort()` with a comparator that handles `string | number | null | undefined`. Null sorts last regardless of direction.
+- `toggle(key)`: same key flips direction, different key sets direction to `defaultDir`.
+- `sortAria(key)`: returns the value to put in `aria-sort` on the header.
+- No persistence in v1 (sort state resets on tab switch). Optional localStorage persistence is a P5 stretch.
+
+#### 2.2 Sortable header markup contract
+
+Each data-table column header that wants to be sortable:
+
+```tsx
+<th
+  scope="col"
+  aria-sort={sortAria("pips")}
+  onClick={() => toggle("pips")}
+  className="data-table-th-sortable"
+>
+  Pips
+  <span className="sort-indicator" aria-hidden="true" />
+</th>
+```
+
+CSS additions (`base.css`):
+
+- `.data-table-th-sortable` — `cursor: pointer; user-select: none`. Hover bumps colour to `var(--ink)`.
+- `.sort-indicator` — 8 × 12 inline-block. `::before` and `::after` render up/down arrows via `border` triangles, dim by default.
+- `[aria-sort="ascending"] .sort-indicator::before` — bright accent.
+- `[aria-sort="descending"] .sort-indicator::after` — bright accent.
+- `[aria-sort="none"] .sort-indicator::before`, `[aria-sort="none"] .sort-indicator::after` — both dim.
+
+#### 2.3 Page extraction
+
+App.tsx today owns:
+
+- Snapshot polling (`useEffect` + fetch + interval).
+- Setup-step state (sign-in / code / 2FA / connected).
+- Form state for fixture classifications, redacted text, parser tabs.
+- Provider toggle / save handlers.
+- Alias / mapping save handlers.
+- Settings (execution + Azure GPT key) save handler.
+- Snapshot-derived `accountHeaderData` memo.
+- Command palette state.
+- Hotkey wiring.
+- The 8-tab routing tree (Performance / Providers / History / Equity Guardian / Symbol Settings / Logs + sidebar destinations Telegram Setup / Linked Accounts / Settings).
+
+After P3, App.tsx becomes:
+
+```tsx
+function App({ initialSnapshot, initialDialogs }) {
+  const session = useTelegramSession(initialSnapshot);
+  const dashboard = useDashboardSnapshot(initialSnapshot);
+  const providerActions = useProviderActions(dashboard.refresh);
+  const mappingActions = useSymbolMappingActions(dashboard.refresh);
+  const settingsActions = useSettingsActions(dashboard.refresh);
+
+  if (session.step !== "connected") return <SignIn {...session} />;
+
+  return (
+    <main className="app-shell">
+      <StatusBar dashboard={dashboard} onCommandPalette={...} />
+      <Sidebar activeView={view} onNavigate={navigate} />
+      <section className="workspace">
+        {view === "dashboard" && (
+          <>
+            <AccountHeader data={dashboard.accountHeader} />
+            <WorkspaceTabs value={tab} onChange={setTab} />
+            <PageRouter tab={tab} dashboard={dashboard}
+                       providerActions={providerActions}
+                       mappingActions={mappingActions} />
+          </>
+        )}
+        {view === "telegram"  && <TelegramSetupPage session={session} dialogs={dialogs} />}
+        {view === "mt5"       && <LinkedAccountsPage dashboard={dashboard} />}
+        {view === "settings"  && <SettingsPage dashboard={dashboard} actions={settingsActions} />}
+      </section>
+      <ProviderConfigModal ... />
+      <SymbolMappingModal ... />
+      <CommandPalette ... />
+    </main>
+  );
+}
+```
+
+Target App.tsx ≤ 200 LOC. Realistic estimate: ~180 LOC after extraction.
+
+#### 2.4 Pages directory
+
+```
+apps/web/src/pages/
+├── PerformancePage.tsx       (GrowthChart + future MonthlyBars + latency strip)
+├── ProvidersPage.tsx         (ProvidersTable + ProviderConfigModal open trigger)
+├── HistoryPage.tsx           (HistoryTable + broker-trail expansion state)
+├── EquityGuardianPage.tsx    (current placeholder + threshold form + breach feed)
+├── SymbolSettingsPage.tsx    (SymbolMappingsTable + SymbolMappingModal open trigger)
+├── LogsPage.tsx              (Parser Lab + Signal Queue + Execution Logs combined feed)
+├── TelegramSetupPage.tsx     (SetupFlow + DialogPicker + saved-fixtures pointer)
+├── LinkedAccountsPage.tsx    (AccountRow list, link-code UI, slot rename + unlink)
+└── SettingsPage.tsx          (Execution settings + Azure GPT key field + default SL/TP defaults)
+```
+
+Each page is a function component that receives the slice of state it needs as props. No global stores. No context (deliberate — keeps the dependency surface explicit). Props are typed via the same `DashboardSnapshot` already exported from `App.tsx`.
+
+`<PageRouter />`: a thin switch over the `activeTab` string returning the right `<Page />`. Lives at `apps/web/src/pages/PageRouter.tsx`.
+
+#### 2.5 Hooks directory
+
+```
+apps/web/src/hooks/
+├── useDashboardSnapshot.ts   (poll + state + refresh + lastPollError + refreshing)
+├── useTelegramSession.ts     (setupStep + form + start/code/password/dialogs)
+├── useProviderActions.ts     (toggleProvider, saveProviderSettings, approveSignal, ignoreSignal)
+├── useSymbolMappingActions.ts(saveGlobalAlias, saveAccountMapping, deleteAlias)
+├── useSettingsActions.ts     (saveExecutionSettings, saveAzureGptKey)
+├── useSortableTable.ts       (defined in §2.1)
+└── useHotkeys.ts             (already exists; keep)
+```
+
+Each hook owns its own fetch handlers + any local state. Returns a typed object of (current values, actions). Pages call hooks at the top level via App.tsx; hooks don't call each other.
+
+#### 2.6 Test impact
+
+Tests today rely on accessible names (`getByRole("tab", { name: "Providers" })`, `getByLabelText("Channel lot size for Alpha FX Signals")`, etc.). Page extraction preserves accessible names so the existing 10 web tests remain unchanged.
+
+Two new tests added in P3:
+
+- Sortable Providers column toggles `aria-sort` and reorders rows.
+- Per-row gear icon stays visible when focused via keyboard (regression for the opacity-0 hover-only change in P2).
+
+#### 2.7 Risk and rollback
+
+P3 is a real refactor. If it goes sideways we roll back the whole commit; tokens.css, motion.css, and the polish in P2 are unaffected.
+
+---
+
+### 3. P4 — Skeletons + empty states
+
+**Goal:** loading and empty states feel intentional, not "the data didn't come". CSS-only shimmer plus two tiny components.
+
+#### 3.1 `Skeleton` component
+
+`apps/web/src/components/Skeleton.tsx`:
+
+```tsx
+export function SkeletonLine({ width = "100%", height = 12 }) { ... }
+export function SkeletonRow({ columns = 4 }) { ... }        // wraps in <tr>/<td>
+export function SkeletonStat() { ... }                       // for KPI placeholder
+export function SkeletonChart({ height = 320 }) { ... }      // for GrowthChart placeholder
+```
+
+CSS (`base.css`):
+
+```css
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--panel-2) 0%,
+    var(--panel-hover) 50%,
+    var(--panel-2) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: var(--radius-1);
+  color: transparent;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+}
+```
+
+Wired into:
+
+- `useDashboardSnapshot.refreshing === true && !snapshot.providers.length` → render `<SkeletonRow columns={12} />` × 6 inside `<ProvidersTable />`.
+- Same for `<HistoryTable />`, `<SymbolMappingsTable />`, `<LogRow />` list.
+- `<AccountHeader />` shows 5 × `<SkeletonStat />` instead of `—` placeholders on first load.
+- `<GrowthChart />` shows `<SkeletonChart />` until uplot's lazy chunk + initial series resolve.
+
+#### 3.2 `EmptyState` component
+
+`apps/web/src/components/EmptyState.tsx`:
+
+```tsx
+export function EmptyState({
+  glyph,         // line-art SVG, single colour, 32 × 32
+  title,         // short heading
+  body,          // optional one-line explanation
+  action,        // optional <button> for "Add provider", "Connect EA", etc.
+}: EmptyStateProps);
+```
+
+CSS:
+
+```css
+.empty-state-card {
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  padding: 56px 24px;
+  text-align: center;
+  color: var(--ink-3);
+}
+.empty-state-card svg { color: var(--ink-faint); }
+.empty-state-card strong {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--ink-2);
+}
+.empty-state-card p { max-width: 320px; font-size: 12px; line-height: 1.5; margin: 0; }
+```
+
+Used in:
+
+- Logs tab → "No execution logs yet. Once the EA processes a signal it will appear here." with a tiny terminal-style glyph.
+- Providers tab → "No providers configured. Select one from Telegram Setup." with an arrow glyph + the action button.
+- Symbol Settings tab → "No symbol mappings yet." with a mapping glyph + "Add mapping" action.
+- History tab → "No trades yet. Approved signals will appear here."
+- Signal Queue → "Queue is empty."
+- Equity Guardian → "No drawdown breaches recorded."
+
+#### 3.3 Polling indicator
+
+`useDashboardSnapshot.refreshing` already exists. P4 wires it into the StatusBar:
+
+- When refreshing, the existing `.live-dot` overlays a thin 1 px ring scaling 0 → 1 outward (already partly captured by the `live-pulse` keyframe from P2 — extend it).
+- When `lastPollError` flips true, the dot turns `var(--down-9)` for 4 s, then returns to `var(--up-9)` so transient blips read as a flash without scaring the operator.
+
+#### 3.4 Test impact
+
+- New test: providers table renders 6 skeleton rows when `refreshing && providers.length === 0`.
+- New test: empty Logs tab shows the EmptyState glyph + body.
+
+---
+
+### 4. P5+ — Stretch (after P2-P4 ship)
+
+Ordered by impact:
+
+1. **Sortable persistence** — write each table's `(sortKey, sortDir)` to `localStorage` keyed by table name. Hydrate on mount.
+2. **Tab content reveal** — wrap `<PageRouter>`'s active child in `<div key={activeTab} className="anim-reveal">` so tab switches fade their content in (not the chrome). One-line change in App.tsx after P3.
+3. **Command palette refinement** — already exists. Pass: dim non-matching entries instead of hiding them, render a thin breadcrumb of recently used actions at the top, keyboard-loop on arrow-down.
+4. **Equity Guardian + Linked Accounts + Settings polish pass** — these pages already exist in the JSX but haven't had a full polish pass. P5 audits each against the new tokens: card layout, field grouping, focus rings, copy.
+5. **Dark mode** — already supported by the token system architecturally. Flip on by:
+   - Adding `[data-theme="dark"]` overrides for `--bg`, `--bg-elevated`, `--panel`, `--panel-2`, `--line`, `--ink-*`, `--accent-soft`, `--shadow-*`, `--font-feature-settings` (Geist's stylistic set sometimes needs different alts on dark).
+   - Adding a theme toggle to StatusBar (sun/moon icon, persisted to localStorage).
+   - Auditing every backdrop-filter / shadow / glassmorphism rule for dark-mode contrast.
+   - Should be ~1 day of work and ~80 lines of CSS overrides if P2 is done well.
+6. **Brand favicon + theme-color meta** — tiny but cheap. Generate a 32 × 32 SVG favicon using the StatusBar's brand mark + Fraunces `T`.
+7. **Page transitions via `<ViewTransition>` (View Transitions API)** — wrap `setActiveTab` in `document.startViewTransition()` for a Chrome / Safari TP fade-cross. Progressive enhancement only.
+
+---
+
+### 5. Out of scope (deliberate)
+
+- Backend / parser / EA / migration changes — you own these.
+- Replacing existing components with shadcn / Radix primitives. Rejected in favor of vanilla CSS + design tokens.
+- Server-rendering / SSR — the app is a single SPA served static.
+- Internationalisation — not required for the operator-facing tool.
+- Mobile-first responsive refinement — the operator workflow is desktop-first. Existing media queries hold at 1024 px and 768 px and remain in place; we don't expand to phone.
+- A typed API client module — Rantoniaina-style `apps/web/src/api/client.ts` was in the original audit. The current handler-per-page pattern works fine at this scale; revisit only if the hooks grow.
+
+---
+
+### 6. Commit hygiene
+
+Per the workflow rule (one `changelog.md` entry per commit):
+
+| Commit | Files | Risk |
+|---|---|---|
+| P1 (shipped `4d2d45a`) | `apps/web/index.html`, `apps/web/src/main.tsx`, `apps/web/src/styles/tokens.css` (new), `apps/web/src/styles/base.css` (renamed) | Low — CSS-only. |
+| P2 | `apps/web/src/styles/motion.css` (new), `apps/web/src/styles/base.css`, `apps/web/src/main.tsx`, `apps/web/src/components/AccountHeader.tsx` (single className edit only) | Low — CSS-only except one className touch on AccountHeader. |
+| P3 | `apps/web/src/App.tsx` (gut), `apps/web/src/pages/*` (9 new files), `apps/web/src/hooks/*` (4 new files + 1 update), `apps/web/src/components/{ProvidersTable,HistoryTable,SymbolMappingsTable}.tsx` (sortable header markup), `apps/web/src/App.test.tsx` (+ 2 sortable tests) | Medium — real refactor; full test suite must stay green. |
+| P4 | `apps/web/src/components/Skeleton.tsx` (new), `apps/web/src/components/EmptyState.tsx` (new), `apps/web/src/styles/base.css` (skeleton + empty-state styles), each page wires loading + empty branches, `apps/web/src/App.test.tsx` (+ 2 tests) | Low — additive components. |
+
+Coordination rule with your parallel backend pass: I never commit files outside the table above without explicit ack. If a file I want to touch is already modified in your working tree, we resolve before the commit.
+
+---
+
+### 7. Verification matrix
+
+Each commit must pass:
+
+| Check | Command | Required outcome |
+|---|---|---|
+| Web tests | `bun test apps/web/` | All green (10 today; grows to 14 after P3 + P4). |
+| API tests | `bun test apps/api/` | Untouched by UI work. Must still pass. |
+| Typecheck | `bun run typecheck` | Clean. |
+| Lint | `bun run lint` | Clean (warnings ok). |
+| Build | `bun run --cwd apps/web build` | Clean. Bundle stays ≤ 280 KB main + 52 KB lazy uplot + ≤ 55 KB CSS. |
+
+Visual walkthrough via Chrome MCP after each commit:
+
+- **Sign-in screen** at 1440 × 900 — verify Fraunces title, atmospheric gradient, focus ring on phone field, soft Telegram-blue logo glow.
+- **Live → Performance** — KPI stagger reveal on first mount, glass StatusBar holds on scroll, GrowthChart canvas size correct on resize.
+- **Providers tab** — sticky header survives scroll, hover lifts the row, gear icon fades in on hover, modal opens with scale-in.
+- **History tab** — sticky head, TP chip palette correct in light theme, broker-trail expansion still works.
+- **Symbol Settings** — Add-mapping modal entrance, scope toggle (global/provider/account), all three forms keep their accessible names.
+- **Logs tab** — Parser Lab + Signal Queue + Execution Logs combined feed, Approve/Ignore buttons styled, GPT extraction button visible.
+- **Linked Accounts** — link-code workflow renders, slot rows readable.
+- **Settings** — Azure GPT key field looks intentional, default SL/TP pip fields look intentional.
+- **Reduced motion** — toggle in DevTools rendering; verify staggers, scale-in, shimmer, live-pulse all no-op.
+- **Keyboard nav** — tab through entire Live workspace; every interactive element has a visible `:focus-visible` ring; modal traps focus on open.
+- **1024 × 768 + 768 × 1024 resize** — account-kpis collapses 5 → 3 → 2, sidebar collapses on narrow.
+
+---
+
+## Frontend UI Improvements — proposal (historical, 2026-05-09)
+
+The original audit below recommended a **modern dark terminal** direction. That recommendation has been **superseded** by:
+
+- The TSC-style pivot to a **light theme** with indigo accent (committed in `b331ff1` and subsequent commits).
+- The latest planning round which adopted the **modern editorial finance** direction with Fraunces + Geist + JetBrains Mono + cobalt accent (committed in `4d2d45a`).
+
+The audit's *Pass 1 / Pass 2 / Pass 3* checklist below is largely delivered: status bar, in-workspace tabs, real Providers data table with gear-icon modal, provider config modal with channel-lot-size first field, refresh button wired, `activeView` properly filtering, exec log timestamps, lot-size locale-safe formatting, etc. The dark-theme palette and cyan accent values listed in *Pass 1* should be ignored.
+
+The sections that follow are retained for traceability and historical context. Do not implement the dark palette specified in *Pass 1 — Visual language swap*; refer to the **Premium UI overhaul — May 2026 roadmap** above for the current direction.
+
+---
+
 # Frontend UI Improvements — proposal
 
 Date: 2026-05-09

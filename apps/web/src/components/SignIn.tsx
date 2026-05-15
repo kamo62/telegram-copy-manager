@@ -3,6 +3,9 @@ import type { SetupFormState } from "./SetupFlow";
 
 export function SignIn({
   form,
+  busy = false,
+  error = "",
+  onReset,
   setupStep,
   setForm,
   startTelegramConnection,
@@ -10,6 +13,9 @@ export function SignIn({
   submitPassword,
 }: {
   form: SetupFormState;
+  busy?: boolean;
+  error?: string;
+  onReset?: () => Promise<void> | void;
   setupStep: "credentials" | "code" | "password" | "connected";
   setForm: React.Dispatch<React.SetStateAction<SetupFormState>>;
   startTelegramConnection: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
@@ -53,6 +59,11 @@ export function SignIn({
           {copy.title}
         </h1>
         <p className="signin-subtitle">{copy.subtitle}</p>
+        {error ? (
+          <p className="signin-meta" role="alert">
+            {error}
+          </p>
+        ) : null}
 
         {setupStep === "credentials" ? (
           <form className="signin-form" onSubmit={startTelegramConnection}>
@@ -66,8 +77,8 @@ export function SignIn({
               required
               value={form.phone}
             />
-            <button className="signin-cta" disabled={!phoneValid} type="submit">
-              Next
+            <button className="signin-cta" disabled={!phoneValid || busy} type="submit">
+              {busy ? "Sending..." : "Next"}
             </button>
             <p className="signin-meta">
               Telegram API credentials are loaded from the server's <code>.env</code>; only your
@@ -87,9 +98,14 @@ export function SignIn({
               required
               value={form.code}
             />
-            <button className="signin-cta" disabled={!form.code.trim()} type="submit">
+            <button className="signin-cta" disabled={!form.code.trim() || busy} type="submit">
               Verify code
             </button>
+            {onReset ? (
+              <button className="btn-ghost" onClick={onReset} type="button">
+                Wrong phone number? Start over
+              </button>
+            ) : null}
           </form>
         ) : null}
 
@@ -104,9 +120,14 @@ export function SignIn({
               type="password"
               value={form.password}
             />
-            <button className="signin-cta" disabled={!form.password.trim()} type="submit">
+            <button className="signin-cta" disabled={!form.password.trim() || busy} type="submit">
               Finish setup
             </button>
+            {onReset ? (
+              <button className="btn-ghost" onClick={onReset} type="button">
+                Use another phone number
+              </button>
+            ) : null}
           </form>
         ) : null}
       </main>

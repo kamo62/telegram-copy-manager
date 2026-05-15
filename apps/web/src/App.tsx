@@ -1,28 +1,36 @@
-import { RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
-import { AccountRow } from "./components/AccountRow";
-import { buildPlaceholderGrowth, GrowthChart } from "./components/GrowthChart";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
-import { DialogPicker, type TelegramDialogSummary } from "./components/DialogPicker";
-import { LogRow } from "./components/LogRow";
-import { Panel } from "./components/Panel";
-import { ParserResult } from "./components/ParserResult";
+import type { TelegramDialogSummary } from "./components/DialogPicker";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { KeyboardShortcutsOverlay } from "./components/KeyboardShortcutsOverlay";
+import { LiveRegion } from "./components/LiveRegion";
+import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import {
   ProviderConfigModal,
   type ProviderConfigSubmission,
+  type ProviderConfigTestResult,
 } from "./components/ProviderConfigModal";
-import { ProvidersTable, type ProviderRowData } from "./components/ProvidersTable";
-import { QueueItem } from "./components/QueueItem";
-import { SetupFlow, type SetupFormState } from "./components/SetupFlow";
-import { SignIn } from "./components/SignIn";
+import type { ProviderRowData } from "./components/ProvidersTable";
+import type { SetupFormState } from "./components/SetupFlow";
 import { navItems, Sidebar } from "./components/Sidebar";
+import { SignIn } from "./components/SignIn";
+import { SmallViewportNotice } from "./components/SmallViewportNotice";
 import { StatusBar } from "./components/StatusBar";
-import { type TabId, tabOptions, WorkspaceTabs } from "./components/WorkspaceTabs";
-import { HistoryTable } from "./components/HistoryTable";
 import { SymbolMappingModal } from "./components/SymbolMappingModal";
-import { SymbolMappingsTable } from "./components/SymbolMappingsTable";
+import { type TabId, WorkspaceTabs } from "./components/WorkspaceTabs";
+import { useAnnouncer } from "./hooks/useAnnouncer";
 import { useHotkeys } from "./hooks/useHotkeys";
+import { apiDelete, apiFetch, apiGet, apiPatch, apiPost } from "./lib/api";
+import { EquityGuardianPage } from "./pages/EquityGuardianPage";
+import { HistoryPage } from "./pages/HistoryPage";
+import { LinkedAccountsPage } from "./pages/LinkedAccountsPage";
+import { LogsPage } from "./pages/LogsPage";
+import { PerformancePage } from "./pages/PerformancePage";
+import { ProvidersPage } from "./pages/ProvidersPage";
+import { SettingsPage } from "./pages/SettingsPage";
+import { SymbolSettingsPage } from "./pages/SymbolSettingsPage";
+import { TelegramSetupPage } from "./pages/TelegramSetupPage";
 
 export interface DashboardSnapshot {
   health: {
@@ -33,12 +41,51 @@ export interface DashboardSnapshot {
   appSettings: {
     defaultLotSize: number;
     defaultRiskPercent: number;
+    defaultStopLossPips: number;
+    defaultTakeProfitPips: number;
     pollingIntervalSeconds: number;
     allowedOrderTypes: string[];
+    azureOpenAIKeyConfigured: boolean;
   };
+  accountPerformance?: {
+    currency: string;
+    initialBalance: number | null;
+    totalProfit: number | null;
+    today: number | null;
+    thisWeek: number | null;
+    thisMonth: number | null;
+    equityCurve?: Array<{ x: number; equity: number; drawdown: number }>;
+  };
+  providerPerformance?: Array<{
+    id: string;
+    pips: number;
+    pnl: number;
+    profit: number;
+    gain: number;
+    winRate: number;
+    averageDrawdown: number;
+  }>;
+  accountSlots?: Array<{
+    id: string;
+    name: string;
+    linkCode: string;
+    status: string;
+    accountNumber: string;
+    server: string;
+  }>;
+  accountProviderLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
+  equityGuardians?: Array<{
+    accountId: string;
+    accountNumber: string;
+    threshold: number;
+    currentDrawdown: number;
+    paused: boolean;
+    breaches: unknown[];
+  }>;
   telegramSessions: Array<{ id: string; phone: string; status: string; profileId?: string }>;
   providers: Array<{
     id: string;
+    dialogId: string;
     title: string;
     enabled: boolean;
     parserMode: string;
@@ -69,6 +116,15 @@ export interface DashboardSnapshot {
     confidence: number;
     reviewRequired: boolean;
   }>;
+  parserFixtures?: Array<{
+    id: string;
+    providerLabel: string;
+    classification: string;
+    rawText: string;
+    expectedCommandType: string;
+    expectedSymbol: string;
+    createdAt: string;
+  }>;
   signalQueue: Array<{
     id: string;
     commandType: string;
@@ -88,11 +144,15 @@ export interface DashboardSnapshot {
       status: string;
     }>;
   }>;
+  brokerOrders?: Array<BrokerOrderRow>;
   symbolMappings: Array<{
     rawSymbol: string;
     canonicalSymbol: string;
     brokerSymbol: string;
     status: string;
+    scope?: string;
+    providerId?: string;
+    accountId?: string;
   }>;
   executionLogs: Array<{
     id: string;
@@ -104,25 +164,84 @@ export interface DashboardSnapshot {
   }>;
 }
 
+export interface BrokerOrderRow {
+  id: string;
+  logicalTradeId: string;
+  legId: string;
+  action: string;
+  orderTicket: string;
+  positionTicket: string;
+  dealTicket: string;
+  filledVolume?: number;
+  filledPrice?: number;
+  retcode: number;
+  brokerComment: string;
+  createdAt: string;
+}
+
 export type { TelegramDialogSummary };
+
+const telegramAuthStorageKey = "telegram-tc.pending-auth";
 
 const emptySnapshot: DashboardSnapshot = {
   health: { status: "loading", database: "loading", telegramAdapter: "mock" },
   appSettings: {
     defaultLotSize: 0.1,
     defaultRiskPercent: 1,
+    defaultStopLossPips: 50,
+    defaultTakeProfitPips: 200,
     pollingIntervalSeconds: 2,
     allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
+    azureOpenAIKeyConfigured: false,
   },
+  accountPerformance: undefined,
+  providerPerformance: [],
+  accountSlots: [],
+  accountProviderLinks: [],
+  equityGuardians: [],
   telegramSessions: [],
   providers: [],
   mt5Accounts: [],
   parserResults: [],
+  parserFixtures: [],
   signalQueue: [],
   logicalTrades: [],
   symbolMappings: [],
   executionLogs: [],
 };
+
+function emptySetupForm(): SetupFormState {
+  return {
+    apiId: "",
+    apiHash: "",
+    phone: "",
+    code: "",
+    password: "",
+    sessionId: "",
+    profileId: "",
+  };
+}
+
+function readPendingAuth(): Partial<SetupFormState> {
+  try {
+    return JSON.parse(
+      window.localStorage.getItem(telegramAuthStorageKey) ?? "{}",
+    ) as Partial<SetupFormState>;
+  } catch {
+    return {};
+  }
+}
+
+function writePendingAuth(form: SetupFormState) {
+  window.localStorage.setItem(
+    telegramAuthStorageKey,
+    JSON.stringify({ phone: form.phone, sessionId: form.sessionId, profileId: form.profileId }),
+  );
+}
+
+function clearPendingAuth() {
+  window.localStorage.removeItem(telegramAuthStorageKey);
+}
 
 export function App({
   initialDialogs = [],
@@ -133,7 +252,7 @@ export function App({
 }) {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(initialSnapshot ?? emptySnapshot);
   const [availableDialogs, setAvailableDialogs] = useState<TelegramDialogSummary[]>(initialDialogs);
-  const [, setLoading] = useState(!initialSnapshot);
+  const [initialLoading, setInitialLoading] = useState(!initialSnapshot);
   const [refreshing, setRefreshing] = useState(false);
   const [lastPollError, setLastPollError] = useState(false);
   const [activeView, setActiveView] = useState("dashboard");
@@ -141,26 +260,52 @@ export function App({
   const [configProvider, setConfigProvider] = useState<ProviderRowData | null>(null);
   const [parserTab, setParserTab] = useState("Recent Parses");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [setupError, setSetupError] = useState("");
   const [setupStep, setSetupStep] = useState<"credentials" | "code" | "password" | "connected">(
     initialSnapshot?.telegramSessions.some((session) => session.status === "CONNECTED")
       ? "connected"
-      : "credentials",
+      : readPendingAuth().sessionId
+        ? "code"
+        : "credentials",
   );
-  const [form, setForm] = useState<SetupFormState>({
-    apiId: "",
-    apiHash: "",
-    phone: "",
-    code: "",
-    password: "",
-    sessionId: "",
-    profileId: "",
-  });
+  const [form, setForm] = useState<SetupFormState>({ ...emptySetupForm(), ...readPendingAuth() });
   const [mappingModalOpen, setMappingModalOpen] = useState(false);
   const [fixtureClassifications, setFixtureClassifications] = useState<
     Record<string, "entry" | "management" | "noise" | "unknown">
   >({});
   const [redactedFixtureText, setRedactedFixtureText] = useState<Record<string, string>>({});
   const [fixtureStatus, setFixtureStatus] = useState<Record<string, string>>({});
+  const [aiReviewStatus, setAiReviewStatus] = useState<Record<string, string>>({});
+  const [parserActionStatus, setParserActionStatus] = useState<Record<string, string>>({});
+  const [brokerOrdersByTrade, setBrokerOrdersByTrade] = useState<Record<string, BrokerOrderRow[]>>(
+    {},
+  );
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const announce = useAnnouncer();
+  const [viewportTooSmall, setViewportTooSmall] = useState(() => {
+    if (typeof window === "undefined") return false;
+    if (window.localStorage.getItem("tg-tc.viewport-override") === "1") return false;
+    return window.innerWidth < 768;
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (window.localStorage.getItem("tg-tc.viewport-override") === "1") return;
+    let frame = 0;
+    function check() {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        setViewportTooSmall(window.innerWidth < 768);
+      });
+    }
+    window.addEventListener("resize", check);
+    return () => {
+      window.removeEventListener("resize", check);
+      window.cancelAnimationFrame(frame);
+    };
+  }, []);
 
   useEffect(() => {
     if (initialSnapshot) return;
@@ -168,9 +313,7 @@ export function App({
     async function load() {
       setRefreshing(true);
       try {
-        const response = await fetch("/api/dashboard");
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = (await response.json()) as DashboardSnapshot;
+        const data = await apiGet<DashboardSnapshot>("/api/dashboard");
         if (active) {
           setSnapshot(data);
           setLastPollError(false);
@@ -179,16 +322,27 @@ export function App({
         if (active) setLastPollError(true);
       } finally {
         if (active) {
-          setLoading(false);
+          setInitialLoading(false);
           setRefreshing(false);
         }
       }
     }
     void load();
-    const interval = window.setInterval(() => void load(), 15_000);
+    let interval = window.setInterval(() => void load(), 15_000);
+    function handleVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        window.clearInterval(interval);
+        interval = 0;
+      } else if (interval === 0 && active) {
+        void load();
+        interval = window.setInterval(() => void load(), 15_000);
+      }
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       active = false;
       window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [initialSnapshot]);
 
@@ -198,11 +352,38 @@ export function App({
     );
     if (hasConnectedSession) {
       setSetupStep((current) => (current === "connected" ? current : "connected"));
+      clearPendingAuth();
+      return;
     }
-  }, [snapshot.telegramSessions]);
+    const storedPending = readPendingAuth();
+    const pending = storedPending.sessionId
+      ? snapshot.telegramSessions.find(
+          (session) =>
+            session.id === storedPending.sessionId &&
+            (session.status === "CODE_REQUIRED" || session.status === "PASSWORD_REQUIRED"),
+        )
+      : undefined;
+    if (pending && !form.sessionId) {
+      setForm((current) => ({
+        ...current,
+        phone: storedPending.phone ?? pending.phone,
+        sessionId: pending.id,
+        profileId: pending.profileId ?? "",
+      }));
+      setSetupStep(pending.status === "PASSWORD_REQUIRED" ? "password" : "code");
+    }
+  }, [form.sessionId, snapshot.telegramSessions]);
+
+  const focusedAccount = useMemo(() => {
+    if (selectedAccountId) {
+      return snapshot.mt5Accounts.find((account) => account.id === selectedAccountId) ?? null;
+    }
+    return snapshot.mt5Accounts[0] ?? null;
+  }, [selectedAccountId, snapshot.mt5Accounts]);
 
   const accountHeaderData = useMemo<AccountHeaderData>(() => {
-    const primary = snapshot.mt5Accounts[0];
+    const primary = focusedAccount;
+    const perf = snapshot.accountPerformance;
     const broker = primary ? primary.server.split("-")[0] || primary.server : "—";
     const accountType = primary
       ? primary.server.toLowerCase().includes("demo")
@@ -219,15 +400,26 @@ export function App({
         eaActive,
       },
       kpis: {
-        initialBalance: null,
-        totalProfit: { amount: null, deltaPercent: null },
-        thisMonth: { amount: null, deltaPercent: null },
-        thisWeek: { amount: null, deltaPercent: null },
-        today: { amount: null, deltaPercent: null },
+        initialBalance: perf?.initialBalance ?? null,
+        totalProfit: { amount: perf?.totalProfit ?? null, deltaPercent: null },
+        thisMonth: { amount: perf?.thisMonth ?? null, deltaPercent: null },
+        thisWeek: { amount: perf?.thisWeek ?? null, deltaPercent: null },
+        today: { amount: perf?.today ?? null, deltaPercent: null },
       },
-      currency: "$",
+      currency: perf?.currency ?? "$",
     };
-  }, [snapshot.mt5Accounts]);
+  }, [focusedAccount, snapshot.accountPerformance]);
+
+  const sidebarAccounts = useMemo(
+    () =>
+      snapshot.mt5Accounts.map((account) => ({
+        id: account.id,
+        label: account.accountNumber || account.id,
+        status: account.heartbeatStatus,
+        online: account.heartbeatStatus === "online",
+      })),
+    [snapshot.mt5Accounts],
+  );
 
   const paletteCommands = useMemo<PaletteCommand[]>(
     () => [
@@ -257,7 +449,12 @@ export function App({
   );
 
   useHotkeys((event) => {
-    if (commandPaletteOpen) return;
+    if (commandPaletteOpen || shortcutsOpen) return;
+    if (event.key === "?") {
+      event.preventDefault();
+      setShortcutsOpen(true);
+      return;
+    }
     if (event.key === "r" || event.key === "R") {
       event.preventDefault();
       void refreshDashboard();
@@ -276,19 +473,43 @@ export function App({
     }
   });
 
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const view = navItems.find(([id]) => id === activeView)?.[1] ?? "Operations";
+    document.title = `TG-TC · ${view}`;
+  }, [activeView]);
+
   const activeProfileId =
     form.profileId ||
     snapshot.telegramSessions.find((session) => session.status === "CONNECTED")?.profileId ||
     "";
 
   const queuePending = snapshot.signalQueue.filter((item) => item.status === "PENDING").length;
+  const growthData = useMemo(() => {
+    const series = snapshot.accountPerformance?.equityCurve;
+    if (!series?.length) {
+      return buildPlaceholderGrowth(
+        snapshot.executionLogs.filter((log) => log.status === "EXECUTED").length,
+      );
+    }
+    return {
+      growth: [series.map((point) => point.x), series.map((point) => point.equity)] as [
+        number[],
+        number[],
+      ],
+      drawdown: [series.map((point) => point.x), series.map((point) => point.drawdown)] as [
+        number[],
+        number[],
+      ],
+      totalProfit: snapshot.accountPerformance?.totalProfit ?? 0,
+      numberOfTrades: series.length,
+    };
+  }, [snapshot.accountPerformance, snapshot.executionLogs]);
 
   async function refreshDashboard() {
     setRefreshing(true);
     try {
-      const response = await fetch("/api/dashboard");
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = (await response.json()) as DashboardSnapshot;
+      const data = await apiGet<DashboardSnapshot>("/api/dashboard");
       setSnapshot(data);
       setLastPollError(false);
     } catch {
@@ -300,39 +521,68 @@ export function App({
 
   async function startTelegramConnection(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const response = await fetch("/api/telegram/start", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ phone: form.phone }),
-    });
-    const data = (await response.json()) as {
-      sessionId: string;
-      profileId: string;
-      status: string;
-    };
-    setForm((current) => ({
-      ...current,
-      apiHash: "",
-      sessionId: data.sessionId,
-      profileId: data.profileId,
-    }));
-    setSetupStep(data.status === "CODE_REQUIRED" ? "code" : "connected");
-    if (data.status === "CONNECTED") {
-      await loadDialogs(data.profileId);
+    const formData = new FormData(event.currentTarget);
+    const phone = String(formData.get("phone") ?? form.phone).trim();
+    if (!phone) return;
+    setSetupBusy(true);
+    setSetupError("");
+    try {
+      const data = await apiPost<{
+        sessionId: string;
+        profileId: string;
+        status: string;
+        error?: string;
+      }>("/api/telegram/start", { phone });
+      if (data.error) throw new Error(data.error);
+      const nextForm = {
+        ...form,
+        phone,
+        apiHash: "",
+        sessionId: data.sessionId,
+        profileId: data.profileId,
+      };
+      setForm(nextForm);
+      if (data.status === "CODE_REQUIRED" || data.status === "PASSWORD_REQUIRED") {
+        writePendingAuth(nextForm);
+      }
+      setSetupStep(
+        data.status === "PASSWORD_REQUIRED"
+          ? "password"
+          : data.status === "CODE_REQUIRED"
+            ? "code"
+            : "connected",
+      );
+      if (data.status === "CONNECTED") {
+        clearPendingAuth();
+        await loadDialogs(data.profileId);
+      }
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : "Telegram login failed");
+    } finally {
+      setSetupBusy(false);
     }
   }
 
   async function submitCode(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const response = await fetch("/api/telegram/verify-code", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: form.sessionId, code: form.code }),
-    });
-    const data = (await response.json()) as { status: string };
+    let data: { status: string; error?: string };
+    try {
+      data = await apiPost<{ status: string; error?: string }>("/api/telegram/verify-code", {
+        sessionId: form.sessionId,
+        code: form.code,
+      });
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : "Telegram code verification failed");
+      return;
+    }
+    if (data.error) {
+      setSetupError(data.error);
+      return;
+    }
     setForm((current) => ({ ...current, code: "" }));
     setSetupStep(data.status === "PASSWORD_REQUIRED" ? "password" : "connected");
     if (data.status === "CONNECTED") {
+      clearPendingAuth();
       await loadDialogs(form.profileId);
       await refreshDashboard();
     }
@@ -340,44 +590,73 @@ export function App({
 
   async function submitPassword(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await fetch("/api/telegram/submit-password", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessionId: form.sessionId, password: form.password }),
+    await apiPost("/api/telegram/submit-password", {
+      sessionId: form.sessionId,
+      password: form.password,
     });
     setForm((current) => ({ ...current, password: "" }));
     setSetupStep("connected");
+    clearPendingAuth();
     await loadDialogs(form.profileId);
     await refreshDashboard();
   }
 
+  async function resetTelegramConnection() {
+    setSetupBusy(true);
+    setSetupError("");
+    try {
+      const sessionId =
+        form.sessionId ||
+        snapshot.telegramSessions.find((session) => session.status === "CONNECTED")?.id ||
+        snapshot.telegramSessions.find(
+          (session) => session.status === "CODE_REQUIRED" || session.status === "PASSWORD_REQUIRED",
+        )?.id;
+      if (sessionId) {
+        await apiPost("/api/telegram/disconnect", { sessionId });
+      }
+    } finally {
+      clearPendingAuth();
+      setForm(emptySetupForm());
+      setSetupStep("credentials");
+      setSetupBusy(false);
+      await refreshDashboard();
+    }
+  }
+
   async function loadDialogs(profileId = activeProfileId) {
     if (!profileId) return;
-    const response = await fetch(`/api/telegram/dialogs?profileId=${profileId}`);
-    const data = (await response.json()) as { dialogs: TelegramDialogSummary[] };
+    const data = await apiGet<{ dialogs: TelegramDialogSummary[] }>(
+      `/api/telegram/dialogs?profileId=${profileId}`,
+    );
     setAvailableDialogs(data.dialogs);
   }
 
   async function selectDialog(dialog: TelegramDialogSummary) {
     if (!activeProfileId) return;
-    await fetch("/api/providers", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    if (!window.confirm(`Add ${dialog.title} as a signal provider?`)) return;
+    try {
+      await apiPost("/api/providers", {
         profileId: activeProfileId,
         dialogId: dialog.id,
         title: dialog.title,
-      }),
-    });
+      });
+    } catch {
+      setLastPollError(true);
+      return;
+    }
     await refreshDashboard();
+    setActiveView("dashboard");
+    setActiveTab("providers");
   }
 
   async function toggleProvider(provider: DashboardSnapshot["providers"][number]) {
-    await fetch(`/api/providers/${provider.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ enabled: !provider.enabled }),
-    });
+    await apiPatch(`/api/providers/${provider.id}`, { enabled: !provider.enabled });
+    await refreshDashboard();
+  }
+
+  async function deleteProvider(provider: DashboardSnapshot["providers"][number]) {
+    if (!window.confirm(`Remove ${provider.title} from configured providers?`)) return;
+    await apiDelete(`/api/providers/${provider.id}`);
     await refreshDashboard();
   }
 
@@ -385,16 +664,52 @@ export function App({
     provider: ProviderRowData,
     payload: ProviderConfigSubmission,
   ) {
-    await fetch(`/api/providers/${provider.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        parserMode: payload.parserMode,
-        lotSize: payload.lotSize,
-      }),
+    await apiPatch(`/api/providers/${provider.id}`, {
+      parserMode: payload.parserMode,
+      lotSize: payload.lotSize,
+      riskMode: payload.riskMode,
+      riskAmount: payload.riskAmount,
+      takeProfitLevels: payload.takeProfitLevels,
+      runner: payload.runner,
     });
     setConfigProvider(null);
+    announce(`Saved configuration for ${provider.title}`);
     await refreshDashboard();
+  }
+
+  async function testProviderSettings(
+    provider: ProviderRowData,
+    payload: ProviderConfigSubmission,
+    rawText: string,
+  ): Promise<ProviderConfigTestResult> {
+    const data = await apiPost<{
+      error?: string;
+      parsed?: {
+        commandType?: string;
+        canonicalSymbol?: string;
+        brokerSymbol?: string;
+        takeProfits?: Array<{ allocationPercent?: number }>;
+      };
+    }>(`/api/providers/${provider.id}/test-config`, {
+      rawText,
+      config: {
+        riskMode: payload.riskMode,
+        riskAmount: payload.riskAmount,
+        takeProfitLevels: payload.takeProfitLevels,
+        runner: payload.runner,
+      },
+    });
+    if (data.error || !data.parsed) {
+      throw new Error(data.error ?? "Provider config test failed");
+    }
+
+    const symbol = data.parsed.brokerSymbol || data.parsed.canonicalSymbol || "unmapped";
+    const takeProfitCount = data.parsed.takeProfits?.length ?? 0;
+    const takeProfitLabel = `${takeProfitCount} TP${takeProfitCount === 1 ? "" : "s"}`;
+    return {
+      ok: true,
+      summary: [data.parsed.commandType ?? "UNKNOWN", symbol, takeProfitLabel].join(" · "),
+    };
   }
 
   async function saveExecutionSettings(event: React.FormEvent<HTMLFormElement>) {
@@ -404,15 +719,14 @@ export function App({
 
   async function saveExecutionSettingsForm(formElement: HTMLFormElement) {
     const formData = new FormData(formElement);
-    await fetch("/api/settings", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        defaultLotSize: Number(formData.get("defaultLotSize")),
-        defaultRiskPercent: Number(formData.get("defaultRiskPercent")),
-        pollingIntervalSeconds: Number(formData.get("pollingIntervalSeconds")),
-        allowedOrderTypes: formData.getAll("allowedOrderTypes").map(String),
-      }),
+    await apiPatch("/api/settings", {
+      defaultLotSize: Number(formData.get("defaultLotSize")),
+      defaultRiskPercent: Number(formData.get("defaultRiskPercent")),
+      defaultStopLossPips: Number(formData.get("defaultStopLossPips")),
+      defaultTakeProfitPips: Number(formData.get("defaultTakeProfitPips")),
+      azureOpenAIApiKey: String(formData.get("azureOpenAIApiKey") ?? ""),
+      pollingIntervalSeconds: Number(formData.get("pollingIntervalSeconds")),
+      allowedOrderTypes: formData.getAll("allowedOrderTypes").map(String),
     });
     await refreshDashboard();
   }
@@ -420,9 +734,7 @@ export function App({
   async function parseRecentProviderMessages() {
     const providerId = snapshot.providers[0]?.id;
     if (!providerId) return;
-    await fetch(`/api/providers/${providerId}/parse-recent?limit=5`, {
-      method: "POST",
-    });
+    await apiPost(`/api/providers/${providerId}/parse-recent?limit=5`);
     await refreshDashboard();
   }
 
@@ -437,35 +749,159 @@ export function App({
       defaultClassification(result.commandType);
     const redactedText = redactedRawText.trim() || redactedFixtureText[result.rawMessageId]?.trim();
     setFixtureStatus((current) => ({ ...current, [result.rawMessageId!]: "Saving" }));
-    await fetch(`/api/messages/${result.rawMessageId}/classification`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ classification }),
-    });
-    await fetch(`/api/messages/${result.rawMessageId}/fixture`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        classification,
-        redacted: Boolean(redactedText),
-        redactedRawText: redactedText || undefined,
-      }),
+    await apiPatch(`/api/messages/${result.rawMessageId}/classification`, { classification });
+    await apiPost(`/api/messages/${result.rawMessageId}/fixture`, {
+      classification,
+      redacted: Boolean(redactedText),
+      redactedRawText: redactedText || undefined,
     });
     setFixtureStatus((current) => ({ ...current, [result.rawMessageId!]: "Saved fixture" }));
     await refreshDashboard();
   }
 
-  async function saveGlobalAlias(payload: { rawSymbol: string; canonicalSymbol: string }) {
-    await fetch("/api/symbol-mappings/aliases", {
+  async function requestAiReview(result: DashboardSnapshot["parserResults"][number]) {
+    setAiReviewStatus((current) => ({ ...current, [result.id]: "Reviewing with GPT..." }));
+    let data:
+      | {
+          review: {
+            verdict: string;
+            confidence: number;
+            reason: string;
+            shouldQueue: boolean;
+            entry: string;
+            stopLoss: string;
+            takeProfits: string[];
+          };
+        }
+      | { error: string };
+    try {
+      data = await apiPost<typeof data>(`/api/signals/${result.id}/ai-review`);
+    } catch (error) {
+      setAiReviewStatus((current) => ({
+        ...current,
+        [result.id]: error instanceof Error ? error.message : "GPT review failed",
+      }));
+      return;
+    }
+    if ("error" in data) {
+      setAiReviewStatus((current) => ({ ...current, [result.id]: data.error }));
+      return;
+    }
+    const fields = [
+      data.review.entry ? `ENTRY ${data.review.entry}` : "",
+      data.review.stopLoss ? `SL ${data.review.stopLoss}` : "",
+      data.review.takeProfits.length ? `TP ${data.review.takeProfits.join(" / ")}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    setAiReviewStatus((current) => ({
+      ...current,
+      [result.id]: `${data.review.verdict} · ${fields || data.review.reason}`,
+    }));
+  }
+
+  async function approveParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Approving..." }));
+    try {
+      await apiPost(`/api/signals/${result.id}/approve`);
+    } catch (error) {
+      setParserActionStatus((current) => ({
+        ...current,
+        [result.id]: error instanceof Error ? error.message : "Approval failed",
+      }));
+      return;
+    }
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Queued" }));
+    announce("Signal approved and queued for MT5");
+    await refreshDashboard();
+  }
+
+  async function ignoreParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignoring..." }));
+    await apiPost(`/api/signals/${result.id}/ignore`);
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignored" }));
+    announce("Signal ignored");
+    await refreshDashboard();
+  }
+
+  async function loadBrokerOrders(tradeId: string) {
+    if (brokerOrdersByTrade[tradeId]) {
+      setBrokerOrdersByTrade((current) => {
+        const next = { ...current };
+        delete next[tradeId];
+        return next;
+      });
+      return;
+    }
+    try {
+      const data = await apiGet<{ orders: BrokerOrderRow[] }>(
+        `/api/trades/${tradeId}/broker-orders`,
+      );
+      setBrokerOrdersByTrade((current) => ({ ...current, [tradeId]: data.orders }));
+    } catch {
+      // silent fail — broker orders are a drilldown, not core to UI
+    }
+  }
+
+  async function createAccountSlot(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    await apiPost("/api/account-slots", {
+      name: String(data.get("slotName") ?? "MT5 Account Slot"),
+    });
+    event.currentTarget.reset();
+    await refreshDashboard();
+  }
+
+  async function toggleAccountProviderLink(accountId: string, providerId: string, enabled: boolean) {
+    await apiFetch(`/api/account-provider-links/${accountId}/${providerId}`, {
       method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        scope: "global",
+      body: { enabled },
+    });
+    await refreshDashboard();
+  }
+
+  async function saveGuardian(accountId: string, formElement: HTMLFormElement) {
+    const data = new FormData(formElement);
+    await apiPatch(`/api/equity-guardian/${accountId}`, {
+      threshold: Number(data.get("threshold")),
+    });
+    await refreshDashboard();
+  }
+
+  async function unpauseGuardian(accountId: string) {
+    await apiPost(`/api/equity-guardian/${accountId}/unpause`);
+    announce("Equity Guardian unpaused");
+    await refreshDashboard();
+  }
+
+  async function saveSymbolAlias(payload: {
+    rawSymbol: string;
+    canonicalSymbol: string;
+    providerId?: string;
+  }) {
+    await apiFetch("/api/symbol-mappings/aliases", {
+      method: "PUT",
+      body: {
+        scope: payload.providerId ? "provider" : "global",
+        providerId: payload.providerId,
         rawSymbol: payload.rawSymbol,
         canonicalSymbol: payload.canonicalSymbol,
-      }),
+      },
     });
     setMappingModalOpen(false);
+    await refreshDashboard();
+  }
+
+  async function deleteSymbolMapping(mapping: DashboardSnapshot["symbolMappings"][number]) {
+    await apiFetch("/api/symbol-mappings/aliases", {
+      method: "DELETE",
+      body: {
+        scope: mapping.scope ?? "global",
+        providerId: mapping.providerId,
+        rawSymbol: mapping.rawSymbol,
+      },
+    });
     await refreshDashboard();
   }
 
@@ -477,10 +913,9 @@ export function App({
     includeSymbols: string[];
     excludeSymbols: string[];
   }) {
-    await fetch(`/api/symbol-mappings/account/${payload.accountId}`, {
+    await apiFetch(`/api/symbol-mappings/account/${payload.accountId}`, {
       method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+      body: {
         accountId: payload.accountId,
         canonicalOverrides: {
           [payload.canonicalSymbol.trim().toUpperCase()]: payload.brokerSymbol.trim(),
@@ -488,7 +923,7 @@ export function App({
         suffix: payload.suffix,
         includeSymbols: payload.includeSymbols,
         excludeSymbols: payload.excludeSymbols,
-      }),
+      },
     });
     setMappingModalOpen(false);
     await refreshDashboard();
@@ -502,7 +937,6 @@ export function App({
   const showTrades = dashTab("history") || activeView === "trades";
   const showMt5 = activeView === "mt5";
   const showMapping = dashTab("symbols") || activeView === "mapping";
-  const showLogs = dashTab("logs") || activeView === "logs";
   const showSettings = activeView === "settings";
   const showEquityGuardian = dashTab("equity-guardian");
   const showPerformance = dashTab("performance");
@@ -516,10 +950,26 @@ export function App({
     setActiveView(viewId);
   }
 
+  if (viewportTooSmall) {
+    return (
+      <SmallViewportNotice
+        onContinueAnyway={() => {
+          if (typeof window !== "undefined") {
+            window.localStorage.setItem("tg-tc.viewport-override", "1");
+          }
+          setViewportTooSmall(false);
+        }}
+      />
+    );
+  }
+
   if (setupStep !== "connected") {
     return (
       <SignIn
         form={form}
+        busy={setupBusy}
+        error={setupError}
+        onReset={resetTelegramConnection}
         setForm={setForm}
         setupStep={setupStep}
         startTelegramConnection={startTelegramConnection}
@@ -531,6 +981,11 @@ export function App({
 
   return (
     <main className="app-shell">
+      <a className="skip-link" href="#main-content">
+        Skip to main content
+      </a>
+      <LiveRegion />
+      <KeyboardShortcutsOverlay onClose={() => setShortcutsOpen(false)} open={shortcutsOpen} />
       <StatusBar
         database={snapshot.health.database}
         lastPollError={lastPollError}
@@ -541,270 +996,169 @@ export function App({
         telegramAdapter={snapshot.health.telegramAdapter}
       />
 
-      <Sidebar activeView={activeView} onNavigate={navigateSidebar} />
+      <Sidebar
+        accounts={sidebarAccounts}
+        activeView={activeView}
+        onAddAccount={() => setActiveView("mt5")}
+        onNavigate={navigateSidebar}
+        onSelectAccount={(id) => setSelectedAccountId(id)}
+        selectedAccountId={selectedAccountId}
+      />
 
-      <section className="workspace">
-        {showDashboard ? <AccountHeader data={accountHeaderData} /> : null}
+      <ErrorBoundary fallbackLabel="This view hit an unexpected error">
+        <section className="workspace" id="main-content" tabIndex={-1}>
+        {showDashboard ? <AccountHeader data={accountHeaderData} loading={initialLoading} /> : null}
+        {showDashboard ? (
+          <LinkedAccountsPage
+            accounts={snapshot.mt5Accounts}
+            slots={snapshot.accountSlots ?? []}
+            onCreateSlot={(event) => void createAccountSlot(event)}
+            providers={snapshot.providers}
+            providerLinks={snapshot.accountProviderLinks ?? []}
+            onToggleProviderLink={(accountId: string, providerId: string, enabled: boolean) =>
+              void toggleAccountProviderLink(accountId, providerId, enabled)
+            }
+            variant="live"
+          />
+        ) : null}
         {showDashboard ? <WorkspaceTabs onChange={setActiveTab} value={activeTab} /> : null}
 
         {showPerformance ? (
-          <div
-            aria-labelledby="tab-performance"
-            id="tabpanel-performance"
-            role="tabpanel"
-          >
-            <GrowthChart
-              data={buildPlaceholderGrowth(
-                snapshot.executionLogs.filter((log) => log.status === "EXECUTED").length,
-              )}
-            />
-          </div>
+          <PerformancePage data={growthData} loading={initialLoading} />
         ) : null}
 
         {showEquityGuardian ? (
-          <div
-            aria-labelledby="tab-equity-guardian"
-            className="tab-empty-state"
-            id="tabpanel-equity-guardian"
-            role="tabpanel"
-          >
-            <strong>Equity Guardian</strong>
-            <span>
-              Per-account drawdown limits and pause-on-breach controls will live here. Backend
-              support coming soon.
-            </span>
-          </div>
+          <EquityGuardianPage
+            guardians={snapshot.equityGuardians ?? []}
+            onSave={(accountId, formElement) => void saveGuardian(accountId, formElement)}
+            onUnpause={(accountId) => void unpauseGuardian(accountId)}
+          />
         ) : null}
 
         <section className="content-grid">
           {showTelegram ? (
-            <Panel className="setup-panel wide-panel" title="Telegram Setup">
-              <SetupFlow
-                form={form}
-                setForm={setForm}
-                setupStep={setupStep}
-                startTelegramConnection={startTelegramConnection}
-                submitCode={submitCode}
-                submitPassword={submitPassword}
-              />
-              <DialogPicker
-                dialogs={availableDialogs}
-                onRefresh={loadDialogs}
-                onSelect={selectDialog}
-              />
-            </Panel>
+            <TelegramSetupPage
+              form={form}
+              busy={setupBusy}
+              error={setupError}
+              onReset={resetTelegramConnection}
+              setForm={setForm}
+              setupStep={setupStep}
+              startTelegramConnection={startTelegramConnection}
+              submitCode={submitCode}
+              submitPassword={submitPassword}
+              dialogs={availableDialogs}
+              onRefreshDialogs={loadDialogs}
+              onSelectDialog={selectDialog}
+              selectedDialogIds={snapshot.providers.map((provider) => provider.dialogId)}
+            />
           ) : null}
 
           {showProviders ? (
-            <Panel className="wide-panel" title="Providers">
-              <ProvidersTable
-                onConfigure={(provider) => setConfigProvider(provider)}
-                onToggle={(provider) => void toggleProvider(provider)}
-                providers={snapshot.providers}
-              />
-            </Panel>
+            <ProvidersPage
+              accounts={snapshot.mt5Accounts.map((account) => ({
+                id: account.id,
+                label: account.accountNumber || account.id,
+              }))}
+              loading={initialLoading}
+              onConfigure={(provider) => setConfigProvider(provider)}
+              onDelete={(provider) => void deleteProvider(provider)}
+              onToggle={(provider) => void toggleProvider(provider)}
+              onToggleAccountLink={(accountId, providerId, enabled) =>
+                void toggleAccountProviderLink(accountId, providerId, enabled)
+              }
+              providerLinks={snapshot.accountProviderLinks ?? []}
+              providers={snapshot.providers.map((provider) => ({
+                ...provider,
+                ...snapshot.providerPerformance?.find((row) => row.id === provider.id),
+              }))}
+            />
           ) : null}
 
           {showParser ? (
-            <Panel
-              activeTab={parserTab}
-              className="wide-panel"
-              onTabChange={setParserTab}
-              tabs={["Recent Parses", "Saved Fixtures"]}
-              testId="parser-lab-panel"
-              title="Parser Lab"
-            >
-              {parserTab === "Recent Parses" ? (
-                <>
-                  <div className="panel-toolbar">
-                    <button
-                      disabled={snapshot.providers.length === 0}
-                      onClick={() => void parseRecentProviderMessages()}
-                      title="Parse recent provider messages"
-                      type="button"
-                    >
-                      <RefreshCw size={13} aria-hidden="true" />
-                      Parse recent
-                    </button>
-                  </div>
-                  <div className="parser-grid">
-                    {snapshot.parserResults.map((result) => {
-                      const rawMessageId = result.rawMessageId ?? result.id;
-                      return (
-                        <ParserResult
-                          key={result.id}
-                          fixtureClassification={fixtureClassifications[rawMessageId]}
-                          onClassify={(classification) =>
-                            setFixtureClassifications((current) => ({
-                              ...current,
-                              [rawMessageId]: classification,
-                            }))
-                          }
-                          onRedactedChange={(value) => {
-                            setRedactedFixtureText((current) => ({
-                              ...current,
-                              [rawMessageId]: value,
-                            }));
-                          }}
-                          onSaveFixture={(redactedText) => {
-                            void saveParserFixture(result, redactedText);
-                          }}
-                          redactedText={redactedFixtureText[rawMessageId] ?? ""}
-                          result={result}
-                          status={fixtureStatus[rawMessageId]}
-                        />
-                      );
-                    })}
-                  </div>
-                </>
-              ) : (
-                <div className="empty-state">Saved fixtures view coming soon</div>
-              )}
-            </Panel>
+            <LogsPage
+              parserTab={parserTab}
+              onParserTabChange={setParserTab}
+              providersLength={snapshot.providers.length}
+              onParseRecent={() => void parseRecentProviderMessages()}
+              snapshot={snapshot}
+              fixtureClassifications={fixtureClassifications}
+              onClassify={(rawMessageId, classification) =>
+                setFixtureClassifications((current) => ({
+                  ...current,
+                  [rawMessageId]: classification,
+                }))
+              }
+              redactedFixtureText={redactedFixtureText}
+              onRedactedChange={(rawMessageId, value) =>
+                setRedactedFixtureText((current) => ({ ...current, [rawMessageId]: value }))
+              }
+              onSaveFixture={(result, redactedText) => void saveParserFixture(result, redactedText)}
+              onAiReview={(result) => void requestAiReview(result)}
+              onApprove={(result) => void approveParsedSignal(result)}
+              onIgnore={(result) => void ignoreParsedSignal(result)}
+              aiReviewStatus={aiReviewStatus}
+              parserActionStatus={parserActionStatus}
+              fixtureStatus={fixtureStatus}
+            />
           ) : null}
 
           {showTrades ? (
-            <Panel className="wide-panel" title="Trade Lifecycle">
-              <HistoryTable trades={snapshot.logicalTrades} />
-            </Panel>
+            <HistoryPage
+              brokerOrdersByTrade={brokerOrdersByTrade}
+              loading={initialLoading}
+              onToggleBrokerOrders={(tradeId) => void loadBrokerOrders(tradeId)}
+              trades={snapshot.logicalTrades}
+            />
           ) : null}
 
           {showMt5 ? (
-            <Panel className="wide-panel" title="Linked Accounts">
-              <div className="list-stack">
-                {snapshot.mt5Accounts.map((account) => (
-                  <AccountRow key={account.id} account={account} />
-                ))}
-              </div>
-            </Panel>
+            <LinkedAccountsPage
+              accounts={snapshot.mt5Accounts}
+              slots={snapshot.accountSlots ?? []}
+              onCreateSlot={(event) => void createAccountSlot(event)}
+              providers={snapshot.providers}
+              providerLinks={snapshot.accountProviderLinks ?? []}
+              onToggleProviderLink={(accountId: string, providerId: string, enabled: boolean) =>
+                void toggleAccountProviderLink(accountId, providerId, enabled)
+              }
+            />
           ) : null}
 
           {showMapping ? (
-            <Panel className="wide-panel" title="Symbol Mapping">
-              <div className="panel-toolbar panel-toolbar-end">
-                <button
-                  className="btn-primary btn-small"
-                  onClick={() => setMappingModalOpen(true)}
-                  type="button"
-                >
-                  Add mapping
-                </button>
-              </div>
-              <SymbolMappingsTable mappings={snapshot.symbolMappings} />
-            </Panel>
-          ) : null}
-
-          {showLogs ? (
-            <Panel className="wide-panel" title="Signal Queue">
-              <div className="queue-board">
-                {snapshot.signalQueue.length === 0 ? (
-                  <div className="empty-state">Queue is empty</div>
-                ) : (
-                  snapshot.signalQueue.map((item) => <QueueItem key={item.id} item={item} />)
-                )}
-              </div>
-            </Panel>
-          ) : null}
-
-          {showLogs ? (
-            <Panel className="wide-panel" title="Execution Logs">
-              <div className="log-list">
-                {snapshot.executionLogs.length === 0 ? (
-                  <div className="empty-state">No MT5 reports yet</div>
-                ) : (
-                  snapshot.executionLogs.map((log) => <LogRow key={log.id} log={log} />)
-                )}
-              </div>
-            </Panel>
+            <SymbolSettingsPage
+              loading={initialLoading}
+              mappings={snapshot.symbolMappings}
+              onAdd={() => setMappingModalOpen(true)}
+              onDelete={deleteSymbolMapping}
+            />
           ) : null}
 
           {showSettings ? (
-            <Panel className="wide-panel" title="Settings">
-              <form className="compact-form settings-form" onSubmit={saveExecutionSettings}>
-                <label>
-                  Default lot size
-                  <input
-                    defaultValue={snapshot.appSettings.defaultLotSize}
-                    min="0.01"
-                    name="defaultLotSize"
-                    step="0.01"
-                    type="number"
-                  />
-                </label>
-                <label>
-                  Default risk percent
-                  <input
-                    defaultValue={snapshot.appSettings.defaultRiskPercent}
-                    min="0.01"
-                    name="defaultRiskPercent"
-                    step="0.01"
-                    type="number"
-                  />
-                </label>
-                <label>
-                  Polling interval seconds
-                  <input
-                    defaultValue={snapshot.appSettings.pollingIntervalSeconds}
-                    min="1"
-                    name="pollingIntervalSeconds"
-                    step="1"
-                    type="number"
-                  />
-                </label>
-                <label className="checkbox-control">
-                  <input
-                    defaultChecked={snapshot.appSettings.allowedOrderTypes.includes("MARKET")}
-                    name="allowedOrderTypes"
-                    type="checkbox"
-                    value="MARKET"
-                  />
-                  Allow market orders
-                </label>
-                <label className="checkbox-control">
-                  <input
-                    defaultChecked={snapshot.appSettings.allowedOrderTypes.includes("LIMIT")}
-                    name="allowedOrderTypes"
-                    type="checkbox"
-                    value="LIMIT"
-                  />
-                  Allow limit orders
-                </label>
-                <label className="checkbox-control">
-                  <input
-                    defaultChecked={snapshot.appSettings.allowedOrderTypes.includes("STOP")}
-                    name="allowedOrderTypes"
-                    type="checkbox"
-                    value="STOP"
-                  />
-                  Allow stop orders
-                </label>
-                <button
-                  onClick={(event) => {
-                    const formElement = event.currentTarget.form;
-                    if (formElement) void saveExecutionSettingsForm(formElement);
-                  }}
-                  type="button"
-                >
-                  Save execution settings
-                </button>
-              </form>
-            </Panel>
+            <SettingsPage
+              settings={snapshot.appSettings}
+              onSubmit={saveExecutionSettings}
+              onSaveForm={(formElement) => void saveExecutionSettingsForm(formElement)}
+            />
           ) : null}
         </section>
       </section>
+      </ErrorBoundary>
 
       <ProviderConfigModal
         onClose={() => setConfigProvider(null)}
         onSave={saveProviderSettings}
+        onTest={testProviderSettings}
         open={configProvider !== null}
         provider={configProvider}
       />
 
       <SymbolMappingModal
         defaultAccountId={snapshot.mt5Accounts[0]?.id ?? ""}
+        defaultProviderId={snapshot.providers[0]?.id}
         onClose={() => setMappingModalOpen(false)}
         onSaveAccountMapping={saveAccountMapping}
-        onSaveGlobalAlias={saveGlobalAlias}
+        onSaveGlobalAlias={saveSymbolAlias}
         open={mappingModalOpen}
       />
 

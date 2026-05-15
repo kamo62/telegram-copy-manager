@@ -20,12 +20,14 @@ export function Panel({
       <header>
         <h2>{title}</h2>
         {tabs && activeTab && onTabChange ? (
-          <div className="panel-tabs">
+          <div className="panel-tabs" role="tablist">
             {tabs.map((tab) => (
               <button
-                className={activeTab === tab ? "active" : ""}
+                aria-selected={activeTab === tab}
+                className={`panel-tab ${activeTab === tab ? "active" : ""}`}
                 key={tab}
                 onClick={() => onTabChange(tab)}
+                role="tab"
                 type="button"
               >
                 {tab}

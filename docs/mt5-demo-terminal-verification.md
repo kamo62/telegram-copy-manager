@@ -9,7 +9,7 @@ WebRequest behavior, broker retcodes, symbol constraints, and hedging/netting be
 - Build and run the API locally or from a reachable host.
 - Confirm `GET /api/health` returns `status: ok`.
 - Copy `mt5/TelegramTC_EA.mq5` into the terminal's `MQL5/Experts/` folder.
-- In MT5, add the backend base URL, for example `http://127.0.0.1:8787/api`, under:
+- In MT5, add the deployed/reachable backend base URL under:
   `Tools -> Options -> Expert Advisors -> Allow WebRequest for listed URL`.
 - Use a demo account first. Do not run this on a live account.
 
@@ -23,7 +23,7 @@ WebRequest behavior, broker retcodes, symbol constraints, and hedging/netting be
 ## Register, Heartbeat, Snapshot
 
 1. Attach the EA to a chart.
-2. Set `BackendBaseUrl` to the reachable API base URL.
+2. Set `BackendBaseUrl` to the reachable API base URL. The EA default is a placeholder and must be changed per environment.
 3. Confirm the backend shows the MT5 account as online.
 4. Confirm `/api/mt5/accounts` includes account number, server, company, currency, balance, equity,
    margin mode, heartbeat timestamp, and available symbols.

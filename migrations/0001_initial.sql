@@ -24,7 +24,15 @@ CREATE TABLE IF NOT EXISTS providers (
   parser_mode TEXT NOT NULL,
   risk_profile TEXT NOT NULL DEFAULT 'balanced',
   lot_size REAL NOT NULL DEFAULT 0.1,
+  provider_config_json TEXT NOT NULL DEFAULT '{}',
   last_message_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS provider_config_history (
+  id TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS raw_messages (
@@ -64,6 +72,7 @@ CREATE TABLE IF NOT EXISTS queue_items (
   account_id TEXT,
   status TEXT NOT NULL,
   payload_json TEXT NOT NULL,
+  lease_count INTEGER NOT NULL DEFAULT 0,
   leased_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -77,11 +86,46 @@ CREATE TABLE IF NOT EXISTS mt5_accounts (
   currency TEXT NOT NULL,
   balance REAL NOT NULL,
   equity REAL NOT NULL,
+  initial_balance REAL NOT NULL DEFAULT 0,
   margin_mode TEXT NOT NULL,
   heartbeat_status TEXT NOT NULL,
   available_symbols_json TEXT NOT NULL,
   last_heartbeat_at TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_slots (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  link_code TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
+  account_id TEXT,
+  account_number TEXT,
+  server TEXT,
+  broker TEXT,
+  currency TEXT,
+  balance REAL,
+  equity REAL,
+  last_heartbeat_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS account_provider_links (
+  account_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (account_id, provider_id)
+);
+
+CREATE TABLE IF NOT EXISTS equity_guardians (
+  account_id TEXT PRIMARY KEY,
+  threshold REAL NOT NULL,
+  current_drawdown REAL NOT NULL,
+  paused INTEGER NOT NULL,
+  breach_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS account_symbol_mappings (
@@ -105,6 +149,12 @@ CREATE TABLE IF NOT EXISTS app_settings (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS app_secrets (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mt5_snapshots (
   account_id TEXT PRIMARY KEY,
   positions_json TEXT NOT NULL,
@@ -122,11 +172,35 @@ CREATE TABLE IF NOT EXISTS execution_reports (
   retcode_external INTEGER NOT NULL,
   broker_comment TEXT NOT NULL,
   order_ticket TEXT,
+  position_ticket TEXT,
   deal_ticket TEXT,
   requested_price REAL,
   filled_price REAL,
   volume REAL,
   error_text TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS broker_orders (
+  id TEXT PRIMARY KEY,
+  logical_trade_id TEXT NOT NULL,
+  leg_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  queue_item_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  order_ticket TEXT,
+  position_ticket TEXT,
+  deal_ticket TEXT,
+  requested_volume REAL,
+  filled_volume REAL,
+  requested_price REAL,
+  filled_price REAL,
+  retcode INTEGER NOT NULL,
+  retcode_external INTEGER NOT NULL,
+  broker_comment TEXT NOT NULL,
+  pnl_currency REAL,
+  pnl_pips REAL,
+  source TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 

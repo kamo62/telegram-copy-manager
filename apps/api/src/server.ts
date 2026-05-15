@@ -6,7 +6,10 @@ const devStaticPath = new URL("../../web/dist", import.meta.url).pathname;
 const staticRoot =
   process.env.WEB_STATIC_ROOT ??
   ((await Bun.file(`${rootStaticPath}/index.html`).exists()) ? rootStaticPath : devStaticPath);
-const app = createApi({ staticRoot });
+const app = createApi({
+  staticRoot,
+  seedDemoData: process.env.SEED_DEMO_DATA === "true",
+});
 
 Bun.serve({
   port,

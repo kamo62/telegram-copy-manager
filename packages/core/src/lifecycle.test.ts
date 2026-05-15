@@ -93,7 +93,7 @@ describe("logical trade lifecycle", () => {
     expect(match.requiresManualReview).toBe(false);
   });
 
-  test("marks ambiguous management commands for manual review", () => {
+  test("marks ambiguous management commands for confirmation", () => {
     const first = createLogicalTradeFromSignal(openSignal, {
       id: "trade-1",
       providerId,

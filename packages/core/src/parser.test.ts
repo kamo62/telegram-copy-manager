@@ -148,10 +148,10 @@ describe("deterministic signal parser", () => {
 
     expect(trailPips.commandType).toBe("TRAILING_STOP");
     expect(trailPips.trailingStop).toEqual({ value: 50, unit: "PIPS" });
-    expect(shouldRequireManualReview(trailPips)).toBe(true);
+    expect(shouldRequireManualReview(trailPips)).toBe(false);
     expect(trailPoints.commandType).toBe("TRAILING_STOP");
     expect(trailPoints.trailingStop).toEqual({ value: 500, unit: "POINTS" });
-    expect(trailPoints.warnings).toContain(
+    expect(trailPoints.warnings).not.toContain(
       "Trailing stop pips/points must be converted using the broker symbol point size",
     );
   });
@@ -190,6 +190,53 @@ describe("deterministic signal parser", () => {
     expect(resultUpdate.commandType).toBe("NO_SIGNAL");
     expect(closedPositionsUpdate.commandType).toBe("NO_SIGNAL");
     expect(tpUpdate.commandType).toBe("MARK_TP_HIT");
+  });
+
+  test("applies provider defaults for market gold signals without explicit SL or TP", () => {
+    const kalContext: ParserContext = {
+      providerId: "kal-vip",
+      accountId: "mt5-demo-1",
+      globalAliases: { GOLD: "XAUUSD" },
+      providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+      accountMappings: context.accountMappings,
+      defaultStopLoss: { value: 50, unit: "PIPS" },
+      defaultTakeProfit: { value: 200, unit: "PIPS" },
+    };
+
+    const signal = parseSignalText("Buy Gold now", kalContext);
+
+    expect(signal.commandType).toBe("OPEN_TRADE");
+    expect(signal.direction).toBe("BUY");
+    expect(signal.orderType).toBe("MARKET");
+    expect(signal.brokerSymbol).toBe("XAUUSD.r");
+    expect(signal.defaultStopLoss).toEqual({ value: 50, unit: "PIPS" });
+    expect(signal.defaultTakeProfit).toEqual({ value: 200, unit: "PIPS" });
+    expect(signal.missingFields).not.toContain("stopLoss");
+    expect(signal.missingFields).not.toContain("takeProfit");
+    expect(shouldRequireManualReview(signal)).toBe(false);
+  });
+
+  test("inherits quoted signal context for close-half replies", () => {
+    const kalContext: ParserContext = {
+      providerId: "kal-vip",
+      accountId: "mt5-demo-1",
+      globalAliases: { GOLD: "XAUUSD" },
+      providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+      accountMappings: context.accountMappings,
+    };
+
+    const signal = parseSignalText(
+      "Quoted signal:\nGold buy limit 4105\nSL 4100\nTP 4115\n\nComment:\nClose half",
+      kalContext,
+    );
+
+    expect(signal.commandType).toBe("CLOSE_PARTIAL");
+    expect(signal.partialClose).toEqual({ kind: "PERCENT", value: 50 });
+    expect(signal.canonicalSymbol).toBe("XAUUSD");
+    expect(signal.brokerSymbol).toBe("XAUUSD.r");
+    expect(signal.matchedPatternIds).toContain("quote.reply-context");
+    expect(signal.missingFields).not.toContain("symbol");
+    expect(shouldRequireManualReview(signal)).toBe(false);
   });
 
   test("uses Telegram quote context for put-this-back comments and extracts wall-of-text signals", () => {
@@ -262,15 +309,37 @@ describe("deterministic signal parser", () => {
     expect(lifecycle.missingFields).not.toContain("symbol");
     expect(notReached.commandType).toBe("NO_SIGNAL");
     expect(notReached.matchedPatternIds).toContain("noise.tp-not-reached");
-    expect(conditionalPlan.commandType).toBe("NO_SIGNAL");
-    expect(conditionalPlan.matchedPatternIds).toContain("noise.conditional-multi-scenario");
+    expect(conditionalPlan.commandType).toBe("TRADE_SETUP");
+    expect(conditionalPlan.matchedPatternIds).toContain("setup.conditional-or-multi-scenario");
+    expect(conditionalPlan.brokerSymbol).toBe("XAUUSD.r");
+    expect(shouldRequireManualReview(conditionalPlan)).toBe(true);
     expect(executable.commandType).toBe("OPEN_TRADE");
     expect(executable.orderType).toBe("LIMIT");
     expect(executable.direction).toBe("BUY");
     expect(shouldRequireManualReview(executable)).toBe(false);
   });
 
-  test("requires manual review when execution-critical fields are missing or symbols are unmapped", () => {
+  test("keeps KAL VIP buy and sell commentary as reviewable gold trade setups", () => {
+    const kalContext: ParserContext = {
+      providerId: "kal-vip",
+      accountId: "mt5-demo-1",
+      globalAliases: { GOLD: "XAUUSD" },
+      providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+      accountMappings: context.accountMappings,
+    };
+    const setup = parseSignalText(
+      "Execution Plan\nBuy: Range Low Sweep\nEntry: 4312-4315\nSL: 4306-4308\nTP1: 4326\nTP2: 4338\n\nSell: Range High Rejection\nEntry: 4338-4342\nSL: 4345-4347\nTP1: 4328\nTP2: 4315\n\nBreakout Trades wait for confirmation",
+      kalContext,
+    );
+
+    expect(setup.commandType).toBe("TRADE_SETUP");
+    expect(setup.canonicalSymbol).toBe("XAUUSD");
+    expect(setup.brokerSymbol).toBe("XAUUSD.r");
+    expect(setup.matchedPatternIds).toContain("setup.conditional-or-multi-scenario");
+    expect(shouldRequireManualReview(setup)).toBe(true);
+  });
+
+  test("requires confirmation when execution-critical fields are missing or symbols are unmapped", () => {
     const result = parseSignalText("SELL UNKNOWNPAIR now\nTP1 1.1000", context);
 
     expect(result.commandType).toBe("OPEN_TRADE");

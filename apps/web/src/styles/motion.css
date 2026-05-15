@@ -1,0 +1,114 @@
+/* Motion keyframes + animation utilities.
+   Every motion respects prefers-reduced-motion via tokens (durations → 0ms). */
+
+@keyframes reveal-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 hsl(155 62% 32% / 0.6);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 4px hsl(155 62% 32% / 0);
+  }
+}
+
+/* Utility hooks for components that want to opt into motion. */
+
+.anim-reveal {
+  animation: reveal-up var(--duration-3) var(--ease-out) backwards;
+}
+
+.anim-fade {
+  animation: fade-in var(--duration-2) var(--ease-out) backwards;
+}
+
+/* Stagger children. Each child sets --i for its own offset, or relies on the
+   nth-child fallback below for the first six items. */
+.anim-stagger > * {
+  animation: reveal-up var(--duration-3) var(--ease-out) backwards;
+  animation-delay: calc(var(--i, 0) * 60ms);
+}
+
+.anim-stagger > *:nth-child(1) {
+  --i: 0;
+}
+.anim-stagger > *:nth-child(2) {
+  --i: 1;
+}
+.anim-stagger > *:nth-child(3) {
+  --i: 2;
+}
+.anim-stagger > *:nth-child(4) {
+  --i: 3;
+}
+.anim-stagger > *:nth-child(5) {
+  --i: 4;
+}
+.anim-stagger > *:nth-child(6) {
+  --i: 5;
+}
+.anim-stagger > *:nth-child(7) {
+  --i: 6;
+}
+.anim-stagger > *:nth-child(8) {
+  --i: 7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-reveal,
+  .anim-fade,
+  .anim-stagger > * {
+    animation: none;
+  }
+}

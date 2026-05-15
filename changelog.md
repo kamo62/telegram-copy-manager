@@ -1,5 +1,71 @@
 # Changelog
 
+## 2026-05-10 (Parser defaults, quote context, and 6-month KAL VIP backtest)
+
+Parser and MT5 contract changes from the MVP parser pass:
+
+- Added configurable default execution distances: default SL = 50 pips and default TP = 200 pips. The web Settings screen now exposes both values and the API persists them with the existing execution settings.
+- Parser context now carries `defaultStopLoss` / `defaultTakeProfit` distances. Short open signals such as `Buy Gold now` no longer require extra normalization purely because SL/TP are omitted when defaults are configured.
+- Telegram reply parsing now preserves quoted context for lifecycle replies. `Close half` on a replied-to signal inherits the quoted trade's symbol/account context and parses as `CLOSE_PARTIAL` with 50% close intent.
+- `TRAILING_STOP` commands are now first-class supported lifecycle commands instead of automatically blocking execution. The EA still converts pips/points broker-side.
+- MT5 poll-line payloads now include default SL/TP distance fields. The EA converts those distances into absolute prices from the execution/reference price using `SYMBOL_POINT`.
+- Added a minimal `broker_orders` trail plus `GET /api/trades/:id/broker-orders`, populated from MT5 execution reports so logical trades can be linked back to broker order/deal tickets.
+- Backtest reporting now includes `autoActionableMessages`, normalization reason counts, matched-pattern counts, and warning counts.
+- Telegram history import can run in chunks via `TELEGRAM_CHUNKED=1`, `TELEGRAM_CHUNK_DAYS`, and `TELEGRAM_HISTORY_DAYS`, using Telegram `offsetDate` so older windows do not repeatedly scan from the latest message.
+- GramJS session loading now supports importing an existing local session file with `TELEGRAM_SESSION_FILE`, or auto-importing the only `.json` session in `TELEGRAM_SESSION_DIR` for interim local workflows.
+- Added Azure GPT-5.4 mini extraction at `POST /api/signals/:id/ai-review`. It only runs for parser outputs that need additional normalization, reads credentials from environment, and returns explicit `ENTRY`, `SL`, and `TP` fields plus advisory classification. Parser Lab exposes `Extract with GPT` only for those items.
+- Added API coverage for GPT extraction: mocked Azure response verifies the hardcoded Foundry deployment name, prompt requirement for `ENTRY`, `SL`, and `TP`, returned field shape, and rejection for parser outputs that do not need normalization.
+- Provider Configuration modal now sends full execution config to the API: risk mode/amount, TP allocation rows, and runner config. The backend persists provider execution config and applies TP allocation/risk sizing when building MT5 queue payloads.
+- Parser Lab now has direct `Approve` and `Ignore` actions so parser outputs can move into the MT5 queue without leaving the Logs tab.
+- Telegram auth now persists pending login state across refreshes/re-renders and exposes a "Wrong phone number? Start over" action on the OTP/2FA screens. Restarting disconnects the pending backend session and returns to phone entry.
+- Real GramJS deployments no longer auto-create the demo/mock provider after login, and `/api/telegram/dialogs` no longer falls back to mock dialogs when no real connected session is available. Demo rows are hidden unless demo seeding is explicitly enabled.
+- Legacy mock provider rows (`dialog-alpha`) are hidden in non-demo deployments so real Telegram logins do not show `Alpha FX Signals`.
+- Implemented the current UI polish roadmap pass from `docs/ui-improvements.md`: motion utilities, account KPI stagger animation, sticky sortable provider-table headers, quieter row actions, glassier modal/status chrome, intentional empty/skeleton primitives, provider-table sorting, and clearer whole-row Telegram dialog selection.
+- Extracted major app surfaces into `apps/web/src/pages/*` and added `useSortableTable`, `Skeleton`, and `EmptyState` building blocks. `App.tsx` now delegates Performance, Providers, History, Equity Guardian, Telegram Setup, Linked Accounts, Symbol Settings, Logs, and Settings to page components.
+- Provider management polish: Telegram dialog rows are sorted with channels/groups before user dialogs, user rows are visually de-emphasized, adding a dialog now asks for confirmation, and Providers now has a Remove action backed by `DELETE /api/providers/:id`.
+- Live account onboarding now appears directly inside the Live/Performance tab. When no MT5 account is connected, operators see the link-slot workflow immediately; created slots and connected MT5 accounts render in Live as account cards as well as under Linked Accounts.
+- Added account-to-provider routing controls in Live and Linked Accounts. Each connected MT5 account can now be assigned to specific configured providers, and open signals fan out to every linked account for that provider when links exist.
+- History can fetch and expand the broker-order trail for a logical trade through `GET /api/trades/:id/broker-orders`, showing order, position, and deal tickets.
+- The MQL5 EA report contract now includes `positionTicket` on reports where a position ticket is known, including modify, close, virtual TP close, and best-effort post-open reports.
+- Added account-slot/link-code API and Linked Accounts UI. The EA now has a `LinkCode` input and sends it on register/heartbeat; bad link codes are rejected and linked slots show the broker account once connected.
+- Added Equity Guardian persistence, API, queue enforcement, and UI. Paused/breached accounts reject new `OPEN_TRADE` leases while allowing non-open lifecycle work to continue.
+- Added basic account/provider performance data from MT5 account state and broker-order rows. Provider rows now display pips/P&L/profit/gain fields when data is available.
+- Symbol Settings now uses real persisted alias/account mapping rows instead of static preview rows, with backend support for deleting aliases.
+- Broker-order rows now include best-effort `pnl_currency` and `pnl_pips` attribution for close/partial-close actions when open and close fill prices are available.
+- Settings now includes an Azure GPT API key field. The key is stored server-side in local SQLite `app_secrets`, and dashboard state only exposes whether a key is configured.
+- Parser Lab Saved Fixtures now renders recent saved fixtures instead of a placeholder.
+- Symbol Settings now supports provider aliases in the Add Mapping modal and can delete global/provider aliases from the table.
+- Performance chart now prefers backend account-performance equity/drawdown series and falls back to placeholder data only when no series is available.
+- Lifecycle queue payloads now include target broker order/position/deal tickets derived from `BrokerOrder`, and the EA consumes target order/position tickets for pending-order cancellation and position management.
+- Snapshot reconciliation now records best-effort manual `FULL_CLOSE` broker-order rows when a previously reported EA-owned broker ticket disappears from MT5 positions/orders.
+- Added provider config history and provider config test endpoints so backend strategy changes can be audited and dry-run against sample raw messages.
+- Added execution-log detail endpoint returning the report, queue payload, and broker-order trail for drilldown.
+- Added `/api/mt5/history` and EA-side `SendHistoryDeals()` so recent broker deal history is posted with deal/order/position tickets, close price, profit, commission, swap, and comments. The backend deduplicates by `deal_ticket` and records exact history-backed broker-order rows when it can match the deal to a logical trade.
+- The EA no longer defaults to a loopback API URL. `BackendBaseUrl` is now a placeholder that must be set per environment, and `PollSeconds` defaults to 1 second.
+- Improved backend performance rollups from broker-order P/L rows and added API coverage for exact broker-history close reconciliation.
+- Disabled runtime demo seeding by default; local demo data now requires `SEED_DEMO_DATA=true` or explicit test options.
+- Added queue lease timeout recovery/expiry with configurable `leaseTimeoutSeconds` and `maxLeaseAttempts`.
+- Heartbeat freshness is now computed dynamically (`online` / `stale` / `offline`) from `last_heartbeat_at`.
+- Heartbeats with invalid link codes are rejected, and linked non-legacy slots require the EA to keep sending its link code.
+- GPT extraction is blocked for `NO_SIGNAL` parser outputs.
+- Equity Guardian unpause now appends an audited `manual_unpause` event to breach history.
+- Parser account context now uses the first linked MT5 account or `DEFAULT_MT5_ACCOUNT_ID` instead of silently relying on the demo account for real parser paths.
+- EA risk-percent sizing now uses broker tick size/value and account balance when volume is not explicitly provided.
+- Updated the main spec with MVP outstanding status, 6-month KAL VIP parser baseline, default SL/TP rules, quote/reply lifecycle behavior, and pip/point conversion rules.
+
+Latest 6-month KAL VIP backtest (`2025-11-08` to `2026-05-10`):
+
+- Total messages: 4,610
+- `NO_SIGNAL`: 2,790
+- `OPEN_TRADE`: 946
+- `TRADE_SETUP`: 60
+- Lifecycle commands: 897
+- Actionable messages: 1,843
+- Auto-actionable after parser rules: 1,710
+- Actionable requiring GPT extraction/operator confirmation: 133 (7.22% of actionable)
+
+Verification: `bun test packages/core apps/api apps/web` 72 pass · `bun run typecheck` clean · `bun run build:web` clean.
+
 ## 2026-05-10 (Symbol Settings cleanup — Add-Mapping modal)
 
 Replaces the cramped two-form layout above the Symbol Settings table with the same modal-driven UX as Provider Config:
@@ -181,7 +247,7 @@ Changes made in this session:
 - Added explicit `TRAILING_STOP` command parsing with pips/points preserved as data instead of converted prematurely.
 - Added parser fixtures for education/analysis text, result updates such as `Buy 66 full TP 400pips`, TP-only lifecycle updates such as `TP 1`, executable KAL VIP gold limits, and trailing-stop pips/points.
 - Added detection for conditional multi-scenario plans so posts with both buy and sell setups plus `only if`/`reaction-based` wording are treated as analysis, not executable orders.
-- Applied KAL VIP's default Gold/XAUUSD provider context to symbol-less lifecycle updates such as `TP 1`, reducing false manual-review items.
+- Applied KAL VIP's default Gold/XAUUSD provider context to symbol-less lifecycle updates such as `TP 1`, reducing false operator-confirmation items.
 - Added Parser Lab fixture labelling controls in the dashboard so captured parsed messages can be marked as entry, management, noise, or unknown and saved as reusable parser fixtures.
 - Added optional redacted fixture text capture in Parser Lab so sensitive names, links, or account details can be replaced before saving deterministic fixtures.
 - Tightened Parser Lab fixture-redaction coverage so the saved fixture payload reflects the operator-edited text from the fixture row.

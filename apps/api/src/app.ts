@@ -44,11 +44,7 @@ const defaultGlobalAliases = {
   US30: "DJI30",
 };
 
-const defaultProviderAliases = {
-  [demoProviderId]: {
-    GOLD: "XAUUSD",
-  },
-};
+const defaultProviderAliases: Record<string, Record<string, string>> = {};
 
 type SymbolAliasScope = "global" | "provider";
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
@@ -58,13 +54,37 @@ interface AppSettings {
   defaultRiskPercent: number;
   pollingIntervalSeconds: number;
   allowedOrderTypes: AppOrderType[];
+  defaultStopLossPips: number;
+  defaultTakeProfitPips: number;
+  azureOpenAIKeyConfigured: boolean;
+  leaseTimeoutSeconds: number;
+  maxLeaseAttempts: number;
 }
+
+interface AccountSlotInput {
+  name: string;
+}
+
+interface ProviderExecutionConfig {
+  riskMode: "fixed" | "percent";
+  riskAmount: number;
+  takeProfitLevels: Array<{ leg: number; percentage: number; strategy: string }>;
+  runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
+}
+
+const fallbackAccountId = process.env.DEFAULT_MT5_ACCOUNT_ID ?? demoAccountId;
+const MAX_PROVIDER_TP_LEVELS = 4;
 
 const defaultAppSettings: AppSettings = {
   defaultLotSize: 0.1,
   defaultRiskPercent: 1,
   pollingIntervalSeconds: 2,
   allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
+  defaultStopLossPips: 50,
+  defaultTakeProfitPips: 200,
+  azureOpenAIKeyConfigured: false,
+  leaseTimeoutSeconds: 15,
+  maxLeaseAttempts: 3,
 };
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
@@ -83,15 +103,17 @@ function defaultAccountMapping(accountId = demoAccountId): AccountSymbolMapping 
 }
 
 export function createApi(options: ApiOptions = {}) {
+  const shouldSeedDemoData = options.seedDemoData ?? process.env.SEED_DEMO_DATA === "true";
   const store = new AppStore(
     options.databasePath ?? process.env.DATABASE_PATH ?? "data/telegram-tc.db",
+    shouldSeedDemoData,
   );
   const telegram =
     options.telegram ??
     createTelegramAdapter(
       options.telegramAdapter ?? (options.databasePath === ":memory:" ? "mock" : undefined),
     );
-  if (options.seedDemoData ?? true) {
+  if (shouldSeedDemoData) {
     store.seedDemoData();
   }
 
@@ -109,7 +131,7 @@ export function createApi(options: ApiOptions = {}) {
   app.get("/api/dashboard", (c) => c.json(store.dashboard()));
   app.get("/api/settings", (c) => c.json({ settings: store.appSettings() }));
   app.patch("/api/settings", async (c) => {
-    const body = await c.req.json<Partial<AppSettings>>();
+    const body = await c.req.json<Partial<AppSettings> & { azureOpenAIApiKey?: string }>();
     return c.json({ settings: store.updateAppSettings(body) });
   });
 
@@ -139,8 +161,6 @@ export function createApi(options: ApiOptions = {}) {
     });
     if (adapterStatus.status !== started.status) {
       store.updateTelegramSession(started.sessionId, adapterStatus.status);
-    } else if (adapterStatus.status === "CONNECTED") {
-      store.ensureProviderForProfile(started.profileId);
     }
     return c.json({
       ...started,
@@ -186,10 +206,25 @@ export function createApi(options: ApiOptions = {}) {
         }
       }
     }
+    if (telegram.name !== "mock") return c.json({ dialogs: [] });
     return c.json({ dialogs: store.dialogs(profileId) });
   });
 
   app.get("/api/providers", (c) => c.json({ providers: store.providers() }));
+  app.get("/api/providers/:id/config", (c) =>
+    c.json({ config: store.providerConfig(c.req.param("id")) }),
+  );
+  app.get("/api/providers/:id/config-history", (c) =>
+    c.json({ history: store.providerConfigHistory(c.req.param("id")) }),
+  );
+  app.post("/api/providers/:id/test-config", async (c) => {
+    const body = await c.req.json<{
+      rawText: string;
+      accountId?: string;
+      config?: ProviderExecutionConfig;
+    }>();
+    return c.json(store.testProviderConfig(c.req.param("id"), body));
+  });
 
   app.post("/api/providers", async (c) => {
     const body = await c.req.json<{ profileId: string; dialogId: string; title?: string }>();
@@ -201,9 +236,16 @@ export function createApi(options: ApiOptions = {}) {
       enabled?: boolean;
       parserMode?: string;
       riskProfile?: string;
+      lotSize?: number;
+      riskMode?: "fixed" | "percent";
+      riskAmount?: number;
+      takeProfitLevels?: Array<{ leg: number; percentage: number; strategy: string }>;
+      runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     }>();
     return c.json(store.updateProvider(c.req.param("id"), body));
   });
+
+  app.delete("/api/providers/:id", (c) => c.json(store.deleteProvider(c.req.param("id"))));
 
   app.get("/api/providers/:id/messages", async (c) => {
     const limit = Number(c.req.query("limit") ?? 20);
@@ -341,6 +383,14 @@ export function createApi(options: ApiOptions = {}) {
 
   app.post("/api/signals/:id/ignore", (c) => c.json(store.ignoreSignal(c.req.param("id"))));
 
+  app.post("/api/signals/:id/ai-review", async (c) => {
+    const review = await store.aiReviewSignal(c.req.param("id"));
+    if ("error" in review) {
+      return c.json({ error: review.error }, review.statusCode);
+    }
+    return c.json(review);
+  });
+
   app.get("/api/symbol-mappings", (c) => c.json(store.symbolMappings()));
 
   app.put("/api/symbol-mappings/aliases", async (c) => {
@@ -352,6 +402,14 @@ export function createApi(options: ApiOptions = {}) {
     }>();
     return c.json(store.saveSymbolAlias(body));
   });
+  app.delete("/api/symbol-mappings/aliases", async (c) => {
+    const body = await c.req.json<{
+      scope: SymbolAliasScope;
+      providerId?: string;
+      rawSymbol: string;
+    }>();
+    return c.json(store.deleteSymbolAlias(body.scope, body.rawSymbol, body.providerId));
+  });
 
   app.put("/api/symbol-mappings/account/:accountId", async (c) => {
     const mapping = await c.req.json<AccountSymbolMapping>();
@@ -359,6 +417,44 @@ export function createApi(options: ApiOptions = {}) {
   });
 
   app.get("/api/mt5/accounts", (c) => c.json({ accounts: store.mt5Accounts() }));
+
+  app.get("/api/account-slots", (c) => c.json({ slots: store.accountSlots() }));
+  app.post("/api/account-slots", async (c) => {
+    const body = await c.req.json<AccountSlotInput>();
+    return c.json({ slot: store.createAccountSlot(body.name) });
+  });
+  app.post("/api/account-slots/:id/rotate", (c) =>
+    c.json({ slot: store.rotateAccountSlot(c.req.param("id")) }),
+  );
+  app.post("/api/account-slots/:id/unlink", (c) =>
+    c.json({ slot: store.unlinkAccountSlot(c.req.param("id")) }),
+  );
+
+  app.get("/api/account-provider-links", (c) =>
+    c.json({ links: store.accountProviderLinks() }),
+  );
+  app.put("/api/account-provider-links/:accountId/:providerId", async (c) => {
+    const body = await c.req.json<{ enabled?: boolean }>();
+    return c.json({
+      link: store.updateAccountProviderLink(
+        c.req.param("accountId"),
+        c.req.param("providerId"),
+        body.enabled ?? true,
+      ),
+    });
+  });
+
+  app.get("/api/equity-guardian", (c) => c.json({ guardians: store.equityGuardians() }));
+  app.patch("/api/equity-guardian/:accountId", async (c) => {
+    const body = await c.req.json<{ threshold?: number; paused?: boolean }>();
+    return c.json({ guardian: store.updateEquityGuardian(c.req.param("accountId"), body) });
+  });
+  app.post("/api/equity-guardian/:accountId/unpause", (c) =>
+    c.json({ guardian: store.unpauseEquityGuardian(c.req.param("accountId")) }),
+  );
+
+  app.get("/api/account/performance", (c) => c.json(store.accountPerformance()));
+  app.get("/api/providers/performance", (c) => c.json({ providers: store.providerPerformance() }));
 
   app.post("/api/mt5/register", async (c) => {
     const body = await c.req.json<{
@@ -370,8 +466,11 @@ export function createApi(options: ApiOptions = {}) {
       equity: number;
       marginMode: "HEDGING" | "NETTING";
       availableSymbols?: string[];
+      linkCode?: string;
     }>();
-    return c.json(store.registerMt5Account(body));
+    const registered = store.registerMt5Account(body);
+    if ("error" in registered) return c.json({ error: registered.error }, registered.statusCode);
+    return c.json(registered);
   });
 
   app.post("/api/mt5/heartbeat", async (c) => {
@@ -380,8 +479,11 @@ export function createApi(options: ApiOptions = {}) {
       balance: number;
       equity: number;
       availableSymbols?: string[];
+      linkCode?: string;
     }>();
-    return c.json(store.heartbeat(body));
+    const heartbeat = store.heartbeat(body);
+    if ("error" in heartbeat) return c.json({ error: heartbeat.error }, heartbeat.statusCode);
+    return c.json(heartbeat);
   });
 
   app.get("/api/mt5/poll", (c) =>
@@ -411,12 +513,25 @@ export function createApi(options: ApiOptions = {}) {
     return c.json(store.saveSnapshot(body));
   });
 
+  app.post("/api/mt5/history", async (c) => {
+    const body = await c.req.json<{
+      accountId: string;
+      deals: Mt5HistoryDealInput[];
+    }>();
+    return c.json(store.saveBrokerHistory(body));
+  });
+
   app.get("/api/execution-logs", (c) =>
     c.json({ logs: store.executionLogs(c.req.query("accountId")) }),
   );
+  app.get("/api/execution-logs/:id", (c) => c.json(store.executionLogDetails(c.req.param("id"))));
 
   app.get("/api/mt5/accounts/:accountId/logs", (c) =>
     c.json(store.mt5AccountLogs(c.req.param("accountId"))),
+  );
+
+  app.get("/api/trades/:id/broker-orders", (c) =>
+    c.json({ orders: store.brokerOrders(c.req.param("id")) }),
   );
 
   if (options.staticRoot) {
@@ -435,6 +550,7 @@ interface ExecutionReportInput {
   retcodeExternal: number;
   brokerComment: string;
   orderTicket?: string;
+  positionTicket?: string;
   dealTicket?: string;
   requestedPrice?: number;
   filledPrice?: number;
@@ -442,12 +558,50 @@ interface ExecutionReportInput {
   errorText?: string;
 }
 
+interface AiSignalReview {
+  verdict:
+    | "EXECUTABLE_SIGNAL"
+    | "TRADE_SETUP"
+    | "LIFECYCLE_COMMAND"
+    | "RESULT_UPDATE"
+    | "PROVIDER_STRATEGY_NOTE"
+    | "NOISE";
+  shouldQueue: boolean;
+  needsConfirmation: boolean;
+  confidence: number;
+  reason: string;
+  symbol: string;
+  direction: string;
+  entry: string;
+  stopLoss: string;
+  takeProfits: string[];
+  lifecycleAction: string;
+}
+
+interface Mt5HistoryDealInput {
+  dealTicket: string;
+  orderTicket?: string;
+  positionTicket?: string;
+  entry?: string;
+  type?: string;
+  symbol?: string;
+  price?: number;
+  volume?: number;
+  profit?: number;
+  commission?: number;
+  swap?: number;
+  comment?: string;
+  time?: string;
+}
+
 type RawMessageClassification = "entry" | "management" | "noise" | "unknown";
 
 class AppStore {
   private readonly db: Database;
+  private readonly allowDemoData: boolean;
 
-  constructor(databasePath: string) {
+  constructor(databasePath: string, allowDemoData = false) {
+    this.allowDemoData = allowDemoData;
     if (databasePath !== ":memory:") {
       const dir = databasePath.split("/").slice(0, -1).join("/");
       if (dir) {
@@ -515,18 +669,24 @@ class AppStore {
           "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, last_message_at FROM providers ORDER BY title",
         )
         .all() as Row[]
-    ).map((row) => ({
-      id: String(row.id),
-      profileId: String(row.profile_id),
-      dialogId: String(row.dialog_id),
-      title: String(row.title),
-      kind: String(row.kind),
-      enabled: Boolean(row.enabled),
-      parserMode: String(row.parser_mode),
-      riskProfile: String(row.risk_profile),
-      lotSize: Number(row.lot_size),
-      lastMessageAt: String(row.last_message_at),
-    }));
+    )
+      .filter(
+        (row) =>
+          this.allowDemoData ||
+          (String(row.profile_id) !== "profile-demo" && String(row.dialog_id) !== "dialog-alpha"),
+      )
+      .map((row) => ({
+        id: String(row.id),
+        profileId: String(row.profile_id),
+        dialogId: String(row.dialog_id),
+        title: String(row.title),
+        kind: String(row.kind),
+        enabled: Boolean(row.enabled),
+        parserMode: String(row.parser_mode),
+        riskProfile: String(row.risk_profile),
+        lotSize: Number(row.lot_size),
+        lastMessageAt: String(row.last_message_at),
+      }));
   }
 
   selectProvider(input: { profileId: string; dialogId: string; title?: string }) {
@@ -557,7 +717,16 @@ class AppStore {
 
   updateProvider(
     id: string,
-    input: { enabled?: boolean; parserMode?: string; riskProfile?: string; lotSize?: number },
+    input: {
+      enabled?: boolean;
+      parserMode?: string;
+      riskProfile?: string;
+      lotSize?: number;
+      riskMode?: "fixed" | "percent";
+      riskAmount?: number;
+      takeProfitLevels?: Array<{ leg: number; percentage: number; strategy: string }>;
+      runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
+    },
   ) {
     const current = this.providers().find((provider) => provider.id === id);
     if (!current) return { error: "Provider not found" };
@@ -572,6 +741,14 @@ class AppStore {
         positiveNumber(input.lotSize, current.lotSize),
         id,
       );
+    if (input.riskMode || input.takeProfitLevels || input.runner) {
+      this.saveProviderConfig(id, {
+        riskMode: input.riskMode ?? "fixed",
+        riskAmount: positiveNumber(input.riskAmount ?? input.lotSize, current.lotSize),
+        takeProfitLevels: normalizeProviderTpLevels(input.takeProfitLevels),
+        runner: input.runner,
+      });
+    }
     this.audit("provider.update", "info", "Provider settings updated", {
       providerId: id,
       ...input,
@@ -579,8 +756,88 @@ class AppStore {
     return { provider: this.providers().find((provider) => provider.id === id) };
   }
 
+  providerConfig(providerId: string): ProviderExecutionConfig {
+    const provider = this.providerDetails(providerId);
+    const row = this.db
+      .query("SELECT provider_config_json FROM providers WHERE id = ?")
+      .get(providerId) as Row | null;
+    const config = row?.provider_config_json
+      ? parseJson<Partial<ProviderExecutionConfig>>(String(row.provider_config_json))
+      : {};
+    return {
+      riskMode: config.riskMode === "percent" ? "percent" : "fixed",
+      riskAmount: positiveNumber(
+        config.riskAmount,
+        provider?.lotSize ?? defaultAppSettings.defaultLotSize,
+      ),
+      takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
+      runner: config.runner,
+    };
+  }
+
+  providerConfigHistory(providerId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT id, provider_id, config_json, created_at FROM provider_config_history WHERE provider_id = ? ORDER BY created_at DESC",
+        )
+        .all(providerId) as Row[]
+    ).map((row) => ({
+      id: String(row.id),
+      providerId: String(row.provider_id),
+      config: parseJson<ProviderExecutionConfig>(String(row.config_json)),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  testProviderConfig(
+    providerId: string,
+    input: { rawText: string; accountId?: string; config?: ProviderExecutionConfig },
+  ) {
+    const accountId = input.accountId ?? this.defaultParserAccountId();
+    const parsed = parseSignalText(input.rawText, this.parserContext(providerId, accountId));
+    const config = input.config ?? this.providerConfig(providerId);
+    return {
+      providerId,
+      accountId,
+      parsed: applyProviderExecutionConfig(parsed, config),
+      config,
+    };
+  }
+
+  private saveProviderConfig(providerId: string, config: ProviderExecutionConfig) {
+    this.db
+      .query("UPDATE providers SET provider_config_json = ? WHERE id = ?")
+      .run(JSON.stringify(config), providerId);
+    this.db
+      .query(
+        "INSERT INTO provider_config_history (id, provider_id, config_json, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(
+        `provider_config_${nanoid(10)}`,
+        providerId,
+        JSON.stringify(config),
+        new Date().toISOString(),
+      );
+    this.audit("provider.config.update", "info", "Provider execution config updated", {
+      providerId,
+      config,
+    });
+  }
+
   providerDetails(providerId: string) {
     return this.providers().find((provider) => provider.id === providerId);
+  }
+
+  deleteProvider(providerId: string) {
+    const provider = this.providerDetails(providerId);
+    if (!provider) return { error: "Provider not found" };
+    this.db.query("DELETE FROM providers WHERE id = ?").run(providerId);
+    this.audit("provider.delete", "warn", "Provider removed", {
+      providerId,
+      title: provider.title,
+    });
+    return { providerId, status: "DELETED" };
   }
 
   connectedSessionIdForProfile(profileId: string) {
@@ -636,7 +893,10 @@ class AppStore {
     const before = this.rawMessageCount(providerId);
     for (const message of messages) {
       const parserText = telegramParserText(message);
-      const parsed = parseSignalText(parserText, this.parserContext(providerId, demoAccountId));
+      const parsed = parseSignalText(
+        parserText,
+        this.parserContext(providerId, this.defaultParserAccountId()),
+      );
       this.db
         .query(
           `INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification)
@@ -676,11 +936,14 @@ class AppStore {
     providerId: string,
     input: { accountId?: string; dateFrom?: string; dateTo?: string } = {},
   ) {
-    const accountId = input.accountId ?? demoAccountId;
+    const accountId = input.accountId ?? this.defaultParserAccountId();
     const rows = this.rawMessagesForBacktest(providerId, input);
     const commandCounts: Record<string, number> = {};
     const mappingStatusCounts: Record<string, number> = {};
     const missingFieldCounts: Record<string, number> = {};
+    const reviewReasonCounts: Record<string, number> = {};
+    const patternCounts: Record<string, number> = {};
+    const warningCounts: Record<string, number> = {};
     const examples: Array<{
       telegramMessageId: string;
       messageDate: string;
@@ -708,12 +971,23 @@ class AppStore {
       for (const field of parsed.missingFields) {
         missingFieldCounts[field] = (missingFieldCounts[field] ?? 0) + 1;
       }
+      for (const pattern of parsed.matchedPatternIds) {
+        patternCounts[pattern] = (patternCounts[pattern] ?? 0) + 1;
+      }
+      for (const warning of parsed.warnings) {
+        warningCounts[warning] = (warningCounts[warning] ?? 0) + 1;
+      }
       if (parsed.commandType === "OPEN_TRADE") openSignals += 1;
       else if (parsed.commandType !== "NO_SIGNAL") lifecycleCommands += 1;
       if (parsed.commandType !== "NO_SIGNAL") actionableMessages += 1;
       const needsReview = shouldRequireManualReview(parsed);
       if (needsReview) reviewRequired += 1;
       if (needsReview && parsed.commandType !== "NO_SIGNAL") actionableReviewRequired += 1;
+      if (needsReview && parsed.commandType !== "NO_SIGNAL") {
+        for (const reason of reviewReasons(parsed)) {
+          reviewReasonCounts[reason] = (reviewReasonCounts[reason] ?? 0) + 1;
+        }
+      }
       if (
         parsed.commandType !== "NO_SIGNAL" &&
         (needsReview || parsed.warnings.length > 0) &&
@@ -739,6 +1013,7 @@ class AppStore {
       openSignals,
       lifecycleCommands,
       actionableMessages,
+      autoActionableMessages: actionableMessages - actionableReviewRequired,
       reviewRequired,
       reviewRate: rows.length ? Number((reviewRequired / rows.length).toFixed(4)) : 0,
       actionableReviewRequired,
@@ -748,11 +1023,18 @@ class AppStore {
       commandCounts,
       mappingStatusCounts,
       missingFieldCounts,
+      reviewReasonCounts,
+      patternCounts,
+      warningCounts,
       examples,
     };
   }
 
-  parseProviderMessage(providerId: string, rawText: string, accountId = demoAccountId) {
+  parseProviderMessage(
+    providerId: string,
+    rawText: string,
+    accountId = this.defaultParserAccountId(),
+  ) {
     const rawMessageId = `raw_${nanoid(10)}`;
     const parsedSignalId = `parse_${nanoid(10)}`;
     const now = new Date().toISOString();
@@ -791,7 +1073,11 @@ class AppStore {
     };
   }
 
-  parseRecentProviderMessages(providerId: string, limit: number, accountId = demoAccountId) {
+  parseRecentProviderMessages(
+    providerId: string,
+    limit: number,
+    accountId = this.defaultParserAccountId(),
+  ) {
     return this.recentMessages(providerId, limit).flatMap((message) => {
       const existing = this.db
         .query("SELECT id FROM parsed_signals WHERE raw_message_id = ? LIMIT 1")
@@ -852,7 +1138,13 @@ class AppStore {
   ):
     | {
         statusCode?: 200;
-        body: { queueItemId?: string; logicalTradeId?: string; status: string };
+        body: {
+          queueItemId?: string;
+          logicalTradeId?: string;
+          queueItems?: string[];
+          logicalTradeIds?: string[];
+          status: string;
+        };
       }
     | { statusCode: 409 | 422; error: string } {
     const existing = this.db
@@ -869,10 +1161,16 @@ class AppStore {
       return { statusCode: 422, error: "Parsed signal not found" };
     }
     const signal = parseJson<ParsedSignal>(String(row.result_json));
-    const accountId = signal.accountId ?? demoAccountId;
+    const providerId = String(row.provider_id);
+    const targetAccountIds = this.targetAccountIdsForProvider(
+      providerId,
+      signal.accountId ?? this.defaultParserAccountId(),
+    );
+    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId();
     const executionMode = options.executionMode ?? "VIRTUAL_TP";
     const settings = this.appSettings();
-    const provider = this.providerDetails(String(row.provider_id));
+    const provider = this.providerDetails(providerId);
+    const providerConfig = this.providerConfig(providerId);
     const duplicate = this.db
       .query(
         "SELECT id FROM parsed_signals WHERE provider_id = ? AND fingerprint = ? AND id != ? AND status = 'APPROVED' LIMIT 1",
@@ -892,31 +1190,78 @@ class AppStore {
 
     const queueId = `queue_${nanoid(10)}`;
     let logicalTradeId: string | undefined;
-    let signalForQueue = signal;
+    let signalForQueue = applyProviderExecutionConfig(signal, providerConfig);
     if (signal.commandType === "OPEN_TRADE") {
-      if (shouldRequireManualReview(signal)) {
-        return { statusCode: 422, error: "Signal still requires manual review before queueing" };
+      if (shouldRequireManualReview(signalForQueue)) {
+        return {
+          statusCode: 422,
+          error: "Signal needs GPT extraction or operator confirmation before queueing",
+        };
       }
-      const orderType = signal.orderType ?? "MARKET";
+      const orderType = signalForQueue.orderType ?? "MARKET";
       if (!settings.allowedOrderTypes.includes(orderType)) {
         return { statusCode: 422, error: `${orderType} orders are not allowed by settings` };
       }
-      logicalTradeId = `trade_${nanoid(10)}`;
-      const trade = createLogicalTradeFromSignal(signal, {
-        id: logicalTradeId,
-        providerId: String(row.provider_id),
-        accountId,
-        executionMode,
+      const queueItems: string[] = [];
+      const logicalTradeIds: string[] = [];
+      for (const targetAccountId of targetAccountIds) {
+        const targetLogicalTradeId = `trade_${nanoid(10)}`;
+        const targetQueueId = `queue_${nanoid(10)}`;
+        const trade = createLogicalTradeFromSignal(signalForQueue, {
+          id: targetLogicalTradeId,
+          providerId,
+          accountId: targetAccountId,
+          executionMode,
+        });
+        this.insertTrade(trade);
+        const item = buildExecutionCommand(signalForQueue, {
+          id: targetQueueId,
+          accountId: targetAccountId,
+          logicalTradeId: targetLogicalTradeId,
+          executionMode,
+          volume:
+            providerConfig.riskMode === "fixed"
+              ? providerConfig.riskAmount
+              : (provider?.lotSize ?? settings.defaultLotSize),
+          riskPercent:
+            providerConfig.riskMode === "percent"
+              ? providerConfig.riskAmount
+              : settings.defaultRiskPercent,
+        });
+        this.insertQueueItem(item, parsedSignalId);
+        queueItems.push(targetQueueId);
+        logicalTradeIds.push(targetLogicalTradeId);
+      }
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("APPROVED", parsedSignalId);
+      this.audit("signal.approve", "info", "Signal approved for MT5 queue", {
+        parsedSignalId,
+        queueItems,
+        logicalTradeIds,
       });
-      this.insertTrade(trade);
+      return {
+        body: {
+          queueItemId: queueItems[0],
+          logicalTradeId: logicalTradeIds[0],
+          queueItems,
+          logicalTradeIds,
+          status: "PENDING",
+        },
+      };
     } else if (signal.commandType === "NO_SIGNAL") {
       return { statusCode: 422, error: "Message is not a trade signal" };
+    } else if (signal.commandType === "TRADE_SETUP") {
+      return {
+        statusCode: 422,
+        error: "Trade setup posts require manual conversion before queueing",
+      };
     } else {
       const match = matchLifecycleCommandToTrade(signal, this.logicalTrades());
       if (match.requiresManualReview || !match.tradeId) {
         return {
           statusCode: 422,
-          error: match.reason ?? "Lifecycle command requires manual review before queueing",
+          error: match.reason ?? "Lifecycle command needs trade matching before queueing",
         };
       }
       const trade = this.logicalTrade(match.tradeId);
@@ -935,7 +1280,7 @@ class AppStore {
         });
         return { body: { logicalTradeId: trade.id, status: "RECORDED" } };
       }
-      signalForQueue = enrichLifecycleSignalFromTrade(signal, trade);
+      signalForQueue = enrichLifecycleSignalFromTrade(signalForQueue, trade);
       this.appendTradeCommand(trade.id, signal);
     }
     const queueItem = buildExecutionCommand(signalForQueue, {
@@ -943,9 +1288,21 @@ class AppStore {
       accountId,
       logicalTradeId,
       executionMode,
-      volume: provider?.lotSize ?? settings.defaultLotSize,
-      riskPercent: settings.defaultRiskPercent,
+      volume:
+        providerConfig.riskMode === "fixed"
+          ? providerConfig.riskAmount
+          : (provider?.lotSize ?? settings.defaultLotSize),
+      riskPercent:
+        providerConfig.riskMode === "percent"
+          ? providerConfig.riskAmount
+          : settings.defaultRiskPercent,
     });
+    if (logicalTradeId && queueItem.payload.commandType !== "OPEN_TRADE") {
+      Object.assign(
+        queueItem.payload,
+        this.brokerTargetForCommand(logicalTradeId, queueItem.payload),
+      );
+    }
     this.insertQueueItem(queueItem, parsedSignalId);
     this.db
       .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
@@ -968,7 +1325,7 @@ class AppStore {
       if (!existing) {
         const signal = parseJson<ParsedSignal>(String(row.result_json));
         this.insertNonLeasedQueueItem(parsedSignalId, signal, "IGNORED", {
-          accountId: signal.accountId ?? demoAccountId,
+          accountId: signal.accountId ?? this.defaultParserAccountId(),
           executionMode: "VIRTUAL_TP",
           settings: this.appSettings(),
         });
@@ -978,6 +1335,50 @@ class AppStore {
       .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
       .run("IGNORED", parsedSignalId);
     return { parsedSignalId, status: "IGNORED" };
+  }
+
+  async aiReviewSignal(
+    parsedSignalId: string,
+  ): Promise<
+    | { parsedSignalId: string; review: AiSignalReview; model: string }
+    | { statusCode: 404 | 409 | 503 | 502; error: string }
+  > {
+    const row = this.db
+      .query(
+        `SELECT parsed_signals.id, parsed_signals.provider_id, parsed_signals.result_json, parsed_signals.review_required, raw_messages.classification
+         FROM parsed_signals
+         LEFT JOIN raw_messages ON raw_messages.id = parsed_signals.raw_message_id
+         WHERE parsed_signals.id = ?`,
+      )
+      .get(parsedSignalId) as Row | null;
+    if (!row) return { statusCode: 404, error: "Parsed signal not found" };
+    const signal = parseJson<ParsedSignal>(String(row.result_json));
+    if (signal.commandType === "NO_SIGNAL") {
+      return {
+        statusCode: 409,
+        error: "GPT extraction is not available for NO_SIGNAL parser outputs",
+      };
+    }
+    if (!row.review_required) {
+      return { statusCode: 409, error: "AI review is only available for signals requiring review" };
+    }
+
+    const provider = this.providerDetails(String(row.provider_id));
+    const model = process.env.AZURE_OPENAI_DEPLOYMENT ?? "gpt-5.4-mini";
+    const review = await reviewSignalWithAzureOpenAI({
+      signal,
+      providerTitle: provider?.title ?? String(row.provider_id),
+      classification: String(row.classification ?? "unknown"),
+      model,
+      apiKey: this.secret("azureOpenAIApiKey"),
+    });
+    if ("error" in review) return review;
+    this.audit("signal.ai-review", "info", "AI parser review completed", {
+      parsedSignalId,
+      model,
+      verdict: review.verdict,
+    });
+    return { parsedSignalId, review, model };
   }
 
   queueItems() {
@@ -999,14 +1400,19 @@ class AppStore {
     equity: number;
     marginMode: "HEDGING" | "NETTING";
     availableSymbols?: string[];
-  }) {
+    linkCode?: string;
+  }): { accountId: string; status: "REGISTERED" } | { statusCode: 404; error: string } {
+    const slot = input.linkCode ? this.accountSlotByCode(input.linkCode) : undefined;
+    if (input.linkCode && !slot) {
+      return { statusCode: 404, error: "Account slot link code was not found" };
+    }
     const accountId = `mt5-${input.accountNumber}`;
     const now = new Date().toISOString();
     this.db
       .query(
         `INSERT INTO mt5_accounts
-          (id, account_number, server, company, currency, balance, equity, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, account_number, server, company, currency, balance, equity, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
           server = excluded.server,
           company = excluded.company,
@@ -1026,6 +1432,7 @@ class AppStore {
         input.currency,
         input.balance,
         input.equity,
+        input.balance,
         input.marginMode,
         "online",
         JSON.stringify(input.availableSymbols ?? []),
@@ -1041,6 +1448,11 @@ class AppStore {
       accountId,
       marginMode: input.marginMode,
     });
+    if (slot) this.attachAccountSlot(slot.id, accountId, input);
+    else this.ensureLegacyAccountSlot(accountId, input);
+    this.updateEquityGuardian(accountId, {
+      currentDrawdown: drawdownPercent(input.balance, input.equity),
+    });
     return { accountId, status: "REGISTERED" };
   }
 
@@ -1049,7 +1461,22 @@ class AppStore {
     balance: number;
     equity: number;
     availableSymbols?: string[];
+    linkCode?: string;
   }) {
+    if (input.linkCode) {
+      const slot = this.accountSlotByCode(input.linkCode);
+      if (!slot || (slot.accountId && slot.accountId !== input.accountId)) {
+        return { error: "Account slot link code was not found", statusCode: 404 as const };
+      }
+    } else {
+      const slot = this.accountSlots().find((item) => item.accountId === input.accountId);
+      if (slot && slot.status !== "legacy") {
+        return {
+          error: "Heartbeat missing link code for linked account slot",
+          statusCode: 404 as const,
+        };
+      }
+    }
     const now = new Date().toISOString();
     this.db
       .query(
@@ -1063,27 +1490,163 @@ class AppStore {
         now,
         input.accountId,
       );
+    this.updateEquityGuardian(input.accountId, {
+      currentDrawdown: drawdownPercent(input.balance, input.equity),
+    });
+    if (input.linkCode) {
+      const slot = this.accountSlotByCode(input.linkCode);
+      if (slot) {
+        this.db
+          .query(
+            "UPDATE account_slots SET account_id = ?, balance = ?, equity = ?, last_heartbeat_at = ?, updated_at = ?, status = ? WHERE id = ?",
+          )
+          .run(input.accountId, input.balance, input.equity, now, now, "linked", slot.id);
+      }
+    }
     return { accountId: input.accountId, heartbeatStatus: "online", at: now };
   }
 
   leaseNextQueueItem(accountId?: string): ReturnType<typeof queueRow> | null {
-    const row = accountId
+    this.recoverStaleLeases();
+    const rows = accountId
       ? (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE status = 'PENDING' AND account_id = ? ORDER BY created_at LIMIT 1",
+            "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE status = 'PENDING' AND account_id = ? ORDER BY created_at LIMIT 25",
           )
-          .get(accountId) as Row | null)
+          .all(accountId) as Row[])
       : (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE status = 'PENDING' ORDER BY created_at LIMIT 1",
+            "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE status = 'PENDING' ORDER BY created_at LIMIT 25",
           )
-          .get() as Row | null);
+          .all() as Row[]);
+    const row = rows.find((candidate) => {
+      const item = queueRow(candidate);
+      if (item.payload.commandType !== "OPEN_TRADE") return true;
+      if (!this.isEquityGuardianPaused(item.accountId)) return true;
+      const now = new Date().toISOString();
+      this.db
+        .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?")
+        .run("FAILED", now, item.id);
+      this.audit("equity-guardian.reject", "warn", "OPEN_TRADE rejected by Equity Guardian", item);
+      return false;
+    }) as Row | undefined;
     if (!row) return null;
     const leasedAt = new Date().toISOString();
     this.db
-      .query("UPDATE queue_items SET status = ?, leased_at = ?, updated_at = ? WHERE id = ?")
+      .query(
+        "UPDATE queue_items SET status = ?, leased_at = ?, lease_count = COALESCE(lease_count, 0) + 1, updated_at = ? WHERE id = ?",
+      )
       .run("LEASED", leasedAt, leasedAt, String(row.id));
     return queueRow({ ...row, status: "LEASED", leased_at: leasedAt });
+  }
+
+  private recoverStaleLeases() {
+    const settings = this.appSettings();
+    const cutoff = new Date(Date.now() - settings.leaseTimeoutSeconds * 1000).toISOString();
+    const stale = this.db
+      .query(
+        "SELECT id, lease_count FROM queue_items WHERE status = 'LEASED' AND leased_at IS NOT NULL AND leased_at < ?",
+      )
+      .all(cutoff) as Row[];
+    for (const row of stale) {
+      const leaseCount = Number(row.lease_count ?? 0);
+      const nextStatus = leaseCount >= settings.maxLeaseAttempts ? "EXPIRED" : "PENDING";
+      this.db
+        .query("UPDATE queue_items SET status = ?, leased_at = NULL, updated_at = ? WHERE id = ?")
+        .run(nextStatus, new Date().toISOString(), String(row.id));
+      this.audit(
+        "queue.lease-recovery",
+        nextStatus === "EXPIRED" ? "warn" : "info",
+        `Queue lease moved to ${nextStatus}`,
+        {
+          queueItemId: String(row.id),
+          leaseCount,
+        },
+      );
+    }
+  }
+
+  equityGuardians() {
+    return this.mt5Accounts().map((account) => this.equityGuardian(account.id));
+  }
+
+  equityGuardian(accountId: string) {
+    const account = this.mt5Accounts().find((item) => item.id === accountId);
+    const row = this.db
+      .query(
+        "SELECT account_id, threshold, current_drawdown, paused, breach_json, updated_at FROM equity_guardians WHERE account_id = ?",
+      )
+      .get(accountId) as Row | null;
+    const currentDrawdown = row
+      ? Number(row.current_drawdown)
+      : drawdownPercent(account?.balance ?? 0, account?.equity ?? 0);
+    return {
+      accountId,
+      accountNumber: account?.accountNumber ?? "",
+      threshold: row ? Number(row.threshold) : 10,
+      currentDrawdown,
+      paused: row ? Boolean(row.paused) : false,
+      breaches: row ? parseJson<unknown[]>(String(row.breach_json || "[]")) : [],
+      updatedAt: row ? String(row.updated_at) : "",
+    };
+  }
+
+  updateEquityGuardian(
+    accountId: string,
+    input: { threshold?: number; paused?: boolean; currentDrawdown?: number },
+  ) {
+    const current = this.equityGuardian(accountId);
+    const threshold = positiveNumber(input.threshold, current.threshold);
+    const currentDrawdown = Number.isFinite(input.currentDrawdown)
+      ? Number(input.currentDrawdown)
+      : current.currentDrawdown;
+    const breached = currentDrawdown >= threshold;
+    const paused = input.paused ?? (current.paused || breached);
+    const breaches = [...current.breaches];
+    if (breached && !current.paused) {
+      breaches.push({ at: new Date().toISOString(), drawdown: currentDrawdown, action: "paused" });
+    }
+    this.db
+      .query(
+        "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
+      )
+      .run(
+        accountId,
+        threshold,
+        currentDrawdown,
+        Number(paused),
+        JSON.stringify(breaches),
+        new Date().toISOString(),
+      );
+    return this.equityGuardian(accountId);
+  }
+
+  unpauseEquityGuardian(accountId: string) {
+    const current = this.equityGuardian(accountId);
+    const breaches = [
+      ...current.breaches,
+      { at: new Date().toISOString(), drawdown: current.currentDrawdown, action: "manual_unpause" },
+    ];
+    this.db
+      .query(
+        "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
+      )
+      .run(
+        accountId,
+        current.threshold,
+        current.currentDrawdown,
+        0,
+        JSON.stringify(breaches),
+        new Date().toISOString(),
+      );
+    this.audit("equity-guardian.unpause", "info", "Equity Guardian manually unpaused", {
+      accountId,
+    });
+    return this.equityGuardian(accountId);
+  }
+
+  private isEquityGuardianPaused(accountId?: string) {
+    return accountId ? this.equityGuardian(accountId).paused : false;
   }
 
   executionReport(input: ExecutionReportInput) {
@@ -1092,8 +1655,8 @@ class AppStore {
     this.db
       .query(
         `INSERT INTO execution_reports
-          (id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -1104,6 +1667,7 @@ class AppStore {
         input.retcodeExternal,
         input.brokerComment,
         input.orderTicket ?? "",
+        input.positionTicket ?? "",
         input.dealTicket ?? "",
         input.requestedPrice ?? null,
         input.filledPrice ?? null,
@@ -1115,6 +1679,7 @@ class AppStore {
       .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?")
       .run(input.status, now, input.queueItemId);
     this.reconcileExecutionReport(input);
+    this.recordBrokerOrder(input);
     this.audit(
       "mt5.report",
       input.status === "EXECUTED" ? "info" : "error",
@@ -1149,6 +1714,7 @@ class AppStore {
         now,
       );
     this.reconcileSnapshotState(input.accountId, input.positions, input.orders);
+    this.reconcileManualBrokerClosures(input.accountId, input.positions, input.orders);
     this.audit("mt5.snapshot", "info", "MT5 state snapshot received", input);
     return {
       accountId: input.accountId,
@@ -1158,12 +1724,66 @@ class AppStore {
     };
   }
 
+  saveBrokerHistory(input: { accountId: string; deals: Mt5HistoryDealInput[] }) {
+    let recorded = 0;
+    for (const deal of input.deals) {
+      if (!deal.dealTicket) continue;
+      const exists = this.db
+        .query("SELECT id FROM broker_orders WHERE deal_ticket = ? LIMIT 1")
+        .get(deal.dealTicket) as Row | null;
+      if (exists) continue;
+      const tradeId = this.logicalTradeIdForHistoryDeal(deal);
+      if (!tradeId) continue;
+      const open = this.openBrokerOrderForDeal(tradeId, deal);
+      const action = historyDealAction(
+        deal,
+        open ? this.positionStillOpen(input.accountId, String(open.position_ticket ?? "")) : false,
+      );
+      const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
+      const pnlPips =
+        openPrice && deal.price
+          ? Number(((deal.price - openPrice) / brokerPipSize(deal.symbol ?? "")).toFixed(1))
+          : null;
+      this.db
+        .query(
+          `INSERT INTO broker_orders
+            (id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
+             requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment, pnl_currency, pnl_pips, source, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `broker_${nanoid(10)}`,
+          tradeId,
+          historyDealLegId(deal),
+          action,
+          "history",
+          input.accountId,
+          deal.orderTicket ?? "",
+          deal.positionTicket ?? "",
+          deal.dealTicket,
+          null,
+          deal.volume ?? null,
+          null,
+          deal.price ?? null,
+          0,
+          0,
+          deal.comment ?? "MT5 history deal",
+          Number(((deal.profit ?? 0) + (deal.commission ?? 0) + (deal.swap ?? 0)).toFixed(2)),
+          pnlPips,
+          "history",
+          deal.time ?? new Date().toISOString(),
+        );
+      recorded += 1;
+    }
+    return { accountId: input.accountId, received: input.deals.length, recorded };
+  }
+
   mt5Accounts() {
     const snapshots = this.mt5SnapshotsByAccount();
     return (
       this.db
         .query(
-          "SELECT id, account_number, server, company, currency, balance, equity, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at FROM mt5_accounts ORDER BY account_number",
+          "SELECT id, account_number, server, company, currency, balance, equity, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at FROM mt5_accounts ORDER BY account_number",
         )
         .all() as Row[]
     ).map((row) => ({
@@ -1174,8 +1794,9 @@ class AppStore {
       currency: String(row.currency),
       balance: Number(row.balance),
       equity: Number(row.equity),
+      initialBalance: Number(row.initial_balance ?? row.balance),
       marginMode: String(row.margin_mode),
-      heartbeatStatus: String(row.heartbeat_status),
+      heartbeatStatus: heartbeatFreshness(String(row.last_heartbeat_at)),
       availableSymbols: parseJson<string[]>(String(row.available_symbols_json)),
       lastHeartbeatAt: String(row.last_heartbeat_at),
       openPositionCount: snapshots[String(row.id)]?.positions.length ?? 0,
@@ -1184,16 +1805,191 @@ class AppStore {
     }));
   }
 
+  accountSlots() {
+    return (
+      this.db
+        .query(
+          "SELECT id, name, link_code, status, account_id, account_number, server, broker, currency, balance, equity, last_heartbeat_at, created_at, updated_at FROM account_slots ORDER BY created_at DESC",
+        )
+        .all() as Row[]
+    ).map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      linkCode: String(row.link_code),
+      status: String(row.status),
+      accountId: String(row.account_id ?? ""),
+      accountNumber: String(row.account_number ?? ""),
+      server: String(row.server ?? ""),
+      broker: String(row.broker ?? ""),
+      currency: String(row.currency ?? ""),
+      balance: nullableNumber(row.balance),
+      equity: nullableNumber(row.equity),
+      lastHeartbeatAt: String(row.last_heartbeat_at ?? ""),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    }));
+  }
+
+  accountProviderLinks() {
+    return (
+      this.db
+        .query("SELECT account_id, provider_id, enabled, updated_at FROM account_provider_links ORDER BY account_id, provider_id")
+        .all() as Row[]
+    ).map((row) => ({
+      accountId: String(row.account_id),
+      providerId: String(row.provider_id),
+      enabled: Boolean(row.enabled),
+      updatedAt: String(row.updated_at),
+    }));
+  }
+
+  updateAccountProviderLink(accountId: string, providerId: string, enabled: boolean) {
+    const now = new Date().toISOString();
+    this.db
+      .query(
+        "INSERT INTO account_provider_links (account_id, provider_id, enabled, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, provider_id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at",
+      )
+      .run(accountId, providerId, Number(enabled), now);
+    this.audit("account-provider-link.update", "info", "Account provider routing updated", {
+      accountId,
+      providerId,
+      enabled,
+    });
+    return this.accountProviderLinks().find((link) => link.accountId === accountId && link.providerId === providerId);
+  }
+
+  private targetAccountIdsForProvider(providerId: string, fallback: string) {
+    const links = this.accountProviderLinks().filter((link) => link.providerId === providerId);
+    const enabled = links.filter((link) => link.enabled).map((link) => link.accountId);
+    return enabled.length ? [...new Set(enabled)] : [fallback];
+  }
+
+  createAccountSlot(name: string) {
+    const now = new Date().toISOString();
+    const slot = {
+      id: `slot_${nanoid(10)}`,
+      name: name?.trim() || "MT5 Account Slot",
+      linkCode: nanoid(8).toUpperCase(),
+      status: "waiting",
+    };
+    this.db
+      .query(
+        "INSERT INTO account_slots (id, name, link_code, status, account_id, account_number, server, broker, currency, balance, equity, last_heartbeat_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        slot.id,
+        slot.name,
+        slot.linkCode,
+        slot.status,
+        "",
+        "",
+        "",
+        "",
+        "",
+        null,
+        null,
+        "",
+        now,
+        now,
+      );
+    return this.accountSlots().find((item) => item.id === slot.id);
+  }
+
+  rotateAccountSlot(id: string) {
+    this.db
+      .query("UPDATE account_slots SET link_code = ?, updated_at = ? WHERE id = ?")
+      .run(nanoid(8).toUpperCase(), new Date().toISOString(), id);
+    return this.accountSlots().find((item) => item.id === id);
+  }
+
+  unlinkAccountSlot(id: string) {
+    this.db
+      .query("UPDATE account_slots SET status = ?, account_id = '', updated_at = ? WHERE id = ?")
+      .run("waiting", new Date().toISOString(), id);
+    return this.accountSlots().find((item) => item.id === id);
+  }
+
+  private accountSlotByCode(linkCode: string) {
+    return this.accountSlots().find((slot) => slot.linkCode === linkCode);
+  }
+
+  private attachAccountSlot(
+    slotId: string,
+    accountId: string,
+    input: {
+      accountNumber: string;
+      server: string;
+      company: string;
+      currency: string;
+      balance: number;
+      equity: number;
+    },
+  ) {
+    this.db
+      .query(
+        "UPDATE account_slots SET status = ?, account_id = ?, account_number = ?, server = ?, broker = ?, currency = ?, balance = ?, equity = ?, last_heartbeat_at = ?, updated_at = ? WHERE id = ?",
+      )
+      .run(
+        "linked",
+        accountId,
+        input.accountNumber,
+        input.server,
+        input.company,
+        input.currency,
+        input.balance,
+        input.equity,
+        new Date().toISOString(),
+        new Date().toISOString(),
+        slotId,
+      );
+  }
+
+  private ensureLegacyAccountSlot(
+    accountId: string,
+    input: {
+      accountNumber: string;
+      server: string;
+      company: string;
+      currency: string;
+      balance: number;
+      equity: number;
+    },
+  ) {
+    const existing = this.accountSlots().find((slot) => slot.accountId === accountId);
+    if (existing) return;
+    const now = new Date().toISOString();
+    this.db
+      .query(
+        "INSERT INTO account_slots (id, name, link_code, status, account_id, account_number, server, broker, currency, balance, equity, last_heartbeat_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        `slot_${nanoid(10)}`,
+        "Unlinked smoke / legacy",
+        nanoid(8).toUpperCase(),
+        "legacy",
+        accountId,
+        input.accountNumber,
+        input.server,
+        input.company,
+        input.currency,
+        input.balance,
+        input.equity,
+        now,
+        now,
+        now,
+      );
+  }
+
   executionLogs(accountId?: string) {
     const rows = accountId
       ? (this.db
           .query(
-            "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports WHERE account_id = ? ORDER BY created_at DESC",
+            "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports WHERE account_id = ? ORDER BY created_at DESC",
           )
           .all(accountId) as Row[])
       : (this.db
           .query(
-            "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports ORDER BY created_at DESC",
+            "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports ORDER BY created_at DESC",
           )
           .all() as Row[]);
     return rows.map((row) => ({
@@ -1205,6 +2001,7 @@ class AppStore {
       retcodeExternal: Number(row.retcode_external),
       brokerComment: String(row.broker_comment),
       orderTicket: String(row.order_ticket),
+      positionTicket: String(row.position_ticket ?? ""),
       dealTicket: String(row.deal_ticket),
       requestedPrice: row.requested_price === null ? undefined : Number(row.requested_price),
       filledPrice: row.filled_price === null ? undefined : Number(row.filled_price),
@@ -1212,6 +2009,194 @@ class AppStore {
       errorText: String(row.error_text),
       createdAt: String(row.created_at),
     }));
+  }
+
+  executionLogDetails(reportId: string) {
+    const row = this.db
+      .query(
+        "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports WHERE id = ?",
+      )
+      .get(reportId) as Row | null;
+    if (!row) return { error: "Execution log not found" };
+    const log = this.executionLogs().find((item) => item.id === reportId);
+    const queue = this.db
+      .query(
+        "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE id = ?",
+      )
+      .get(String(row.queue_item_id)) as Row | null;
+    const queueItem = queue ? queueRow(queue) : null;
+    return {
+      log,
+      queueItem,
+      brokerOrders: queueItem?.logicalTradeId ? this.brokerOrders(queueItem.logicalTradeId) : [],
+    };
+  }
+
+  brokerOrders(logicalTradeId: string) {
+    return (
+      this.db
+        .query(
+          `SELECT id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
+            requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment, pnl_currency, pnl_pips, source, created_at
+           FROM broker_orders WHERE logical_trade_id = ? ORDER BY created_at ASC`,
+        )
+        .all(logicalTradeId) as Row[]
+    ).map((row) => ({
+      id: String(row.id),
+      logicalTradeId: String(row.logical_trade_id),
+      legId: String(row.leg_id),
+      action: String(row.action),
+      queueItemId: String(row.queue_item_id),
+      accountId: String(row.account_id),
+      orderTicket: String(row.order_ticket ?? ""),
+      positionTicket: String(row.position_ticket ?? ""),
+      dealTicket: String(row.deal_ticket ?? ""),
+      requestedVolume: nullableNumber(row.requested_volume),
+      filledVolume: nullableNumber(row.filled_volume),
+      requestedPrice: nullableNumber(row.requested_price),
+      filledPrice: nullableNumber(row.filled_price),
+      retcode: Number(row.retcode),
+      retcodeExternal: Number(row.retcode_external),
+      brokerComment: String(row.broker_comment),
+      pnlCurrency: nullableNumber(row.pnl_currency),
+      pnlPips: nullableNumber(row.pnl_pips),
+      source: String(row.source),
+      createdAt: String(row.created_at),
+    }));
+  }
+
+  accountPerformance() {
+    const accounts = this.mt5Accounts();
+    const primary = accounts[0];
+    if (!primary) {
+      return {
+        currency: "$",
+        initialBalance: null,
+        totalProfit: null,
+        today: null,
+        thisWeek: null,
+        thisMonth: null,
+        equityCurve: [],
+        monthlyReturns: [],
+      };
+    }
+    const initial = primary.initialBalance || primary.balance;
+    const accountOrders = this.brokerOrdersForAccount(primary.id);
+    const brokerPnl = sumPnl(accountOrders);
+    const totalProfit = accountOrders.length ? brokerPnl : primary.equity - initial;
+    return {
+      accountId: primary.id,
+      currency: primary.currency,
+      initialBalance: initial,
+      totalProfit,
+      today: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 1))),
+      thisWeek: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 7))),
+      thisMonth: sumPnl(accountOrders.filter((order) => withinCurrentMonth(order.createdAt))),
+      equityCurve: this.equityCurve(primary.id, initial, accountOrders),
+      monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders),
+    };
+  }
+
+  providerPerformance() {
+    return this.providers().map((provider) => {
+      const trades = this.logicalTrades().filter((trade) => trade.providerId === provider.id);
+      const orders = trades.flatMap((trade) => this.brokerOrders(trade.id));
+      const pnl = orders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0);
+      const pips = orders.reduce((sum, order) => sum + (order.pnlPips ?? 0), 0);
+      const pnlByTrade = trades.map((trade) => sumPnl(this.brokerOrders(trade.id)));
+      const closed = pnlByTrade.filter((value) => value !== 0);
+      return {
+        id: provider.id,
+        title: provider.title,
+        lots: provider.lotSize,
+        tradeCount: trades.length,
+        pips,
+        pnl,
+        profit: pnl,
+        gain: Number(
+          (
+            pnl /
+            Math.max(
+              1,
+              orders.reduce(
+                (sum, order) => sum + (order.requestedVolume ?? order.filledVolume ?? 0),
+                0,
+              ),
+            )
+          ).toFixed(2),
+        ),
+        winRate: closed.length ? closed.filter((value) => value > 0).length / closed.length : 0,
+        averageDrawdown: 0,
+      };
+    });
+  }
+
+  private equityCurve(
+    accountId: string,
+    initialBalance?: number,
+    orders = this.brokerOrdersForAccount(accountId),
+  ) {
+    const account = this.mt5Accounts().find((item) => item.id === accountId);
+    if (!account) return [];
+    const initial = initialBalance ?? account.initialBalance ?? account.balance;
+    let equity = initial;
+    let peak = initial;
+    const points = [{ x: 0, equity, drawdown: 0 }];
+    orders
+      .filter((order) => order.pnlCurrency !== undefined)
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+      .forEach((order, index) => {
+        equity += order.pnlCurrency ?? 0;
+        peak = Math.max(peak, equity);
+        points.push({
+          x: index + 1,
+          equity: Number(equity.toFixed(2)),
+          drawdown: drawdownPercent(peak, equity),
+        });
+      });
+    if (points.length === 1)
+      points.push({
+        x: 1,
+        equity: account.equity,
+        drawdown: drawdownPercent(account.balance, account.equity),
+      });
+    return points;
+  }
+
+  private monthlyReturns(
+    accountId: string,
+    initialBalance: number,
+    orders = this.brokerOrdersForAccount(accountId),
+  ) {
+    const account = this.mt5Accounts().find((item) => item.id === accountId);
+    if (!account || initialBalance <= 0) return [];
+    const byMonth = new Map<string, number>();
+    for (const order of orders) {
+      const month = order.createdAt.slice(0, 7);
+      byMonth.set(month, (byMonth.get(month) ?? 0) + (order.pnlCurrency ?? 0));
+    }
+    if (byMonth.size === 0) {
+      return [
+        {
+          month: new Date().toISOString().slice(0, 7),
+          returnPercent: ((account.equity - initialBalance) / initialBalance) * 100,
+        },
+      ];
+    }
+    return [...byMonth.entries()].map(([month, pnl]) => ({
+      month,
+      returnPercent: Number(((pnl / initialBalance) * 100).toFixed(2)),
+    }));
+  }
+
+  private brokerOrdersForAccount(accountId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT logical_trade_id FROM broker_orders WHERE account_id = ? GROUP BY logical_trade_id",
+        )
+        .all(accountId) as Row[]
+    ).flatMap((row) => this.brokerOrders(String(row.logical_trade_id)));
   }
 
   mt5AccountLogs(accountId: string) {
@@ -1231,35 +2216,59 @@ class AppStore {
   }
 
   symbolMappings() {
+    const aliases = [
+      ...Object.entries(this.globalAliases()).map(([rawSymbol, canonicalSymbol]) => ({
+        rawSymbol,
+        canonicalSymbol,
+        brokerSymbol: canonicalSymbol,
+        status: "mapped",
+        scope: "global",
+      })),
+      ...Object.entries(this.providerAliases()).flatMap(([providerId, values]) =>
+        Object.entries(values).map(([rawSymbol, canonicalSymbol]) => ({
+          rawSymbol,
+          canonicalSymbol,
+          brokerSymbol: canonicalSymbol,
+          status: "mapped",
+          scope: "provider",
+          providerId,
+        })),
+      ),
+    ];
+    const accountMappings = (
+      this.db
+        .query("SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id")
+        .all() as Row[]
+    ).map((row) => parseJson<AccountSymbolMapping>(String(row.mapping_json)));
+    const preview = [
+      ...aliases,
+      ...accountMappings.flatMap((mapping) =>
+        Object.entries(mapping.canonicalOverrides ?? {}).map(([canonicalSymbol, brokerSymbol]) => ({
+          rawSymbol: canonicalSymbol,
+          canonicalSymbol,
+          brokerSymbol,
+          status:
+            mapping.availableBrokerSymbols?.includes(brokerSymbol) === false
+              ? "unavailable"
+              : "mapped",
+          scope: "account",
+          accountId: mapping.accountId,
+        })),
+      ),
+    ];
     return {
       globalAliases: this.globalAliases(),
       providerAliases: this.providerAliases(),
-      accountMappings: (
-        this.db
-          .query("SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id")
-          .all() as Row[]
-      ).map((row) => parseJson<AccountSymbolMapping>(String(row.mapping_json))),
-      preview: [
-        {
-          rawSymbol: "GOLD",
-          canonicalSymbol: "XAUUSD",
-          brokerSymbol: "XAUUSD.r",
-          status: "mapped",
-        },
-        {
-          rawSymbol: "EUR/USD",
-          canonicalSymbol: "EURUSD",
-          brokerSymbol: "EURUSD.raw",
-          status: "mapped",
-        },
-        {
-          rawSymbol: "US30",
-          canonicalSymbol: "DJI30",
-          brokerSymbol: "DJI30.raw",
-          status: "mapped",
-        },
-      ],
+      accountMappings,
+      preview,
     };
+  }
+
+  deleteSymbolAlias(scope: SymbolAliasScope, rawSymbol: string, providerId = "") {
+    this.db
+      .query("DELETE FROM symbol_aliases WHERE scope = ? AND provider_id = ? AND raw_symbol = ?")
+      .run(scope, scope === "provider" ? providerId : "", rawSymbol.trim().toUpperCase());
+    return this.symbolMappings();
   }
 
   saveSymbolAlias(input: {
@@ -1372,7 +2381,10 @@ class AppStore {
     }
     const provider = this.providerDetails(message.providerId);
     const rawText = input.redactedRawText?.trim() || message.rawText;
-    const parsed = parseSignalText(rawText, this.parserContext(message.providerId, demoAccountId));
+    const parsed = parseSignalText(
+      rawText,
+      this.parserContext(message.providerId, this.defaultParserAccountId()),
+    );
     const expected = fixtureExpected(parsed);
     const expectedCommandType = input.expectedCommandType ?? parsed.commandType;
     const expectedSymbol = input.expectedSymbol ?? parsed.canonicalSymbol ?? "";
@@ -1440,17 +2452,38 @@ class AppStore {
     const row = this.db
       .query("SELECT settings_json FROM app_settings WHERE id = 'default'")
       .get() as Row | null;
-    if (!row) return { ...defaultAppSettings };
-    return normalizeAppSettings(parseJson<Partial<AppSettings>>(String(row.settings_json)));
+    const settings = row
+      ? normalizeAppSettings(parseJson<Partial<AppSettings>>(String(row.settings_json)))
+      : { ...defaultAppSettings };
+    return {
+      ...settings,
+      azureOpenAIKeyConfigured: Boolean(
+        process.env.AZURE_OPENAI_API_KEY || this.secret("azureOpenAIApiKey"),
+      ),
+    };
   }
 
-  updateAppSettings(input: Partial<AppSettings>) {
+  updateAppSettings(input: Partial<AppSettings> & { azureOpenAIApiKey?: string }) {
+    if (input.azureOpenAIApiKey?.trim()) {
+      this.saveSecret("azureOpenAIApiKey", input.azureOpenAIApiKey.trim());
+    }
     const settings = normalizeAppSettings({ ...this.appSettings(), ...input });
     this.db
       .query("INSERT OR REPLACE INTO app_settings (id, settings_json, updated_at) VALUES (?, ?, ?)")
       .run("default", JSON.stringify(settings), new Date().toISOString());
     this.audit("settings.update", "info", "Application settings updated", settings);
     return settings;
+  }
+
+  private saveSecret(key: string, value: string) {
+    this.db
+      .query("INSERT OR REPLACE INTO app_secrets (key, value, updated_at) VALUES (?, ?, ?)")
+      .run(key, value, new Date().toISOString());
+  }
+
+  private secret(key: string) {
+    const row = this.db.query("SELECT value FROM app_secrets WHERE key = ?").get(key) as Row | null;
+    return row ? String(row.value) : "";
   }
 
   dashboard() {
@@ -1465,6 +2498,11 @@ class AppStore {
         telegramAdapter: process.env.TELEGRAM_ADAPTER ?? "mock",
       },
       appSettings: this.appSettings(),
+      accountPerformance: this.accountPerformance(),
+      providerPerformance: this.providerPerformance(),
+      accountSlots: this.accountSlots(),
+      accountProviderLinks: this.accountProviderLinks(),
+      equityGuardians: this.equityGuardians(),
       telegramSessions: (
         this.db
           .query(
@@ -1479,6 +2517,7 @@ class AppStore {
       })),
       providers: providers.map((provider) => ({
         id: provider.id,
+        dialogId: provider.dialogId,
         title: provider.title,
         enabled: provider.enabled,
         parserMode: provider.parserMode,
@@ -1511,6 +2550,7 @@ class AppStore {
         confidence: signal.result.confidence,
         reviewRequired: signal.reviewRequired,
       })),
+      parserFixtures: this.fixtures().slice(0, 20),
       signalQueue: queue.map((item) => ({
         id: item.id,
         commandType: item.payload.commandType,
@@ -1580,7 +2620,11 @@ class AppStore {
   }
 
   ensureProviderForProfile(profileId: string) {
-    this.ensureMockProvider(profileId);
+    if (this.allowDemoData) this.ensureMockProvider(profileId);
+  }
+
+  private defaultParserAccountId() {
+    return this.mt5Accounts()[0]?.id ?? fallbackAccountId;
   }
 
   private migrate() {
@@ -1589,6 +2633,13 @@ class AppStore {
         id TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
         created_at TEXT NOT NULL
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS app_secrets (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
     `);
     this.db.run(`
@@ -1613,11 +2664,21 @@ class AppStore {
         parser_mode TEXT NOT NULL,
         risk_profile TEXT NOT NULL DEFAULT 'balanced',
         lot_size REAL NOT NULL DEFAULT 0.1,
+        provider_config_json TEXT NOT NULL DEFAULT '{}',
         last_message_at TEXT NOT NULL
       );
     `);
     this.ensureColumn("providers", "risk_profile", "TEXT NOT NULL DEFAULT 'balanced'");
     this.ensureColumn("providers", "lot_size", "REAL NOT NULL DEFAULT 0.1");
+    this.ensureColumn("providers", "provider_config_json", "TEXT NOT NULL DEFAULT '{}'");
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS provider_config_history (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        config_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS raw_messages (
         id TEXT PRIMARY KEY,
@@ -1659,11 +2720,13 @@ class AppStore {
         account_id TEXT,
         status TEXT NOT NULL,
         payload_json TEXT NOT NULL,
+        lease_count INTEGER NOT NULL DEFAULT 0,
         leased_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
     `);
+    this.ensureColumn("queue_items", "lease_count", "INTEGER NOT NULL DEFAULT 0");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS mt5_accounts (
         id TEXT PRIMARY KEY,
@@ -1673,11 +2736,50 @@ class AppStore {
         currency TEXT NOT NULL,
         balance REAL NOT NULL,
         equity REAL NOT NULL,
+        initial_balance REAL NOT NULL DEFAULT 0,
         margin_mode TEXT NOT NULL,
         heartbeat_status TEXT NOT NULL,
         available_symbols_json TEXT NOT NULL,
         last_heartbeat_at TEXT NOT NULL,
         created_at TEXT NOT NULL
+      );
+    `);
+    this.ensureColumn("mt5_accounts", "initial_balance", "REAL NOT NULL DEFAULT 0");
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS account_slots (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        link_code TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL,
+        account_id TEXT,
+        account_number TEXT,
+        server TEXT,
+        broker TEXT,
+        currency TEXT,
+        balance REAL,
+        equity REAL,
+        last_heartbeat_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS account_provider_links (
+        account_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, provider_id)
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS equity_guardians (
+        account_id TEXT PRIMARY KEY,
+        threshold REAL NOT NULL,
+        current_drawdown REAL NOT NULL,
+        paused INTEGER NOT NULL,
+        breach_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
       );
     `);
     this.db.run(`
@@ -1731,6 +2833,33 @@ class AppStore {
         created_at TEXT NOT NULL
       );
     `);
+    this.ensureColumn("execution_reports", "position_ticket", "TEXT");
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS broker_orders (
+        id TEXT PRIMARY KEY,
+        logical_trade_id TEXT NOT NULL,
+        leg_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        queue_item_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        order_ticket TEXT,
+        position_ticket TEXT,
+        deal_ticket TEXT,
+        requested_volume REAL,
+        filled_volume REAL,
+        requested_price REAL,
+        filled_price REAL,
+        retcode INTEGER NOT NULL,
+        retcode_external INTEGER NOT NULL,
+        broker_comment TEXT NOT NULL,
+        pnl_currency REAL,
+        pnl_pips REAL,
+        source TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+    `);
+    this.ensureColumn("broker_orders", "pnl_currency", "REAL");
+    this.ensureColumn("broker_orders", "pnl_pips", "REAL");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS parser_fixtures (
         id TEXT PRIMARY KEY,
@@ -1792,7 +2921,7 @@ class AppStore {
     demoMessages().forEach((message, index) => {
       const parsed = parseSignalText(
         message.rawText,
-        this.parserContext(providerId, demoAccountId),
+        this.parserContext(providerId, this.defaultParserAccountId()),
       );
       this.db
         .query(
@@ -1811,6 +2940,7 @@ class AppStore {
   }
 
   private parserContext(providerId: string, accountId: string) {
+    const settings = this.appSettings();
     return {
       providerId,
       accountId,
@@ -1818,6 +2948,8 @@ class AppStore {
       providerAliases: this.providerAliases(),
       providerDefaultSymbols: this.providerDefaultSymbols(),
       accountMappings: this.accountMappings(accountId),
+      defaultStopLoss: { value: settings.defaultStopLossPips, unit: "PIPS" as const },
+      defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" as const },
     };
   }
 
@@ -1979,7 +3111,7 @@ class AppStore {
     const now = new Date().toISOString();
     this.db
       .query(
-        "INSERT INTO queue_items (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, leased_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO queue_items (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, lease_count, leased_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         item.id,
@@ -1988,6 +3120,7 @@ class AppStore {
         item.accountId ?? "",
         item.status,
         JSON.stringify(item.payload),
+        0,
         item.leasedAt ?? null,
         now,
         now,
@@ -2174,6 +3307,200 @@ class AppStore {
       .run(updated.status, JSON.stringify(updated), trade.id);
   }
 
+  private recordBrokerOrder(input: ExecutionReportInput) {
+    const row = this.db
+      .query("SELECT logical_trade_id, payload_json FROM queue_items WHERE id = ?")
+      .get(input.queueItemId) as Row | null;
+    const tradeId = row?.logical_trade_id ? String(row.logical_trade_id) : "";
+    if (!row || !tradeId) return;
+
+    const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+    const pnl = this.computeBrokerOrderPnl(tradeId, payload, input);
+    const now = new Date().toISOString();
+    this.db
+      .query(
+        `INSERT INTO broker_orders
+          (id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
+           requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment, pnl_currency, pnl_pips, source, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `broker_${nanoid(10)}`,
+        tradeId,
+        brokerLegId(payload, input),
+        brokerAction(payload.commandType),
+        input.queueItemId,
+        input.accountId,
+        input.orderTicket ?? "",
+        input.positionTicket ?? "",
+        input.dealTicket ?? "",
+        payload.volume ?? null,
+        input.volume ?? null,
+        input.requestedPrice ?? null,
+        input.filledPrice ?? null,
+        input.retcode,
+        input.retcodeExternal,
+        input.brokerComment,
+        pnl.pnlCurrency,
+        pnl.pnlPips,
+        "signal",
+        now,
+      );
+  }
+
+  private brokerTargetForCommand(logicalTradeId: string, payload: ExecutionQueueItem["payload"]) {
+    const action = brokerAction(payload.commandType);
+    const rows = this.brokerOrders(logicalTradeId).slice().reverse();
+    if (action === "CANCEL_PENDING") {
+      const order = rows.find((row) => row.orderTicket && row.action === "OPEN");
+      return { targetOrderTicket: order?.orderTicket, targetPositionTicket: order?.positionTicket };
+    }
+    const position = rows.find(
+      (row) => row.positionTicket && row.action !== "FULL_CLOSE" && row.action !== "PARTIAL_CLOSE",
+    );
+    return {
+      targetPositionTicket: position?.positionTicket,
+      targetOrderTicket: position?.orderTicket,
+      targetDealTicket: position?.dealTicket,
+    };
+  }
+
+  private reconcileManualBrokerClosures(
+    accountId: string,
+    positions: unknown[],
+    orders: unknown[],
+  ) {
+    const liveTickets = new Set(
+      [...positions, ...orders]
+        .map((record) => brokerTicketFromSnapshot(record))
+        .filter((value): value is string => Boolean(value)),
+    );
+    const rows = this.db
+      .query(
+        "SELECT logical_trade_id, leg_id, position_ticket, order_ticket FROM broker_orders WHERE account_id = ? AND action = 'OPEN' AND (position_ticket != '' OR order_ticket != '')",
+      )
+      .all(accountId) as Row[];
+    for (const row of rows) {
+      const ticket = String(row.position_ticket || row.order_ticket || "");
+      if (!ticket || liveTickets.has(ticket)) continue;
+      const duplicate = this.db
+        .query(
+          "SELECT id FROM broker_orders WHERE account_id = ? AND action = 'FULL_CLOSE' AND source = 'manual' AND (position_ticket = ? OR order_ticket = ?) LIMIT 1",
+        )
+        .get(accountId, ticket, ticket) as Row | null;
+      if (duplicate) continue;
+      this.db
+        .query(
+          `INSERT INTO broker_orders
+            (id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
+             requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment, pnl_currency, pnl_pips, source, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `broker_${nanoid(10)}`,
+          String(row.logical_trade_id),
+          String(row.leg_id || "trade"),
+          "FULL_CLOSE",
+          "manual",
+          accountId,
+          String(row.order_ticket ?? ""),
+          String(row.position_ticket ?? ""),
+          "",
+          null,
+          null,
+          null,
+          null,
+          0,
+          0,
+          "Manual terminal intervention detected from snapshot diff",
+          null,
+          null,
+          "manual",
+          new Date().toISOString(),
+        );
+    }
+  }
+
+  private logicalTradeIdForHistoryDeal(deal: Mt5HistoryDealInput) {
+    const fromComment = logicalTradeIdFromComment(deal.comment ?? "");
+    if (fromComment) return fromComment;
+    if (deal.positionTicket) {
+      const row = this.db
+        .query(
+          "SELECT logical_trade_id FROM broker_orders WHERE position_ticket = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .get(deal.positionTicket) as Row | null;
+      if (row) return String(row.logical_trade_id);
+    }
+    if (deal.orderTicket) {
+      const row = this.db
+        .query(
+          "SELECT logical_trade_id FROM broker_orders WHERE order_ticket = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .get(deal.orderTicket) as Row | null;
+      if (row) return String(row.logical_trade_id);
+    }
+    return "";
+  }
+
+  private openBrokerOrderForDeal(tradeId: string, deal: Mt5HistoryDealInput) {
+    if (deal.positionTicket) {
+      const row = this.db
+        .query(
+          "SELECT * FROM broker_orders WHERE logical_trade_id = ? AND position_ticket = ? AND action = 'OPEN' ORDER BY created_at ASC LIMIT 1",
+        )
+        .get(tradeId, deal.positionTicket) as Row | null;
+      if (row) return row;
+    }
+    return this.db
+      .query(
+        "SELECT * FROM broker_orders WHERE logical_trade_id = ? AND action = 'OPEN' ORDER BY created_at ASC LIMIT 1",
+      )
+      .get(tradeId) as Row | null;
+  }
+
+  private positionStillOpen(accountId: string, positionTicket: string) {
+    if (!positionTicket) return false;
+    const snapshot = this.mt5SnapshotsByAccount()[accountId];
+    return (
+      snapshot?.positions.some((record) => brokerTicketFromSnapshot(record) === positionTicket) ??
+      false
+    );
+  }
+
+  private computeBrokerOrderPnl(
+    tradeId: string,
+    payload: ExecutionQueueItem["payload"],
+    input: ExecutionReportInput,
+  ) {
+    if (!input.filledPrice || !input.volume || !payload.direction) {
+      return { pnlCurrency: null, pnlPips: null };
+    }
+    const action = brokerAction(payload.commandType);
+    if (
+      action === "OPEN" ||
+      action === "MODIFY_SL" ||
+      action === "MODIFY_TP" ||
+      action === "CANCEL_PENDING"
+    ) {
+      return { pnlCurrency: null, pnlPips: null };
+    }
+    const open = this.db
+      .query(
+        "SELECT filled_price FROM broker_orders WHERE logical_trade_id = ? AND action = 'OPEN' AND filled_price IS NOT NULL ORDER BY created_at ASC LIMIT 1",
+      )
+      .get(tradeId) as Row | null;
+    const openPrice = nullableNumber(open?.filled_price);
+    if (!openPrice) return { pnlCurrency: null, pnlPips: null };
+    const signed =
+      payload.direction === "BUY" ? input.filledPrice - openPrice : openPrice - input.filledPrice;
+    const pipSize = brokerPipSize(payload.brokerSymbol ?? payload.canonicalSymbol ?? "");
+    return {
+      pnlCurrency: Number((signed * input.volume).toFixed(4)),
+      pnlPips: pipSize > 0 ? Number((signed / pipSize).toFixed(1)) : null,
+    };
+  }
+
   private audit(
     eventType: string,
     level: "info" | "warn" | "error",
@@ -2207,6 +3534,130 @@ function executionEvidence(input: ExecutionReportInput) {
     .join(" | ");
 }
 
+function nullableNumber(value: unknown) {
+  return value === null || value === undefined || value === "" ? undefined : Number(value);
+}
+
+function brokerAction(commandType: string) {
+  if (commandType === "OPEN_TRADE") return "OPEN";
+  if (commandType === "CLOSE_PARTIAL") return "PARTIAL_CLOSE";
+  if (commandType === "CLOSE_TRADE") return "FULL_CLOSE";
+  if (commandType === "MODIFY_SL") return "MODIFY_SL";
+  if (commandType === "MODIFY_TP") return "MODIFY_TP";
+  if (commandType === "CANCEL_PENDING") return "CANCEL_PENDING";
+  if (commandType === "TRAILING_STOP") return "TRAIL";
+  return commandType;
+}
+
+function brokerLegId(payload: ExecutionQueueItem["payload"], input: ExecutionReportInput) {
+  const virtualTp = virtualTpLegFromBrokerComment(input.brokerComment);
+  if (virtualTp !== undefined) return `tp${virtualTp}`;
+  if (payload.partialClose?.kind === "TP_LEG") return `tp${payload.partialClose.value}`;
+  if (payload.commandType === "OPEN_TRADE") return "entry";
+  return "trade";
+}
+
+function brokerPipSize(symbol: string) {
+  const upper = symbol.toUpperCase();
+  if (upper.includes("XAU") || upper.includes("GOLD")) return 0.1;
+  if (/JPY/.test(upper)) return 0.01;
+  return 0.0001;
+}
+
+function brokerTicketFromSnapshot(record: unknown) {
+  if (!record || typeof record !== "object") return "";
+  const value = (record as Record<string, unknown>).ticket;
+  return value === undefined || value === null ? "" : String(value);
+}
+
+function logicalTradeIdFromComment(comment: string) {
+  const match = comment.match(/telegram-tc(?:-close|-virtual-tp)?:([^:\s]+)/i);
+  return match?.[1] ?? "";
+}
+
+function historyDealAction(deal: Mt5HistoryDealInput, positionStillOpen: boolean) {
+  const entry = String(deal.entry ?? "").toUpperCase();
+  if (entry.includes("IN") && !entry.includes("OUT")) return "OPEN";
+  return positionStillOpen ? "PARTIAL_CLOSE" : "FULL_CLOSE";
+}
+
+function historyDealLegId(deal: Mt5HistoryDealInput) {
+  const match = String(deal.comment ?? "").match(/:tp(\d+)/i);
+  return match?.[1] ? `tp${match[1]}` : "trade";
+}
+
+function drawdownPercent(balance: number, equity: number) {
+  if (!Number.isFinite(balance) || balance <= 0 || !Number.isFinite(equity)) return 0;
+  return Number(Math.max(0, ((balance - equity) / balance) * 100).toFixed(2));
+}
+
+function sumPnl(orders: Array<{ pnlCurrency?: number }>) {
+  return Number(orders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0).toFixed(2));
+}
+
+function withinDays(iso: string, days: number) {
+  const time = Date.parse(iso);
+  return Number.isFinite(time) && Date.now() - time <= days * 24 * 60 * 60 * 1000;
+}
+
+function withinCurrentMonth(iso: string) {
+  return iso.slice(0, 7) === new Date().toISOString().slice(0, 7);
+}
+
+function heartbeatFreshness(iso: string) {
+  const ageMs = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ageMs)) return "offline";
+  if (ageMs <= 10_000) return "online";
+  if (ageMs <= 30_000) return "stale";
+  return "offline";
+}
+
+function normalizeProviderTpLevels(
+  levels?: Array<{ leg: number; percentage: number; strategy: string }>,
+) {
+  const source = levels?.length
+    ? levels
+    : Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
+        leg: index + 1,
+        percentage: 25,
+        strategy: "",
+      }));
+  const cleaned = source
+    .map((level, index) => ({
+      leg: Number.isFinite(level.leg) && level.leg > 0 ? Math.round(level.leg) : index + 1,
+      percentage: Math.max(0, Number(level.percentage) || 0),
+      strategy: String(level.strategy ?? ""),
+    }))
+    .slice(0, MAX_PROVIDER_TP_LEVELS);
+  const total = cleaned.reduce((sum, level) => sum + level.percentage, 0);
+  if (total <= 0) {
+    return Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
+      leg: index + 1,
+      percentage: 25,
+      strategy: "",
+    }));
+  }
+  return cleaned.map((level) => ({
+    ...level,
+    percentage: Number(((level.percentage / total) * 100).toFixed(2)),
+  }));
+}
+
+function applyProviderExecutionConfig(
+  signal: ParsedSignal,
+  config: ProviderExecutionConfig,
+): ParsedSignal {
+  if (signal.commandType !== "OPEN_TRADE" || signal.takeProfits.length === 0) return signal;
+  const percentages = config.takeProfitLevels.map((level) => level.percentage);
+  return {
+    ...signal,
+    takeProfits: signal.takeProfits.map((target, index) => ({
+      ...target,
+      allocationPercent: percentages[index] ?? target.allocationPercent,
+    })),
+  };
+}
+
 function virtualTpLegFromBrokerComment(comment: string) {
   const match = comment.match(/:tp([1-4])\b/i);
   return match?.[1] ? Number(match[1]) : undefined;
@@ -2232,6 +3683,7 @@ function queueRow(row: Row) {
     logicalTradeId: String(row.logical_trade_id),
     status: String(row.status),
     payload: parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json)),
+    leaseCount: Number(row.lease_count ?? 0),
     leasedAt: row.leased_at ? String(row.leased_at) : undefined,
     createdAt: String(row.created_at),
   };
@@ -2254,6 +3706,120 @@ function classifyParsedCommand(commandType: string): RawMessageClassification {
 function telegramParserText(message: TelegramCapturedMessage) {
   if (!message.quotedText) return message.rawText;
   return `Quoted signal:\n${message.quotedText}\n\nComment:\n${message.rawText}`;
+}
+
+function reviewReasons(signal: ParsedSignal) {
+  const reasons: string[] = [];
+  if (signal.confidence < 0.75) reasons.push("low-confidence");
+  if (signal.mappingStatus !== "mapped") reasons.push(`mapping-${signal.mappingStatus}`);
+  for (const field of signal.missingFields) reasons.push(`missing-${field}`);
+  if (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol")) {
+    reasons.push("lifecycle-missing-symbol");
+  }
+  return reasons.length ? reasons : ["operator-confirmation-rule"];
+}
+
+async function reviewSignalWithAzureOpenAI(input: {
+  signal: ParsedSignal;
+  providerTitle: string;
+  classification: string;
+  model: string;
+  apiKey?: string;
+}): Promise<AiSignalReview | { statusCode: 503 | 502; error: string }> {
+  const apiKey = process.env.AZURE_OPENAI_API_KEY || input.apiKey;
+  if (!apiKey) {
+    return { statusCode: 503, error: "AZURE_OPENAI_API_KEY is not configured" };
+  }
+  const endpoint = (
+    process.env.AZURE_OPENAI_ENDPOINT ??
+    "https://kamogelo-dev-resource.cognitiveservices.azure.com/openai/v1/"
+  ).replace(/\/$/, "");
+  const response = await fetch(`${endpoint}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`,
+      "api-key": apiKey,
+    },
+    body: JSON.stringify({
+      model: input.model,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You normalize uncertain Telegram trading-signal parser outputs. Return strict JSON only. KAL VIP trades Gold/XAUUSD only, so missing symbols can be interpreted as XAUUSD. Your primary job is to extract actionable trading fields: ENTRY, SL, and TP levels. Conditional or multi-scenario commentary can be classified as TRADE_SETUP, but you must still extract any entry, SL, and TP values you can find. Result recaps and strategy notes must not be queued automatically.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify({
+            task: "Extract ENTRY, SL, and TP levels from this uncertain parser output and classify it for operator confirmation.",
+            allowedVerdicts: [
+              "EXECUTABLE_SIGNAL",
+              "TRADE_SETUP",
+              "LIFECYCLE_COMMAND",
+              "RESULT_UPDATE",
+              "PROVIDER_STRATEGY_NOTE",
+              "NOISE",
+            ],
+            requiredJsonShape: {
+              verdict: "one allowed verdict",
+              shouldQueue: "boolean; true only for direct executable/lifecycle commands",
+              needsConfirmation: "boolean; true when the operator should confirm before queueing",
+              confidence: "number from 0 to 1",
+              reason: "short explanation",
+              symbol: "normalized symbol, default XAUUSD for KAL VIP when applicable",
+              direction: "BUY, SELL, BOTH, or empty string",
+              entry: "ENTRY value/zone as text, or empty string",
+              stopLoss: "SL value/zone/distance as text, or empty string",
+              takeProfits: "array of TP values/levels as text, empty array if none",
+              lifecycleAction: "close/cancel/modify/tp-hit action as text, or empty string",
+            },
+            provider: input.providerTitle,
+            currentClassification: input.classification,
+            parserOutput: input.signal,
+          }),
+        },
+      ],
+      response_format: { type: "json_object" },
+    }),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    return { statusCode: 502, error: `Azure OpenAI review failed: ${text}` };
+  }
+  const payload = parseJson<{ choices?: Array<{ message?: { content?: string } }> }>(text);
+  const content = payload.choices?.[0]?.message?.content;
+  if (!content) return { statusCode: 502, error: "Azure OpenAI review returned no content" };
+  return normalizeAiSignalReview(parseJson<Partial<AiSignalReview>>(content));
+}
+
+function normalizeAiSignalReview(input: Partial<AiSignalReview>): AiSignalReview {
+  const verdicts = new Set<AiSignalReview["verdict"]>([
+    "EXECUTABLE_SIGNAL",
+    "TRADE_SETUP",
+    "LIFECYCLE_COMMAND",
+    "RESULT_UPDATE",
+    "PROVIDER_STRATEGY_NOTE",
+    "NOISE",
+  ]);
+  const verdict = verdicts.has(input.verdict as AiSignalReview["verdict"])
+    ? (input.verdict as AiSignalReview["verdict"])
+    : "NOISE";
+  return {
+    verdict,
+    shouldQueue:
+      Boolean(input.shouldQueue) &&
+      (verdict === "EXECUTABLE_SIGNAL" || verdict === "LIFECYCLE_COMMAND"),
+    needsConfirmation: input.needsConfirmation ?? verdict !== "EXECUTABLE_SIGNAL",
+    confidence: Math.max(0, Math.min(1, Number(input.confidence ?? 0))),
+    reason: String(input.reason ?? "No reason returned"),
+    symbol: String(input.symbol ?? ""),
+    direction: String(input.direction ?? ""),
+    entry: String(input.entry ?? ""),
+    stopLoss: String(input.stopLoss ?? ""),
+    takeProfits: Array.isArray(input.takeProfits) ? input.takeProfits.map(String) : [],
+    lifecycleAction: String(input.lifecycleAction ?? ""),
+  };
 }
 
 function fixtureExpected(signal: ParsedSignal) {
@@ -2298,6 +3864,23 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
       ),
     ),
     allowedOrderTypes,
+    defaultStopLossPips: positiveNumber(
+      input.defaultStopLossPips,
+      defaultAppSettings.defaultStopLossPips,
+    ),
+    defaultTakeProfitPips: positiveNumber(
+      input.defaultTakeProfitPips,
+      defaultAppSettings.defaultTakeProfitPips,
+    ),
+    azureOpenAIKeyConfigured: Boolean(input.azureOpenAIKeyConfigured),
+    leaseTimeoutSeconds: positiveNumber(
+      input.leaseTimeoutSeconds,
+      defaultAppSettings.leaseTimeoutSeconds,
+    ),
+    maxLeaseAttempts: Math.max(
+      1,
+      Math.round(positiveNumber(input.maxLeaseAttempts, defaultAppSettings.maxLeaseAttempts)),
+    ),
   };
 }
 
@@ -2331,11 +3914,18 @@ function toMt5LinePayload(item: ReturnType<typeof queueRow>, settings: AppSettin
     `entryFrom=${item.payload.entry?.from ?? ""}`,
     `entryTo=${item.payload.entry?.to ?? ""}`,
     `stopLoss=${item.payload.stopLoss ?? ""}`,
+    `defaultStopLossValue=${item.payload.defaultStopLoss?.value ?? ""}`,
+    `defaultStopLossUnit=${item.payload.defaultStopLoss?.unit ?? ""}`,
     `newStopLoss=${item.payload.newStopLoss ?? ""}`,
+    `defaultTakeProfitValue=${item.payload.defaultTakeProfit?.value ?? ""}`,
+    `defaultTakeProfitUnit=${item.payload.defaultTakeProfit?.unit ?? ""}`,
     `trailingStopValue=${item.payload.trailingStop?.value ?? ""}`,
     `trailingStopUnit=${item.payload.trailingStop?.unit ?? ""}`,
     `partialCloseKind=${item.payload.partialClose?.kind ?? ""}`,
     `partialCloseValue=${item.payload.partialClose?.value ?? ""}`,
+    `targetOrderTicket=${item.payload.targetOrderTicket ?? ""}`,
+    `targetPositionTicket=${item.payload.targetPositionTicket ?? ""}`,
+    `targetDealTicket=${item.payload.targetDealTicket ?? ""}`,
   ];
   for (const takeProfit of item.payload.takeProfits) {
     lines.push(`tp${takeProfit.leg}=${takeProfit.price}`);

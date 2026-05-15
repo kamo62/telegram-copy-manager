@@ -10,7 +10,8 @@ export type CommandType =
   | "MODIFY_SL"
   | "MODIFY_TP"
   | "TRAILING_STOP"
-  | "MARK_TP_HIT";
+  | "MARK_TP_HIT"
+  | "TRADE_SETUP";
 export type MappingStatus = "mapped" | "unmapped" | "ambiguous" | "excluded" | "unavailable";
 export type ExecutionMode = "VIRTUAL_TP" | "SPLIT_ORDER";
 export type QueueStatus =
@@ -39,6 +40,8 @@ export interface ParserContext {
   providerAliases?: Record<string, Record<string, string>>;
   providerDefaultSymbols?: Record<string, string>;
   accountMappings?: Record<string, AccountSymbolMapping>;
+  defaultStopLoss?: DistanceInstruction;
+  defaultTakeProfit?: DistanceInstruction;
 }
 
 export interface SymbolResolution {
@@ -89,7 +92,9 @@ export interface ParsedSignal {
   mappingWarnings: string[];
   entry?: PriceZone;
   stopLoss?: number;
+  defaultStopLoss?: DistanceInstruction;
   takeProfits: TakeProfitTarget[];
+  defaultTakeProfit?: DistanceInstruction;
   lotSize?: number;
   riskPercent?: number;
   newStopLoss?: number;
@@ -149,13 +154,18 @@ export interface ExecutionQueueItem {
     orderType?: OrderType;
     entry?: PriceZone;
     stopLoss?: number;
+    defaultStopLoss?: DistanceInstruction;
     newStopLoss?: number;
     trailingStop?: DistanceInstruction;
     partialClose?: PartialCloseInstruction;
     takeProfits: TakeProfitTarget[];
+    defaultTakeProfit?: DistanceInstruction;
     executionMode: ExecutionMode;
     volume?: number;
     riskPercent?: number;
+    targetOrderTicket?: string;
+    targetPositionTicket?: string;
+    targetDealTicket?: string;
     originalText: string;
   };
 }
@@ -208,6 +218,12 @@ const COMMAND_ALIASES = new Set([
   "CLOSE",
   "CANCEL",
   "PENDING",
+  "SCALP",
+  "SCALPS",
+  "SCENARIO",
+  "SETUP",
+  "SIGNAL",
+  "TRADE",
   "MOVE",
   "MODIFY",
   "UPDATE",
@@ -342,6 +358,26 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const newStopLoss = commandType === "MODIFY_SL" ? extractPriceNearToken(text, "SL") : undefined;
   const trailingStop = commandType === "TRAILING_STOP" ? extractTrailingStop(upper) : undefined;
   const partialClose = commandType === "CLOSE_PARTIAL" ? extractPartialClose(upper) : undefined;
+  const quotedSignal =
+    candidate.quotedText && commandType !== "OPEN_TRADE" && commandType !== "NO_SIGNAL"
+      ? parseSignalText(candidate.quotedText, context)
+      : undefined;
+  const inheritedSymbol = quotedSignal?.canonicalSymbol ? quotedSignal : undefined;
+  const effectiveRawSymbol = rawSymbol ?? inheritedSymbol?.rawSymbol;
+  const effectiveCanonicalSymbol = symbol.canonicalSymbol ?? inheritedSymbol?.canonicalSymbol;
+  const effectiveBrokerSymbol = symbol.brokerSymbol ?? inheritedSymbol?.brokerSymbol;
+  const effectiveMappingStatus = rawSymbol
+    ? symbol.mappingStatus
+    : (inheritedSymbol?.mappingStatus ?? symbol.mappingStatus);
+  const effectiveMappingWarnings = rawSymbol
+    ? symbol.warnings
+    : (inheritedSymbol?.mappingWarnings ?? symbol.warnings);
+  const defaultStopLoss =
+    commandType === "OPEN_TRADE" && stopLoss === undefined ? context.defaultStopLoss : undefined;
+  const defaultTakeProfit =
+    commandType === "OPEN_TRADE" && takeProfits.length === 0
+      ? context.defaultTakeProfit
+      : undefined;
 
   if (direction && rawSymbol && commandType === "OPEN_TRADE") {
     matchedPatternIds.push(entry ? "open.direction-symbol-entry" : "open.direction-symbol-market");
@@ -355,31 +391,28 @@ export function parseSignalText(originalText: string, context: ParserContext = {
 
   if (commandType === "OPEN_TRADE") {
     if (!direction) missingFields.push("direction");
-    if (!rawSymbol) missingFields.push("symbol");
-    if (symbol.mappingStatus !== "mapped") missingFields.push("brokerSymbol");
-    if (stopLoss === undefined) missingFields.push("stopLoss");
-    if (takeProfits.length === 0) missingFields.push("takeProfit");
+    if (!effectiveRawSymbol) missingFields.push("symbol");
+    if (effectiveMappingStatus !== "mapped") missingFields.push("brokerSymbol");
+    if (stopLoss === undefined && !defaultStopLoss) missingFields.push("stopLoss");
+    if (takeProfits.length === 0 && !defaultTakeProfit) missingFields.push("takeProfit");
   } else if (commandType !== "NO_SIGNAL" && !rawSymbol && commandType !== "CLOSE_TRADE") {
-    missingFields.push("symbol");
+    if (!inheritedSymbol?.canonicalSymbol) missingFields.push("symbol");
   }
 
-  if (commandType !== "NO_SIGNAL" && symbol.mappingStatus !== "mapped") {
+  if (commandType !== "NO_SIGNAL" && effectiveMappingStatus !== "mapped") {
     warnings.push("Symbol could not be mapped to a broker symbol");
   }
-  if (commandType === "TRAILING_STOP") {
-    warnings.push("Trailing stop pips/points must be converted using the broker symbol point size");
-  }
   if (commandType !== "NO_SIGNAL") {
-    warnings.push(...symbol.warnings);
+    warnings.push(...effectiveMappingWarnings);
   }
 
   const confidence = calculateConfidence({
     commandType,
     direction,
-    symbolStatus: symbol.mappingStatus,
+    symbolStatus: effectiveMappingStatus,
     hasEntry: Boolean(entry),
-    hasStopLoss: stopLoss !== undefined,
-    takeProfitCount: takeProfits.length,
+    hasStopLoss: stopLoss !== undefined || Boolean(defaultStopLoss),
+    takeProfitCount: takeProfits.length || (defaultTakeProfit ? 1 : 0),
     missingFieldCount: missingFields.length,
   });
 
@@ -388,14 +421,16 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     commandType,
     direction,
     orderType: commandType === "OPEN_TRADE" ? orderType : undefined,
-    rawSymbol: rawSymbol ?? undefined,
-    canonicalSymbol: symbol.canonicalSymbol,
-    brokerSymbol: symbol.brokerSymbol,
-    mappingStatus: symbol.mappingStatus,
-    mappingWarnings: symbol.warnings,
+    rawSymbol: effectiveRawSymbol ?? undefined,
+    canonicalSymbol: effectiveCanonicalSymbol,
+    brokerSymbol: effectiveBrokerSymbol,
+    mappingStatus: effectiveMappingStatus,
+    mappingWarnings: effectiveMappingWarnings,
     entry,
     stopLoss,
+    defaultStopLoss,
     takeProfits,
+    defaultTakeProfit,
     lotSize,
     riskPercent,
     newStopLoss,
@@ -416,8 +451,8 @@ export function shouldRequireManualReview(signal: ParsedSignal): boolean {
     signal.confidence < 0.75 ||
     signal.mappingStatus !== "mapped" ||
     (signal.commandType === "OPEN_TRADE" && signal.missingFields.length > 0) ||
+    signal.commandType === "TRADE_SETUP" ||
     signal.commandType === "NO_SIGNAL" ||
-    signal.commandType === "TRAILING_STOP" ||
     (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol"))
   );
 }
@@ -546,10 +581,12 @@ export function buildExecutionCommand(
       orderType: signal.orderType,
       entry: signal.entry,
       stopLoss: signal.stopLoss,
+      defaultStopLoss: signal.defaultStopLoss,
       newStopLoss: signal.newStopLoss,
       trailingStop: signal.trailingStop,
       partialClose: signal.partialClose,
       takeProfits,
+      defaultTakeProfit: signal.defaultTakeProfit,
       executionMode: options.executionMode ?? "VIRTUAL_TP",
       volume: options.volume,
       riskPercent: options.riskPercent,
@@ -589,6 +626,16 @@ function extractSignalCandidate(text: string) {
     return {
       text: quoted[1].trim(),
       matchedPatternIds: ["quote.reinstated-signal"],
+      quotedText: quoted[1].trim(),
+      commentText: quoted[2]?.trim(),
+    };
+  }
+  if (quoted?.[1] && quoted[2]) {
+    return {
+      text: quoted[2].trim(),
+      matchedPatternIds: ["quote.reply-context"],
+      quotedText: quoted[1].trim(),
+      commentText: quoted[2].trim(),
     };
   }
 
@@ -606,7 +653,7 @@ function extractSignalCandidate(text: string) {
     };
   }
 
-  return { text, matchedPatternIds: [] };
+  return { text, matchedPatternIds: [], quotedText: undefined, commentText: undefined };
 }
 
 function detectCommandType(upper: string, matchedPatternIds: string[]): CommandType {
@@ -614,9 +661,9 @@ function detectCommandType(upper: string, matchedPatternIds: string[]): CommandT
     matchedPatternIds.push("noise.education-analysis");
     return "NO_SIGNAL";
   }
-  if (isConditionalMultiScenarioPlan(upper)) {
-    matchedPatternIds.push("noise.conditional-multi-scenario");
-    return "NO_SIGNAL";
+  if (isConditionalTradeSetup(upper)) {
+    matchedPatternIds.push("setup.conditional-or-multi-scenario");
+    return "TRADE_SETUP";
   }
   if (/\bTP\b.*\b(NOT\s+(?:REACHED|HIT)|WAIT|MONITOR)\b/.test(upper)) {
     matchedPatternIds.push("noise.tp-not-reached");
@@ -686,6 +733,22 @@ function isConditionalMultiScenarioPlan(upper: string): boolean {
     /\b(SELL\s+SCALP|SELL\s+SCENARIO|PRE[-\s]?NFP\s+SELL|IF\s+PRICE\s+SPIKES)\b/.test(upper);
   const conditional = /\b(ONLY\s+IF|IF\s+PRICE|REACTION-BASED|NO\s+BLIND|WAIT\s+FOR)\b/.test(upper);
   return hasBuyScenario && hasSellScenario && conditional;
+}
+
+function isConditionalTradeSetup(upper: string): boolean {
+  const hasBuy = /\bBUY\b/.test(upper);
+  const hasSell = /\bSELL\b/.test(upper);
+  const hasPlan = /\b(EXECUTION\s+(?:PLAN|MODEL)|SETUP|SCENARIO|BIAS|ENTRY)\b/.test(upper);
+  const hasRiskReward = /\b(ENTRY|SL|STOP|TP|TARGET)\b/.test(upper);
+  const conditional =
+    /\b(ONLY\s+IF|IF\s+PRICE|CONFIRMATION\s+NEEDED|WAIT\s+FOR|REACTION\s+TRADE|REACTION-BASED|NO\s+BLIND|MUST\s+SEE|INVALID|FLIP\s+SCENARIO)\b/.test(
+      upper,
+    );
+  return (
+    isConditionalMultiScenarioPlan(upper) ||
+    (hasBuy && hasSell && hasPlan && hasRiskReward) ||
+    (hasPlan && hasRiskReward && conditional)
+  );
 }
 
 function isCloseCommand(upper: string): boolean {

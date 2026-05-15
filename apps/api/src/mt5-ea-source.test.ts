@@ -11,6 +11,19 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("MqlTradeResult");
     expect(source).toContain("result.retcode");
     expect(source).toContain("retcode_external");
+    expect(source).toContain("input string LinkCode");
+    expect(source).toContain('\\"linkCode\\"');
+    expect(source).toContain("input int    PollSeconds    = 1;");
+    expect(source).not.toContain('input string BackendBaseUrl = "http://127.0.0.1:8787/api"');
+  });
+
+  test("reports broker history deals for manual close reconciliation", () => {
+    expect(source).toContain("SendHistoryDeals()");
+    expect(source).toContain("HistorySelect(fromTime, toTime)");
+    expect(source).toContain("HistoryDealsJson()");
+    expect(source).toContain('HttpPost("/mt5/history"');
+    expect(source).toContain("DEAL_POSITION_ID");
+    expect(source).toContain("DEAL_PROFIT");
   });
 
   test("covers market, pending, cancel, SL/TP modification, close, and partial close commands", () => {
@@ -31,8 +44,9 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("ExecuteModifyTp(command)");
 
     for (const report of reportCalls(source)) {
-      expect(report.argumentCount).toBe(11);
+      expect(report.argumentCount).toBe(12);
     }
+    expect(source).toContain("positionTicket");
   });
 
   test("matches broker positions and pending orders by logical trade comments", () => {
@@ -106,7 +120,15 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("double volume;");
     expect(source).toContain('ValueFor(body, "volume")');
     expect(source).toContain("CommandVolume(command)");
-    expect(source).toContain("command.volume > 0.0 ? command.volume : DefaultLots");
+    expect(source).toContain("if(command.volume > 0.0)");
+    expect(source).toContain("return DefaultLots");
+  });
+
+  test("calculates risk-percent volume from broker tick metadata before falling back to defaults", () => {
+    expect(source).toContain("RiskPercentVolume(command)");
+    expect(source).toContain("SYMBOL_TRADE_TICK_SIZE");
+    expect(source).toContain("SYMBOL_TRADE_TICK_VALUE");
+    expect(source).toContain("AccountInfoDouble(ACCOUNT_BALANCE)");
   });
 
   test("uses backend-provided TP leg volumes for split orders and virtual TP closes", () => {
