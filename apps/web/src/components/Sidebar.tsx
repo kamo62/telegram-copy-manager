@@ -27,7 +27,9 @@ export function Sidebar({
   accounts = [],
   pendingSlots = [],
   selectedAccountId,
+  selectedSlotId,
   onSelectAccount,
+  onSelectSlot,
   onAddAccount,
 }: {
   activeView: string;
@@ -35,7 +37,9 @@ export function Sidebar({
   accounts?: SidebarAccount[];
   pendingSlots?: SidebarPendingSlot[];
   selectedAccountId?: string | null;
+  selectedSlotId?: string | null;
   onSelectAccount?: (accountId: string | null) => void;
+  onSelectSlot?: (slotId: string | null) => void;
   onAddAccount?: () => void;
 }) {
   return (
@@ -56,10 +60,15 @@ export function Sidebar({
           return (
             <div className="sidebar-group" key={id}>
               <button
-                className={isActive ? "active" : ""}
+                className={
+                  isActive && (!isLive || (!selectedAccountId && !selectedSlotId)) ? "active" : ""
+                }
                 onClick={() => {
                   onNavigate(id);
-                  if (isLive && onSelectAccount) onSelectAccount(null);
+                  if (isLive) {
+                    onSelectAccount?.(null);
+                    onSelectSlot?.(null);
+                  }
                 }}
                 type="button"
               >
@@ -83,6 +92,7 @@ export function Sidebar({
                           onClick={() => {
                             onNavigate("dashboard");
                             onSelectAccount?.(account.id);
+                            onSelectSlot?.(null);
                           }}
                           type="button"
                         >
@@ -96,23 +106,31 @@ export function Sidebar({
                       </li>
                     );
                   })}
-                  {pendingSlots.map((slot) => (
-                    <li key={`slot-${slot.id}`}>
-                      <button
-                        className="sidebar-child sidebar-child-pending"
-                        onClick={() => onNavigate("mt5")}
-                        title={`Waiting for EA · link code ${slot.linkCode}`}
-                        type="button"
-                      >
-                        <span
-                          aria-hidden="true"
-                          className="sidebar-child-dot pending"
-                        />
-                        <span className="sidebar-child-label">{slot.name || "Pending slot"}</span>
-                        <span className="sidebar-child-meta">{slot.linkCode}</span>
-                      </button>
-                    </li>
-                  ))}
+                  {pendingSlots.map((slot) => {
+                    const slotActive = isActive && selectedSlotId === slot.id;
+                    return (
+                      <li key={`slot-${slot.id}`}>
+                        <button
+                          aria-current={slotActive ? "true" : undefined}
+                          className={`sidebar-child sidebar-child-pending ${slotActive ? "active" : ""}`}
+                          onClick={() => {
+                            onNavigate("dashboard");
+                            onSelectAccount?.(null);
+                            onSelectSlot?.(slot.id);
+                          }}
+                          title={`Waiting for EA · link code ${slot.linkCode}`}
+                          type="button"
+                        >
+                          <span
+                            aria-hidden="true"
+                            className="sidebar-child-dot pending"
+                          />
+                          <span className="sidebar-child-label">{slot.name || "Pending slot"}</span>
+                          <span className="sidebar-child-meta">{slot.linkCode}</span>
+                        </button>
+                      </li>
+                    );
+                  })}
                   {onAddAccount ? (
                     <li>
                       <button

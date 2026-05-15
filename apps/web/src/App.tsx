@@ -1,11 +1,13 @@
 import { Server } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
+import { AccountsOverview } from "./components/AccountsOverview";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { KeyboardShortcutsOverlay } from "./components/KeyboardShortcutsOverlay";
 import { LiveRegion } from "./components/LiveRegion";
+import { PendingSlotView } from "./components/PendingSlotView";
 import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import {
   ProviderConfigModal,
@@ -284,6 +286,7 @@ export function App({
   );
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const announce = useAnnouncer();
   const [viewportTooSmall, setViewportTooSmall] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -379,25 +382,48 @@ export function App({
     if (selectedAccountId) {
       return snapshot.mt5Accounts.find((account) => account.id === selectedAccountId) ?? null;
     }
-    return snapshot.mt5Accounts[0] ?? null;
+    return null;
   }, [selectedAccountId, snapshot.mt5Accounts]);
 
+  const focusedSlot = useMemo(() => {
+    if (!selectedSlotId) return null;
+    return (snapshot.accountSlots ?? []).find((slot) => slot.id === selectedSlotId) ?? null;
+  }, [selectedSlotId, snapshot.accountSlots]);
+
   const accountHeaderData = useMemo<AccountHeaderData>(() => {
-    const primary = focusedAccount;
     const perf = snapshot.accountPerformance;
-    const broker = primary ? primary.server.split("-")[0] || primary.server : "—";
-    const accountType = primary
-      ? primary.server.toLowerCase().includes("demo")
-        ? "DEMO"
-        : "LIVE"
-      : "—";
-    const eaActive = primary?.heartbeatStatus === "online";
+    const accounts = snapshot.mt5Accounts;
+    const onlineCount = accounts.filter((a) => a.heartbeatStatus === "online").length;
+
+    let platform = "—";
+    let broker = "—";
+    let accountType: "DEMO" | "LIVE" | "—" = "—";
+    let eaActive = false;
+    let expertAdvisorVersion = "Idle";
+
+    if (focusedAccount) {
+      platform = "MT5";
+      broker = focusedAccount.server.split("-")[0] || focusedAccount.server;
+      accountType = focusedAccount.server.toLowerCase().includes("demo") ? "DEMO" : "LIVE";
+      eaActive = focusedAccount.heartbeatStatus === "online";
+      expertAdvisorVersion = eaActive ? "Active" : "Idle";
+    } else if (accounts.length > 0) {
+      platform = `MT5 · ${accounts.length} account${accounts.length === 1 ? "" : "s"}`;
+      broker = `${onlineCount} of ${accounts.length} online`;
+      const allDemo = accounts.every((a) => a.server.toLowerCase().includes("demo"));
+      const allLive = accounts.every((a) => !a.server.toLowerCase().includes("demo"));
+      accountType = allDemo ? "DEMO" : allLive ? "LIVE" : "—";
+      eaActive = onlineCount > 0;
+      expertAdvisorVersion =
+        onlineCount === accounts.length ? "All active" : onlineCount === 0 ? "Idle" : "Mixed";
+    }
+
     return {
       connectedPlatform: {
-        platform: primary ? "MT5" : "—",
-        broker: primary ? broker : "—",
+        platform,
+        broker,
         accountType,
-        expertAdvisorVersion: eaActive ? "Active" : "Idle",
+        expertAdvisorVersion,
         eaActive,
       },
       kpis: {
@@ -409,7 +435,7 @@ export function App({
       },
       currency: perf?.currency ?? "$",
     };
-  }, [focusedAccount, snapshot.accountPerformance]);
+  }, [focusedAccount, snapshot.accountPerformance, snapshot.mt5Accounts]);
 
   const sidebarAccounts = useMemo(
     () =>
@@ -938,7 +964,8 @@ export function App({
   }
 
   const showDashboard = activeView === "dashboard";
-  const dashTab = (id: TabId) => showDashboard && activeTab === id;
+  const slotFocused = showDashboard && Boolean(focusedSlot);
+  const dashTab = (id: TabId) => showDashboard && !slotFocused && activeTab === id;
   const showTelegram = activeView === "telegram";
   const showProviders = dashTab("providers") || activeView === "providers";
   const showParser = dashTab("logs") || activeView === "parser";
@@ -1010,34 +1037,57 @@ export function App({
         onAddAccount={() => setActiveView("mt5")}
         onNavigate={navigateSidebar}
         onSelectAccount={(id) => setSelectedAccountId(id)}
+        onSelectSlot={(id) => setSelectedSlotId(id)}
         pendingSlots={sidebarPendingSlots}
         selectedAccountId={selectedAccountId}
+        selectedSlotId={selectedSlotId}
       />
 
       <ErrorBoundary fallbackLabel="This view hit an unexpected error">
         <section className="workspace" id="main-content" tabIndex={-1}>
-        {showDashboard ? <AccountHeader data={accountHeaderData} loading={initialLoading} /> : null}
-        {showDashboard && snapshot.mt5Accounts.length === 0 ? (
-          <section className="live-empty">
-            <div className="live-empty-glyph" aria-hidden="true">
-              <Server size={28} />
-            </div>
-            <div className="live-empty-body">
-              <strong>No MT5 account connected yet</strong>
-              <p>
-                Create a link slot in <button className="live-empty-link" onClick={() => setActiveView("mt5")} type="button">Linked Accounts</button>, paste the code into your EA's <code>LinkCode</code> input, and the account will appear here.
-              </p>
-            </div>
-            <button
-              className="btn btn-primary"
-              onClick={() => setActiveView("mt5")}
-              type="button"
-            >
-              Open Linked Accounts
-            </button>
-          </section>
+        {showDashboard && focusedSlot ? (
+          <PendingSlotView slot={focusedSlot} />
+        ) : showDashboard ? (
+          <>
+            <AccountHeader data={accountHeaderData} loading={initialLoading} />
+            {snapshot.mt5Accounts.length === 0 && sidebarPendingSlots.length === 0 ? (
+              <section className="live-empty">
+                <div className="live-empty-glyph" aria-hidden="true">
+                  <Server size={28} />
+                </div>
+                <div className="live-empty-body">
+                  <strong>No MT5 account connected yet</strong>
+                  <p>
+                    Create a link slot in{" "}
+                    <button
+                      className="live-empty-link"
+                      onClick={() => setActiveView("mt5")}
+                      type="button"
+                    >
+                      Linked Accounts
+                    </button>
+                    , paste the code into your EA's <code>LinkCode</code> input, and the account
+                    will appear here.
+                  </p>
+                </div>
+                <button
+                  className="btn btn-primary"
+                  onClick={() => setActiveView("mt5")}
+                  type="button"
+                >
+                  Open Linked Accounts
+                </button>
+              </section>
+            ) : null}
+            {!selectedAccountId && snapshot.mt5Accounts.length > 0 ? (
+              <AccountsOverview
+                accounts={snapshot.mt5Accounts}
+                onSelectAccount={(id) => setSelectedAccountId(id)}
+              />
+            ) : null}
+            <WorkspaceTabs onChange={setActiveTab} value={activeTab} />
+          </>
         ) : null}
-        {showDashboard ? <WorkspaceTabs onChange={setActiveTab} value={activeTab} /> : null}
 
         {showPerformance ? (
           <PerformancePage data={growthData} loading={initialLoading} />
