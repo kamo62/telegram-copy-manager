@@ -172,9 +172,7 @@ export function ProviderConfigModal({
   const totalPercent = tps.reduce((acc, tp) => acc + tp.percentage, 0);
 
   return (
-    <div className="modal-overlay" onClick={(event) => {
-      if (event.target === event.currentTarget) onClose();
-    }}>
+    <div className="modal-overlay">
       <div
         aria-labelledby="provider-config-title"
         aria-modal="true"

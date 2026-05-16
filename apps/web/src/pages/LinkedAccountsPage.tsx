@@ -1,4 +1,4 @@
-import { Plug, Plus, Server } from "lucide-react";
+import { ArrowRight, Plug, Plus, Server } from "lucide-react";
 import { AccountRow } from "../components/AccountRow";
 import { EmptyState } from "../components/EmptyState";
 import { Panel } from "../components/Panel";
@@ -9,7 +9,7 @@ export function LinkedAccountsPage({
   providers = [],
   providerLinks = [],
   onCreateSlot,
-  onToggleProviderLink,
+  onEditProviderLinks,
   variant = "page",
 }: {
   slots: Array<{
@@ -24,10 +24,14 @@ export function LinkedAccountsPage({
   providers?: Array<{ id: string; title: string }>;
   providerLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
   onCreateSlot: (event: React.FormEvent<HTMLFormElement>) => void;
-  onToggleProviderLink?: (accountId: string, providerId: string, enabled: boolean) => void;
+  onEditProviderLinks?: () => void;
   variant?: "page" | "live";
 }) {
-  const showEmpty = accounts.length === 0 && slots.length === 0;
+  const linkedAccountIds = new Set(accounts.map((account) => account.id));
+  const pendingSlots = slots.filter(
+    (slot) => !slot.accountNumber && !linkedAccountIds.has(slot.id),
+  );
+  const showEmpty = accounts.length === 0 && pendingSlots.length === 0;
   return (
     <Panel
       className="wide-panel"
@@ -58,11 +62,11 @@ export function LinkedAccountsPage({
         </button>
       </form>
 
-      {slots.length > 0 ? (
+      {pendingSlots.length > 0 ? (
         <section className="linked-section">
           <h3 className="linked-section-title">Pending link slots</h3>
           <ul className="linked-slot-list">
-            {slots.map((slot) => (
+            {pendingSlots.map((slot) => (
               <li className="linked-slot-row" key={slot.id}>
                 <div className="linked-slot-icon" aria-hidden="true">
                   <Server size={14} />
@@ -70,9 +74,9 @@ export function LinkedAccountsPage({
                 <div className="linked-slot-body">
                   <strong>{slot.name}</strong>
                   <span>
-                    Link code <code>{slot.linkCode}</code> · {slot.status}
+                    Link code <code>{slot.linkCode}</code> · waiting for EA
                   </span>
-                  <span>{slot.accountNumber || "Waiting for EA"} {slot.server}</span>
+                  <span>Open this slot from the sidebar to see EA setup steps.</span>
                 </div>
               </li>
             ))}
@@ -84,45 +88,49 @@ export function LinkedAccountsPage({
         <section className="linked-section">
           <h3 className="linked-section-title">Connected accounts</h3>
           <ul className="linked-account-list">
-            {accounts.map((account) => (
-              <li className="linked-account-card" key={account.id}>
-                <AccountRow account={account} />
-                {providers.length > 0 ? (
-                  <div className="provider-link-block">
-                    <span className="provider-link-label">Copy from</span>
-                    <div className="provider-link-grid">
-                      {providers.map((provider) => {
-                        const linked = providerLinks.some(
-                          (link) =>
-                            link.accountId === account.id &&
-                            link.providerId === provider.id &&
-                            link.enabled,
-                        );
-                        return (
-                          <label
-                            className={`provider-link-chip ${linked ? "is-on" : ""}`}
-                            key={provider.id}
-                          >
-                            <input
-                              checked={linked}
-                              onChange={(event) =>
-                                onToggleProviderLink?.(
-                                  account.id,
-                                  provider.id,
-                                  event.currentTarget.checked,
-                                )
-                              }
-                              type="checkbox"
-                            />
-                            <span>{provider.title}</span>
-                          </label>
-                        );
-                      })}
+            {accounts.map((account) => {
+              const copiedProviders = providers.filter((provider) =>
+                providerLinks.some(
+                  (link) =>
+                    link.accountId === account.id &&
+                    link.providerId === provider.id &&
+                    link.enabled,
+                ),
+              );
+              return (
+                <li className="linked-account-card" key={account.id}>
+                  <AccountRow account={account} />
+                  {providers.length > 0 ? (
+                    <div className="provider-link-block">
+                      <div className="provider-link-summary">
+                        <span className="provider-link-label">Copying from</span>
+                        {copiedProviders.length > 0 ? (
+                          <ul className="provider-link-summary-list">
+                            {copiedProviders.map((provider) => (
+                              <li key={provider.id}>{provider.title}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <span className="provider-link-summary-empty">
+                            No providers assigned. Pick providers in the Providers tab.
+                          </span>
+                        )}
+                      </div>
+                      {onEditProviderLinks ? (
+                        <button
+                          className="btn btn-ghost btn-small"
+                          onClick={onEditProviderLinks}
+                          type="button"
+                        >
+                          Edit in Providers
+                          <ArrowRight aria-hidden="true" size={12} />
+                        </button>
+                      ) : null}
                     </div>
-                  </div>
-                ) : null}
-              </li>
-            ))}
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </section>
       ) : null}

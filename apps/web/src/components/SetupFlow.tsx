@@ -54,7 +54,11 @@ export function SetupFlow({
   if (setupStep === "code") {
     return (
       <form className="setup-form" onSubmit={submitCode}>
-        {error ? <span className="setup-form-error" role="alert">{error}</span> : null}
+        {error ? (
+          <span className="setup-form-error" role="alert">
+            {error}
+          </span>
+        ) : null}
         <label>
           Telegram code
           <input
@@ -83,7 +87,11 @@ export function SetupFlow({
   if (setupStep === "password") {
     return (
       <form className="setup-form" onSubmit={submitPassword}>
-        {error ? <span className="setup-form-error" role="alert">{error}</span> : null}
+        {error ? (
+          <span className="setup-form-error" role="alert">
+            {error}
+          </span>
+        ) : null}
         <label>
           2FA password
           <input
@@ -113,7 +121,11 @@ export function SetupFlow({
 
   return (
     <form className="setup-form" onSubmit={startTelegramConnection}>
-      {error ? <span className="setup-form-error" role="alert">{error}</span> : null}
+      {error ? (
+        <span className="setup-form-error" role="alert">
+          {error}
+        </span>
+      ) : null}
       <label>
         API ID
         <input

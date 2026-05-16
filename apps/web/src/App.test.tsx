@@ -151,7 +151,9 @@ describe("App dashboard", () => {
   });
 
   test("shows an empty-state CTA on Live when no account is connected", () => {
-    const view = render(<App initialSnapshot={{ ...snapshot, mt5Accounts: [], accountSlots: [] }} />);
+    const view = render(
+      <App initialSnapshot={{ ...snapshot, mt5Accounts: [], accountSlots: [] }} />,
+    );
 
     expect(view.getByText("No MT5 account connected yet")).toBeTruthy();
     expect(view.getByRole("button", { name: "Open Linked Accounts" })).toBeTruthy();
@@ -206,9 +208,7 @@ describe("App dashboard", () => {
     clickSidebar(view, "Telegram Setup");
     expect(view.getByText("Available dialogs")).toBeTruthy();
     expect(view.getByText("Real FX Channel")).toBeTruthy();
-    expect(
-      view.getByRole("button", { name: "Add Real FX Channel as a provider" }),
-    ).toBeTruthy();
+    expect(view.getByRole("button", { name: "Add Real FX Channel as a provider" })).toBeTruthy();
   });
 
   test("lets the operator enable provider auto-copy from the dashboard", async () => {
@@ -431,9 +431,7 @@ describe("App dashboard", () => {
   test("shows the History empty state when there are no trades", () => {
     globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
       Response.json(snapshot)) as typeof fetch;
-    const view = render(
-      <App initialSnapshot={{ ...snapshot, logicalTrades: [] }} />,
-    );
+    const view = render(<App initialSnapshot={{ ...snapshot, logicalTrades: [] }} />);
     clickTab(view, "History");
     expect(view.getByText("No trades yet. Approved signals will appear here.")).toBeTruthy();
   });
@@ -488,5 +486,19 @@ describe("App dashboard", () => {
       const dot = document.querySelector(".status-bar .live-dot");
       expect(dot?.className).toContain("error");
     });
+  });
+
+  test("shows GramJS Telegram adapter as healthy when backend health is OK", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          health: { status: "ok", database: "connected", telegramAdapter: "gramjs" },
+        }}
+      />,
+    );
+
+    const telegramChip = view.getByText("TG gramjs").closest(".chip");
+    expect(telegramChip?.querySelector(".chip-dot")?.className).toContain("ok");
   });
 });

@@ -8,10 +8,7 @@ export type GrowthSeries = {
   numberOfTrades: number;
 };
 
-export function GrowthChart({
-  data,
-  loading = false,
-}: { data: GrowthSeries; loading?: boolean }) {
+export function GrowthChart({ data, loading = false }: { data: GrowthSeries; loading?: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<{
     destroy: () => void;
@@ -27,6 +24,7 @@ export function GrowthChart({
     async function initPlot() {
       const container = containerRef.current;
       if (!container) return;
+      if (!canvas2dSupported()) return;
       // Dynamic import so uplot only touches the DOM at runtime, not at module-load.
       const [{ default: uPlot }] = await Promise.all([
         import("uplot"),
@@ -139,6 +137,11 @@ export function GrowthChart({
       <footer className="chart-card-foot">Number of trades</footer>
     </section>
   );
+}
+
+function canvas2dSupported() {
+  const canvas = document.createElement("canvas");
+  return Boolean(canvas.getContext("2d"));
 }
 
 export function buildPlaceholderGrowth(executedCount: number): GrowthSeries {

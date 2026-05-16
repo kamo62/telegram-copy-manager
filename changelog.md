@@ -1,5 +1,58 @@
 # Changelog
 
+## 2026-05-16 (Broker-aware symbols and Telegram auto-ingestion)
+
+Fixes live provider messages not being picked up automatically and prevents stale demo symbol
+settings from blocking OctaFX symbols such as `BTCUSD`.
+
+- Added a backend Telegram ingestion loop for enabled providers. It polls connected GramJS sessions
+  every 2 seconds, captures new messages, parses unparsed rows, dedupes repeated Telegram message
+  IDs, and queues only clean `OPEN_TRADE` signals that do not require review.
+- Added broker-aware symbol resolution. The resolver now prefers exact EA-reported symbols, then
+  known broker variants such as `GOLD#`, `BTCUSDm`, and `BTCUSD.raw`, and only then configured
+  prefix/suffix fallbacks.
+- Replaced the stale demo account mapping defaults with empty broker-aware defaults and added repair
+  logic for old `.raw` / `XAUUSD.r` / demo include-list mappings once the EA reports plain broker
+  symbols such as `BTCUSD` or `XAUUSD`.
+- Updated approval fan-out so each linked MT5 account re-resolves the signal against that account's
+  symbol list before queueing.
+- Fixed the dashboard status bar so `TG gramjs` is shown as healthy, added provider ingestion status
+  hints, and changed the command-palette "parse recent" action to process enabled providers instead
+  of the first provider only.
+- Hardened GramJS message fetching so it resolves the dialog entity before polling even after a
+  server restart.
+- Updated the EA source to choose a broker-supported market-order filling mode from
+  `SYMBOL_FILLING_MODE` instead of hard-coding IOC, which OctaFX rejected for BTCUSD with retcode
+  `10030`.
+
+Verification: focused parser/API/UI regression tests pass for OctaFX-style `BTCUSD`, `GOLD` /
+`XAUUSD`, suffix/prefix variants, auto-ingestion queue safety, stale mapping repair, and GramJS
+status rendering. Full gate and live deployment verification are tracked with this implementation
+run.
+
+## 2026-05-16 (MT5 EA HTTP 500 null-byte fix)
+
+Fixes the live MT5 EA integration where Docker networking and `/api/health` were reachable, but
+EA POST requests failed with `Telegram TC HTTP 500: Internal Server Error`.
+
+- Added a root `/health` backend route that returns the same JSON as `/api/health`, so host checks
+  no longer fall through to the React app shell.
+- Added MT5-specific JSON parsing for `/api/mt5/register`, `/api/mt5/heartbeat`,
+  `/api/mt5/report`, `/api/mt5/snapshot`, and `/api/mt5/history`. These routes now strip trailing
+  null bytes from MT5-style POST bodies and return `400` for malformed JSON instead of uncaught
+  parser `500`s.
+- Updated `mt5/TelegramTC_EA.mq5` so `HttpPost()` trims the UTF-8 null terminator produced by
+  `StringToCharArray(..., WHOLE_ARRAY, CP_UTF8)` before `WebRequest`.
+- Documented the deployed EA base URL as `http://192.168.0.100:18787/api` and the matching MT5
+  WebRequest allow-list requirement.
+
+Verification: `bun run format`, `bun run typecheck`, `bun run lint`, `bun test` (97 pass),
+`bun run build`, and `bun run docker:build` all pass. Remote host `192.168.0.100` was rebuilt
+and redeployed as `telegram-tc:latest`; `/api/health` and `/health` return backend JSON health, a
+null-terminated MT5-style register request now returns the expected bad-link `404` instead of a
+JSON parser `500`, recent container logs no longer show the null-byte parser error, and the OctaFX
+MT5 account is online with fresh heartbeat/snapshot timestamps.
+
 ## 2026-05-10 (Parser defaults, quote context, and 6-month KAL VIP backtest)
 
 Parser and MT5 contract changes from the MVP parser pass:

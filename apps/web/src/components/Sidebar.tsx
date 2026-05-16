@@ -75,7 +75,7 @@ export function Sidebar({
                 <Icon size={15} aria-hidden="true" />
                 {label}
                 {isLive && accounts.length > 0 ? (
-                  <span className="sidebar-count" aria-label={`${accounts.length} accounts`}>
+                  <span className="sidebar-count" title={`${accounts.length} accounts`}>
                     {accounts.length}
                   </span>
                 ) : null}
@@ -121,10 +121,7 @@ export function Sidebar({
                           title={`Waiting for EA · link code ${slot.linkCode}`}
                           type="button"
                         >
-                          <span
-                            aria-hidden="true"
-                            className="sidebar-child-dot pending"
-                          />
+                          <span aria-hidden="true" className="sidebar-child-dot pending" />
                           <span className="sidebar-child-label">{slot.name || "Pending slot"}</span>
                           <span className="sidebar-child-meta">{slot.linkCode}</span>
                         </button>

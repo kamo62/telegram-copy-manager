@@ -38,7 +38,10 @@ function formatDelta(
 export function AccountHeader({
   data,
   loading = false,
-}: { data: AccountHeaderData; loading?: boolean }) {
+}: {
+  data: AccountHeaderData;
+  loading?: boolean;
+}) {
   const { connectedPlatform, kpis, currency } = data;
   const { locale } = useLocale();
 

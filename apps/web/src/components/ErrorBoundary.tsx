@@ -70,7 +70,11 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
               <RefreshCw aria-hidden="true" size={13} />
               Retry
             </button>
-            <button className="btn btn-ghost" onClick={() => void this.copyDiagnostics()} type="button">
+            <button
+              className="btn btn-ghost"
+              onClick={() => void this.copyDiagnostics()}
+              type="button"
+            >
               <Copy aria-hidden="true" size={13} />
               {copyState === "copied" ? "Copied" : "Copy diagnostics"}
             </button>

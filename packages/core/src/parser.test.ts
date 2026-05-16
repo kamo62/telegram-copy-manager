@@ -389,4 +389,82 @@ describe("symbol resolver", () => {
     });
     expect(unavailable.mappingStatus).toBe("unavailable");
   });
+
+  test("prefers EA-reported exact broker symbols over configured suffixes", () => {
+    const octaContext: ParserContext = {
+      accountId: "mt5-octa",
+      accountMappings: {
+        "mt5-octa": {
+          accountId: "mt5-octa",
+          suffix: ".raw",
+          availableBrokerSymbols: ["BTCUSD", "XAUUSD", "EURUSD"],
+        },
+      },
+    };
+
+    expect(resolveSymbol("BTCUSD", octaContext)).toMatchObject({
+      canonicalSymbol: "BTCUSD",
+      brokerSymbol: "BTCUSD",
+      mappingStatus: "mapped",
+    });
+    expect(resolveSymbol("GOLD", octaContext)).toMatchObject({
+      canonicalSymbol: "XAUUSD",
+      brokerSymbol: "XAUUSD",
+      mappingStatus: "mapped",
+    });
+  });
+
+  test("maps known broker variants only when the EA reports those symbols", () => {
+    const variantContext: ParserContext = {
+      accountId: "mt5-variant",
+      accountMappings: {
+        "mt5-variant": {
+          accountId: "mt5-variant",
+          availableBrokerSymbols: ["BTCUSDm", "BTCUSD.raw", "GOLD#"],
+        },
+      },
+    };
+
+    expect(resolveSymbol("BTCUSD", variantContext)).toMatchObject({
+      canonicalSymbol: "BTCUSD",
+      brokerSymbol: "BTCUSDm",
+      mappingStatus: "mapped",
+    });
+    expect(resolveSymbol("GOLD", variantContext)).toMatchObject({
+      canonicalSymbol: "XAUUSD",
+      brokerSymbol: "GOLD#",
+      mappingStatus: "mapped",
+    });
+
+    const unavailable = resolveSymbol("XAUUSD", {
+      accountId: "mt5-no-gold",
+      accountMappings: {
+        "mt5-no-gold": {
+          accountId: "mt5-no-gold",
+          availableBrokerSymbols: ["BTCUSDm"],
+        },
+      },
+    });
+    expect(unavailable.mappingStatus).toBe("unavailable");
+  });
+
+  test("uses configured prefix and suffix after exact and known-variant matching", () => {
+    const suffixContext: ParserContext = {
+      accountId: "mt5-suffix",
+      accountMappings: {
+        "mt5-suffix": {
+          accountId: "mt5-suffix",
+          prefix: "m.",
+          suffix: ".pro",
+          availableBrokerSymbols: ["m.EURUSD.pro"],
+        },
+      },
+    };
+
+    expect(resolveSymbol("EURUSD", suffixContext)).toMatchObject({
+      canonicalSymbol: "EURUSD",
+      brokerSymbol: "m.EURUSD.pro",
+      mappingStatus: "mapped",
+    });
+  });
 });

@@ -5,10 +5,10 @@ import { AccountsOverview } from "./components/AccountsOverview";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import { KeyboardShortcutsOverlay } from "./components/KeyboardShortcutsOverlay";
 import { LiveRegion } from "./components/LiveRegion";
 import { PendingSlotView } from "./components/PendingSlotView";
-import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import {
   ProviderConfigModal,
   type ProviderConfigSubmission,
@@ -95,6 +95,7 @@ export interface DashboardSnapshot {
     riskProfile: string;
     lotSize: number;
     lastMessageAt: string;
+    ingestionStatus?: string;
   }>;
   mt5Accounts: Array<{
     id: string;
@@ -766,9 +767,14 @@ export function App({
   }
 
   async function parseRecentProviderMessages() {
-    const providerId = snapshot.providers[0]?.id;
-    if (!providerId) return;
-    await apiPost(`/api/providers/${providerId}/parse-recent?limit=5`);
+    const providers = snapshot.providers.filter((provider) => provider.enabled);
+    const providerIds = (providers.length ? providers : snapshot.providers).map(
+      (provider) => provider.id,
+    );
+    if (providerIds.length === 0) return;
+    await Promise.all(
+      providerIds.map((providerId) => apiPost(`/api/providers/${providerId}/parse-recent?limit=5`)),
+    );
     await refreshDashboard();
   }
 
@@ -887,7 +893,11 @@ export function App({
     await refreshDashboard();
   }
 
-  async function toggleAccountProviderLink(accountId: string, providerId: string, enabled: boolean) {
+  async function toggleAccountProviderLink(
+    accountId: string,
+    providerId: string,
+    enabled: boolean,
+  ) {
     await apiFetch(`/api/account-provider-links/${accountId}/${providerId}`, {
       method: "PUT",
       body: { enabled },
@@ -1045,174 +1055,175 @@ export function App({
 
       <ErrorBoundary fallbackLabel="This view hit an unexpected error">
         <section className="workspace" id="main-content" tabIndex={-1}>
-        {showDashboard && focusedSlot ? (
-          <PendingSlotView slot={focusedSlot} />
-        ) : showDashboard ? (
-          <>
-            <AccountHeader data={accountHeaderData} loading={initialLoading} />
-            {snapshot.mt5Accounts.length === 0 && sidebarPendingSlots.length === 0 ? (
-              <section className="live-empty">
-                <div className="live-empty-glyph" aria-hidden="true">
-                  <Server size={28} />
-                </div>
-                <div className="live-empty-body">
-                  <strong>No MT5 account connected yet</strong>
-                  <p>
-                    Create a link slot in{" "}
-                    <button
-                      className="live-empty-link"
-                      onClick={() => setActiveView("mt5")}
-                      type="button"
-                    >
-                      Linked Accounts
-                    </button>
-                    , paste the code into your EA's <code>LinkCode</code> input, and the account
-                    will appear here.
-                  </p>
-                </div>
-                <button
-                  className="btn btn-primary"
-                  onClick={() => setActiveView("mt5")}
-                  type="button"
-                >
-                  Open Linked Accounts
-                </button>
-              </section>
-            ) : null}
-            {!selectedAccountId && snapshot.mt5Accounts.length > 0 ? (
-              <AccountsOverview
-                accounts={snapshot.mt5Accounts}
-                onSelectAccount={(id) => setSelectedAccountId(id)}
+          {showDashboard && focusedSlot ? (
+            <PendingSlotView slot={focusedSlot} />
+          ) : showDashboard ? (
+            <>
+              <AccountHeader data={accountHeaderData} loading={initialLoading} />
+              {snapshot.mt5Accounts.length === 0 && sidebarPendingSlots.length === 0 ? (
+                <section className="live-empty">
+                  <div className="live-empty-glyph" aria-hidden="true">
+                    <Server size={28} />
+                  </div>
+                  <div className="live-empty-body">
+                    <strong>No MT5 account connected yet</strong>
+                    <p>
+                      Create a link slot in{" "}
+                      <button
+                        className="live-empty-link"
+                        onClick={() => setActiveView("mt5")}
+                        type="button"
+                      >
+                        Linked Accounts
+                      </button>
+                      , paste the code into your EA's <code>LinkCode</code> input, and the account
+                      will appear here.
+                    </p>
+                  </div>
+                  <button
+                    className="btn btn-primary"
+                    onClick={() => setActiveView("mt5")}
+                    type="button"
+                  >
+                    Open Linked Accounts
+                  </button>
+                </section>
+              ) : null}
+              {!selectedAccountId && snapshot.mt5Accounts.length > 0 ? (
+                <AccountsOverview
+                  accounts={snapshot.mt5Accounts}
+                  onSelectAccount={(id) => setSelectedAccountId(id)}
+                />
+              ) : null}
+              <WorkspaceTabs onChange={setActiveTab} value={activeTab} />
+            </>
+          ) : null}
+
+          {showPerformance ? <PerformancePage data={growthData} loading={initialLoading} /> : null}
+
+          {showEquityGuardian ? (
+            <EquityGuardianPage
+              guardians={snapshot.equityGuardians ?? []}
+              onSave={(accountId, formElement) => void saveGuardian(accountId, formElement)}
+              onUnpause={(accountId) => void unpauseGuardian(accountId)}
+            />
+          ) : null}
+
+          <section className="content-grid">
+            {showTelegram ? (
+              <TelegramSetupPage
+                form={form}
+                busy={setupBusy}
+                error={setupError}
+                onReset={resetTelegramConnection}
+                setForm={setForm}
+                setupStep={setupStep}
+                startTelegramConnection={startTelegramConnection}
+                submitCode={submitCode}
+                submitPassword={submitPassword}
+                dialogs={availableDialogs}
+                onRefreshDialogs={loadDialogs}
+                onRemoveDialog={(dialog) => {
+                  const provider = snapshot.providers.find((p) => p.dialogId === dialog.id);
+                  if (provider) return deleteProvider(provider);
+                }}
+                onSelectDialog={selectDialog}
+                selectedDialogIds={snapshot.providers.map((provider) => provider.dialogId)}
               />
             ) : null}
-            <WorkspaceTabs onChange={setActiveTab} value={activeTab} />
-          </>
-        ) : null}
 
-        {showPerformance ? (
-          <PerformancePage data={growthData} loading={initialLoading} />
-        ) : null}
+            {showProviders ? (
+              <ProvidersPage
+                accounts={snapshot.mt5Accounts.map((account) => ({
+                  id: account.id,
+                  label: account.accountNumber || account.id,
+                }))}
+                loading={initialLoading}
+                onConfigure={(provider) => setConfigProvider(provider)}
+                onDelete={(provider) => void deleteProvider(provider)}
+                onToggle={(provider) => void toggleProvider(provider)}
+                onToggleAccountLink={(accountId, providerId, enabled) =>
+                  void toggleAccountProviderLink(accountId, providerId, enabled)
+                }
+                providerLinks={snapshot.accountProviderLinks ?? []}
+                providers={snapshot.providers.map((provider) => ({
+                  ...provider,
+                  ...snapshot.providerPerformance?.find((row) => row.id === provider.id),
+                }))}
+              />
+            ) : null}
 
-        {showEquityGuardian ? (
-          <EquityGuardianPage
-            guardians={snapshot.equityGuardians ?? []}
-            onSave={(accountId, formElement) => void saveGuardian(accountId, formElement)}
-            onUnpause={(accountId) => void unpauseGuardian(accountId)}
-          />
-        ) : null}
+            {showParser ? (
+              <LogsPage
+                parserTab={parserTab}
+                onParserTabChange={setParserTab}
+                providersLength={snapshot.providers.length}
+                onParseRecent={() => void parseRecentProviderMessages()}
+                snapshot={snapshot}
+                fixtureClassifications={fixtureClassifications}
+                onClassify={(rawMessageId, classification) =>
+                  setFixtureClassifications((current) => ({
+                    ...current,
+                    [rawMessageId]: classification,
+                  }))
+                }
+                redactedFixtureText={redactedFixtureText}
+                onRedactedChange={(rawMessageId, value) =>
+                  setRedactedFixtureText((current) => ({ ...current, [rawMessageId]: value }))
+                }
+                onSaveFixture={(result, redactedText) =>
+                  void saveParserFixture(result, redactedText)
+                }
+                onAiReview={(result) => void requestAiReview(result)}
+                onApprove={(result) => void approveParsedSignal(result)}
+                onIgnore={(result) => void ignoreParsedSignal(result)}
+                aiReviewStatus={aiReviewStatus}
+                parserActionStatus={parserActionStatus}
+                fixtureStatus={fixtureStatus}
+              />
+            ) : null}
 
-        <section className="content-grid">
-          {showTelegram ? (
-            <TelegramSetupPage
-              form={form}
-              busy={setupBusy}
-              error={setupError}
-              onReset={resetTelegramConnection}
-              setForm={setForm}
-              setupStep={setupStep}
-              startTelegramConnection={startTelegramConnection}
-              submitCode={submitCode}
-              submitPassword={submitPassword}
-              dialogs={availableDialogs}
-              onRefreshDialogs={loadDialogs}
-              onRemoveDialog={(dialog) => {
-                const provider = snapshot.providers.find((p) => p.dialogId === dialog.id);
-                if (provider) return deleteProvider(provider);
-              }}
-              onSelectDialog={selectDialog}
-              selectedDialogIds={snapshot.providers.map((provider) => provider.dialogId)}
-            />
-          ) : null}
+            {showTrades ? (
+              <HistoryPage
+                brokerOrdersByTrade={brokerOrdersByTrade}
+                loading={initialLoading}
+                onToggleBrokerOrders={(tradeId) => void loadBrokerOrders(tradeId)}
+                trades={snapshot.logicalTrades}
+              />
+            ) : null}
 
-          {showProviders ? (
-            <ProvidersPage
-              accounts={snapshot.mt5Accounts.map((account) => ({
-                id: account.id,
-                label: account.accountNumber || account.id,
-              }))}
-              loading={initialLoading}
-              onConfigure={(provider) => setConfigProvider(provider)}
-              onDelete={(provider) => void deleteProvider(provider)}
-              onToggle={(provider) => void toggleProvider(provider)}
-              onToggleAccountLink={(accountId, providerId, enabled) =>
-                void toggleAccountProviderLink(accountId, providerId, enabled)
-              }
-              providerLinks={snapshot.accountProviderLinks ?? []}
-              providers={snapshot.providers.map((provider) => ({
-                ...provider,
-                ...snapshot.providerPerformance?.find((row) => row.id === provider.id),
-              }))}
-            />
-          ) : null}
+            {showMt5 ? (
+              <LinkedAccountsPage
+                accounts={snapshot.mt5Accounts}
+                slots={snapshot.accountSlots ?? []}
+                onCreateSlot={(event) => void createAccountSlot(event)}
+                onEditProviderLinks={() => {
+                  setActiveView("dashboard");
+                  setActiveTab("providers");
+                }}
+                providers={snapshot.providers}
+                providerLinks={snapshot.accountProviderLinks ?? []}
+              />
+            ) : null}
 
-          {showParser ? (
-            <LogsPage
-              parserTab={parserTab}
-              onParserTabChange={setParserTab}
-              providersLength={snapshot.providers.length}
-              onParseRecent={() => void parseRecentProviderMessages()}
-              snapshot={snapshot}
-              fixtureClassifications={fixtureClassifications}
-              onClassify={(rawMessageId, classification) =>
-                setFixtureClassifications((current) => ({
-                  ...current,
-                  [rawMessageId]: classification,
-                }))
-              }
-              redactedFixtureText={redactedFixtureText}
-              onRedactedChange={(rawMessageId, value) =>
-                setRedactedFixtureText((current) => ({ ...current, [rawMessageId]: value }))
-              }
-              onSaveFixture={(result, redactedText) => void saveParserFixture(result, redactedText)}
-              onAiReview={(result) => void requestAiReview(result)}
-              onApprove={(result) => void approveParsedSignal(result)}
-              onIgnore={(result) => void ignoreParsedSignal(result)}
-              aiReviewStatus={aiReviewStatus}
-              parserActionStatus={parserActionStatus}
-              fixtureStatus={fixtureStatus}
-            />
-          ) : null}
+            {showMapping ? (
+              <SymbolSettingsPage
+                loading={initialLoading}
+                mappings={snapshot.symbolMappings}
+                onAdd={() => setMappingModalOpen(true)}
+                onDelete={deleteSymbolMapping}
+              />
+            ) : null}
 
-          {showTrades ? (
-            <HistoryPage
-              brokerOrdersByTrade={brokerOrdersByTrade}
-              loading={initialLoading}
-              onToggleBrokerOrders={(tradeId) => void loadBrokerOrders(tradeId)}
-              trades={snapshot.logicalTrades}
-            />
-          ) : null}
-
-          {showMt5 ? (
-            <LinkedAccountsPage
-              accounts={snapshot.mt5Accounts}
-              slots={snapshot.accountSlots ?? []}
-              onCreateSlot={(event) => void createAccountSlot(event)}
-              providers={snapshot.providers}
-              providerLinks={snapshot.accountProviderLinks ?? []}
-              onToggleProviderLink={(accountId: string, providerId: string, enabled: boolean) =>
-                void toggleAccountProviderLink(accountId, providerId, enabled)
-              }
-            />
-          ) : null}
-
-          {showMapping ? (
-            <SymbolSettingsPage
-              loading={initialLoading}
-              mappings={snapshot.symbolMappings}
-              onAdd={() => setMappingModalOpen(true)}
-              onDelete={deleteSymbolMapping}
-            />
-          ) : null}
-
-          {showSettings ? (
-            <SettingsPage
-              settings={snapshot.appSettings}
-              onSubmit={saveExecutionSettings}
-              onSaveForm={(formElement) => void saveExecutionSettingsForm(formElement)}
-            />
-          ) : null}
+            {showSettings ? (
+              <SettingsPage
+                settings={snapshot.appSettings}
+                onSubmit={saveExecutionSettings}
+                onSaveForm={(formElement) => void saveExecutionSettingsForm(formElement)}
+              />
+            ) : null}
+          </section>
         </section>
-      </section>
       </ErrorBoundary>
 
       <ProviderConfigModal

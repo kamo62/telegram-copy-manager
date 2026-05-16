@@ -27,16 +27,41 @@ to the logical trade. It proves the backend contract used by the EA, but it does
 
 The MT5 Expert Advisor source is in `mt5/TelegramTC_EA.mq5`. Local Codex runs can statically inspect the file and verify the backend payloads it consumes, but compiling and executing the EA requires MetaTrader 5 with the backend URL added under allowed WebRequest URLs.
 
+For the home-server Docker deployment, set the EA `BackendBaseUrl` input to the API origin with
+the `/api` prefix:
+
+```text
+http://192.168.0.100:18787/api
+```
+
+In MetaTrader 5, also add the backend origin to `Tools > Options > Expert Advisors > Allow
+WebRequest for listed URL`. The EA posts JSON to `/api/mt5/*`, and the backend tolerates the
+trailing null terminator older EA builds may send from `StringToCharArray(..., WHOLE_ARRAY, ...)`.
+
 Real Telegram verification requires a Telegram API ID/hash and a phone number. Run the API with
 `TELEGRAM_ADAPTER=gramjs`, complete the frontend code/2FA flow, load dialogs, select a provider,
-then open Parser Lab against recent messages. Session strings are stored only in ignored local
-files under `data/telegram-sessions/`.
+then enable the provider. Session strings are stored only in ignored local files under
+`data/telegram-sessions/`.
+
+Enabled providers are polled automatically every 2 seconds. Clean `OPEN_TRADE` parser outputs are
+queued for MT5; review-required signals remain in Parser Lab. For a live smoke, send a simple
+message such as `SELL BTCUSD` to the selected provider and verify the dashboard shows the raw parse,
+the broker symbol reported by the EA, and a pending queue item.
+
+Broker symbols are resolved in the backend from the EA-reported `availableSymbols` list. Prefer
+leaving prefix/suffix empty unless the broker actually reports symbols that require them. Common
+provider terms such as `GOLD` normalize to `XAUUSD`, but the final broker symbol is selected per MT5
+account from the live broker list, so OctaFX `BTCUSD` stays `BTCUSD` instead of becoming
+`BTCUSD.raw`.
 
 MT5 demo-terminal verification should cover:
 
 - EA account registration and heartbeat.
 - `/api/mt5/poll-line` leasing a pending command.
 - Market and pending order execution through `MqlTradeRequest`.
+- Broker-supported filling mode selection for market/close requests. A retcode `10030` with
+  "Unsupported filling mode" means the running compiled EA is still using an unsupported fill policy
+  for that broker symbol.
 - Retcode-aware reporting through `/api/mt5/report`.
 - At least one lifecycle command, such as `MOVE_SL_TO_BE` or `CANCEL_PENDING`.
 - Split-order mode creating one child request per TP leg.

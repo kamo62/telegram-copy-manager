@@ -49,7 +49,9 @@ export function DialogPicker({
       <div className="dialog-picker-head">
         <div className="dialog-picker-title">
           <strong>Available dialogs</strong>
-          <span className="dialog-picker-count">{dialogs.length} total · {selected.size} selected</span>
+          <span className="dialog-picker-count">
+            {dialogs.length} total · {selected.size} selected
+          </span>
         </div>
         <button
           aria-label="Refresh Telegram dialogs"
@@ -75,11 +77,12 @@ export function DialogPicker({
         <div className="dialog-picker-types" role="tablist" aria-label="Filter by type">
           {(["all", "channel", "group", "user"] as Filter[]).map((option) => (
             <button
-              aria-pressed={filter === option}
+              aria-selected={filter === option}
               className={`dialog-filter-chip ${filter === option ? "is-on" : ""}`}
               key={option}
               onClick={() => setFilter(option)}
               role="tab"
+              tabIndex={filter === option ? 0 : -1}
               type="button"
             >
               {option === "all" ? `All ${dialogs.length}` : `${option} ${counts[option] ?? 0}`}
@@ -115,9 +118,7 @@ export function DialogPicker({
                         {dialog.type}
                       </span>
                       {dialog.unreadCount > 0 ? (
-                        <span className="dialog-unread-pill">
-                          {dialog.unreadCount} unread
-                        </span>
+                        <span className="dialog-unread-pill">{dialog.unreadCount} unread</span>
                       ) : (
                         <span className="dialog-row-muted-text">no new messages</span>
                       )}
@@ -125,7 +126,7 @@ export function DialogPicker({
                   </div>
                   {isSelected ? (
                     <div className="dialog-row-actions">
-                      <span className="dialog-row-action is-selected" aria-label="Provider added">
+                      <span className="dialog-row-action is-selected" title="Provider added">
                         <CheckCircle2 aria-hidden="true" size={13} />
                         Added
                       </span>

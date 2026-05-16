@@ -39,6 +39,12 @@ export function StatusBar({
     : refreshing
       ? "Refreshing dashboard"
       : "Live updates active";
+  const telegramAdapterStatus =
+    telegramAdapter === "gramjs" || telegramAdapter === "live"
+      ? "ok"
+      : telegramAdapter === "mock"
+        ? "warn"
+        : "error";
 
   return (
     <header className="status-bar">
@@ -49,9 +55,7 @@ export function StatusBar({
           DB {database}
         </span>
         <span className="chip">
-          <span
-            className={`chip-dot ${telegramAdapter === "live" ? "ok" : telegramAdapter === "mock" ? "warn" : "error"}`}
-          />
+          <span className={`chip-dot ${telegramAdapterStatus}`} />
           TG {telegramAdapter}
         </span>
         <span className="chip">Queue {queuePending}</span>

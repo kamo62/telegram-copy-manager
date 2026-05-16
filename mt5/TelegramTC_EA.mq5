@@ -174,6 +174,36 @@ void PollAndExecute()
       ReportFailure(command.queueItemId, "Unsupported command type", command.commandType);
 }
 
+ENUM_ORDER_TYPE_FILLING FillingModeForSymbol(string symbol, bool pendingOrder)
+{
+   if(pendingOrder)
+      return ORDER_FILLING_RETURN;
+
+   long fillingMode = SymbolInfoInteger(symbol, SYMBOL_FILLING_MODE);
+   ENUM_SYMBOL_TRADE_EXECUTION execMode =
+      (ENUM_SYMBOL_TRADE_EXECUTION)SymbolInfoInteger(symbol, SYMBOL_TRADE_EXEMODE);
+
+   // Market / Exchange execution: ORDER_FILLING_RETURN is invalid for instant deals.
+   // OctaFX returns retcode 10030 (Unsupported filling mode) when RETURN is used for
+   // market-execution symbols such as crypto pairs. Prefer FOK, then IOC, and default
+   // to FOK when the broker reports an empty mask (typical for some MetaQuotes builds).
+   if(execMode == SYMBOL_TRADE_EXECUTION_MARKET || execMode == SYMBOL_TRADE_EXECUTION_EXCHANGE)
+   {
+      if((fillingMode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+         return ORDER_FILLING_FOK;
+      if((fillingMode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+         return ORDER_FILLING_IOC;
+      return ORDER_FILLING_FOK;
+   }
+
+   // Instant / Request execution: RETURN is the canonical choice.
+   if((fillingMode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+      return ORDER_FILLING_IOC;
+   if((fillingMode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+      return ORDER_FILLING_FOK;
+   return ORDER_FILLING_RETURN;
+}
+
 bool ExecuteOpenTrade(SignalCommand &command)
 {
    if(!EnsureSymbol(command.brokerSymbol))
@@ -203,13 +233,13 @@ bool ExecuteOpenTrade(SignalCommand &command)
       request.action = TRADE_ACTION_PENDING;
       request.price = command.entryFrom;
       request.type_time = ORDER_TIME_GTC;
-      request.type_filling = ORDER_FILLING_RETURN;
+      request.type_filling = FillingModeForSymbol(command.brokerSymbol, true);
       request.type = PendingOrderType(command.direction, command.orderType);
    }
    else
    {
       request.action = TRADE_ACTION_DEAL;
-      request.type_filling = ORDER_FILLING_IOC;
+      request.type_filling = FillingModeForSymbol(command.brokerSymbol, false);
       request.type = command.direction == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
       request.price = command.direction == "BUY"
          ? SymbolInfoDouble(command.brokerSymbol, SYMBOL_ASK)
@@ -281,13 +311,13 @@ bool ExecuteSplitOrders(SignalCommand &command)
          request.action = TRADE_ACTION_PENDING;
          request.price = command.entryFrom;
          request.type_time = ORDER_TIME_GTC;
-         request.type_filling = ORDER_FILLING_RETURN;
+         request.type_filling = FillingModeForSymbol(command.brokerSymbol, true);
          request.type = PendingOrderType(command.direction, command.orderType);
       }
       else
       {
          request.action = TRADE_ACTION_DEAL;
-         request.type_filling = ORDER_FILLING_IOC;
+         request.type_filling = FillingModeForSymbol(command.brokerSymbol, false);
          request.type = command.direction == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
          request.price = command.direction == "BUY"
             ? SymbolInfoDouble(command.brokerSymbol, SYMBOL_ASK)
@@ -508,6 +538,7 @@ void ExecuteClose(SignalCommand &command)
    request.volume = MathMin(closeVolume, currentVolume);
    request.deviation = DeviationPoints;
    request.magic = MagicNumber;
+   request.type_filling = FillingModeForSymbol(symbol, false);
    request.type = positionType == POSITION_TYPE_BUY ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
    request.price = positionType == POSITION_TYPE_BUY
       ? SymbolInfoDouble(symbol, SYMBOL_BID)
@@ -611,6 +642,7 @@ bool CloseVirtualTpLeg(int stateIndex, int leg)
    request.volume = MathMin(closeVolume, currentVolume);
    request.deviation = DeviationPoints;
    request.magic = MagicNumber;
+   request.type_filling = FillingModeForSymbol(symbol, false);
    request.type = positionType == POSITION_TYPE_BUY ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
    request.price = positionType == POSITION_TYPE_BUY
       ? SymbolInfoDouble(symbol, SYMBOL_BID)
@@ -1142,6 +1174,8 @@ bool HttpPost(string path, string body, string &response)
 {
    char data[];
    StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(data) > 0 && data[ArraySize(data) - 1] == 0)
+      ArrayResize(data, ArraySize(data) - 1);
    return HttpRequest("POST", path, "Content-Type: application/json\r\n", data, response);
 }
 

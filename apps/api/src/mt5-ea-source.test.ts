@@ -26,6 +26,12 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("DEAL_PROFIT");
   });
 
+  test("trims the UTF-8 null terminator before POSTing JSON with WebRequest", () => {
+    expect(source).toContain("StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8)");
+    expect(source).toContain("ArrayResize(data, ArraySize(data) - 1)");
+    expect(source).toContain("data[ArraySize(data) - 1] == 0");
+  });
+
   test("covers market, pending, cancel, SL/TP modification, close, and partial close commands", () => {
     expect(source).toContain("TRADE_ACTION_DEAL");
     expect(source).toContain("TRADE_ACTION_PENDING");
@@ -90,6 +96,18 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("SYMBOL_POINT");
     expect(source).toContain("SYMBOL_ASK");
     expect(source).toContain("SYMBOL_BID");
+  });
+
+  test("selects a broker-supported filling mode for market and close requests", () => {
+    expect(source).toContain("FillingModeForSymbol");
+    expect(source).toContain("SYMBOL_FILLING_MODE");
+    expect(source).toContain("SYMBOL_FILLING_IOC");
+    expect(source).toContain("SYMBOL_FILLING_FOK");
+    expect(source).toContain("ORDER_FILLING_FOK");
+    expect(source).toContain(
+      "request.type_filling = FillingModeForSymbol(command.brokerSymbol, false)",
+    );
+    expect(source).toContain("request.type_filling = FillingModeForSymbol(symbol, false)");
   });
 
   test("executes trailing-stop lifecycle commands with broker point conversion", () => {
