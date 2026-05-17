@@ -49,6 +49,7 @@ export interface DashboardSnapshot {
     pollingIntervalSeconds: number;
     allowedOrderTypes: string[];
     azureOpenAIKeyConfigured: boolean;
+    dedupWindowSeconds: number;
   };
   accountPerformance?: {
     currency: string;
@@ -197,6 +198,7 @@ const emptySnapshot: DashboardSnapshot = {
     pollingIntervalSeconds: 2,
     allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
     azureOpenAIKeyConfigured: false,
+    dedupWindowSeconds: 300,
   },
   accountPerformance: undefined,
   providerPerformance: [],
@@ -666,6 +668,23 @@ export function App({
     setAvailableDialogs(data.dialogs);
   }
 
+  async function resyncProvidersToCurrentSession() {
+    if (!activeProfileId) return;
+    setSetupBusy(true);
+    setSetupError("");
+    try {
+      await apiPost("/api/providers/resync-current-session", { profileId: activeProfileId });
+      await loadDialogs(activeProfileId);
+      await refreshDashboard();
+      announce("Provider Telegram links resynced");
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : "Provider resync failed");
+      setLastPollError(true);
+    } finally {
+      setSetupBusy(false);
+    }
+  }
+
   async function selectDialog(dialog: TelegramDialogSummary) {
     if (!activeProfileId) return;
     if (!window.confirm(`Add ${dialog.title} as a signal provider?`)) return;
@@ -761,6 +780,7 @@ export function App({
       defaultTakeProfitPips: Number(formData.get("defaultTakeProfitPips")),
       azureOpenAIApiKey: String(formData.get("azureOpenAIApiKey") ?? ""),
       pollingIntervalSeconds: Number(formData.get("pollingIntervalSeconds")),
+      dedupWindowSeconds: Number(formData.get("dedupWindowSeconds")),
       allowedOrderTypes: formData.getAll("allowedOrderTypes").map(String),
     });
     await refreshDashboard();
@@ -1123,6 +1143,7 @@ export function App({
                 submitPassword={submitPassword}
                 dialogs={availableDialogs}
                 onRefreshDialogs={loadDialogs}
+                onResyncProviders={resyncProvidersToCurrentSession}
                 onRemoveDialog={(dialog) => {
                   const provider = snapshot.providers.find((p) => p.dialogId === dialog.id);
                   if (provider) return deleteProvider(provider);

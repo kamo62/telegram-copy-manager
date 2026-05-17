@@ -1,4 +1,4 @@
-import { Info, ShieldCheck } from "lucide-react";
+import { Info, RefreshCw, ShieldCheck } from "lucide-react";
 import { DialogPicker, type TelegramDialogSummary } from "../components/DialogPicker";
 import { Panel } from "../components/Panel";
 import { SetupFlow, type SetupFormState } from "../components/SetupFlow";
@@ -15,6 +15,7 @@ export function TelegramSetupPage({
   onReset,
   dialogs,
   onRefreshDialogs,
+  onResyncProviders,
   onSelectDialog,
   onRemoveDialog,
   selectedDialogIds,
@@ -30,6 +31,7 @@ export function TelegramSetupPage({
   onReset: () => Promise<void>;
   dialogs: TelegramDialogSummary[];
   onRefreshDialogs: () => Promise<void>;
+  onResyncProviders?: () => Promise<void>;
   onSelectDialog: (dialog: TelegramDialogSummary) => Promise<void>;
   onRemoveDialog?: (dialog: TelegramDialogSummary) => Promise<void> | void;
   selectedDialogIds: string[];
@@ -65,11 +67,22 @@ export function TelegramSetupPage({
         <>
           <div className="setup-next">
             <Info aria-hidden="true" size={14} />
-            <span>
+            <span className="setup-next-message">
               {selectedDialogIds.length === 0
                 ? "Pick at least one channel below to start collecting signals."
                 : `${selectedDialogIds.length} provider${selectedDialogIds.length === 1 ? "" : "s"} selected. Open the Providers tab to assign them to MT5 accounts.`}
             </span>
+            {onResyncProviders ? (
+              <button
+                className="btn btn-ghost btn-small"
+                disabled={busy}
+                onClick={() => void onResyncProviders()}
+                type="button"
+              >
+                <RefreshCw aria-hidden="true" size={12} />
+                Resync providers
+              </button>
+            ) : null}
           </div>
           <DialogPicker
             dialogs={dialogs}

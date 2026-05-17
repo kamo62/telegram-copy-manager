@@ -15,6 +15,7 @@ const snapshot: DashboardSnapshot = {
     pollingIntervalSeconds: 2,
     allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
     azureOpenAIKeyConfigured: false,
+    dedupWindowSeconds: 300,
   },
   telegramSessions: [{ id: "session-1", phone: "+27821234567", status: "CONNECTED" }],
   providers: [
@@ -160,7 +161,14 @@ describe("App dashboard", () => {
   });
 
   test("scopes provider, parser, history, and symbol panels behind their tabs", () => {
-    const view = render(<App initialSnapshot={snapshot} />);
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          telegramSessions: [{ ...snapshot.telegramSessions[0]!, profileId: "profile-current" }],
+        }}
+      />,
+    );
 
     clickTab(view, "Providers");
     expect(view.getByText("Provider paused")).toBeTruthy();
@@ -209,6 +217,36 @@ describe("App dashboard", () => {
     expect(view.getByText("Available dialogs")).toBeTruthy();
     expect(view.getByText("Real FX Channel")).toBeTruthy();
     expect(view.getByRole("button", { name: "Add Real FX Channel as a provider" })).toBeTruthy();
+  });
+
+  test("lets the operator resync providers after a new Telegram session connects", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url).startsWith("/api/telegram/dialogs")) {
+        return Response.json({
+          dialogs: [{ id: "dialog-alpha", title: "Alpha FX Signals", type: "channel", unreadCount: 0 }],
+        });
+      }
+      if (String(url) === "/api/providers/resync-current-session") {
+        return Response.json({
+          rebound: [{ providerId: "provider-alpha" }],
+          stillOffline: [],
+        });
+      }
+      return Response.json(snapshot);
+    }) as typeof fetch;
+    const view = render(<App initialSnapshot={snapshot} />);
+
+    clickSidebar(view, "Telegram Setup");
+    fireEvent.click(view.getByRole("button", { name: "Resync providers" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/providers/resync-current-session")).toBe(true),
+    );
+    const resyncCall = calls.find((call) => call.url === "/api/providers/resync-current-session");
+    expect(resyncCall?.init?.method).toBe("POST");
+    expect(String(resyncCall?.init?.body)).toContain("profile-current");
   });
 
   test("lets the operator enable provider auto-copy from the dashboard", async () => {
@@ -339,6 +377,7 @@ describe("App dashboard", () => {
       defaultTakeProfitPips: 200,
       azureOpenAIApiKey: "",
       pollingIntervalSeconds: 5,
+      dedupWindowSeconds: 300,
       allowedOrderTypes: ["MARKET"],
     });
   });

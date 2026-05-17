@@ -40,6 +40,21 @@ export interface ApiOptions {
 const demoAccountId = "mt5-100200300";
 const demoProviderId = "provider-alpha";
 
+/**
+ * Emit a single-line JSON log to stdout. Visible in `docker logs telegram-tc -f`.
+ * Use for events the operator needs to see in real time (request errors, queue
+ * transitions, EA reports). The audit_logs table remains the persistent record.
+ */
+export function log(
+  level: "info" | "warn" | "error",
+  event: string,
+  fields: Record<string, unknown> = {},
+): void {
+  const line = JSON.stringify({ t: new Date().toISOString(), level, event, ...fields });
+  if (level === "error") console.error(line);
+  else console.log(line);
+}
+
 const defaultGlobalAliases = {
   GOLD: "XAUUSD",
   "EUR/USD": "EURUSD",
@@ -61,6 +76,7 @@ interface AppSettings {
   azureOpenAIKeyConfigured: boolean;
   leaseTimeoutSeconds: number;
   maxLeaseAttempts: number;
+  dedupWindowSeconds: number;
 }
 
 interface AccountSlotInput {
@@ -87,6 +103,7 @@ const defaultAppSettings: AppSettings = {
   azureOpenAIKeyConfigured: false,
   leaseTimeoutSeconds: 15,
   maxLeaseAttempts: 3,
+  dedupWindowSeconds: 300,
 };
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
@@ -231,6 +248,27 @@ export function createApi(options: ApiOptions = {}) {
   app.post("/api/providers", async (c) => {
     const body = await c.req.json<{ profileId: string; dialogId: string; title?: string }>();
     return c.json(store.selectProvider(body));
+  });
+
+  app.post("/api/providers/resync-current-session", async (c) => {
+    let body: { profileId?: string } = {};
+    try {
+      body = await c.req.json<{ profileId?: string }>();
+    } catch {
+      body = {};
+    }
+    const session = store.connectedTelegramSession(body.profileId);
+    if (!session) {
+      return c.json({ error: "Connected Telegram session not found" }, 404);
+    }
+    const dialogs = await telegram.listDialogs(session.id);
+    return c.json({
+      sessionId: session.id,
+      ...store.resyncProvidersToTelegramSession({
+        profileId: session.profileId,
+        dialogs,
+      }),
+    });
   });
 
   app.patch("/api/providers/:id", async (c) => {
@@ -667,6 +705,10 @@ type RawMessageClassification = "entry" | "management" | "noise" | "unknown";
 class AppStore {
   private readonly db: Database;
   private readonly allowDemoData: boolean;
+  // Tracks providers we've already warned about for the "no connected
+  // Telegram session" state, so we log once per offline→online edge instead
+  // of once per poll. Reset when a session connects.
+  private readonly providersWithoutSession = new Set<string>();
 
   constructor(databasePath: string, allowDemoData = false) {
     this.allowDemoData = allowDemoData;
@@ -757,12 +799,47 @@ class AppStore {
       }));
   }
 
+  connectedTelegramSession(profileId?: string) {
+    const row = profileId
+      ? (this.db
+          .query(
+            "SELECT id, profile_id FROM telegram_sessions WHERE profile_id = ? AND status = 'CONNECTED' ORDER BY updated_at DESC LIMIT 1",
+          )
+          .get(profileId) as Row | null)
+      : (this.db
+          .query(
+            "SELECT id, profile_id FROM telegram_sessions WHERE status = 'CONNECTED' ORDER BY updated_at DESC LIMIT 1",
+          )
+          .get() as Row | null);
+    return row
+      ? {
+          id: String(row.id),
+          profileId: String(row.profile_id),
+        }
+      : undefined;
+  }
+
   selectProvider(input: { profileId: string; dialogId: string; title?: string }) {
     const dialog = this.dialogs(input.profileId).find((item) => item.id === input.dialogId);
+    const existing = this.collapseDuplicateProvidersForDialog(input.dialogId);
+    if (existing) {
+      const title = input.title ?? dialog?.title ?? String(existing.title);
+      const kind = dialog?.type ?? String(existing.kind);
+      this.db
+        .query("UPDATE providers SET profile_id = ?, title = ?, kind = ? WHERE id = ?")
+        .run(input.profileId, title, kind, String(existing.id));
+      this.audit("provider.rebind", "info", "Provider bound to Telegram session profile", {
+        providerId: String(existing.id),
+        dialogId: input.dialogId,
+        fromProfileId: String(existing.profile_id),
+        toProfileId: input.profileId,
+      });
+      return { provider: this.providers().find((provider) => provider.id === String(existing.id)) };
+    }
     const id =
       input.dialogId === "dialog-alpha"
         ? demoProviderId
-        : `provider_${hashHint(`${input.profileId}:${input.dialogId}`).replace(/^api_/, "")}`;
+        : `provider_${hashHint(input.dialogId).replace(/^api_/, "")}`;
     const now = new Date().toISOString();
     this.db
       .query(
@@ -781,6 +858,56 @@ class AppStore {
         now,
       );
     return { provider: this.providers().find((provider) => provider.id === id) };
+  }
+
+  resyncProvidersToTelegramSession(input: { profileId: string; dialogs: TelegramDialog[] }) {
+    const dialogMap = new Map(input.dialogs.map((dialog) => [dialog.id, dialog]));
+    const rebound: Array<{ providerId: string; fromProfileId: string; toProfileId: string }> = [];
+    let alreadyCurrent = 0;
+    for (const dialog of dialogMap.values()) {
+      const provider = this.collapseDuplicateProvidersForDialog(dialog.id);
+      if (!provider) continue;
+      const fromProfileId = String(provider.profile_id);
+      this.db
+        .query("UPDATE providers SET profile_id = ?, title = ?, kind = ? WHERE id = ?")
+        .run(input.profileId, dialog.title, dialog.type, String(provider.id));
+      if (fromProfileId === input.profileId) {
+        alreadyCurrent += 1;
+      } else {
+        rebound.push({
+          providerId: String(provider.id),
+          fromProfileId,
+          toProfileId: input.profileId,
+        });
+      }
+    }
+    const stillOffline = this.providers()
+      .filter(
+        (provider) =>
+          provider.enabled &&
+          !dialogMap.has(provider.dialogId) &&
+          !this.connectedSessionIdForProfile(provider.profileId),
+      )
+      .map((provider) => ({
+        providerId: provider.id,
+        dialogId: provider.dialogId,
+        title: provider.title,
+      }));
+    this.audit("provider.resync", "info", "Providers resynced against Telegram session dialogs", {
+      profileId: input.profileId,
+      dialogsSeen: input.dialogs.length,
+      rebound: rebound.length,
+      alreadyCurrent,
+      stillOffline: stillOffline.length,
+    });
+    return {
+      profileId: input.profileId,
+      dialogsSeen: input.dialogs.length,
+      rebound,
+      alreadyCurrent,
+      stillOffline,
+      providers: this.providers(),
+    };
   }
 
   updateProvider(
@@ -909,12 +1036,163 @@ class AppStore {
   }
 
   connectedSessionIdForProfile(profileId: string) {
-    const row = this.db
+    return this.connectedTelegramSession(profileId)?.id;
+  }
+
+  private providerRowsForDialog(dialogId: string) {
+    return this.db
       .query(
-        "SELECT id FROM telegram_sessions WHERE profile_id = ? AND status = 'CONNECTED' ORDER BY updated_at DESC LIMIT 1",
+        "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at FROM providers WHERE dialog_id = ? ORDER BY id",
       )
-      .get(profileId) as Row | null;
-    return row ? String(row.id) : undefined;
+      .all(dialogId) as Row[];
+  }
+
+  private providerRowById(providerId: string) {
+    return this.db
+      .query(
+        "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at FROM providers WHERE id = ?",
+      )
+      .get(providerId) as Row | null;
+  }
+
+  private collapseDuplicateProvidersForDialog(dialogId: string) {
+    const rows = this.providerRowsForDialog(dialogId);
+    if (rows.length <= 1) return rows[0];
+    const [canonical, ...duplicates] = [...rows].sort(
+      (left, right) => this.providerMergeScore(right) - this.providerMergeScore(left),
+    );
+    if (!canonical) return undefined;
+    for (const duplicate of duplicates) {
+      this.mergeProviderInto(String(canonical.id), duplicate);
+    }
+    return this.providerRowById(String(canonical.id)) ?? canonical;
+  }
+
+  private providerMergeScore(row: Row) {
+    const providerId = String(row.id);
+    const count = (table: string) =>
+      Number(
+        (
+          this.db
+            .query(`SELECT COUNT(*) AS count FROM ${table} WHERE provider_id = ?`)
+            .get(providerId) as Row | null
+        )?.count ?? 0,
+      );
+    const hasConfig = !isEmptyJsonObject(String(row.provider_config_json ?? "{}"));
+    return (
+      count("raw_messages") * 1000 +
+      count("parsed_signals") * 500 +
+      count("logical_trades") * 250 +
+      count("account_provider_links") * 100 +
+      count("symbol_aliases") * 50 +
+      (hasConfig ? 25 : 0) +
+      (Number(row.enabled) ? 10 : 0)
+    );
+  }
+
+  private mergeProviderInto(canonicalProviderId: string, duplicate: Row) {
+    const duplicateProviderId = String(duplicate.id);
+    if (canonicalProviderId === duplicateProviderId) return;
+    const canonical = this.providerRowById(canonicalProviderId);
+    if (!canonical) return;
+    const canonicalConfig = String(canonical.provider_config_json ?? "{}");
+    const duplicateConfig = String(duplicate.provider_config_json ?? "{}");
+    const mergedEnabled = Number(Boolean(canonical.enabled) || Boolean(duplicate.enabled));
+    const mergedLastMessageAt =
+      String(duplicate.last_message_at) > String(canonical.last_message_at)
+        ? String(duplicate.last_message_at)
+        : String(canonical.last_message_at);
+    this.db
+      .query("UPDATE providers SET enabled = ?, last_message_at = ? WHERE id = ?")
+      .run(mergedEnabled, mergedLastMessageAt, canonicalProviderId);
+    if (isEmptyJsonObject(canonicalConfig) && !isEmptyJsonObject(duplicateConfig)) {
+      this.db
+        .query(
+          "UPDATE providers SET parser_mode = ?, risk_profile = ?, lot_size = ?, provider_config_json = ? WHERE id = ?",
+        )
+        .run(
+          String(duplicate.parser_mode),
+          String(duplicate.risk_profile),
+          Number(duplicate.lot_size),
+          duplicateConfig,
+          canonicalProviderId,
+        );
+    }
+
+    this.db
+      .query("UPDATE raw_messages SET provider_id = ? WHERE provider_id = ?")
+      .run(canonicalProviderId, duplicateProviderId);
+    this.db
+      .query("UPDATE parsed_signals SET provider_id = ? WHERE provider_id = ?")
+      .run(canonicalProviderId, duplicateProviderId);
+    this.db
+      .query("UPDATE logical_trades SET provider_id = ? WHERE provider_id = ?")
+      .run(canonicalProviderId, duplicateProviderId);
+    this.db
+      .query("UPDATE provider_config_history SET provider_id = ? WHERE provider_id = ?")
+      .run(canonicalProviderId, duplicateProviderId);
+
+    const duplicateLinks = this.db
+      .query("SELECT account_id, enabled FROM account_provider_links WHERE provider_id = ?")
+      .all(duplicateProviderId) as Row[];
+    const now = new Date().toISOString();
+    for (const link of duplicateLinks) {
+      const existing = this.db
+        .query(
+          "SELECT enabled FROM account_provider_links WHERE account_id = ? AND provider_id = ?",
+        )
+        .get(String(link.account_id), canonicalProviderId) as Row | null;
+      if (existing) {
+        this.db
+          .query(
+            "UPDATE account_provider_links SET enabled = ?, updated_at = ? WHERE account_id = ? AND provider_id = ?",
+          )
+          .run(
+            Number(Boolean(existing.enabled) || Boolean(link.enabled)),
+            now,
+            String(link.account_id),
+            canonicalProviderId,
+          );
+      } else {
+        this.db
+          .query(
+            "INSERT INTO account_provider_links (account_id, provider_id, enabled, updated_at) VALUES (?, ?, ?, ?)",
+          )
+          .run(String(link.account_id), canonicalProviderId, Number(link.enabled), now);
+      }
+    }
+    this.db
+      .query("DELETE FROM account_provider_links WHERE provider_id = ?")
+      .run(duplicateProviderId);
+
+    const duplicateAliases = this.db
+      .query(
+        "SELECT raw_symbol, canonical_symbol, updated_at FROM symbol_aliases WHERE scope = 'provider' AND provider_id = ?",
+      )
+      .all(duplicateProviderId) as Row[];
+    for (const alias of duplicateAliases) {
+      this.db
+        .query(
+          `INSERT INTO symbol_aliases (scope, provider_id, raw_symbol, canonical_symbol, updated_at)
+           VALUES ('provider', ?, ?, ?, ?)
+           ON CONFLICT(scope, provider_id, raw_symbol) DO NOTHING`,
+        )
+        .run(
+          canonicalProviderId,
+          String(alias.raw_symbol),
+          String(alias.canonical_symbol),
+          String(alias.updated_at),
+        );
+    }
+    this.db
+      .query("DELETE FROM symbol_aliases WHERE scope = 'provider' AND provider_id = ?")
+      .run(duplicateProviderId);
+    this.db.query("DELETE FROM providers WHERE id = ?").run(duplicateProviderId);
+    this.audit("provider.merge", "info", "Duplicate provider row merged by Telegram dialog", {
+      providerId: canonicalProviderId,
+      duplicateProviderId,
+      dialogId: String(duplicate.dialog_id),
+    });
   }
 
   recentMessages(providerId: string, limit: number, seedIfEmpty = true) {
@@ -1013,16 +1291,20 @@ class AppStore {
       result.providers += 1;
       const sessionId = this.connectedSessionIdForProfile(provider.profileId);
       if (!sessionId) {
-        this.audit(
-          "telegram.ingest.skip",
-          "warn",
-          "Enabled provider has no connected Telegram session",
-          {
-            providerId: provider.id,
-          },
-        );
+        if (!this.providersWithoutSession.has(provider.id)) {
+          this.providersWithoutSession.add(provider.id);
+          this.audit(
+            "telegram.ingest.skip",
+            "warn",
+            "Enabled provider has no connected Telegram session",
+            { providerId: provider.id },
+          );
+          log("warn", "telegram.ingest.skip", { providerId: provider.id });
+        }
         continue;
       }
+      // Provider reconnected — clear the warned flag so we re-log if it drops again.
+      this.providersWithoutSession.delete(provider.id);
       try {
         const captured = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit, {
           dateFrom: provider.lastMessageAt,
@@ -1274,15 +1556,20 @@ class AppStore {
     const settings = this.appSettings();
     const provider = this.providerDetails(providerId);
     const providerConfig = this.providerConfig(providerId);
-    // Dedup window: only collapse against APPROVED signals from the last 15 minutes so
-    // a provider re-issuing the same short-form signal (e.g. "Sell BTCUSD") after the
-    // earlier position closes can still queue. Without the window, every fresh repeat
-    // of an identical raw text gets rejected as DUPLICATE forever.
+    // Dedup window: only collapse against APPROVED signals within the configured window
+    // so a provider re-issuing the same short-form signal (e.g. "Sell BTCUSD") after the
+    // earlier position closes can still queue. Configurable via settings.dedupWindowSeconds.
+    const dedupWindowSeconds = settings.dedupWindowSeconds;
     const duplicate = this.db
       .query(
-        "SELECT id FROM parsed_signals WHERE provider_id = ? AND fingerprint = ? AND id != ? AND status = 'APPROVED' AND created_at > datetime('now','-15 minutes') LIMIT 1",
+        "SELECT id FROM parsed_signals WHERE provider_id = ? AND fingerprint = ? AND id != ? AND status = 'APPROVED' AND created_at > datetime('now', ?) LIMIT 1",
       )
-      .get(String(row.provider_id), signal.fingerprint, parsedSignalId) as Row | null;
+      .get(
+        String(row.provider_id),
+        signal.fingerprint,
+        parsedSignalId,
+        `-${dedupWindowSeconds} seconds`,
+      ) as Row | null;
     if (duplicate) {
       this.insertNonLeasedQueueItem(parsedSignalId, signal, "DUPLICATE", {
         accountId,
@@ -1432,6 +1719,15 @@ class AppStore {
     this.audit("signal.approve", "info", "Signal approved for MT5 queue", {
       parsedSignalId,
       queueId,
+    });
+    log("info", "signal.approve", {
+      parsedSignalId,
+      queueId,
+      providerId: signal.providerId,
+      symbol: signal.brokerSymbol ?? signal.canonicalSymbol,
+      direction: signal.direction,
+      commandType: signal.commandType,
+      accountId,
     });
     return { body: { queueItemId: queueId, logicalTradeId, status: "PENDING" } };
   }
@@ -1812,6 +2108,15 @@ class AppStore {
       "MT5 execution report received",
       input,
     );
+    log(input.status === "EXECUTED" ? "info" : "error", "mt5.report", {
+      accountId: input.accountId,
+      queueItemId: input.queueItemId,
+      status: input.status,
+      retcode: input.retcode,
+      brokerComment: input.brokerComment,
+      orderTicket: input.orderTicket,
+      errorText: input.errorText,
+    });
     return { reportId: id, status: input.status };
   }
 
@@ -1841,7 +2146,9 @@ class AppStore {
       );
     this.reconcileSnapshotState(input.accountId, input.positions, input.orders);
     this.reconcileManualBrokerClosures(input.accountId, input.positions, input.orders);
-    this.audit("mt5.snapshot", "info", "MT5 state snapshot received", input);
+    // Snapshots arrive every ~2 s per account. The full payload is already
+    // persisted in mt5_snapshots; writing an audit_logs row per poll was
+    // producing ~43k rows/day per account with zero diagnostic value.
     return {
       accountId: input.accountId,
       status: "RECORDED",
@@ -3910,6 +4217,10 @@ function parseJson<T>(value: string): T {
   return JSON.parse(value) as T;
 }
 
+function isEmptyJsonObject(value: string) {
+  return value.trim() === "" || value.trim() === "{}";
+}
+
 function isRawMessageClassification(value: string): value is RawMessageClassification {
   return value === "entry" || value === "management" || value === "noise" || value === "unknown";
 }
@@ -4118,6 +4429,15 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     maxLeaseAttempts: Math.max(
       1,
       Math.round(positiveNumber(input.maxLeaseAttempts, defaultAppSettings.maxLeaseAttempts)),
+    ),
+    dedupWindowSeconds: Math.max(
+      60,
+      Math.min(
+        3600,
+        Math.round(
+          positiveNumber(input.dedupWindowSeconds, defaultAppSettings.dedupWindowSeconds),
+        ),
+      ),
     ),
   };
 }

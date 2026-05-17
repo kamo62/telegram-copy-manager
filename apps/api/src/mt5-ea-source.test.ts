@@ -66,7 +66,7 @@ describe("MT5 Expert Advisor source", () => {
 
   test("reports current MT5 position and pending-order snapshots to the backend", () => {
     expect(source).toContain("SendSnapshot()");
-    expect(source).toContain('HttpPost("/mt5/snapshot"');
+    expect(source).toContain('HttpPostRetry("/mt5/snapshot"');
     expect(source).toContain("PositionsJson()");
     expect(source).toContain("OrdersJson()");
     expect(source).toContain("POSITION_PRICE_OPEN");

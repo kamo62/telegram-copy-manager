@@ -2952,6 +2952,10 @@ h3 {
   flex-shrink: 0;
 }
 
+.setup-next-message {
+  flex: 1;
+}
+
 .dialog-picker-title {
   display: flex;
   flex-direction: column;

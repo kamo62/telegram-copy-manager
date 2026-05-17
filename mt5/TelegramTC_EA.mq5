@@ -119,7 +119,7 @@ void SendSnapshot()
       SymbolsMarketJson()
    );
    string response = "";
-   HttpPost("/mt5/snapshot", body, response);
+   HttpPostRetry("/mt5/snapshot", body, response);
 }
 
 void SendHistoryDeals()
@@ -141,7 +141,7 @@ void PollAndExecute()
 {
    string url = StringFormat("/mt5/poll-line?accountId=mt5-%I64d", AccountInfoInteger(ACCOUNT_LOGIN));
    string response = "";
-   if(!HttpGet(url, response))
+   if(!HttpGetRetry(url, response))
       return;
 
    ApplyPollConfig(response);
@@ -254,7 +254,20 @@ bool ExecuteOpenTrade(SignalCommand &command)
    request.sl = command.stopLoss;
    request.tp = command.executionMode == "SPLIT_ORDER" ? command.tp[0] : 0.0;
 
+   PrintFormat("Telegram TC OPEN_TRADE symbol=%s side=%s type=%s vol=%.2f price=%.5f sl=%.5f filling=%d execMode=%d",
+      command.brokerSymbol, command.direction, command.orderType,
+      request.volume, request.price, request.sl,
+      (int)request.type_filling,
+      (int)SymbolInfoInteger(command.brokerSymbol, SYMBOL_TRADE_EXEMODE));
+
    bool sent = OrderSend(request, result);
+   int sendErr = sent ? 0 : GetLastError();
+
+   PrintFormat("Telegram TC OrderSend RESULT sent=%s retcode=%u (%s) deal=%I64u order=%I64u price=%.5f err=%d",
+      sent ? "true" : "false",
+      result.retcode, result.comment,
+      result.deal, result.order, result.price, sendErr);
+
    Report(
       command.queueItemId,
       IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED",
@@ -267,7 +280,7 @@ bool ExecuteOpenTrade(SignalCommand &command)
       request.price,
       result.price,
       request.volume,
-      sent ? "" : IntegerToString(GetLastError())
+      sent ? "" : IntegerToString(sendErr)
    );
    bool ok = sent && IsTradeSuccess(result.retcode);
    if(ok)
@@ -1170,6 +1183,13 @@ bool HttpGet(string path, string &response)
    return HttpRequest("GET", path, "", data, response);
 }
 
+// Idempotent GET with up to 3 attempts and short backoff. Safe for poll-line.
+bool HttpGetRetry(string path, string &response)
+{
+   char data[];
+   return HttpRequestRetry("GET", path, "", data, response, 3);
+}
+
 bool HttpPost(string path, string body, string &response)
 {
    char data[];
@@ -1179,6 +1199,17 @@ bool HttpPost(string path, string body, string &response)
    return HttpRequest("POST", path, "Content-Type: application/json\r\n", data, response);
 }
 
+// Retry-safe POST — ONLY use for idempotent posts (snapshot, history) where
+// the server collapses identical payloads. Never use for /report or /register.
+bool HttpPostRetry(string path, string body, string &response)
+{
+   char data[];
+   StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(data) > 0 && data[ArraySize(data) - 1] == 0)
+      ArrayResize(data, ArraySize(data) - 1);
+   return HttpRequestRetry("POST", path, "Content-Type: application/json\r\n", data, response, 3);
+}
+
 bool HttpRequest(string method, string path, string headers, char &data[], string &response)
 {
    char result[];
@@ -1186,18 +1217,37 @@ bool HttpRequest(string method, string path, string headers, char &data[], strin
    string url = BackendBaseUrl + path;
    ResetLastError();
    int status = WebRequest(method, url, headers, 8000, data, result, resultHeaders);
+   int lastErr = GetLastError();
    if(status == -1)
    {
-      PrintFormat("Telegram TC WebRequest failed: %d. Add %s to allowed WebRequest URLs.", GetLastError(), BackendBaseUrl);
+      PrintFormat("Telegram TC WebRequest CONNECT FAILED err=%d url=%s (add URL to allowed WebRequest list if err=4014/4060)",
+         lastErr, url);
       return false;
    }
    response = CharArrayToString(result, 0, -1, CP_UTF8);
    if(status < 200 || status >= 300)
    {
-      PrintFormat("Telegram TC HTTP %d: %s", status, response);
+      PrintFormat("Telegram TC HTTP %d err=%d method=%s path=%s body=%s",
+         status, lastErr, method, path,
+         (StringLen(response) > 0 ? response : "(empty)"));
       return false;
    }
    return true;
+}
+
+// Retry wrapper for idempotent calls (snapshot, poll-line).
+// NEVER use this for /report, /register, /heartbeat — those are mutations
+// where a retry could double-fire or corrupt server-side state.
+bool HttpRequestRetry(string method, string path, string headers, char &data[], string &response, int maxAttempts)
+{
+   for(int attempt = 1; attempt <= maxAttempts; attempt++)
+   {
+      if(HttpRequest(method, path, headers, data, response))
+         return true;
+      if(attempt < maxAttempts)
+         Sleep(250 * attempt);
+   }
+   return false;
 }
 
 string JsonEscape(string value)

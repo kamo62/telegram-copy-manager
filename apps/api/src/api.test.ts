@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createApi } from "./app";
-import type { TelegramAdapter, TelegramCapturedMessage } from "./telegram";
+import type { TelegramAdapter, TelegramCapturedMessage, TelegramDialog } from "./telegram";
 
 const json = async <T>(response: Response) => (await response.json()) as T;
 
@@ -26,6 +26,28 @@ function createQueuedTelegramAdapter(messages: TelegramCapturedMessage[]): Teleg
           unreadCount: messages.length,
         },
       ];
+    },
+    async fetchRecentMessages() {
+      return messages;
+    },
+  };
+}
+
+function createDialogTelegramAdapter(dialogs: TelegramDialog[], messages: TelegramCapturedMessage[] = []): TelegramAdapter {
+  return {
+    name: "mock",
+    async startLogin() {
+      return { status: "CODE_REQUIRED" as const };
+    },
+    async submitCode() {
+      return { status: "CONNECTED" as const };
+    },
+    async submitPassword() {
+      return { status: "CONNECTED" as const };
+    },
+    async disconnect() {},
+    async listDialogs() {
+      return dialogs;
     },
     async fetchRecentMessages() {
       return messages;
@@ -1051,6 +1073,173 @@ describe("Telegram TC API", () => {
     ).toHaveLength(1);
   });
 
+  test("rebinds an existing provider when the same Telegram dialog is selected from a new session", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createDialogTelegramAdapter([
+        { id: "kal-dialog", title: "KAL VIP", type: "channel", unreadCount: 0 },
+      ]),
+    });
+    const firstSession = await json<{ profileId: string; sessionId: string }>(
+      await app.request("/api/telegram/start", {
+        method: "POST",
+        body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27820000000" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request("/api/telegram/verify-code", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: firstSession.sessionId, code: "12345" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const first = await json<{ provider: { id: string } }>(
+      await app.request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          profileId: firstSession.profileId,
+          dialogId: "kal-dialog",
+          title: "KAL VIP",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/providers/${first.provider.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: true, lotSize: 0.24 }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/telegram/disconnect", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: firstSession.sessionId }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const secondSession = await json<{ profileId: string; sessionId: string }>(
+      await app.request("/api/telegram/start", {
+        method: "POST",
+        body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27820000000" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request("/api/telegram/verify-code", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: secondSession.sessionId, code: "12345" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const second = await json<{ provider: { id: string; lotSize: number } }>(
+      await app.request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          profileId: secondSession.profileId,
+          dialogId: "kal-dialog",
+          title: "KAL VIP",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const providers = await json<{
+      providers: Array<{ id: string; dialogId: string; lotSize: number; ingestionStatus?: string }>;
+    }>(await app.request("/api/dashboard"));
+    const kalProviders = providers.providers.filter((provider) => provider.dialogId === "kal-dialog");
+
+    expect(second.provider.id).toBe(first.provider.id);
+    expect(second.provider.lotSize).toBe(0.24);
+    expect(kalProviders).toHaveLength(1);
+    expect(kalProviders[0]).toMatchObject({ id: first.provider.id, ingestionStatus: "polling" });
+  });
+
+  test("resyncs stale providers to the current connected Telegram session when their dialogs are visible", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createDialogTelegramAdapter([
+        { id: "kal-dialog", title: "KAL VIP", type: "channel", unreadCount: 0 },
+      ]),
+    });
+    const firstSession = await json<{ profileId: string; sessionId: string }>(
+      await app.request("/api/telegram/start", {
+        method: "POST",
+        body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27820000000" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request("/api/telegram/verify-code", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: firstSession.sessionId, code: "12345" }),
+      headers: { "content-type": "application/json" },
+    });
+    const selected = await json<{ provider: { id: string } }>(
+      await app.request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          profileId: firstSession.profileId,
+          dialogId: "kal-dialog",
+          title: "KAL VIP",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/providers/${selected.provider.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/telegram/disconnect", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: firstSession.sessionId }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const secondSession = await json<{ profileId: string; sessionId: string }>(
+      await app.request("/api/telegram/start", {
+        method: "POST",
+        body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27820000000" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request("/api/telegram/verify-code", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: secondSession.sessionId, code: "12345" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const before = await json<{
+      providers: Array<{ id: string; dialogId: string; ingestionStatus?: string }>;
+    }>(await app.request("/api/dashboard"));
+    expect(before.providers.find((provider) => provider.id === selected.provider.id)).toMatchObject(
+      {
+        ingestionStatus: "telegram-offline",
+      },
+    );
+
+    const resync = await json<{
+      rebound: Array<{ providerId: string; fromProfileId: string; toProfileId: string }>;
+    }>(
+      await app.request("/api/providers/resync-current-session", {
+        method: "POST",
+        body: JSON.stringify({ profileId: secondSession.profileId }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const after = await json<{
+      providers: Array<{ id: string; dialogId: string; ingestionStatus?: string }>;
+    }>(await app.request("/api/dashboard"));
+
+    expect(resync.rebound).toEqual([
+      {
+        providerId: selected.provider.id,
+        fromProfileId: firstSession.profileId,
+        toProfileId: secondSession.profileId,
+      },
+    ]);
+    expect(after.providers.find((provider) => provider.id === selected.provider.id)).toMatchObject({
+      ingestionStatus: "polling",
+    });
+  });
+
   test("updates provider parser mode, risk profile, and channel lot size settings", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     const providers = await json<{
@@ -1103,6 +1292,7 @@ describe("Telegram TC API", () => {
         maxLeaseAttempts: number;
         pollingIntervalSeconds: number;
         allowedOrderTypes: string[];
+        dedupWindowSeconds: number;
       };
     }>(await app.request("/api/settings"));
     expect(defaults.settings).toEqual({
@@ -1113,6 +1303,7 @@ describe("Telegram TC API", () => {
       azureOpenAIKeyConfigured: false,
       leaseTimeoutSeconds: 15,
       maxLeaseAttempts: 3,
+      dedupWindowSeconds: 300,
       pollingIntervalSeconds: 2,
       allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
     });
