@@ -16,7 +16,7 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "build": "bun run build:api && bun run build:web",
-    "build:api": "bun build apps/api/src/server.ts --target=bun --outdir dist/api",
+    "build:api": "bun build apps/api/src/server.ts --target=bun --outdir dist/api --external telegram --external telegram/sessions --external websocket --external bufferutil --external utf-8-validate",
     "build:web": "bun run --cwd apps/web build",
     "docker:build": "docker build -t telegram-tc:local .",
     "telegram:start": "bun scripts/telegram-flow.ts start",

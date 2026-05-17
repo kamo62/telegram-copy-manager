@@ -30,6 +30,11 @@ partial closes, runner/trailing execution, broker-history attribution, and app v
 - Real Telegram session connection no longer creates the hidden demo provider unless demo seeding is
   enabled.
 - Fixed the frontend resync test fixture so connected Telegram sessions include the active profile id.
+- Added Docker build-context protection for runtime data, Telegram session files, local databases,
+  logs, and env files so redeploys cannot read or package already-authenticated provider/session
+  state.
+- Externalized GramJS and websocket native optional modules from the API bundle so Docker builds use
+  installed runtime dependencies without trying to inline Telegram's native websocket helpers.
 
 Verification: focused core/API/EA/web suites pass after the red/green lifecycle hardening tests. Full
 typecheck, lint, test, build, and Docker verification are run as part of this implementation pass.
