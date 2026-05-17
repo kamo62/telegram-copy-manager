@@ -67,14 +67,19 @@ export interface PriceZone {
 
 export interface TakeProfitTarget {
   leg: number;
-  price: number;
+  price?: number;
   allocationPercent: number;
   volume?: number;
+  targetSource?: "explicit" | "default-distance";
+  defaultDistance?: DistanceInstruction;
+  strategy?: TakeProfitStrategy;
 }
 
 export interface PartialCloseInstruction {
   kind: "PERCENT" | "TP_LEG" | "LOTS";
   value: number;
+  allocationPercent?: number;
+  volume?: number;
 }
 
 export interface DistanceInstruction {
@@ -128,10 +133,25 @@ export interface LogicalTrade {
 
 export interface TradeLeg {
   leg: number;
-  targetPrice: number;
+  targetPrice?: number;
+  targetSource?: "explicit" | "default-distance";
+  defaultDistance?: DistanceInstruction;
   allocationPercent: number;
+  strategy?: TakeProfitStrategy;
   status: "PLANNED" | "OPEN" | "HIT" | "CLOSED" | "SKIPPED" | "FAILED" | "UNKNOWN";
   brokerEvidence?: string;
+}
+
+export type TakeProfitStrategy =
+  | { kind: "set-sl-to-entry"; offsetPips: number }
+  | { kind: "set-sl-to-tp"; tpLeg: number; offsetPips: number }
+  | { kind: "no-change" };
+
+export interface RunnerConfig {
+  enabled: boolean;
+  lotSize: number;
+  slBehavior: "break-even" | "last-tp" | "trail" | string;
+  trailPips: number;
 }
 
 export interface LifecycleMatch {
@@ -162,6 +182,7 @@ export interface ExecutionQueueItem {
     partialClose?: PartialCloseInstruction;
     takeProfits: TakeProfitTarget[];
     defaultTakeProfit?: DistanceInstruction;
+    runner?: RunnerConfig;
     executionMode: ExecutionMode;
     volume?: number;
     riskPercent?: number;
@@ -417,7 +438,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
         mappingSource: "fallback" as const,
         warnings: ["No provider symbol found"],
       };
-  const newStopLoss = commandType === "MODIFY_SL" ? extractPriceNearToken(text, "SL") : undefined;
+  const newStopLoss = commandType === "MODIFY_SL" ? extractLifecyclePrice(text, "SL") : undefined;
   const trailingStop = commandType === "TRAILING_STOP" ? extractTrailingStop(upper) : undefined;
   const partialClose = commandType === "CLOSE_PARTIAL" ? extractPartialClose(upper) : undefined;
   const quotedSignal =
@@ -459,6 +480,12 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     if (takeProfits.length === 0 && !defaultTakeProfit) missingFields.push("takeProfit");
   } else if (commandType !== "NO_SIGNAL" && !rawSymbol && commandType !== "CLOSE_TRADE") {
     if (!inheritedSymbol?.canonicalSymbol) missingFields.push("symbol");
+  }
+  if (commandType === "MODIFY_SL" && newStopLoss === undefined) {
+    missingFields.push("newStopLoss");
+  }
+  if (commandType === "TRAILING_STOP" && !trailingStop) {
+    missingFields.push("trailingStop");
   }
 
   if (commandType !== "NO_SIGNAL" && effectiveMappingStatus !== "mapped") {
@@ -513,6 +540,8 @@ export function shouldRequireManualReview(signal: ParsedSignal): boolean {
     signal.confidence < 0.75 ||
     signal.mappingStatus !== "mapped" ||
     (signal.commandType === "OPEN_TRADE" && signal.missingFields.length > 0) ||
+    (signal.commandType !== "OPEN_TRADE" &&
+      signal.missingFields.some((field) => field !== "symbol")) ||
     signal.commandType === "TRADE_SETUP" ||
     signal.commandType === "NO_SIGNAL" ||
     (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol"))
@@ -532,7 +561,7 @@ export function createLogicalTradeFromSignal(
   if (signal.commandType !== "OPEN_TRADE" || !signal.direction) {
     throw new Error("Only open trade signals can create a logical trade");
   }
-  const allocation = normalizeAllocation(options.allocation, signal.takeProfits.length);
+  const legs = logicalTradeLegs(signal, options.allocation);
   return {
     id: options.id,
     providerId: options.providerId ?? signal.providerId,
@@ -550,12 +579,7 @@ export function createLogicalTradeFromSignal(
     executionMode: options.executionMode,
     entry: signal.entry,
     stopLoss: signal.stopLoss,
-    legs: signal.takeProfits.map((target, index) => ({
-      leg: target.leg,
-      targetPrice: target.price,
-      allocationPercent: allocation[index] ?? target.allocationPercent,
-      status: "PLANNED",
-    })),
+    legs,
     commandHistory: [
       { commandType: signal.commandType, text: signal.originalText, at: new Date().toISOString() },
     ],
@@ -623,10 +647,17 @@ export function buildExecutionCommand(
     executionMode?: ExecutionMode;
     volume?: number;
     riskPercent?: number;
+    runner?: RunnerConfig;
   },
 ): ExecutionQueueItem {
   const takeProfits = withTakeProfitVolumes(
     normalizeTakeProfitAllocations(signal.takeProfits, signal.commandType),
+    signal.commandType,
+    options.volume,
+    options.runner,
+  );
+  const partialClose = withPartialCloseVolume(
+    signal.partialClose,
     signal.commandType,
     options.volume,
   );
@@ -646,9 +677,10 @@ export function buildExecutionCommand(
       defaultStopLoss: signal.defaultStopLoss,
       newStopLoss: signal.newStopLoss,
       trailingStop: signal.trailingStop,
-      partialClose: signal.partialClose,
+      partialClose,
       takeProfits,
       defaultTakeProfit: signal.defaultTakeProfit,
+      runner: normalizeRunnerConfig(options.runner, options.volume),
       executionMode: options.executionMode ?? "VIRTUAL_TP",
       volume: options.volume,
       riskPercent: options.riskPercent,
@@ -924,7 +956,7 @@ function inferDirectionFromPrices(
   stopLoss?: number,
   takeProfits: TakeProfitTarget[] = [],
 ): Direction | undefined {
-  if (!entry || stopLoss === undefined || !takeProfits[0]) return undefined;
+  if (!entry || stopLoss === undefined || !takeProfits[0]?.price) return undefined;
   const entryMid = entry.to === undefined ? entry.from : (entry.from + entry.to) / 2;
   const firstTarget = takeProfits[0].price;
   if (firstTarget > entryMid && stopLoss < entryMid) return "BUY";
@@ -1039,6 +1071,13 @@ function extractPriceNearToken(text: string, token: string): number | undefined 
   return match?.[1] ? Number(match[1]) : undefined;
 }
 
+function extractLifecyclePrice(text: string, token: string): number | undefined {
+  const near = extractPriceNearToken(text, token);
+  if (near !== undefined) return near;
+  const numbers = [...text.matchAll(/\b\d+(?:\.\d+)?\b/g)].map((match) => Number(match[0]));
+  return numbers.at(-1);
+}
+
 function extractTakeProfits(text: string): TakeProfitTarget[] {
   const targets = new Map<number, number>();
   const tpRegex = /\bTP\s*([1-4])\b\s*(?:[:@]|-|=)?\s*(\d+(?:\.\d+)?)/gi;
@@ -1151,6 +1190,34 @@ function normalizeAllocation(allocation: number[] | undefined, takeProfitCount: 
   return values;
 }
 
+function logicalTradeLegs(signal: ParsedSignal, allocationInput?: number[]): TradeLeg[] {
+  if (signal.takeProfits.length > 0) {
+    const allocation = normalizeAllocation(allocationInput, signal.takeProfits.length);
+    return signal.takeProfits.map((target, index) => ({
+      leg: target.leg,
+      targetPrice: target.price,
+      targetSource: target.targetSource ?? "explicit",
+      allocationPercent: allocation[index] ?? target.allocationPercent,
+      strategy: target.strategy,
+      status: "PLANNED",
+    }));
+  }
+
+  if (signal.defaultTakeProfit) {
+    return [
+      {
+        leg: 1,
+        targetSource: "default-distance",
+        defaultDistance: signal.defaultTakeProfit,
+        allocationPercent: 100,
+        status: "PLANNED",
+      },
+    ];
+  }
+
+  return [];
+}
+
 function normalizeTakeProfitAllocations(
   takeProfits: TakeProfitTarget[],
   commandType: CommandType,
@@ -1169,16 +1236,50 @@ function withTakeProfitVolumes(
   takeProfits: TakeProfitTarget[],
   commandType: CommandType,
   totalVolume?: number,
+  runner?: RunnerConfig,
 ): TakeProfitTarget[] {
   if (commandType !== "OPEN_TRADE" || takeProfits.length === 0 || !totalVolume) {
     return takeProfits;
   }
 
-  const volumes = splitVolumeByCent(totalVolume, takeProfits.length);
+  const runnerVolume = runner?.enabled ? Math.min(runner.lotSize, totalVolume) : 0;
+  const tradedVolume = Math.max(0, totalVolume - runnerVolume);
+  const volumes = splitVolumeByCent(tradedVolume, takeProfits.length);
   return takeProfits.map((target, index) => ({
     ...target,
     volume: volumes[index],
   }));
+}
+
+function withPartialCloseVolume(
+  partialClose: PartialCloseInstruction | undefined,
+  commandType: CommandType,
+  totalVolume?: number,
+): PartialCloseInstruction | undefined {
+  if (commandType !== "CLOSE_PARTIAL" || !partialClose) return partialClose;
+  if (partialClose.volume !== undefined) return partialClose;
+  if (partialClose.kind !== "TP_LEG" || !totalVolume || !partialClose.allocationPercent) {
+    return partialClose;
+  }
+  return {
+    ...partialClose,
+    volume: Number(((totalVolume * partialClose.allocationPercent) / 100).toFixed(2)),
+  };
+}
+
+function normalizeRunnerConfig(
+  runner: RunnerConfig | undefined,
+  totalVolume?: number,
+): RunnerConfig | undefined {
+  if (!runner?.enabled || !totalVolume) return undefined;
+  const lotSize = Math.min(Math.max(0, runner.lotSize), totalVolume);
+  if (lotSize <= 0) return undefined;
+  return {
+    enabled: true,
+    lotSize,
+    slBehavior: runner.slBehavior,
+    trailPips: runner.trailPips,
+  };
 }
 
 function splitVolumeByCent(totalVolume: number, count: number): number[] {

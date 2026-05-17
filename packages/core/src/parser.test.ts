@@ -145,6 +145,7 @@ describe("deterministic signal parser", () => {
   test("preserves trailing stop pips and points for broker-side conversion", () => {
     const trailPips = parseSignalText("Trail stop Gold by 50 pips", context);
     const trailPoints = parseSignalText("XAUUSD trailing SL 500 points", context);
+    const trailWithoutDistance = parseSignalText("Trail stop Gold", context);
 
     expect(trailPips.commandType).toBe("TRAILING_STOP");
     expect(trailPips.trailingStop).toEqual({ value: 50, unit: "PIPS" });
@@ -154,6 +155,24 @@ describe("deterministic signal parser", () => {
     expect(trailPoints.warnings).not.toContain(
       "Trailing stop pips/points must be converted using the broker symbol point size",
     );
+    expect(trailWithoutDistance.commandType).toBe("TRAILING_STOP");
+    expect(trailWithoutDistance.missingFields).toContain("trailingStop");
+    expect(shouldRequireManualReview(trailWithoutDistance)).toBe(true);
+  });
+
+  test("requires review for modify-SL lifecycle commands that do not include a stop price", () => {
+    const missingPrice = parseSignalText("Modify SL EURUSD", context);
+    const validPrice = parseSignalText("Modify SL EURUSD 1.0830", context);
+
+    expect(missingPrice.commandType).toBe("MODIFY_SL");
+    expect(missingPrice.newStopLoss).toBeUndefined();
+    expect(missingPrice.missingFields).toContain("newStopLoss");
+    expect(shouldRequireManualReview(missingPrice)).toBe(true);
+
+    expect(validPrice.commandType).toBe("MODIFY_SL");
+    expect(validPrice.newStopLoss).toBe(1.083);
+    expect(validPrice.missingFields).not.toContain("newStopLoss");
+    expect(shouldRequireManualReview(validPrice)).toBe(false);
   });
 
   test("parses KAL VIP style gold limit signals and ignores result chatter", () => {

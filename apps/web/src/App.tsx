@@ -144,7 +144,9 @@ export interface DashboardSnapshot {
     executionMode: string;
     legs: Array<{
       leg: number;
-      targetPrice: number;
+      targetPrice?: number;
+      targetSource?: string;
+      defaultDistance?: { value: number; unit: string };
       allocationPercent: number;
       status: string;
     }>;
@@ -181,6 +183,9 @@ export interface BrokerOrderRow {
   filledPrice?: number;
   retcode: number;
   brokerComment: string;
+  source?: string;
+  pnlCurrency?: number;
+  pnlPips?: number;
   createdAt: string;
 }
 

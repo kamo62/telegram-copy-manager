@@ -3,13 +3,73 @@ import { useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import type { ProviderRowData } from "./ProvidersTable";
 
+/**
+ * Structured TP-leg SL movement strategy. Was previously a freeform string
+ * ("Set SL to ENTRY + 0 pips") that nobody actually parsed — the EA ignored
+ * it entirely, the backend stored it as opaque text. Discriminated union
+ * means the EA / backend can act on it without regex-parsing English.
+ *
+ * - entry: move SL to the entry price (optionally + N pips toward profit)
+ * - tp:    move SL to a prior TP leg's price (offset added in profit direction)
+ * - none:  leave SL where it is when this TP fires
+ */
+export type TpStrategy =
+  | { kind: "set-sl-to-entry"; offsetPips: number }
+  | { kind: "set-sl-to-tp"; tpLeg: number; offsetPips: number }
+  | { kind: "no-change" };
+
+export interface TpStrategyLevel {
+  leg: number;
+  percentage: number;
+  strategy: TpStrategy;
+}
+
 export interface ProviderConfigSubmission {
   parserMode: string;
   lotSize: number;
   riskMode: "fixed" | "percent";
   riskAmount: number;
-  takeProfitLevels: Array<{ leg: number; percentage: number; strategy: string }>;
+  takeProfitLevels: TpStrategyLevel[];
   runner: RunnerConfig;
+}
+
+/** Render a structured strategy as the legacy human-readable string for the Order Summary block. */
+export function strategyLabel(strategy: TpStrategy): string {
+  switch (strategy.kind) {
+    case "set-sl-to-entry":
+      return strategy.offsetPips === 0
+        ? "Move SL to entry"
+        : `Move SL to entry + ${strategy.offsetPips} pips`;
+    case "set-sl-to-tp":
+      return strategy.offsetPips === 0
+        ? `Move SL to TP${strategy.tpLeg}`
+        : `Move SL to TP${strategy.tpLeg} + ${strategy.offsetPips} pips`;
+    case "no-change":
+      return "Leave SL unchanged";
+  }
+}
+
+/** Best-effort migration of legacy freeform strings into the structured shape. */
+export function parseLegacyStrategy(value: string): TpStrategy {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed || trimmed.includes("unchanged") || trimmed.includes("no change"))
+    return { kind: "no-change" };
+  const tpMatch = trimmed.match(/tp(\d+).*?([+-]?\s*\d+)\s*pips?/);
+  if (tpMatch) {
+    return {
+      kind: "set-sl-to-tp",
+      tpLeg: Number(tpMatch[1]) || 1,
+      offsetPips: Math.abs(Number(tpMatch[2]?.replace(/\s+/g, "") ?? 0)) || 0,
+    };
+  }
+  if (trimmed.includes("entry")) {
+    const pipsMatch = trimmed.match(/([+-]?\s*\d+)\s*pips?/);
+    return {
+      kind: "set-sl-to-entry",
+      offsetPips: pipsMatch ? Math.abs(Number(pipsMatch[1]?.replace(/\s+/g, "") ?? 0)) || 0 : 0,
+    };
+  }
+  return { kind: "no-change" };
 }
 
 export interface ProviderConfigTestResult {
@@ -28,11 +88,11 @@ export interface RunnerConfig {
   trailPips: number;
 }
 
-const DEFAULT_TPS = [
-  { leg: 1, percentage: 25, strategy: "Set SL to ENTRY + 0 pips" },
-  { leg: 2, percentage: 25, strategy: "Set SL to ENTRY + 1 pips" },
-  { leg: 3, percentage: 25, strategy: "Set SL to TP1 + 0 pips" },
-  { leg: 4, percentage: 25, strategy: "Set SL to TP2 + 0 pips" },
+const DEFAULT_TPS: TpStrategyLevel[] = [
+  { leg: 1, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+  { leg: 2, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 1 } },
+  { leg: 3, percentage: 25, strategy: { kind: "set-sl-to-tp", tpLeg: 1, offsetPips: 0 } },
+  { leg: 4, percentage: 25, strategy: { kind: "set-sl-to-tp", tpLeg: 2, offsetPips: 0 } },
 ];
 
 const MAX_TP_LEVELS = 4;
@@ -160,9 +220,40 @@ export function ProviderConfigModal({
       {
         leg: tps.length + 1,
         percentage: 0,
-        strategy: `Set SL to TP${tps.length} + 0 pips`,
+        strategy:
+          tps.length === 0
+            ? { kind: "set-sl-to-entry", offsetPips: 0 }
+            : { kind: "set-sl-to-tp", tpLeg: tps.length, offsetPips: 0 },
       },
     ]);
+  }
+
+  function updateStrategy(
+    index: number,
+    patch: Partial<TpStrategy> & { kind?: TpStrategy["kind"] },
+  ) {
+    setTps(
+      tps.map((tp, i) => {
+        if (i !== index) return tp;
+        const current = tp.strategy;
+        // Preserve fields where they make sense across kind switches; default the rest.
+        const nextKind: TpStrategy["kind"] = patch.kind ?? current.kind;
+        if (nextKind === "no-change") {
+          return { ...tp, strategy: { kind: "no-change" } };
+        }
+        const baseOffset = current.kind === "no-change" ? 0 : current.offsetPips;
+        const offsetPips =
+          "offsetPips" in patch && patch.offsetPips !== undefined ? patch.offsetPips : baseOffset;
+        if (nextKind === "set-sl-to-entry") {
+          return { ...tp, strategy: { kind: "set-sl-to-entry", offsetPips } };
+        }
+        // set-sl-to-tp
+        const currentLeg =
+          current.kind === "set-sl-to-tp" ? current.tpLeg : Math.max(1, tp.leg - 1);
+        const tpLeg = "tpLeg" in patch && patch.tpLeg !== undefined ? patch.tpLeg : currentLeg;
+        return { ...tp, strategy: { kind: "set-sl-to-tp", tpLeg, offsetPips } };
+      }),
+    );
   }
 
   // --- Resume math --------------------------------------------------------
@@ -333,13 +424,48 @@ export function ProviderConfigModal({
                       +
                     </button>
                   </div>
-                  <input
-                    aria-label={`TP${tp.leg} strategy`}
-                    className="config-strategy-input"
-                    onChange={(event) => updateTp(index, { strategy: event.target.value })}
-                    type="text"
-                    value={tp.strategy}
-                  />
+                  <div className="config-strategy-controls">
+                    <select
+                      aria-label={`TP${tp.leg} strategy action`}
+                      className="config-strategy-input"
+                      onChange={(event) =>
+                        updateStrategy(index, { kind: event.target.value as TpStrategy["kind"] })
+                      }
+                      value={tp.strategy.kind}
+                    >
+                      <option value="set-sl-to-entry">Move SL to entry</option>
+                      <option value="set-sl-to-tp">Move SL to prior TP</option>
+                      <option value="no-change">Leave SL unchanged</option>
+                    </select>
+                    {tp.strategy.kind === "set-sl-to-tp" ? (
+                      <select
+                        aria-label={`TP${tp.leg} strategy reference TP`}
+                        className="config-strategy-input config-strategy-reference"
+                        onChange={(event) =>
+                          updateStrategy(index, { tpLeg: Number(event.target.value) || 1 })
+                        }
+                        value={tp.strategy.tpLeg}
+                      >
+                        {Array.from({ length: Math.max(1, tp.leg - 1) }, (_value, tpIndex) => (
+                          <option key={tpIndex + 1} value={tpIndex + 1}>
+                            TP{tpIndex + 1}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                    {tp.strategy.kind !== "no-change" ? (
+                      <input
+                        aria-label={`TP${tp.leg} strategy offset pips`}
+                        className="config-strategy-input config-strategy-offset"
+                        inputMode="decimal"
+                        onChange={(event) =>
+                          updateStrategy(index, { offsetPips: Number(event.target.value) || 0 })
+                        }
+                        type="text"
+                        value={tp.strategy.offsetPips}
+                      />
+                    ) : null}
+                  </div>
                   <button
                     aria-label={`Delete TP${tp.leg}`}
                     className="config-row-delete"
@@ -473,7 +599,7 @@ export function ProviderConfigModal({
                   <li key={tp.leg}>
                     <strong>TP{tp.leg}</strong> hit · close{" "}
                     <span className="num">{numberFmt.format(closed)}</span> lots
-                    <span className="config-resume-strategy"> · {tp.strategy}</span>
+                    <span className="config-resume-strategy"> · {strategyLabel(tp.strategy)}</span>
                   </li>
                 );
               })}

@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-05-17 (MT5 trade lifecycle hardening)
+
+Closes the lifecycle review gaps around default TP visibility, lifecycle command safety, TP-leg
+partial closes, runner/trailing execution, broker-history attribution, and app verification.
+
+- Wired provider TP strategy from the config modal into real execution: the freeform strategy text is
+  now a structured dropdown/offset model, normalized by the API, sent in the MT5 line payload, and
+  applied by the EA after virtual TP hits to move SL to entry or a prior TP without worsening the
+  current stop.
+- Added parser safeguards so `MODIFY_SL` without a new stop price and trailing-stop commands without
+  a distance require review instead of queueing unsafe MT5 work.
+- Default-only market trades now create a visible logical TP leg marked as a default-distance target,
+  while the MT5 queue still sends the default TP distance for EA-side price calculation.
+- Telegram auto-ingestion now processes clean lifecycle commands after clean open signals in message
+  order, so safe commands like trailing-stop updates can be queued when they match exactly.
+- Lifecycle approvals now match per linked account, fan out when every account has one clear active
+  trade, and keep same-account ambiguous symbol commands out of the MT5 queue.
+- TP-leg partial closes now carry the intended allocation/volume into the MT5 line payload, preventing
+  `Close TP1` from becoming a full-position close.
+- Provider runner config is now sent to MT5 for `VIRTUAL_TP` work. Split-order runner mode is blocked
+  explicitly until a dedicated child-order design is implemented.
+- The EA now uses ticket-led position/order collection for close, modify, cancel, and trail commands;
+  adds persistent timer-managed trailing-stop state; and applies runner SL behaviour after final
+  virtual TP handling.
+- Broker history pips now respect trade direction, so profitable SELL closes report positive pips.
+- Broker-order history labels now distinguish signal opens, app closes/modifies/trailing commands,
+  TP/SL hits, manual terminal/mobile/web closes, stop-outs, and other broker reasons.
+- Real Telegram session connection no longer creates the hidden demo provider unless demo seeding is
+  enabled.
+- Fixed the frontend resync test fixture so connected Telegram sessions include the active profile id.
+
+Verification: focused core/API/EA/web suites pass after the red/green lifecycle hardening tests. Full
+typecheck, lint, test, build, and Docker verification are run as part of this implementation pass.
+
 ## 2026-05-16 (Broker-aware symbols and Telegram auto-ingestion)
 
 Fixes live provider messages not being picked up automatically and prevents stale demo symbol

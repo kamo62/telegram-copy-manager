@@ -21,9 +21,33 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("SendHistoryDeals()");
     expect(source).toContain("HistorySelect(fromTime, toTime)");
     expect(source).toContain("HistoryDealsJson()");
-    expect(source).toContain('HttpPost("/mt5/history"');
+    expect(source).toContain('HttpPostRetry("/mt5/history"');
     expect(source).toContain("DEAL_POSITION_ID");
     expect(source).toContain("DEAL_PROFIT");
+  });
+
+  test("includes DEAL_REASON in the history payload so backend can distinguish TP/SL/manual closes", () => {
+    expect(source).toContain("DEAL_REASON");
+    expect(source).toContain('\\"reason\\":%d');
+  });
+
+  test("exposes BrokerMinLotMultiplier as a single-knob sizing override across asset classes", () => {
+    expect(source).toContain("input double BrokerMinLotMultiplier");
+    expect(source).toContain("SymbolInfoDouble(command.brokerSymbol, SYMBOL_VOLUME_MIN)");
+    // Override path must short-circuit BEFORE the existing command.volume / risk% / DefaultLots fallback.
+    expect(source).toMatch(
+      /BrokerMinLotMultiplier > 0\.0[\s\S]*minVol \* BrokerMinLotMultiplier[\s\S]*command\.volume > 0\.0/,
+    );
+  });
+
+  test("exposes MinStopBufferMultiplier safety to keep SL/TP outside broker SYMBOL_TRADE_STOPS_LEVEL", () => {
+    expect(source).toContain("input double MinStopBufferMultiplier");
+    expect(source).toContain("SafeStopPrice");
+    expect(source).toContain("SYMBOL_TRADE_STOPS_LEVEL");
+    // Safety must be applied to BOTH SL and TP on market orders.
+    expect(source).toContain(
+      "SafeStopPrice(command.brokerSymbol, referencePrice, command.stopLoss, command.direction, true)",
+    );
   });
 
   test("trims the UTF-8 null terminator before POSTing JSON with WebRequest", () => {
@@ -118,12 +142,52 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("SYMBOL_POINT");
   });
 
+  test("keeps trailing stops active on timer instead of applying a one-shot SL move", () => {
+    expect(source).toContain("struct TrailingStopState");
+    expect(source).toContain("trailingStopStates");
+    expect(source).toContain("TrackTrailingStop(command");
+    expect(source).toContain("ManageTrailingStops()");
+    expect(source).toMatch(/void\s+OnTimer\(\)[\s\S]*ManageTrailingStops\(\)/);
+    expect(source).toContain("TrailingStopImproves");
+  });
+
+  test("uses ticket-led close and modify execution across all matching broker positions and orders", () => {
+    expect(source).toContain("CollectPositionTickets(command");
+    expect(source).toContain("CollectPendingOrderTickets(command");
+    expect(source).toContain("request.position = ticket");
+    expect(source).toContain("request.action = TRADE_ACTION_SLTP");
+    expect(source).toContain("request.action = TRADE_ACTION_DEAL");
+    expect(source).toContain("request.action = TRADE_ACTION_REMOVE");
+    expect(source).toContain("if(command.newStopLoss <= 0.0)");
+  });
+
+  test("supports TP-leg partial closes and runner controls from backend payloads", () => {
+    expect(source).toContain("double partialCloseVolume;");
+    expect(source).toContain('ValueFor(body, "partialCloseVolume")');
+    expect(source).toContain('command.partialCloseKind == "TP_LEG"');
+    expect(source).toContain("No valid partial-close volume provided");
+    expect(source).toContain("RunnerVolume(command)");
+    expect(source).toContain("runnerSlBehavior");
+    expect(source).toContain("runnerTrailPips");
+    expect(source).toContain("ApplyRunnerAfterFinalTp");
+  });
+
+  test("applies configured TP strategy after a virtual TP leg is hit", () => {
+    expect(source).toContain("string tpStrategyKind[4];");
+    expect(source).toContain('ValueFor(body, "tp" + leg + "StrategyKind")');
+    expect(source).toContain("ApplyTpStrategyAfterHit");
+    expect(source).toContain("StrategyStopPrice");
+    expect(source).toMatch(
+      /CloseVirtualTpLeg\(index,\s*leg\)[\s\S]*ApplyTpStrategyAfterHit\(index,\s*leg\)/,
+    );
+  });
+
   test("creates split child orders for each configured TP leg", () => {
     expect(source).toContain("ExecuteSplitOrders(command)");
     expect(source).toContain("for(int leg = 0; leg < 4; leg++)");
     expect(source).toContain("command.tpAllocation[leg]");
     expect(source).toContain('StringFormat("telegram-tc:%s:tp%d"');
-    expect(source).toContain("request.tp = command.tp[leg]");
+    expect(source).toContain("SafeStopPrice(command.brokerSymbol, referencePrice, command.tp[leg]");
   });
 
   test("monitors virtual TP legs and closes planned partial volumes on timer", () => {

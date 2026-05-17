@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createApi } from "./app";
+import { brokerOrderSourceForDealReason, createApi } from "./app";
 import type { TelegramAdapter, TelegramCapturedMessage, TelegramDialog } from "./telegram";
 
 const json = async <T>(response: Response) => (await response.json()) as T;
@@ -33,7 +33,10 @@ function createQueuedTelegramAdapter(messages: TelegramCapturedMessage[]): Teleg
   };
 }
 
-function createDialogTelegramAdapter(dialogs: TelegramDialog[], messages: TelegramCapturedMessage[] = []): TelegramAdapter {
+function createDialogTelegramAdapter(
+  dialogs: TelegramDialog[],
+  messages: TelegramCapturedMessage[] = [],
+): TelegramAdapter {
   return {
     name: "mock",
     async startLogin() {
@@ -705,6 +708,139 @@ describe("Telegram TC API", () => {
     expect(secondPoll).toContain("status=WORK");
   });
 
+  test("fans out lifecycle commands across linked MT5 accounts", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const selected = await json<{ provider: { id: string } }>(
+      await app.request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          profileId: "profile-real",
+          dialogId: "dialog-gold",
+          title: "Gold Room London",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    for (const accountNumber of ["100200300", "200300400"]) {
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber,
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes Ltd",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["EURUSD.raw"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(
+        `/api/account-provider-links/mt5-${accountNumber}/${selected.provider.id}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ enabled: true }),
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }
+
+    const openParsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: selected.provider.id,
+          rawText: "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const openApproval = await json<{ queueItems: string[]; logicalTradeIds: string[] }>(
+      await app.request(`/api/signals/${openParsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    expect(openApproval.queueItems).toHaveLength(2);
+    expect(openApproval.logicalTradeIds).toHaveLength(2);
+
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+    await app.request("/api/mt5/poll-line?accountId=mt5-200300400");
+
+    const trailParsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: selected.provider.id,
+          rawText: "Trail stop EURUSD by 25 pips",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const trailApprovalResponse = await app.request(
+      `/api/signals/${trailParsed.parsedSignalId}/approve`,
+      { method: "POST" },
+    );
+    expect(trailApprovalResponse.status).toBe(200);
+    const trailApproval = await json<{ queueItems: string[]; logicalTradeIds: string[] }>(
+      trailApprovalResponse,
+    );
+    expect(trailApproval.queueItems).toHaveLength(2);
+    expect(trailApproval.logicalTradeIds).toEqual(openApproval.logicalTradeIds);
+
+    const firstPoll = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
+    ).text();
+    const secondPoll = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-200300400")
+    ).text();
+    expect(firstPoll).toContain("commandType=TRAILING_STOP");
+    expect(secondPoll).toContain("commandType=TRAILING_STOP");
+    expect(firstPoll).toContain("trailingStopValue=25");
+    expect(secondPoll).toContain("trailingStopValue=25");
+  });
+
+  test("leaves ambiguous same-account lifecycle commands for operator review", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+
+    for (const rawText of [
+      "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900",
+      "BUY EURUSD @ 1.0860\nSL 1.0820\nTP1 1.0910",
+    ]) {
+      const parsed = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({ providerId, accountId: "mt5-63442826", rawText }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+        method: "POST",
+      });
+      expect(approval.status).toBe(200);
+    }
+
+    const lifecycle = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "Trail stop EURUSD by 20 pips",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await app.request(`/api/signals/${lifecycle.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approval.status).toBe(422);
+    expect((await json<{ error: string }>(approval)).error).toContain(
+      "Multiple open logical trades",
+    );
+  });
+
   test("reconciles MT5 execution reports back into logical trade TP leg state", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
 
@@ -1073,6 +1209,29 @@ describe("Telegram TC API", () => {
     ).toHaveLength(1);
   });
 
+  test("does not insert the hidden demo provider when a real Telegram session connects", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const start = await json<{ profileId: string; sessionId: string }>(
+      await app.request("/api/telegram/start", {
+        method: "POST",
+        body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27820000000" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request("/api/telegram/verify-code", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: start.sessionId, code: "12345" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const dashboard = await json<{
+      providers: Array<{ dialogId: string; profileId?: string }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.providers.filter((provider) => provider.dialogId === "dialog-alpha"),
+    ).toHaveLength(0);
+  });
+
   test("rebinds an existing provider when the same Telegram dialog is selected from a new session", async () => {
     const app = createApi({
       databasePath: ":memory:",
@@ -1143,7 +1302,9 @@ describe("Telegram TC API", () => {
     const providers = await json<{
       providers: Array<{ id: string; dialogId: string; lotSize: number; ingestionStatus?: string }>;
     }>(await app.request("/api/dashboard"));
-    const kalProviders = providers.providers.filter((provider) => provider.dialogId === "kal-dialog");
+    const kalProviders = providers.providers.filter(
+      (provider) => provider.dialogId === "kal-dialog",
+    );
 
     expect(second.provider.id).toBe(first.provider.id);
     expect(second.provider.lotSize).toBe(0.24);
@@ -1408,15 +1569,19 @@ describe("Telegram TC API", () => {
 
     const saved = await json<{
       config: {
-        takeProfitLevels: Array<{ leg: number; percentage: number; strategy: string }>;
+        takeProfitLevels: Array<{
+          leg: number;
+          percentage: number;
+          strategy: { kind: string };
+        }>;
       };
     }>(await app.request("/api/providers/provider-alpha/config"));
 
     expect(saved.config.takeProfitLevels).toEqual([
-      { leg: 1, percentage: 25, strategy: "TP1 strategy" },
-      { leg: 2, percentage: 25, strategy: "TP2 strategy" },
-      { leg: 3, percentage: 25, strategy: "TP3 strategy" },
-      { leg: 4, percentage: 25, strategy: "TP4 strategy" },
+      { leg: 1, percentage: 25, strategy: { kind: "no-change" } },
+      { leg: 2, percentage: 25, strategy: { kind: "no-change" } },
+      { leg: 3, percentage: 25, strategy: { kind: "no-change" } },
+      { leg: 4, percentage: 25, strategy: { kind: "no-change" } },
     ]);
   });
 
@@ -1698,6 +1863,286 @@ describe("Telegram TC API", () => {
     expect(pollLine).toContain("trailingStopUnit=PIPS");
   });
 
+  test("refuses lifecycle approvals that are missing executable values", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+
+    const modifySl = await json<{ parsedSignalId: string; reviewRequired: boolean }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId: "provider-alpha", rawText: "Modify SL EURUSD" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(modifySl.reviewRequired).toBe(true);
+    const modifyApproval = await app.request(`/api/signals/${modifySl.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(modifyApproval.status).toBe(422);
+    expect((await json<{ error: string }>(modifyApproval)).error).toContain("newStopLoss");
+
+    const trailing = await json<{ parsedSignalId: string; reviewRequired: boolean }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId: "provider-alpha", rawText: "Trail stop EURUSD" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(trailing.reviewRequired).toBe(true);
+    const trailingApproval = await app.request(`/api/signals/${trailing.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(trailingApproval.status).toBe(422);
+    expect((await json<{ error: string }>(trailingApproval)).error).toContain("trailingStop");
+  });
+
+  test("auto-ingests clean lifecycle commands after matching an active provider trade", async () => {
+    const telegram = createQueuedTelegramAdapter([
+      {
+        telegramMessageId: "btc-open-1",
+        messageDate: "2026-05-16T18:51:10.000Z",
+        rawText: "SELL BTCUSD",
+      },
+      {
+        telegramMessageId: "btc-trail-1",
+        messageDate: "2026-05-16T18:51:20.000Z",
+        rawText: "Trail stop BTCUSD by 50 pips",
+      },
+    ]);
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram,
+      telegramPollingEnabled: false,
+    });
+    await configureProviderWithAccount(app, {
+      availableSymbols: ["BTCUSD", "XAUUSD", "EURUSD"],
+    });
+
+    const result = await app.runTelegramIngestionOnce();
+
+    expect(result.parsed).toBe(2);
+    expect(result.reviewRequired).toBe(0);
+    expect(result.queued).toBe(2);
+
+    const openPayload = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+    ).text();
+    const trailPayload = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+    ).text();
+    expect(openPayload).toContain("commandType=OPEN_TRADE");
+    expect(trailPayload).toContain("commandType=TRAILING_STOP");
+    expect(trailPayload).toContain("trailingStopValue=50");
+    expect(trailPayload).toContain("trailingStopUnit=PIPS");
+  });
+
+  test("enriches TP-leg partial closes with the planned close volume", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId: "provider-alpha", rawText: "Close TP1 EURUSD" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approve = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approve.status).toBe(200);
+
+    const pollLine = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+    expect(pollLine).toContain("commandType=CLOSE_PARTIAL");
+    expect(pollLine).toContain("partialCloseKind=TP_LEG");
+    expect(pollLine).toContain("partialCloseValue=1");
+    expect(pollLine).toContain("partialCloseVolume=0.03");
+  });
+
+  test("sends runner configuration to MT5 for virtual-TP work and blocks split-order runner mode", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.1,
+        runner: { enabled: true, lotSize: 0.02, slBehavior: "trail", trailPips: 25 },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const splitParsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const splitApproval = await app.request(`/api/signals/${splitParsed.parsedSignalId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ executionMode: "SPLIT_ORDER" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(splitApproval.status).toBe(422);
+    expect((await json<{ error: string }>(splitApproval)).error).toContain("Runner");
+
+    const virtualParsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const virtualApproval = await app.request(
+      `/api/signals/${virtualParsed.parsedSignalId}/approve`,
+      {
+        method: "POST",
+      },
+    );
+    expect(virtualApproval.status).toBe(200);
+
+    const pollLine = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(pollLine).toContain("executionMode=VIRTUAL_TP");
+    expect(pollLine).toContain("runnerEnabled=true");
+    expect(pollLine).toContain("runnerVolume=0.02");
+    expect(pollLine).toContain("runnerSlBehavior=trail");
+    expect(pollLine).toContain("runnerTrailPips=25");
+  });
+
+  test("sends structured TP strategy fields to MT5 for virtual TP SL movement", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.1,
+        takeProfitLevels: [
+          {
+            leg: 1,
+            percentage: 50,
+            strategy: { kind: "set-sl-to-entry", offsetPips: 2 },
+          },
+          {
+            leg: 2,
+            percentage: 50,
+            strategy: { kind: "set-sl-to-tp", tpLeg: 1, offsetPips: 1 },
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900\nTP2 1.0950",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approval.status).toBe(200);
+
+    const pollLine = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(pollLine).toContain("tp1StrategyKind=set-sl-to-entry");
+    expect(pollLine).toContain("tp1StrategyReferenceLeg=0");
+    expect(pollLine).toContain("tp1StrategyOffsetPips=2");
+    expect(pollLine).toContain("tp2StrategyKind=set-sl-to-tp");
+    expect(pollLine).toContain("tp2StrategyReferenceLeg=1");
+    expect(pollLine).toContain("tp2StrategyOffsetPips=1");
+  });
+
+  test("records SELL broker history pips in the profitable direction", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "SELL EURUSD @ 1.1000\nSL 1.1050\nTP1 1.0900",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approval.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request completed",
+        orderTicket: "50001",
+        positionTicket: "70001",
+        dealTicket: "60001",
+        requestedPrice: 1.1,
+        filledPrice: 1.1,
+        volume: 0.1,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        deals: [
+          {
+            dealTicket: "60002",
+            orderTicket: "50002",
+            positionTicket: "70001",
+            entry: "OUT",
+            reason: 5,
+            symbol: "EURUSD.raw",
+            price: 1.09,
+            volume: 0.1,
+            profit: 100,
+            commission: 0,
+            swap: 0,
+            comment: `telegram-tc:${approval.logicalTradeId}`,
+            time: "2026-05-10T12:00:00.000Z",
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const brokerTrail = await json<{
+      orders: Array<{ dealTicket: string; pnlPips?: number; source?: string }>;
+    }>(await app.request(`/api/trades/${approval.logicalTradeId}/broker-orders`));
+    const close = brokerTrail.orders.find((order) => order.dealTicket === "60002");
+    expect(close?.pnlPips).toBe(100);
+    expect(close?.source).toBe("tp-hit");
+  });
+
   test("can approve an open signal with split-order execution mode instead of the virtual-TP default", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     await app.request("/api/mt5/register", {
@@ -1808,5 +2253,22 @@ describe("Telegram TC API", () => {
     expect(fixtures.fixtures[0]?.id).toBe(saved.fixtureId);
     expect(fixtures.fixtures[0]?.telegramMessageId).toBe(message.telegramMessageId);
     expect(fixtures.fixtures[0]?.expected.confidence).toBeGreaterThanOrEqual(0.85);
+  });
+
+  test("maps every MT5 DEAL_REASON code to a distinct broker order source", () => {
+    expect(brokerOrderSourceForDealReason(0)).toBe("manual-terminal");
+    expect(brokerOrderSourceForDealReason(1)).toBe("manual-mobile");
+    expect(brokerOrderSourceForDealReason(2)).toBe("manual-web");
+    expect(brokerOrderSourceForDealReason(3)).toBe("expert");
+    expect(brokerOrderSourceForDealReason(4)).toBe("sl-hit");
+    expect(brokerOrderSourceForDealReason(5)).toBe("tp-hit");
+    expect(brokerOrderSourceForDealReason(6)).toBe("stop-out");
+    expect(brokerOrderSourceForDealReason(7)).toBe("rollover");
+    expect(brokerOrderSourceForDealReason(8)).toBe("variation-margin");
+    expect(brokerOrderSourceForDealReason(9)).toBe("split");
+    // Unknown / undefined falls back to a safe label so the History tab is
+    // never blank for an unexpected broker code.
+    expect(brokerOrderSourceForDealReason(undefined)).toBe("history");
+    expect(brokerOrderSourceForDealReason(99)).toBe("history");
   });
 });

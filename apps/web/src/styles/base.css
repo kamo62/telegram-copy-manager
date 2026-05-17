@@ -2420,6 +2420,57 @@ h3 {
   color: var(--ink-dim);
 }
 
+.broker-trail-source {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border-radius: 999px;
+}
+
+.broker-trail-source-good {
+  background: hsl(155 60% 94%);
+  color: hsl(155 70% 25%);
+}
+
+.broker-trail-source-warn {
+  background: hsl(35 90% 94%);
+  color: hsl(28 80% 30%);
+}
+
+.broker-trail-source-down {
+  background: hsl(0 85% 95%);
+  color: hsl(0 70% 38%);
+}
+
+.broker-trail-source-muted {
+  background: var(--panel);
+  color: var(--ink-3);
+  border: 1px solid var(--line-subtle);
+}
+
+.broker-trail-pnl {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.broker-trail-pnl.up {
+  background: hsl(155 60% 94%);
+  color: hsl(155 70% 25%);
+}
+
+.broker-trail-pnl.down {
+  background: hsl(0 85% 95%);
+  color: hsl(0 70% 38%);
+}
+
 .small-viewport-notice {
   position: fixed;
   inset: 0;
@@ -4016,6 +4067,27 @@ h3 {
 .config-strategy-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.config-strategy-controls {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(82px, 0.5fr) minmax(74px, 0.45fr);
+  gap: 6px;
+  align-items: center;
+}
+
+.config-strategy-controls .config-strategy-input:first-child:last-child {
+  grid-column: 1 / -1;
+}
+
+.config-strategy-reference {
+  min-width: 82px;
+}
+
+.config-strategy-offset {
+  min-width: 74px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .config-row-delete {

@@ -12,6 +12,7 @@ import {
   parseSignalText,
   type QueueStatus,
   shouldRequireManualReview,
+  type TakeProfitStrategy,
 } from "@telegram-tc/core";
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
@@ -86,9 +87,21 @@ interface AccountSlotInput {
 interface ProviderExecutionConfig {
   riskMode: "fixed" | "percent";
   riskAmount: number;
-  takeProfitLevels: Array<{ leg: number; percentage: number; strategy: string }>;
+  takeProfitLevels: ProviderTakeProfitLevel[];
   runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
 }
+
+interface ProviderTakeProfitLevel {
+  leg: number;
+  percentage: number;
+  strategy: TakeProfitStrategy;
+}
+
+type ProviderTakeProfitLevelInput = {
+  leg: number;
+  percentage: number;
+  strategy?: TakeProfitStrategy | string | null;
+};
 
 const fallbackAccountId = process.env.DEFAULT_MT5_ACCOUNT_ID ?? demoAccountId;
 const MAX_PROVIDER_TP_LEVELS = 4;
@@ -279,7 +292,7 @@ export function createApi(options: ApiOptions = {}) {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
-      takeProfitLevels?: Array<{ leg: number; percentage: number; strategy: string }>;
+      takeProfitLevels?: ProviderTakeProfitLevelInput[];
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     }>();
     return c.json(store.updateProvider(c.req.param("id"), body));
@@ -690,6 +703,8 @@ interface Mt5HistoryDealInput {
   positionTicket?: string;
   entry?: string;
   type?: string;
+  /** MT5 ENUM_DEAL_REASON: 0=CLIENT, 1=MOBILE, 2=WEB, 3=EXPERT, 4=SL, 5=TP, 6=SO, 7=ROLLOVER, 8=VMARGIN, 9=SPLIT */
+  reason?: number;
   symbol?: string;
   price?: number;
   volume?: number;
@@ -698,6 +713,39 @@ interface Mt5HistoryDealInput {
   swap?: number;
   comment?: string;
   time?: string;
+}
+
+/**
+ * MT5 ENUM_DEAL_REASON → broker_orders.source mapping. The source field is
+ * what surfaces in the History tab so the operator knows whether a position
+ * closed because SL was hit, TP fired, the user clicked Close in the terminal,
+ * or an EA managed the exit.
+ */
+export function brokerOrderSourceForDealReason(reason: number | undefined): string {
+  switch (reason) {
+    case 0:
+      return "manual-terminal";
+    case 1:
+      return "manual-mobile";
+    case 2:
+      return "manual-web";
+    case 3:
+      return "expert";
+    case 4:
+      return "sl-hit";
+    case 5:
+      return "tp-hit";
+    case 6:
+      return "stop-out";
+    case 7:
+      return "rollover";
+    case 8:
+      return "variation-margin";
+    case 9:
+      return "split";
+    default:
+      return "history";
+  }
 }
 
 type RawMessageClassification = "entry" | "management" | "noise" | "unknown";
@@ -754,7 +802,7 @@ class AppStore {
       return { error: "Session not found" };
     }
     if (status === "CONNECTED") {
-      this.ensureMockProvider(String(session.profile_id));
+      if (this.allowDemoData) this.ensureMockProvider(String(session.profile_id));
     }
     this.audit("telegram.status", "info", `Telegram session moved to ${status}`, {
       sessionId,
@@ -919,7 +967,7 @@ class AppStore {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
-      takeProfitLevels?: Array<{ leg: number; percentage: number; strategy: string }>;
+      takeProfitLevels?: ProviderTakeProfitLevelInput[];
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     },
   ) {
@@ -1320,7 +1368,9 @@ class AppStore {
         result.parsed += parsed.length;
         for (const item of parsed) {
           if (item.reviewRequired) result.reviewRequired += 1;
-          if (item.result.commandType !== "OPEN_TRADE" || item.reviewRequired) continue;
+          if (!isAutoQueueableIngestionCommand(item.result.commandType) || item.reviewRequired) {
+            continue;
+          }
           const approval = this.approveSignal(item.parsedSignalId);
           if ("body" in approval) {
             result.queued +=
@@ -1556,6 +1606,12 @@ class AppStore {
     const settings = this.appSettings();
     const provider = this.providerDetails(providerId);
     const providerConfig = this.providerConfig(providerId);
+    if (executionMode === "SPLIT_ORDER" && providerConfig.runner?.enabled) {
+      return {
+        statusCode: 422,
+        error: "Runner mode is only supported for VIRTUAL_TP execution today",
+      };
+    }
     // Dedup window: only collapse against APPROVED signals within the configured window
     // so a provider re-issuing the same short-form signal (e.g. "Sell BTCUSD") after the
     // earlier position closes can still queue. Configurable via settings.dedupWindowSeconds.
@@ -1582,9 +1638,7 @@ class AppStore {
       return { statusCode: 409, error: "Signal has already been approved or queued" };
     }
 
-    const queueId = `queue_${nanoid(10)}`;
-    let logicalTradeId: string | undefined;
-    let signalForQueue = applyProviderExecutionConfig(signal, providerConfig);
+    const signalForQueue = applyProviderExecutionConfig(signal, providerConfig);
     if (signal.commandType === "OPEN_TRADE") {
       const targetSignals = targetAccountIds.map((targetAccountId) => {
         const signalForTarget =
@@ -1636,6 +1690,7 @@ class AppStore {
             providerConfig.riskMode === "percent"
               ? providerConfig.riskAmount
               : settings.defaultRiskPercent,
+          runner: providerConfig.runner,
         });
         this.insertQueueItem(item, parsedSignalId);
         queueItems.push(targetQueueId);
@@ -1666,70 +1721,124 @@ class AppStore {
         error: "Trade setup posts require manual conversion before queueing",
       };
     } else {
-      const match = matchLifecycleCommandToTrade(signal, this.logicalTrades());
-      if (match.requiresManualReview || !match.tradeId) {
-        return {
-          statusCode: 422,
-          error: match.reason ?? "Lifecycle command needs trade matching before queueing",
-        };
+      const lifecycleTargets = targetAccountIds.map((targetAccountId) => {
+        const targetSignal =
+          targetAccountId === signal.accountId
+            ? signalForQueue
+            : applyProviderExecutionConfig(
+                parseSignalText(
+                  signal.originalText,
+                  this.parserContext(providerId, targetAccountId),
+                ),
+                providerConfig,
+              );
+        const match = matchLifecycleCommandToTrade(
+          targetSignal,
+          this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
+        );
+        return { accountId: targetAccountId, signal: targetSignal, match };
+      });
+
+      for (const target of lifecycleTargets) {
+        const unsafeMissingFields = target.signal.missingFields.filter(
+          (field) => field !== "symbol" && field !== "brokerSymbol",
+        );
+        if (unsafeMissingFields.length > 0) {
+          return {
+            statusCode: 422,
+            error: `Lifecycle command is missing ${unsafeMissingFields.join(", ")}`,
+          };
+        }
+        if (target.match.requiresManualReview || !target.match.tradeId) {
+          return {
+            statusCode: 422,
+            error: target.match.reason ?? "Lifecycle command needs trade matching before queueing",
+          };
+        }
       }
-      const trade = this.logicalTrade(match.tradeId);
-      if (!trade) {
-        return { statusCode: 422, error: "Matched logical trade could not be loaded" };
-      }
-      logicalTradeId = trade.id;
+
       if (signal.commandType === "MARK_TP_HIT") {
-        this.recordProviderTpHit(trade.id, signal);
+        const logicalTradeIds: string[] = [];
+        for (const target of lifecycleTargets) {
+          const trade = this.logicalTrade(target.match.tradeId!);
+          if (!trade) {
+            return { statusCode: 422, error: "Matched logical trade could not be loaded" };
+          }
+          this.recordProviderTpHit(trade.id, target.signal);
+          logicalTradeIds.push(trade.id);
+        }
         this.db
           .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
           .run("APPROVED", parsedSignalId);
         this.audit("signal.tp-hit", "info", "Provider TP hit recorded for logical trade", {
           parsedSignalId,
-          logicalTradeId: trade.id,
+          logicalTradeIds,
         });
-        return { body: { logicalTradeId: trade.id, status: "RECORDED" } };
+        return {
+          body: {
+            logicalTradeId: logicalTradeIds[0],
+            logicalTradeIds,
+            status: "RECORDED",
+          },
+        };
       }
-      signalForQueue = enrichLifecycleSignalFromTrade(signalForQueue, trade);
-      this.appendTradeCommand(trade.id, signal);
+
+      const queueItems: string[] = [];
+      const logicalTradeIds: string[] = [];
+      for (const target of lifecycleTargets) {
+        const trade = this.logicalTrade(target.match.tradeId!);
+        if (!trade) {
+          return { statusCode: 422, error: "Matched logical trade could not be loaded" };
+        }
+        const targetQueueId = `queue_${nanoid(10)}`;
+        const enrichedSignal = enrichLifecycleSignalFromTrade(target.signal, trade);
+        this.appendTradeCommand(trade.id, target.signal);
+        const queueItem = buildExecutionCommand(enrichedSignal, {
+          id: targetQueueId,
+          accountId: target.accountId,
+          logicalTradeId: trade.id,
+          executionMode,
+          volume:
+            providerConfig.riskMode === "fixed"
+              ? providerConfig.riskAmount
+              : (provider?.lotSize ?? settings.defaultLotSize),
+          riskPercent:
+            providerConfig.riskMode === "percent"
+              ? providerConfig.riskAmount
+              : settings.defaultRiskPercent,
+        });
+        Object.assign(queueItem.payload, this.brokerTargetForCommand(trade.id, queueItem.payload));
+        this.insertQueueItem(queueItem, parsedSignalId);
+        queueItems.push(targetQueueId);
+        logicalTradeIds.push(trade.id);
+      }
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("APPROVED", parsedSignalId);
+      this.audit("signal.approve", "info", "Signal approved for MT5 queue", {
+        parsedSignalId,
+        queueItems,
+        logicalTradeIds,
+      });
+      log("info", "signal.approve", {
+        parsedSignalId,
+        queueItems,
+        logicalTradeIds,
+        providerId: signal.providerId,
+        symbol: signal.brokerSymbol ?? signal.canonicalSymbol,
+        direction: signal.direction,
+        commandType: signal.commandType,
+      });
+      return {
+        body: {
+          queueItemId: queueItems[0],
+          logicalTradeId: logicalTradeIds[0],
+          queueItems,
+          logicalTradeIds,
+          status: "PENDING",
+        },
+      };
     }
-    const queueItem = buildExecutionCommand(signalForQueue, {
-      id: queueId,
-      accountId,
-      logicalTradeId,
-      executionMode,
-      volume:
-        providerConfig.riskMode === "fixed"
-          ? providerConfig.riskAmount
-          : (provider?.lotSize ?? settings.defaultLotSize),
-      riskPercent:
-        providerConfig.riskMode === "percent"
-          ? providerConfig.riskAmount
-          : settings.defaultRiskPercent,
-    });
-    if (logicalTradeId && queueItem.payload.commandType !== "OPEN_TRADE") {
-      Object.assign(
-        queueItem.payload,
-        this.brokerTargetForCommand(logicalTradeId, queueItem.payload),
-      );
-    }
-    this.insertQueueItem(queueItem, parsedSignalId);
-    this.db
-      .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
-      .run("APPROVED", parsedSignalId);
-    this.audit("signal.approve", "info", "Signal approved for MT5 queue", {
-      parsedSignalId,
-      queueId,
-    });
-    log("info", "signal.approve", {
-      parsedSignalId,
-      queueId,
-      providerId: signal.providerId,
-      symbol: signal.brokerSymbol ?? signal.canonicalSymbol,
-      direction: signal.direction,
-      commandType: signal.commandType,
-      accountId,
-    });
-    return { body: { queueItemId: queueId, logicalTradeId, status: "PENDING" } };
   }
 
   ignoreSignal(parsedSignalId: string) {
@@ -2173,10 +2282,18 @@ class AppStore {
         open ? this.positionStillOpen(input.accountId, String(open.position_ticket ?? "")) : false,
       );
       const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
-      const pnlPips =
+      const trade = this.logicalTrade(tradeId);
+      const signedPips =
         openPrice && deal.price
-          ? Number(((deal.price - openPrice) / brokerPipSize(deal.symbol ?? "")).toFixed(1))
+          ? trade?.direction === "SELL"
+            ? openPrice - deal.price
+            : deal.price - openPrice
           : null;
+      const pnlPips =
+        signedPips !== null
+          ? Number((signedPips / brokerPipSize(deal.symbol ?? "")).toFixed(1))
+          : null;
+      const source = brokerOrderSourceForDealReason(deal.reason);
       this.db
         .query(
           `INSERT INTO broker_orders
@@ -2203,7 +2320,7 @@ class AppStore {
           deal.comment ?? "MT5 history deal",
           Number(((deal.profit ?? 0) + (deal.commission ?? 0) + (deal.swap ?? 0)).toFixed(2)),
           pnlPips,
-          "history",
+          source,
           deal.time ?? new Date().toISOString(),
         );
       recorded += 1;
@@ -3485,7 +3602,7 @@ class AppStore {
            AND NOT EXISTS (
              SELECT 1 FROM parsed_signals WHERE parsed_signals.raw_message_id = raw_messages.id
            )
-         ORDER BY message_date DESC
+         ORDER BY message_date ASC
          LIMIT ?`,
       )
       .all(providerId, limit) as Row[];
@@ -3701,6 +3818,8 @@ class AppStore {
         legs: trade.legs.map((leg) => ({
           leg: leg.leg,
           targetPrice: leg.targetPrice,
+          targetSource: leg.targetSource,
+          defaultDistance: leg.defaultDistance,
           allocationPercent: leg.allocationPercent,
           status: leg.status,
         })),
@@ -3867,7 +3986,7 @@ class AppStore {
         input.brokerComment,
         pnl.pnlCurrency,
         pnl.pnlPips,
-        "signal",
+        brokerOrderSourceForPayload(payload),
         now,
       );
   }
@@ -3907,9 +4026,21 @@ class AppStore {
     for (const row of rows) {
       const ticket = String(row.position_ticket || row.order_ticket || "");
       if (!ticket || liveTickets.has(ticket)) continue;
+      // Skip if a snapshot-diff manual row already exists, OR if the broker
+      // history sweep has already recorded the close with a real reason
+      // (sl-hit, tp-hit, expert, manual-mobile, etc). Without this guard,
+      // every TP/SL close would also get a duplicate `source='manual'` row
+      // from the snapshot diff, polluting the History trail.
       const duplicate = this.db
         .query(
-          "SELECT id FROM broker_orders WHERE account_id = ? AND action = 'FULL_CLOSE' AND source = 'manual' AND (position_ticket = ? OR order_ticket = ?) LIMIT 1",
+          `SELECT id FROM broker_orders
+           WHERE account_id = ? AND (position_ticket = ? OR order_ticket = ?)
+             AND (
+               (action = 'FULL_CLOSE' AND source = 'manual')
+               OR (action IN ('FULL_CLOSE','PARTIAL_CLOSE') AND source IN
+                   ('sl-hit','tp-hit','expert','manual-terminal','manual-mobile','manual-web','stop-out','history'))
+             )
+           LIMIT 1`,
         )
         .get(accountId, ticket, ticket) as Row | null;
       if (duplicate) continue;
@@ -4073,6 +4204,26 @@ function brokerAction(commandType: string) {
   return commandType;
 }
 
+function brokerOrderSourceForPayload(payload: ExecutionQueueItem["payload"]) {
+  switch (payload.commandType) {
+    case "OPEN_TRADE":
+      return "signal";
+    case "CLOSE_TRADE":
+    case "CLOSE_PARTIAL":
+      return "app-close";
+    case "TRAILING_STOP":
+      return "app-trailing";
+    case "MODIFY_SL":
+    case "MODIFY_TP":
+    case "MOVE_SL_TO_BE":
+      return "app-modify";
+    case "CANCEL_PENDING":
+      return "app-cancel";
+    default:
+      return "app-command";
+  }
+}
+
 function brokerLegId(payload: ExecutionQueueItem["payload"], input: ExecutionReportInput) {
   const virtualTp = virtualTpLegFromBrokerComment(input.brokerComment);
   if (virtualTp !== undefined) return `tp${virtualTp}`;
@@ -4137,20 +4288,20 @@ function heartbeatFreshness(iso: string) {
 }
 
 function normalizeProviderTpLevels(
-  levels?: Array<{ leg: number; percentage: number; strategy: string }>,
-) {
+  levels?: ProviderTakeProfitLevelInput[],
+): ProviderTakeProfitLevel[] {
   const source = levels?.length
     ? levels
     : Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
         leg: index + 1,
         percentage: 25,
-        strategy: "",
+        strategy: { kind: "no-change" as const },
       }));
   const cleaned = source
     .map((level, index) => ({
       leg: Number.isFinite(level.leg) && level.leg > 0 ? Math.round(level.leg) : index + 1,
       percentage: Math.max(0, Number(level.percentage) || 0),
-      strategy: String(level.strategy ?? ""),
+      strategy: normalizeTakeProfitStrategy(level.strategy),
     }))
     .slice(0, MAX_PROVIDER_TP_LEVELS);
   const total = cleaned.reduce((sum, level) => sum + level.percentage, 0);
@@ -4158,7 +4309,7 @@ function normalizeProviderTpLevels(
     return Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
       leg: index + 1,
       percentage: 25,
-      strategy: "",
+      strategy: { kind: "no-change" },
     }));
   }
   return cleaned.map((level) => ({
@@ -4167,18 +4318,66 @@ function normalizeProviderTpLevels(
   }));
 }
 
+function normalizeTakeProfitStrategy(
+  input: TakeProfitStrategy | string | null | undefined,
+): TakeProfitStrategy {
+  if (!input) return { kind: "no-change" };
+  if (typeof input === "object") {
+    if (input.kind === "set-sl-to-entry") {
+      return { kind: "set-sl-to-entry", offsetPips: Math.max(0, Number(input.offsetPips) || 0) };
+    }
+    if (input.kind === "set-sl-to-tp") {
+      return {
+        kind: "set-sl-to-tp",
+        tpLeg: Math.min(MAX_PROVIDER_TP_LEVELS, Math.max(1, Math.round(Number(input.tpLeg) || 1))),
+        offsetPips: Math.max(0, Number(input.offsetPips) || 0),
+      };
+    }
+    return { kind: "no-change" };
+  }
+
+  const value = input.trim().toLowerCase();
+  if (!value || value.includes("unchanged") || value.includes("no change")) {
+    return { kind: "no-change" };
+  }
+  if (!/\b(sl|stop|move|set)\b/i.test(value)) {
+    return { kind: "no-change" };
+  }
+  if (value.includes("entry") || value.includes("break-even") || value.includes("breakeven")) {
+    return { kind: "set-sl-to-entry", offsetPips: strategyOffsetPips(value) };
+  }
+  const tpMatch = value.match(/tp\s*([1-4])/i);
+  if (tpMatch?.[1]) {
+    return {
+      kind: "set-sl-to-tp",
+      tpLeg: Number(tpMatch[1]),
+      offsetPips: strategyOffsetPips(value),
+    };
+  }
+  return { kind: "no-change" };
+}
+
+function strategyOffsetPips(value: string) {
+  const match = value.match(/([+-]?\s*\d+(?:\.\d+)?)\s*pips?/i);
+  return match?.[1] ? Math.max(0, Number(match[1].replace(/\s+/g, "")) || 0) : 0;
+}
+
 function applyProviderExecutionConfig(
   signal: ParsedSignal,
   config: ProviderExecutionConfig,
 ): ParsedSignal {
   if (signal.commandType !== "OPEN_TRADE" || signal.takeProfits.length === 0) return signal;
-  const percentages = config.takeProfitLevels.map((level) => level.percentage);
+  const levelsByLeg = new Map(config.takeProfitLevels.map((level) => [level.leg, level]));
   return {
     ...signal,
-    takeProfits: signal.takeProfits.map((target, index) => ({
-      ...target,
-      allocationPercent: percentages[index] ?? target.allocationPercent,
-    })),
+    takeProfits: signal.takeProfits.map((target, index) => {
+      const level = levelsByLeg.get(target.leg) ?? config.takeProfitLevels[index];
+      return {
+        ...target,
+        allocationPercent: level?.percentage ?? target.allocationPercent,
+        strategy: level?.strategy ?? target.strategy ?? { kind: "no-change" },
+      };
+    }),
   };
 }
 
@@ -4229,6 +4428,10 @@ function classifyParsedCommand(commandType: string): RawMessageClassification {
   if (commandType === "OPEN_TRADE") return "entry";
   if (commandType === "NO_SIGNAL") return "noise";
   return "management";
+}
+
+function isAutoQueueableIngestionCommand(commandType: string) {
+  return commandType !== "NO_SIGNAL" && commandType !== "TRADE_SETUP";
 }
 
 function telegramParserText(message: TelegramCapturedMessage) {
@@ -4434,9 +4637,7 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
       60,
       Math.min(
         3600,
-        Math.round(
-          positiveNumber(input.dedupWindowSeconds, defaultAppSettings.dedupWindowSeconds),
-        ),
+        Math.round(positiveNumber(input.dedupWindowSeconds, defaultAppSettings.dedupWindowSeconds)),
       ),
     ),
   };
@@ -4481,16 +4682,39 @@ function toMt5LinePayload(item: ReturnType<typeof queueRow>, settings: AppSettin
     `trailingStopUnit=${item.payload.trailingStop?.unit ?? ""}`,
     `partialCloseKind=${item.payload.partialClose?.kind ?? ""}`,
     `partialCloseValue=${item.payload.partialClose?.value ?? ""}`,
+    `partialCloseVolume=${item.payload.partialClose?.volume ?? ""}`,
+    `partialCloseAllocation=${item.payload.partialClose?.allocationPercent ?? ""}`,
+    `runnerEnabled=${item.payload.runner?.enabled ? "true" : "false"}`,
+    `runnerVolume=${item.payload.runner?.lotSize ?? ""}`,
+    `runnerSlBehavior=${item.payload.runner?.slBehavior ?? ""}`,
+    `runnerTrailPips=${item.payload.runner?.trailPips ?? ""}`,
     `targetOrderTicket=${item.payload.targetOrderTicket ?? ""}`,
     `targetPositionTicket=${item.payload.targetPositionTicket ?? ""}`,
     `targetDealTicket=${item.payload.targetDealTicket ?? ""}`,
   ];
   for (const takeProfit of item.payload.takeProfits) {
-    lines.push(`tp${takeProfit.leg}=${takeProfit.price}`);
+    lines.push(`tp${takeProfit.leg}=${takeProfit.price ?? ""}`);
     lines.push(`tp${takeProfit.leg}Allocation=${takeProfit.allocationPercent}`);
     lines.push(`tp${takeProfit.leg}Volume=${takeProfit.volume ?? ""}`);
+    lines.push(`tp${takeProfit.leg}StrategyKind=${takeProfit.strategy?.kind ?? "no-change"}`);
+    lines.push(
+      `tp${takeProfit.leg}StrategyReferenceLeg=${strategyReferenceLeg(takeProfit.strategy)}`,
+    );
+    lines.push(
+      `tp${takeProfit.leg}StrategyOffsetPips=${strategyOffsetForPayload(takeProfit.strategy)}`,
+    );
   }
   return `${lines.join("\n")}\n`;
+}
+
+function strategyReferenceLeg(strategy: TakeProfitStrategy | undefined) {
+  return strategy?.kind === "set-sl-to-tp" ? strategy.tpLeg : 0;
+}
+
+function strategyOffsetForPayload(strategy: TakeProfitStrategy | undefined) {
+  return strategy?.kind === "set-sl-to-entry" || strategy?.kind === "set-sl-to-tp"
+    ? strategy.offsetPips
+    : 0;
 }
 
 function toMt5NoWorkPayload(settings: AppSettings) {
@@ -4524,13 +4748,25 @@ async function mt5Json<T>(request: Request): Promise<{ body: T } | { error: stri
 }
 
 function enrichLifecycleSignalFromTrade(signal: ParsedSignal, trade: LogicalTrade): ParsedSignal {
+  const tpLeg =
+    signal.partialClose?.kind === "TP_LEG"
+      ? trade.legs.find((leg) => leg.leg === signal.partialClose?.value)
+      : undefined;
   return {
     ...signal,
     rawSymbol: signal.rawSymbol ?? trade.symbol.rawSymbol,
     canonicalSymbol: signal.canonicalSymbol ?? trade.symbol.canonicalSymbol,
     brokerSymbol: signal.brokerSymbol ?? trade.symbol.brokerSymbol,
+    direction: signal.direction ?? trade.direction,
     mappingStatus: trade.symbol.mappingStatus,
     mappingWarnings: trade.symbol.warnings,
+    partialClose:
+      signal.partialClose?.kind === "TP_LEG" && tpLeg
+        ? {
+            ...signal.partialClose,
+            allocationPercent: tpLeg.allocationPercent,
+          }
+        : signal.partialClose,
     providerId: signal.providerId ?? trade.providerId,
     accountId: signal.accountId ?? trade.accountId,
     missingFields: signal.missingFields.filter(

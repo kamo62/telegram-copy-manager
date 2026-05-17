@@ -17,7 +17,9 @@ const snapshot: DashboardSnapshot = {
     azureOpenAIKeyConfigured: false,
     dedupWindowSeconds: 300,
   },
-  telegramSessions: [{ id: "session-1", phone: "+27821234567", status: "CONNECTED" }],
+  telegramSessions: [
+    { id: "session-1", phone: "+27821234567", status: "CONNECTED", profileId: "profile-current" },
+  ],
   providers: [
     {
       id: "provider-alpha",
@@ -225,7 +227,9 @@ describe("App dashboard", () => {
       calls.push({ url: String(url), init });
       if (String(url).startsWith("/api/telegram/dialogs")) {
         return Response.json({
-          dialogs: [{ id: "dialog-alpha", title: "Alpha FX Signals", type: "channel", unreadCount: 0 }],
+          dialogs: [
+            { id: "dialog-alpha", title: "Alpha FX Signals", type: "channel", unreadCount: 0 },
+          ],
         });
       }
       if (String(url) === "/api/providers/resync-current-session") {
@@ -283,6 +287,9 @@ describe("App dashboard", () => {
     fireEvent.change(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
       target: { value: "0.2" },
     });
+    fireEvent.change(view.getByLabelText("TP1 strategy action"), {
+      target: { value: "no-change" },
+    });
     fireEvent.click(
       view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
     );
@@ -296,7 +303,7 @@ describe("App dashboard", () => {
       riskMode: "fixed",
       riskAmount: 0.2,
       takeProfitLevels: [
-        { leg: 1, percentage: 25 },
+        { leg: 1, percentage: 25, strategy: { kind: "no-change" } },
         { leg: 2, percentage: 25 },
         { leg: 3, percentage: 25 },
         { leg: 4, percentage: 25 },
