@@ -3,12 +3,12 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.6.1"
+#property version   "1.6.2"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
 input int    PollSeconds    = 1;
-input string LinkCode       = "-IF3QCYL";
+input string LinkCode       = "-UTN4-D6";
 input int    HistoryLookbackHours = 168;
 input int    HeartbeatSeconds = 5;
 input int    HistoryBackfillSeconds = 60;

@@ -24,6 +24,10 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).not.toContain('input string BackendBaseUrl = "http://127.0.0.1:8787/api"');
   });
 
+  test("uses the current default app link code for EA registration", () => {
+    expect(source).toContain('input string LinkCode       = "-UTN4-D6";');
+  });
+
   test("reports broker history deals for manual close reconciliation", () => {
     expect(source).toContain("SendHistoryDeals()");
     expect(source).toContain("HistorySelect(fromTime, toTime)");

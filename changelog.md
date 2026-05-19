@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-05-19 (EA default link code update)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.2` and kept the
+  MT5 EA `#property version` aligned at `1.6.2` because this updates the default EA link-code input
+  without changing the backend/EA command protocol.
+- Updated the EA `LinkCode` default from `-IF3QCYL` to `-UTN4-D6`.
+- Added an EA source regression so the expected default link code is checked with the other EA
+  packaging/source invariants.
+
 ## 2026-05-19 (EA lifecycle command Journal logging)
 
 - Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.1` and kept the
