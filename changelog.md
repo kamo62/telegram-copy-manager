@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-05-19 (PR review fixes: poll lease safety and filled-volume virtual TP sizing)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.3` and kept the
+  MT5 EA `#property version` aligned at `1.6.3` because this fixes two backwards-compatible runtime
+  bugs without changing the backend/EA command protocol.
+- Stopped retrying `/mt5/poll-line` in the EA. Polling leases queue items server-side, so a lost
+  response must not trigger another lease that could skip or reorder pending commands.
+- Changed app-managed virtual TP close sizing to use the broker-reported OPEN filled volume for the
+  matched position before falling back to the original requested queue volume. This keeps TP-leg
+  partial closes correct when `BrokerMinLotMultiplier` changes the actual lot size sent by the EA.
+- Added regressions for both PR review findings.
+
 ## 2026-05-19 (EA default link code update)
 
 - Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.2` and kept the

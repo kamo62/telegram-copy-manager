@@ -2500,12 +2500,12 @@ class AppStore {
     const leg = trade.legs.find((item) => item.leg === legNumber);
     if (!leg) return false;
     const plannedTp = open.payload.takeProfits.find((item) => item.leg === legNumber);
-    const managedVolume = managedVirtualTpVolume(open.payload);
+    const brokerOpenVolume = this.openVolumeForTrade(trade.id, positionTicket);
+    const managedVolume = managedVirtualTpVolume(open.payload, brokerOpenVolume);
+    const allocatedVolume =
+      managedVolume > 0 ? Number(((managedVolume * leg.allocationPercent) / 100).toFixed(2)) : 0;
     const volume =
-      plannedTp?.volume ??
-      (managedVolume > 0
-        ? Number(((managedVolume * leg.allocationPercent) / 100).toFixed(2))
-        : undefined);
+      brokerOpenVolume !== undefined ? allocatedVolume : (plannedTp?.volume ?? allocatedVolume);
     if (!volume || volume <= 0) return false;
     const item: ExecutionQueueItem = {
       id: `queue_${nanoid(10)}`,
@@ -2525,7 +2525,7 @@ class AppStore {
         },
         takeProfits: [],
         executionMode: "VIRTUAL_TP",
-        volume: open.payload.volume,
+        volume: brokerOpenVolume ?? open.payload.volume,
         runner: open.payload.runner,
         targetPositionTicket: positionTicket,
         originalText: `App-managed TP${legNumber} hit at ${triggerPrice}`,
@@ -2746,6 +2746,40 @@ class AppStore {
     if (filled && filled > 0) return filled;
     const requested = nullableNumber(row?.requested_price);
     return requested && requested > 0 ? requested : undefined;
+  }
+
+  private openVolumeForTrade(tradeId: string, positionTicket?: string) {
+    if (truthyBrokerTicket(positionTicket)) {
+      const exact = this.db
+        .query(
+          `SELECT filled_volume FROM broker_orders
+           WHERE logical_trade_id = ?
+             AND position_ticket = ?
+             AND action = 'OPEN'
+             AND filled_volume IS NOT NULL
+             AND filled_volume > 0
+           ORDER BY created_at ASC
+           LIMIT 1`,
+        )
+        .get(tradeId, positionTicket) as Row | null;
+      const exactVolume = nullableNumber(exact?.filled_volume);
+      if (exactVolume && exactVolume > 0) return exactVolume;
+    }
+    const row = this.db
+      .query(
+        `SELECT filled_volume FROM broker_orders
+         WHERE logical_trade_id = ?
+           AND action = 'OPEN'
+           AND position_ticket IS NOT NULL
+           AND position_ticket NOT IN ('','0')
+           AND filled_volume IS NOT NULL
+           AND filled_volume > 0
+         ORDER BY created_at ASC
+         LIMIT 1`,
+      )
+      .get(tradeId) as Row | null;
+    const volume = nullableNumber(row?.filled_volume);
+    return volume && volume > 0 ? volume : undefined;
   }
 
   private reconcileHistoryDeal(
@@ -5495,8 +5529,8 @@ function distanceToPriceDelta(
   return distance.value * (point && point > 0 ? point * 10 : brokerPipSize(symbol));
 }
 
-function managedVirtualTpVolume(payload: ExecutionQueueItem["payload"]) {
-  const totalVolume = Number(payload.volume ?? 0);
+function managedVirtualTpVolume(payload: ExecutionQueueItem["payload"], brokerOpenVolume?: number) {
+  const totalVolume = Number(brokerOpenVolume ?? payload.volume ?? 0);
   if (!Number.isFinite(totalVolume) || totalVolume <= 0) return 0;
   const runnerVolume = payload.runner?.enabled
     ? Math.min(totalVolume, Math.max(0, Number(payload.runner.lotSize) || 0))

@@ -263,6 +263,15 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain('ValueFor(body, "pollSeconds")');
     expect(source).toContain("EventSetTimer(CurrentPollSeconds)");
   });
+
+  test("does not retry poll-line because polling leases queue items", () => {
+    expect(source).toContain("/mt5/poll-line");
+    expect(source).toMatch(/void\s+PollAndExecute\(\)[\s\S]*if\(!HttpGet\(url, response\)\)/);
+    expect(source).not.toMatch(
+      /void\s+PollAndExecute\(\)[\s\S]*HttpGetRetry\(url, response\)[\s\S]*ApplyPollConfig/,
+    );
+    expect(source).toContain("UNSAFE: /poll-line");
+  });
 });
 
 function reportCalls(text: string) {

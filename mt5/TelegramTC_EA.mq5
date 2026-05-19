@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.6.2"
+#property version   "1.6.3"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -199,7 +199,7 @@ void PollAndExecute()
 {
    string url = StringFormat("/mt5/poll-line?accountId=mt5-%I64d", AccountInfoInteger(ACCOUNT_LOGIN));
    string response = "";
-   if(!HttpGetRetry(url, response))
+   if(!HttpGet(url, response))
       return;
 
    ApplyPollConfig(response);
@@ -1521,9 +1521,9 @@ bool HttpRequest(string method, string path, string headers, char &data[], strin
 // without flooding the Experts tab with `HTTP 1001/1003 err=5203` noise from
 // the brief connect-failures-mid-request window.
 //
-// SAFE: /snapshot, /poll-line, /history (deal-ticket dedup), /heartbeat (idem),
+// SAFE: /snapshot, /history (deal-ticket dedup), /heartbeat (idem),
 //       /register (link-code dedup).
-// UNSAFE: /report — execution must be sent exactly once.
+// UNSAFE: /poll-line leases work server-side; /report must be sent exactly once.
 bool HttpRequestRetry(string method, string path, string headers, char &data[], string &response, int maxAttempts)
 {
    for(int attempt = 1; attempt <= maxAttempts; attempt++)

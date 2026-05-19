@@ -1318,6 +1318,63 @@ describe("Telegram TC API", () => {
     expect(noDuplicate).toContain("status=NO_WORK");
   });
 
+  test("sizes app-managed TP closes from broker-filled volume when EA lot override changes actual size", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        deals: [
+          {
+            dealTicket: "244236611",
+            orderTicket: "247596888",
+            positionTicket: "247596888",
+            entry: "0",
+            reason: 3,
+            symbol: "XAUUSD",
+            price: 4540.9,
+            volume: 0.08,
+            profit: 0,
+            commission: 0,
+            swap: 0,
+            comment: `ttc:${approved.shortId}`,
+            time: "2026.05.18 18:01:12",
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    await sendGoldSnapshot(app, {
+      shortId: approved.shortId,
+      bid: 4546.2,
+      positions: [
+        {
+          ticket: "247596888",
+          symbol: "XAUUSD",
+          type: 0,
+          volume: 0.08,
+          openPrice: 4540.9,
+          sl: 4535,
+          tp: 0,
+          profit: 0,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ],
+    });
+
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
+    expect(closeWork).toContain("partialCloseKind=TP_LEG");
+    expect(closeWork).toContain("partialCloseValue=1");
+    expect(closeWork).toContain("partialCloseVolume=0.02");
+    expect(closeWork).toContain("targetPositionTicket=247596888");
+  });
+
   test("confirms app-managed TP1 close before queueing the configured SL move", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const approved = await approveGoldBuyLimit(app);
