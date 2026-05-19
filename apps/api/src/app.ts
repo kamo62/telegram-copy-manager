@@ -64,6 +64,7 @@ const defaultGlobalAliases = {
 };
 
 const defaultProviderAliases: Record<string, Record<string, string>> = {};
+const CLOSE_VOLUME_EPSILON = 0.000001;
 
 type SymbolAliasScope = "global" | "provider";
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
@@ -2391,8 +2392,10 @@ class AppStore {
       if (!tradeId) continue;
       const open = this.openBrokerOrderForDeal(tradeId, deal);
       const positionTicket = String(deal.positionTicket || open?.position_ticket || "");
-      const action = historyDealAction(
+      const action = this.historyDealActionForTrade(
+        tradeId,
         deal,
+        positionTicket,
         this.positionStillOpen(input.accountId, positionTicket),
       );
       const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
@@ -2780,6 +2783,52 @@ class AppStore {
       .get(tradeId) as Row | null;
     const volume = nullableNumber(row?.filled_volume);
     return volume && volume > 0 ? volume : undefined;
+  }
+
+  private closeVolumeForTrade(tradeId: string, positionTicket?: string) {
+    const params = [tradeId];
+    let ticketFilter = "";
+    if (truthyBrokerTicket(positionTicket)) {
+      ticketFilter = "AND position_ticket = ?";
+      params.push(positionTicket);
+    }
+    const row = this.db
+      .query(
+        `SELECT COALESCE(SUM(filled_volume), 0) AS volume
+         FROM broker_orders
+         WHERE logical_trade_id = ?
+           ${ticketFilter}
+           AND action IN ('FULL_CLOSE','PARTIAL_CLOSE')
+           AND filled_volume IS NOT NULL
+           AND filled_volume > 0`,
+      )
+      .get(...params) as Row | null;
+    return nullableNumber(row?.volume) ?? 0;
+  }
+
+  private closeVolumeCoversOpen(
+    tradeId: string,
+    positionTicket: string | undefined,
+    nextCloseVolume: number | undefined,
+  ) {
+    const openVolume = this.openVolumeForTrade(tradeId, positionTicket);
+    const volume = nullableNumber(nextCloseVolume);
+    if (!openVolume || !volume || volume <= 0) return false;
+    return (
+      this.closeVolumeForTrade(tradeId, positionTicket) + volume >=
+      openVolume - CLOSE_VOLUME_EPSILON
+    );
+  }
+
+  private historyDealActionForTrade(
+    tradeId: string,
+    deal: Mt5HistoryDealInput,
+    positionTicket: string,
+    positionStillOpen: boolean,
+  ) {
+    const action = historyDealAction(deal, positionStillOpen);
+    if (action !== "PARTIAL_CLOSE") return action;
+    return this.closeVolumeCoversOpen(tradeId, positionTicket, deal.volume) ? "FULL_CLOSE" : action;
   }
 
   private reconcileHistoryDeal(
@@ -4300,9 +4349,9 @@ class AppStore {
     let healed = 0;
     for (const row of stuck) {
       const tradeId = String(row.id);
-      const realClose = this.db
+      const fullClose = this.db
         .query(
-          `SELECT position_ticket, source, broker_comment, pnl_currency, created_at
+          `SELECT id, action, position_ticket, source, broker_comment, pnl_currency, created_at
            FROM broker_orders
            WHERE logical_trade_id = ?
              AND action = 'FULL_CLOSE'
@@ -4310,6 +4359,7 @@ class AppStore {
            ORDER BY created_at DESC LIMIT 1`,
         )
         .get(tradeId) as Row | null;
+      const realClose = fullClose ?? this.coveringCloseForTrade(tradeId);
       if (!realClose) {
         const recoverableOpen = this.db
           .query(
@@ -4359,6 +4409,11 @@ class AppStore {
           healed += 1;
         }
         continue;
+      }
+      if (String(realClose.action) !== "FULL_CLOSE" && realClose.id) {
+        this.db
+          .query("UPDATE broker_orders SET action = 'FULL_CLOSE' WHERE id = ?")
+          .run(String(realClose.id));
       }
       const positionTicket = String(realClose.position_ticket ?? "");
       if (positionTicket) {
@@ -4840,7 +4895,52 @@ class AppStore {
          LIMIT 1`,
       )
       .get(tradeId) as Row | null;
-    return Boolean(row);
+    return Boolean(row) || Boolean(this.coveringCloseForTrade(tradeId));
+  }
+
+  private coveringCloseForTrade(tradeId: string) {
+    const openRows = this.db
+      .query(
+        `SELECT position_ticket, filled_volume
+         FROM broker_orders
+         WHERE logical_trade_id = ?
+           AND action = 'OPEN'
+           AND filled_volume IS NOT NULL
+           AND filled_volume > 0
+         ORDER BY created_at ASC`,
+      )
+      .all(tradeId) as Row[];
+
+    for (const openRow of openRows) {
+      const openVolume = nullableNumber(openRow.filled_volume);
+      if (!openVolume || openVolume <= 0) continue;
+      const positionTicket = String(openRow.position_ticket ?? "");
+      const params = [tradeId];
+      let ticketFilter = "";
+      if (truthyBrokerTicket(positionTicket)) {
+        ticketFilter = "AND position_ticket = ?";
+        params.push(positionTicket);
+      }
+      const closeRows = this.db
+        .query(
+          `SELECT id, action, position_ticket, source, broker_comment, pnl_currency, created_at, filled_volume
+           FROM broker_orders
+           WHERE logical_trade_id = ?
+             ${ticketFilter}
+             AND action IN ('FULL_CLOSE','PARTIAL_CLOSE')
+             AND source != 'manual'
+             AND filled_volume IS NOT NULL
+             AND filled_volume > 0
+           ORDER BY created_at ASC`,
+        )
+        .all(...params) as Row[];
+      let closedVolume = 0;
+      for (const closeRow of closeRows) {
+        closedVolume += nullableNumber(closeRow.filled_volume) ?? 0;
+        if (closedVolume >= openVolume - CLOSE_VOLUME_EPSILON) return closeRow;
+      }
+    }
+    return null;
   }
 
   private logicalTradesForDashboard() {

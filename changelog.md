@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-05-19 (Stale-snapshot SL close reconciliation)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.4` and kept the
+  MT5 EA `#property version` aligned at `1.6.4` because this is a backwards-compatible backend
+  reconciliation fix with no EA/backend protocol change.
+- Fixed MT5 history close classification when the latest snapshot is stale. If an SL/TP/history
+  deal's close volume covers the remaining broker-open volume, the backend now records it as a
+  terminal `FULL_CLOSE` instead of leaving it as a non-TP `PARTIAL_CLOSE`.
+- Startup repair now heals older `OUT_OF_SYNC` trades whose recorded close rows cumulatively cover
+  the open volume, including rows that were previously mis-recorded as `PARTIAL_CLOSE`.
+- Added regressions for full-volume SL closes, TP1-then-SL remaining-volume closes, and startup
+  healing of stale partial-close broker history.
+
 ## 2026-05-19 (PR review fixes: poll lease safety and filled-volume virtual TP sizing)
 
 - Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.3` and kept the
