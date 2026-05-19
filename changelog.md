@@ -1,5 +1,57 @@
 # Changelog
 
+## 2026-05-19 (Virtual TP recovery and operator-state guard)
+
+- Release impact: Minor. Bumped the canonical app version in `package.json` to `1.6.0` and kept the
+  MT5 EA `#property version` aligned at `1.6.0` because this adds persisted trade source lineage,
+  startup virtual-TP recovery behaviour, and an operator-state startup guard.
+- Approved logical trades now keep their source Telegram/raw-message lineage directly in
+  `logical_trades.data_json` so a reload/redeploy can trace a broker trade back to the parsed signal
+  and raw provider message without relying only on queue rows.
+- Startup reconciliation now recovers still-live `OUT_OF_SYNC` virtual-TP trades when persisted
+  broker open evidence exists, restoring the logical trade to `OPEN`, re-arming planned TP legs, and
+  restoring the active-plan line payload with the known position ticket.
+- Added a startup preservation guard for operator-owned routing/config state. Provider links,
+  provider config/history, account symbol mappings, and symbol aliases are snapshotted before and
+  after startup maintenance; any mutation raises an error instead of silently disappearing, and a
+  preserved audit event is written when protected rows exist.
+- Added regressions for source lineage, live virtual-TP recovery, and startup mapping/config
+  preservation.
+
+## 2026-05-19 (Runner breakeven after app-managed TP)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.5.1` and kept the
+  MT5 EA `#property version` aligned at `1.5.1` for deployment/package traceability.
+- Fixed app-managed virtual TP runner handling when MT5 reports a TP-leg partial close with a
+  generic broker comment such as `Request executed`. The backend now queues the configured
+  post-TP `MODIFY_SL`/runner strategy from the structured `CLOSE_PARTIAL` payload instead of
+  relying on a broker comment that names `tp1`.
+- Added a regression covering the live 200-pip default-TP runner path where TP1 closes the managed
+  volume and the remaining runner must move to breakeven.
+
+## 2026-05-19 (Source-available commercial licensing)
+
+Documentation/legal metadata update; no runtime SemVer bump. `package.json` and
+`mt5/TelegramTC_EA.mq5` remain at `1.5.0`.
+
+- Added a custom source-available licence that allows free non-commercial use and reserves
+  commercial rights for a separate royalty-bearing commercial agreement.
+- Added the root `package.json` licence pointer to `LICENSE`.
+- Added the README licence summary so users understand non-commercial use, personal trading use, and
+  commercial licensing requirements.
+
+## 2026-05-19 (README refresh and Markdown documentation pruning)
+
+Documentation-only maintenance; no runtime SemVer bump. `package.json` and
+`mt5/TelegramTC_EA.mq5` remain at `1.5.0`.
+
+- Removed outdated supporting Markdown documents under `docs/` so the README is the primary
+  project documentation surface.
+- Rewrote the README from the current app implementation, covering the Telegram setup, provider
+  configuration, MT5 link-code workflow, EA inputs, API surfaces, Docker deployment, runtime
+  configuration, verification gate, and versioning rules.
+- Kept `changelog.md` because this repo requires a changelog entry for every change.
+
 ## 2026-05-19 (App-owned default TP runners)
 
 - Release impact: Minor. Bumped the canonical app version in `package.json` to `1.5.0` and kept the

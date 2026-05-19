@@ -120,6 +120,7 @@ export interface LogicalTrade {
   id: string;
   providerId?: string;
   accountId?: string;
+  source?: TradeSource;
   symbol: SymbolResolution;
   direction: Direction;
   status: "PLANNED" | "OPEN" | "PENDING" | "CLOSED" | "OUT_OF_SYNC" | "CANCELLED";
@@ -134,6 +135,14 @@ export interface LogicalTrade {
   matchedBrokerTickets?: string[];
   brokerComment?: string;
   lastSnapshotAt?: string;
+}
+
+export interface TradeSource {
+  parsedSignalId: string;
+  rawMessageId: string;
+  telegramMessageId: string;
+  messageDate: string;
+  rawText: string;
 }
 
 export interface TradeLeg {
@@ -559,6 +568,7 @@ export function createLogicalTradeFromSignal(
     id: string;
     providerId?: string;
     accountId?: string;
+    source?: TradeSource;
     executionMode: ExecutionMode;
     allocation?: number[];
   },
@@ -571,6 +581,7 @@ export function createLogicalTradeFromSignal(
     id: options.id,
     providerId: options.providerId ?? signal.providerId,
     accountId: options.accountId ?? signal.accountId,
+    ...(options.source ? { source: options.source } : {}),
     symbol: {
       rawSymbol: signal.rawSymbol ?? "",
       canonicalSymbol: signal.canonicalSymbol,

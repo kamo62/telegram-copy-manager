@@ -13,6 +13,7 @@ import {
   type QueueStatus,
   shouldRequireManualReview,
   type TakeProfitStrategy,
+  type TradeSource,
 } from "@telegram-tc/core";
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
@@ -723,6 +724,19 @@ interface Mt5HistoryDealInput {
   swap?: number;
   comment?: string;
   time?: string;
+}
+
+interface OperatorStateTableSnapshot {
+  count: number;
+  fingerprint: string;
+}
+
+interface OperatorStateSnapshot {
+  accountProviderLinks: OperatorStateTableSnapshot;
+  accountSymbolMappings: OperatorStateTableSnapshot;
+  symbolAliases: OperatorStateTableSnapshot;
+  providers: OperatorStateTableSnapshot;
+  providerConfigHistory: OperatorStateTableSnapshot;
 }
 
 /**
@@ -1577,6 +1591,29 @@ class AppStore {
     }));
   }
 
+  private sourceForParsedSignal(
+    parsedSignalId: string,
+    signal: ParsedSignal,
+  ): TradeSource | undefined {
+    const row = this.db
+      .query(
+        `SELECT parsed_signals.raw_message_id, raw_messages.telegram_message_id,
+                raw_messages.message_date, raw_messages.raw_text
+         FROM parsed_signals
+         LEFT JOIN raw_messages ON raw_messages.id = parsed_signals.raw_message_id
+         WHERE parsed_signals.id = ?`,
+      )
+      .get(parsedSignalId) as Row | null;
+    if (!row?.raw_message_id) return undefined;
+    return {
+      parsedSignalId,
+      rawMessageId: String(row.raw_message_id),
+      telegramMessageId: String(row.telegram_message_id ?? ""),
+      messageDate: String(row.message_date ?? ""),
+      rawText: String(row.raw_text ?? signal.originalText),
+    };
+  }
+
   approveSignal(
     parsedSignalId: string,
     options: { executionMode?: ExecutionMode } = {},
@@ -1606,6 +1643,7 @@ class AppStore {
       return { statusCode: 422, error: "Parsed signal not found" };
     }
     const signal = parseJson<ParsedSignal>(String(row.result_json));
+    const source = this.sourceForParsedSignal(parsedSignalId, signal);
     const providerId = String(row.provider_id);
     const targetAccountIds = this.targetAccountIdsForProvider(
       providerId,
@@ -1684,6 +1722,7 @@ class AppStore {
           id: targetLogicalTradeId,
           providerId,
           accountId: target.accountId,
+          source,
           executionMode,
         });
         this.insertTrade(trade);
@@ -3837,6 +3876,7 @@ class AppStore {
       id: "trade-demo-1",
       providerId: demoProviderId,
       accountId: demoAccountId,
+      source: this.sourceForParsedSignal(parsed.parsedSignalId, signal),
       executionMode: "VIRTUAL_TP",
     });
     this.insertTrade(trade);
@@ -4125,7 +4165,78 @@ class AppStore {
         created_at TEXT NOT NULL
       );
     `);
+    const operatorStateBefore = this.operatorStateSnapshot();
     this.backfillStuckOutOfSyncTrades();
+    this.assertOperatorStatePreserved(
+      "startup-maintenance",
+      operatorStateBefore,
+      this.operatorStateSnapshot(),
+    );
+  }
+
+  private operatorStateSnapshot(): OperatorStateSnapshot {
+    return {
+      accountProviderLinks: this.operatorStateTable(
+        "SELECT account_id, provider_id, enabled FROM account_provider_links ORDER BY account_id, provider_id",
+      ),
+      accountSymbolMappings: this.operatorStateTable(
+        "SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id",
+      ),
+      symbolAliases: this.operatorStateTable(
+        "SELECT scope, provider_id, raw_symbol, canonical_symbol FROM symbol_aliases ORDER BY scope, provider_id, raw_symbol",
+      ),
+      providers: this.operatorStateTable(
+        "SELECT id, enabled, parser_mode, risk_profile, lot_size, provider_config_json FROM providers ORDER BY id",
+      ),
+      providerConfigHistory: this.operatorStateTable(
+        "SELECT provider_id, config_json, created_at FROM provider_config_history ORDER BY provider_id, created_at",
+      ),
+    };
+  }
+
+  private operatorStateTable(query: string): OperatorStateTableSnapshot {
+    const rows = this.db.query(query).all() as Row[];
+    return { count: rows.length, fingerprint: JSON.stringify(rows) };
+  }
+
+  private assertOperatorStatePreserved(
+    context: string,
+    before: OperatorStateSnapshot,
+    after: OperatorStateSnapshot,
+  ) {
+    const changedTables = (Object.keys(before) as Array<keyof OperatorStateSnapshot>).filter(
+      (table) => before[table].fingerprint !== after[table].fingerprint,
+    );
+    const beforeCounts = Object.fromEntries(
+      (Object.keys(before) as Array<keyof OperatorStateSnapshot>).map((table) => [
+        table,
+        before[table].count,
+      ]),
+    );
+    const afterCounts = Object.fromEntries(
+      (Object.keys(after) as Array<keyof OperatorStateSnapshot>).map((table) => [
+        table,
+        after[table].count,
+      ]),
+    );
+    if (changedTables.length > 0) {
+      this.audit("operator-state.changed", "error", "Operator state changed during startup", {
+        context,
+        changedTables,
+        beforeCounts,
+        afterCounts,
+      });
+      throw new Error(`Operator state changed during ${context}: ${changedTables.join(", ")}`);
+    }
+
+    const protectedRows = Object.values(before).reduce((sum, table) => sum + table.count, 0);
+    if (protectedRows > 0) {
+      this.audit("operator-state.preserved", "info", "Operator state preserved during startup", {
+        context,
+        protectedRows,
+        counts: beforeCounts,
+      });
+    }
   }
 
   /**
@@ -4166,9 +4277,10 @@ class AppStore {
         )
         .get(tradeId) as Row | null;
       if (!realClose) {
-        const hasRecoverableOpen = this.db
+        const recoverableOpen = this.db
           .query(
-            `SELECT 1 FROM broker_orders
+            `SELECT action, order_ticket, position_ticket, broker_comment, created_at
+             FROM broker_orders
              WHERE logical_trade_id = ?
                AND (
                  (
@@ -4184,10 +4296,13 @@ class AppStore {
                    AND order_ticket NOT IN ('','0')
                  )
                )
-             LIMIT 1`,
+             ORDER BY created_at DESC LIMIT 1`,
           )
           .get(tradeId) as Row | null;
-        if (!hasRecoverableOpen) {
+        if (recoverableOpen) {
+          const recovered = this.recoverOutOfSyncOpenTrade(row, recoverableOpen);
+          if (recovered) healed += 1;
+        } else {
           const trade = parseJson<LogicalTrade>(String(row.data_json));
           const evidence =
             "No broker OPEN row recorded; trade cannot be recovered from MT5 history";
@@ -4262,6 +4377,54 @@ class AppStore {
         { healed, scanned: stuck.length },
       );
     }
+  }
+
+  private recoverOutOfSyncOpenTrade(row: Row, openRow: Row) {
+    const tradeId = String(row.id);
+    const trade = parseJson<LogicalTrade>(String(row.data_json));
+    const openQueue = this.originalOpenQueue(tradeId);
+    if (!openQueue) return false;
+    const action = String(openRow.action);
+    const positionTicket = String(openRow.position_ticket ?? "");
+    const orderTicket = String(openRow.order_ticket ?? "");
+    const isOpen = action === "OPEN" && truthyBrokerTicket(positionTicket);
+    const isPending = action === "PENDING_OPEN" && truthyBrokerTicket(orderTicket);
+    if (!isOpen && !isPending) return false;
+
+    const matchedTicket = isOpen ? positionTicket : orderTicket;
+    const evidence = [
+      "startup recovery",
+      action.toLowerCase(),
+      String(openRow.broker_comment ?? ""),
+      matchedTicket ? `ticket:${matchedTicket}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    const nextLegStatus = isOpen ? "OPEN" : "PLANNED";
+    const updated: LogicalTrade = {
+      ...trade,
+      status: isOpen ? "OPEN" : "PENDING",
+      livePositionExists: isOpen,
+      outOfSyncReason: undefined,
+      matchedBrokerTickets: matchedTicket ? [matchedTicket] : trade.matchedBrokerTickets,
+      brokerComment: String(openRow.broker_comment ?? trade.brokerComment ?? ""),
+      lastSnapshotAt: String(openRow.created_at ?? new Date().toISOString()),
+      legs: trade.legs.map((leg) =>
+        leg.status === "CLOSED" || leg.status === "HIT"
+          ? leg
+          : { ...leg, status: nextLegStatus, brokerEvidence: evidence },
+      ),
+    };
+    this.db
+      .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+      .run(updated.status, JSON.stringify(updated), tradeId);
+    this.audit("logical-trade.backfill-recovered-open", "info", "Recovered stuck live trade", {
+      logicalTradeId: tradeId,
+      status: updated.status,
+      matchedTicket,
+      parsedSignalId: openQueue.parsedSignalId,
+    });
+    return true;
   }
 
   private ensureMockProvider(profileId: string) {
@@ -4654,6 +4817,7 @@ class AppStore {
         direction: trade.direction,
         status: trade.status,
         executionMode: trade.executionMode,
+        source: trade.source,
         outOfSyncReason: trade.outOfSyncReason,
         livePositionExists: trade.livePositionExists,
         matchedBrokerTickets: trade.matchedBrokerTickets,
@@ -4808,14 +4972,16 @@ class AppStore {
         legs: trade.legs.map((leg) => ({ ...leg, status: "CLOSED", brokerEvidence: evidence })),
       };
     } else if (payload.commandType === "CLOSE_PARTIAL" && payload.partialClose?.kind === "TP_LEG") {
+      const closedLeg = payload.partialClose.value;
       updated = {
         ...trade,
         legs: trade.legs.map((leg) =>
-          leg.leg === payload.partialClose?.value
-            ? { ...leg, status: "CLOSED", brokerEvidence: evidence }
-            : leg,
+          leg.leg === closedLeg ? { ...leg, status: "CLOSED", brokerEvidence: evidence } : leg,
         ),
       };
+      if (truthyBrokerTicket(input.positionTicket)) {
+        this.queueSlStrategyAfterTpClose(updated, closedLeg, input.positionTicket);
+      }
     }
 
     if (updated === trade) return;

@@ -297,6 +297,54 @@ describe("Telegram TC API", () => {
     expect(dashboard.signalQueue[0]?.symbol).toBe("BTCUSD");
   });
 
+  test("approved logical trades keep their source Telegram message lineage", async () => {
+    const telegram = createQueuedTelegramAdapter([
+      {
+        telegramMessageId: "lineage-1",
+        messageDate: "2026-05-19T09:10:11.000Z",
+        rawText: "BUY XAUUSD\nSL 4515\nTP 4535\nTP 4545",
+      },
+    ]);
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram,
+      telegramPollingEnabled: false,
+    });
+
+    await configureProviderWithAccount(app, {
+      availableSymbols: ["XAUUSD", "EURUSD"],
+    });
+
+    const ingest = await app.runTelegramIngestionOnce();
+    expect(ingest.parsed).toBe(1);
+    expect(ingest.queued).toBe(1);
+
+    const dashboard = await json<{
+      logicalTrades: Array<{
+        id: string;
+        source?: {
+          parsedSignalId: string;
+          rawMessageId: string;
+          telegramMessageId: string;
+          messageDate: string;
+          rawText: string;
+        };
+      }>;
+    }>(await app.request("/api/dashboard"));
+
+    expect(dashboard.logicalTrades).toHaveLength(1);
+    expect(dashboard.logicalTrades[0]!.source).toMatchObject({
+      parsedSignalId: expect.any(String),
+      rawMessageId: expect.any(String),
+      telegramMessageId: "lineage-1",
+      messageDate: "2026-05-19T09:10:11.000Z",
+      rawText: "BUY XAUUSD\nSL 4515\nTP 4535\nTP 4545",
+    });
+    expect(dashboard.logicalTrades[0]!.source!.parsedSignalId).not.toBe("");
+    expect(dashboard.logicalTrades[0]!.source!.rawMessageId).not.toBe("");
+  });
+
   test("auto-ingestion keeps review-required signals out of the MT5 queue", async () => {
     const telegram = createQueuedTelegramAdapter([
       {
@@ -2683,7 +2731,7 @@ describe("Telegram TC API", () => {
         status: "EXECUTED",
         retcode: 10009,
         retcodeExternal: 0,
-        brokerComment: `ttc:${shortId}:tp1`,
+        brokerComment: "Request executed",
         orderTicket: "70002",
         positionTicket: "70001",
         dealTicket: "60002",
@@ -3495,6 +3543,235 @@ describe("Telegram TC API", () => {
       const cancelled = dash.logicalTrades.find((item) => item.id === "trade-demo-1");
       expect(cancelled?.status).toBe("CANCELLED");
       expect(cancelled?.legs.every((leg) => leg.status === "SKIPPED")).toBe(true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("startup backfill recovers live OUT_OF_SYNC virtual TP plans with source lineage", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const telegram = createQueuedTelegramAdapter([
+        {
+          telegramMessageId: "recovery-1",
+          messageDate: "2026-05-19T10:01:02.000Z",
+          rawText: "BUY XAUUSD\nSL 4515\nTP 4535\nTP 4545",
+        },
+      ]);
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram,
+        telegramPollingEnabled: false,
+      });
+
+      await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD", "EURUSD"] });
+      const ingest = await app.runTelegramIngestionOnce();
+      expect(ingest.queued).toBe(1);
+
+      const before = await json<{
+        logicalTrades: Array<{ id: string; status: string }>;
+      }>(await app.request("/api/dashboard"));
+      const tradeId = before.logicalTrades[0]!.id;
+      const queueDb = new Database(databasePath);
+      const queueRow = queueDb
+        .query("SELECT id FROM queue_items WHERE logical_trade_id = ?")
+        .get(tradeId) as { id: string } | null;
+      queueDb.close();
+      expect(queueRow).toBeDefined();
+      const queueId = queueRow!.id;
+
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          queueItemId: queueId,
+          accountId: "mt5-63442826",
+          status: "EXECUTED",
+          retcode: 10009,
+          retcodeExternal: 0,
+          brokerComment: "Request executed",
+          orderTicket: "open-order-1",
+          positionTicket: "open-position-1",
+          dealTicket: "open-deal-1",
+          requestedPrice: 4528,
+          filledPrice: 4528,
+          volume: 0.1,
+          errorText: "",
+        }),
+      });
+
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          positions: [],
+          orders: [],
+          symbols: [{ symbol: "XAUUSD", bid: 4529, ask: 4529.3 }],
+        }),
+      });
+
+      const stuck = await json<{
+        logicalTrades: Array<{ id: string; status: string }>;
+      }>(await app.request("/api/dashboard"));
+      expect(stuck.logicalTrades.find((item) => item.id === tradeId)?.status).toBe("OUT_OF_SYNC");
+
+      const restarted = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: false,
+        telegramPollingEnabled: false,
+      });
+      const recovered = await json<{
+        logicalTrades: Array<{
+          id: string;
+          status: string;
+          outOfSyncReason?: string;
+          livePositionExists?: boolean;
+          matchedBrokerTickets?: string[];
+          source?: { telegramMessageId: string; rawText: string };
+          legs: Array<{ status: string }>;
+        }>;
+      }>(await restarted.request("/api/dashboard"));
+      const trade = recovered.logicalTrades.find((item) => item.id === tradeId);
+      expect(trade).toBeDefined();
+      expect(trade!.status).toBe("OPEN");
+      expect(trade!.outOfSyncReason).toBeUndefined();
+      expect(trade!.livePositionExists).toBe(true);
+      expect(trade!.matchedBrokerTickets).toEqual(["open-position-1"]);
+      expect(trade!.source).toMatchObject({
+        telegramMessageId: "recovery-1",
+        rawText: "BUY XAUUSD\nSL 4515\nTP 4535\nTP 4545",
+      });
+      expect(trade!.legs.every((leg) => leg.status === "OPEN")).toBe(true);
+
+      const activePlans = await (
+        await restarted.request("/api/mt5/active-plans?accountId=mt5-63442826")
+      ).text();
+      expect(activePlans).toContain(`logicalTradeId=${tradeId}`);
+      expect(activePlans).toContain("positionTicket=open-position-1");
+      expect(activePlans).toContain("tp1Price=4535");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("startup maintenance preserves provider routing config and symbol mappings", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: false,
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD", "EURUSD.raw"],
+      });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          riskMode: "fixed",
+          riskAmount: 0.2,
+          takeProfitLevels: [
+            { leg: 1, percentage: 50, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+            { leg: 2, percentage: 50, strategy: { kind: "no-change" } },
+          ],
+        }),
+      });
+      await app.request(`/api/accounts/mt5-63442826/providers/${providerId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      });
+      await app.request("/api/symbol-aliases", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          scope: "provider",
+          providerId,
+          rawSymbol: "GOLD",
+          canonicalSymbol: "XAUUSD",
+        }),
+      });
+      await app.request("/api/symbol-mappings/account/mt5-63442826", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          canonicalOverrides: { XAUUSD: "XAUUSD", EURUSD: "EURUSD.raw" },
+          suffix: ".raw",
+          includeSymbols: ["XAUUSD", "EURUSD.raw"],
+          excludeSymbols: [],
+        }),
+      });
+
+      const db = new Database(databasePath);
+      const before = {
+        links: db
+          .query(
+            "SELECT account_id, provider_id, enabled FROM account_provider_links ORDER BY account_id, provider_id",
+          )
+          .all(),
+        mappings: db
+          .query("SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id")
+          .all(),
+        aliases: db
+          .query(
+            "SELECT scope, provider_id, raw_symbol, canonical_symbol FROM symbol_aliases ORDER BY scope, provider_id, raw_symbol",
+          )
+          .all(),
+        configHistory: db
+          .query(
+            "SELECT provider_id, config_json FROM provider_config_history ORDER BY provider_id, created_at",
+          )
+          .all(),
+      };
+      db.close();
+
+      createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: false,
+        telegramPollingEnabled: false,
+      });
+
+      const verifyDb = new Database(databasePath);
+      expect(
+        verifyDb
+          .query(
+            "SELECT account_id, provider_id, enabled FROM account_provider_links ORDER BY account_id, provider_id",
+          )
+          .all(),
+      ).toEqual(before.links);
+      expect(
+        verifyDb
+          .query("SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id")
+          .all(),
+      ).toEqual(before.mappings);
+      expect(
+        verifyDb
+          .query(
+            "SELECT scope, provider_id, raw_symbol, canonical_symbol FROM symbol_aliases ORDER BY scope, provider_id, raw_symbol",
+          )
+          .all(),
+      ).toEqual(before.aliases);
+      expect(
+        verifyDb
+          .query(
+            "SELECT provider_id, config_json FROM provider_config_history ORDER BY provider_id, created_at",
+          )
+          .all(),
+      ).toEqual(before.configHistory);
+      const audit = verifyDb
+        .query("SELECT level, event_type FROM audit_logs WHERE event_type = ?")
+        .get("operator-state.preserved") as { level: string; event_type: string } | null;
+      verifyDb.close();
+      expect(audit).toEqual({ level: "info", event_type: "operator-state.preserved" });
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
