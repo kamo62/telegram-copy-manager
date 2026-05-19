@@ -2,6 +2,7 @@ services:
   app:
     build: .
     image: telegram-tc:local
+    restart: unless-stopped
     ports:
       - "18787:8787"
     env_file:

@@ -588,6 +588,16 @@ export function createApi(options: ApiOptions = {}) {
     c.json(store.mt5AccountLogs(c.req.param("accountId"))),
   );
 
+  // Active virtual-TP plans for diagnostics and backward-compatible inspection.
+  // Current EA builds no longer consume this endpoint; TP ownership lives in the app.
+  app.get("/api/mt5/active-plans", (c) => {
+    const accountId = c.req.query("accountId");
+    if (!accountId) return c.text("error=accountId is required\n", 400);
+    return c.text(renderActiveVirtualTpPlansLine(store.activeVirtualTpPlans(accountId)), 200, {
+      "content-type": "text/plain; charset=utf-8",
+    });
+  });
+
   app.get("/api/trades/:id/broker-orders", (c) =>
     c.json({ orders: store.brokerOrders(c.req.param("id")) }),
   );
@@ -2255,6 +2265,11 @@ class AppStore {
       );
     this.reconcileSnapshotState(input.accountId, input.positions, input.orders);
     this.reconcileManualBrokerClosures(input.accountId, input.positions, input.orders);
+    this.evaluateVirtualTakeProfits({
+      accountId: input.accountId,
+      positions: input.positions,
+      symbols: input.symbols,
+    });
     // Snapshots arrive every ~2 s per account. The full payload is already
     // persisted in mt5_snapshots; writing an audit_logs row per poll was
     // producing ~43k rows/day per account with zero diagnostic value.
@@ -2264,6 +2279,65 @@ class AppStore {
       openPositionCount: input.positions.length,
       pendingOrderCount: input.orders.length,
     };
+  }
+
+  private evaluateVirtualTakeProfits(input: {
+    accountId: string;
+    positions: unknown[];
+    symbols?: unknown[];
+  }) {
+    const quotes = quotesBySymbol(input.symbols ?? []);
+    for (const trade of this.logicalTrades().filter(
+      (item) =>
+        item.accountId === input.accountId &&
+        item.status === "OPEN" &&
+        item.executionMode === "VIRTUAL_TP",
+    )) {
+      const position = matchedBrokerRecordForTrade(
+        input.positions,
+        trade,
+        this.brokerOrderTicketsForTrade(trade.id),
+      );
+      if (!position) continue;
+      const positionTicket = brokerTicketFromSnapshot(position);
+      if (!positionTicket) continue;
+      const quote = quotes.get(
+        (trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "").toUpperCase(),
+      );
+      if (!quote) continue;
+      const price = trade.direction === "BUY" ? quote.bid : quote.ask;
+      if (!price) continue;
+      const openPrice =
+        brokerOpenPriceFromSnapshot(position) ??
+        this.openPriceForTrade(trade.id) ??
+        trade.entry?.from;
+      for (const leg of trade.legs) {
+        if (leg.status !== "OPEN") continue;
+        const targetPrice = virtualTpTargetPrice(trade, leg, openPrice, quote.point);
+        if (!targetPrice) continue;
+        const hit = trade.direction === "BUY" ? price >= targetPrice : price <= targetPrice;
+        if (!hit) continue;
+        const queued = this.queueVirtualTpClose(trade, leg.leg, positionTicket, price);
+        if (queued) {
+          const updated: LogicalTrade = {
+            ...trade,
+            legs: trade.legs.map((item) =>
+              item.leg === leg.leg
+                ? {
+                    ...item,
+                    status: "HIT",
+                    brokerEvidence: `app price ${price} crossed TP${leg.leg} ${targetPrice}`,
+                  }
+                : item,
+            ),
+          };
+          this.db
+            .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+            .run(updated.status, JSON.stringify(updated), trade.id);
+        }
+        break;
+      }
+    }
   }
 
   saveBrokerHistory(input: { accountId: string; deals: Mt5HistoryDealInput[] }) {
@@ -2277,9 +2351,10 @@ class AppStore {
       const tradeId = this.logicalTradeIdForHistoryDeal(deal);
       if (!tradeId) continue;
       const open = this.openBrokerOrderForDeal(tradeId, deal);
+      const positionTicket = String(deal.positionTicket || open?.position_ticket || "");
       const action = historyDealAction(
         deal,
-        open ? this.positionStillOpen(input.accountId, String(open.position_ticket ?? "")) : false,
+        this.positionStillOpen(input.accountId, positionTicket),
       );
       const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
       const trade = this.logicalTrade(tradeId);
@@ -2294,6 +2369,26 @@ class AppStore {
           ? Number((signedPips / brokerPipSize(deal.symbol ?? "")).toFixed(1))
           : null;
       const source = brokerOrderSourceForDealReason(deal.reason);
+      // If a snapshot-diff synthetic 'manual' close was written first (it
+      // races the broker's history sweep by a few seconds), delete it before
+      // recording the real close — otherwise the trade would show two close
+      // legs in the Closed view, one with null P/L and one with the real P/L.
+      if (
+        (action === "FULL_CLOSE" || action === "PARTIAL_CLOSE") &&
+        source !== "manual" &&
+        positionTicket
+      ) {
+        this.db
+          .query(
+            `DELETE FROM broker_orders
+             WHERE logical_trade_id = ?
+               AND action = 'FULL_CLOSE'
+               AND source = 'manual'
+               AND position_ticket = ?
+               AND broker_comment = 'Manual terminal intervention detected from snapshot diff'`,
+          )
+          .run(tradeId, positionTicket);
+      }
       this.db
         .query(
           `INSERT INTO broker_orders
@@ -2323,9 +2418,364 @@ class AppStore {
           source,
           deal.time ?? new Date().toISOString(),
         );
+      this.reconcileHistoryDeal(tradeId, deal, action, source, positionTicket);
       recorded += 1;
     }
     return { accountId: input.accountId, received: input.deals.length, recorded };
+  }
+
+  private originalOpenQueue(tradeId: string) {
+    const row = this.db
+      .query(
+        `SELECT parsed_signal_id, payload_json FROM queue_items
+         WHERE logical_trade_id = ?
+         ORDER BY created_at ASC LIMIT 1`,
+      )
+      .get(tradeId) as Row | null;
+    if (!row) return undefined;
+    return {
+      parsedSignalId: String(row.parsed_signal_id),
+      payload: parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json)),
+    };
+  }
+
+  private queueVirtualTpClose(
+    trade: LogicalTrade,
+    legNumber: number,
+    positionTicket: string,
+    triggerPrice: number,
+  ) {
+    if (
+      this.hasLifecycleQueue(
+        trade.id,
+        (payload) =>
+          payload.commandType === "CLOSE_PARTIAL" &&
+          payload.partialClose?.kind === "TP_LEG" &&
+          payload.partialClose.value === legNumber,
+      )
+    ) {
+      return true;
+    }
+    const open = this.originalOpenQueue(trade.id);
+    if (!open) return false;
+    const leg = trade.legs.find((item) => item.leg === legNumber);
+    if (!leg) return false;
+    const plannedTp = open.payload.takeProfits.find((item) => item.leg === legNumber);
+    const managedVolume = managedVirtualTpVolume(open.payload);
+    const volume =
+      plannedTp?.volume ??
+      (managedVolume > 0
+        ? Number(((managedVolume * leg.allocationPercent) / 100).toFixed(2))
+        : undefined);
+    if (!volume || volume <= 0) return false;
+    const item: ExecutionQueueItem = {
+      id: `queue_${nanoid(10)}`,
+      accountId: trade.accountId,
+      logicalTradeId: trade.id,
+      status: "PENDING",
+      payload: {
+        commandType: "CLOSE_PARTIAL",
+        brokerSymbol: trade.symbol.brokerSymbol,
+        canonicalSymbol: trade.symbol.canonicalSymbol,
+        direction: trade.direction,
+        partialClose: {
+          kind: "TP_LEG",
+          value: legNumber,
+          allocationPercent: leg.allocationPercent,
+          volume,
+        },
+        takeProfits: [],
+        executionMode: "VIRTUAL_TP",
+        volume: open.payload.volume,
+        runner: open.payload.runner,
+        targetPositionTicket: positionTicket,
+        originalText: `App-managed TP${legNumber} hit at ${triggerPrice}`,
+      },
+    };
+    this.insertQueueItem(item, open.parsedSignalId);
+    this.audit("virtual-tp.hit", "info", "App-managed virtual TP queued a partial close", {
+      logicalTradeId: trade.id,
+      leg: legNumber,
+      triggerPrice,
+      positionTicket,
+    });
+    return true;
+  }
+
+  private queueSlStrategyAfterTpClose(
+    trade: LogicalTrade,
+    legNumber: number,
+    positionTicket: string,
+  ) {
+    const open = this.originalOpenQueue(trade.id);
+    if (!open) return;
+    const leg = trade.legs.find((item) => item.leg === legNumber);
+    const strategy = leg?.strategy;
+    if (strategy && strategy.kind !== "no-change") {
+      const newStopLoss = this.strategyStopPrice(trade, strategy);
+      if (newStopLoss) {
+        this.queueModifySlAfterVirtualTp({
+          trade,
+          positionTicket,
+          newStopLoss,
+          parsedSignalId: open.parsedSignalId,
+          originalText: `App-managed TP${legNumber} SL strategy`,
+          auditEvent: "virtual-tp.sl-strategy",
+          auditMessage: "App-managed virtual TP queued SL strategy",
+          auditFields: { leg: legNumber },
+        });
+      }
+    }
+
+    this.queueRunnerManagementAfterFinalTp(trade, legNumber, positionTicket, open);
+  }
+
+  private queueModifySlAfterVirtualTp(input: {
+    trade: LogicalTrade;
+    positionTicket: string;
+    newStopLoss: number;
+    parsedSignalId: string;
+    originalText: string;
+    auditEvent: string;
+    auditMessage: string;
+    auditFields?: Record<string, unknown>;
+  }) {
+    if (
+      this.hasLifecycleQueue(
+        input.trade.id,
+        (payload) =>
+          payload.commandType === "MODIFY_SL" &&
+          payload.targetPositionTicket === input.positionTicket &&
+          payload.newStopLoss === input.newStopLoss,
+      )
+    ) {
+      return;
+    }
+    const item: ExecutionQueueItem = {
+      id: `queue_${nanoid(10)}`,
+      accountId: input.trade.accountId,
+      logicalTradeId: input.trade.id,
+      status: "PENDING",
+      payload: {
+        commandType: "MODIFY_SL",
+        brokerSymbol: input.trade.symbol.brokerSymbol,
+        canonicalSymbol: input.trade.symbol.canonicalSymbol,
+        direction: input.trade.direction,
+        newStopLoss: input.newStopLoss,
+        takeProfits: [],
+        executionMode: "VIRTUAL_TP",
+        targetPositionTicket: input.positionTicket,
+        originalText: input.originalText,
+      },
+    };
+    this.insertQueueItem(item, input.parsedSignalId);
+    this.audit(input.auditEvent, "info", input.auditMessage, {
+      logicalTradeId: input.trade.id,
+      newStopLoss: input.newStopLoss,
+      positionTicket: input.positionTicket,
+      ...(input.auditFields ?? {}),
+    });
+  }
+
+  private queueRunnerManagementAfterFinalTp(
+    trade: LogicalTrade,
+    legNumber: number,
+    positionTicket: string,
+    open: { parsedSignalId: string; payload: ExecutionQueueItem["payload"] },
+  ) {
+    const runner = open.payload.runner;
+    if (!runner?.enabled || runner.lotSize <= 0) return;
+    const nextLegs = trade.legs.map((leg) =>
+      leg.leg === legNumber ? { ...leg, status: "CLOSED" as const } : leg,
+    );
+    if (!nextLegs.length || nextLegs.some((leg) => leg.status !== "CLOSED")) return;
+
+    if (runner.slBehavior === "trail") {
+      if (!runner.trailPips || runner.trailPips <= 0) return;
+      if (
+        this.hasLifecycleQueue(
+          trade.id,
+          (payload) =>
+            payload.commandType === "TRAILING_STOP" &&
+            payload.targetPositionTicket === positionTicket &&
+            payload.trailingStop?.value === runner.trailPips &&
+            payload.trailingStop.unit === "PIPS",
+        )
+      ) {
+        return;
+      }
+      const item: ExecutionQueueItem = {
+        id: `queue_${nanoid(10)}`,
+        accountId: trade.accountId,
+        logicalTradeId: trade.id,
+        status: "PENDING",
+        payload: {
+          commandType: "TRAILING_STOP",
+          brokerSymbol: trade.symbol.brokerSymbol,
+          canonicalSymbol: trade.symbol.canonicalSymbol,
+          direction: trade.direction,
+          trailingStop: { value: runner.trailPips, unit: "PIPS" },
+          takeProfits: [],
+          executionMode: "VIRTUAL_TP",
+          targetPositionTicket: positionTicket,
+          originalText: "App-managed runner trailing stop",
+        },
+      };
+      this.insertQueueItem(item, open.parsedSignalId);
+      this.audit("virtual-tp.runner-trail", "info", "App-managed runner queued trailing stop", {
+        logicalTradeId: trade.id,
+        positionTicket,
+        trailPips: runner.trailPips,
+      });
+      return;
+    }
+
+    const newStopLoss =
+      runner.slBehavior === "last-tp"
+        ? this.lastClosedVirtualTpPrice({ ...trade, legs: nextLegs })
+        : this.openPriceForTrade(trade.id);
+    if (!newStopLoss) return;
+    this.queueModifySlAfterVirtualTp({
+      trade,
+      positionTicket,
+      newStopLoss,
+      parsedSignalId: open.parsedSignalId,
+      originalText: "App-managed runner SL strategy",
+      auditEvent: "virtual-tp.runner-sl",
+      auditMessage: "App-managed runner queued SL strategy",
+    });
+  }
+
+  private lastClosedVirtualTpPrice(trade: LogicalTrade) {
+    const openPrice = this.openPriceForTrade(trade.id) ?? trade.entry?.from;
+    for (const leg of trade.legs.slice().sort((left, right) => right.leg - left.leg)) {
+      if (leg.status !== "CLOSED") continue;
+      const price = virtualTpTargetPrice(trade, leg, openPrice);
+      if (price) return price;
+    }
+    return undefined;
+  }
+
+  private hasLifecycleQueue(
+    tradeId: string,
+    matches: (payload: ExecutionQueueItem["payload"]) => boolean,
+  ) {
+    const rows = this.db
+      .query(
+        `SELECT status, payload_json FROM queue_items
+         WHERE logical_trade_id = ?
+         ORDER BY created_at DESC`,
+      )
+      .all(tradeId) as Row[];
+    return rows.some((row) => {
+      const status = String(row.status);
+      if (!["PENDING", "LEASED", "EXECUTED"].includes(status)) return false;
+      return matches(parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json)));
+    });
+  }
+
+  private strategyStopPrice(trade: LogicalTrade, strategy: TakeProfitStrategy) {
+    const symbol = trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "";
+    const pipSize = brokerPipSize(symbol);
+    const offset = strategy.kind === "no-change" ? 0 : strategy.offsetPips * pipSize;
+    let basePrice = 0;
+    if (strategy.kind === "set-sl-to-entry") {
+      basePrice = this.openPriceForTrade(trade.id) ?? trade.entry?.from ?? 0;
+    } else if (strategy.kind === "set-sl-to-tp") {
+      basePrice = trade.legs.find((leg) => leg.leg === strategy.tpLeg)?.targetPrice ?? 0;
+    }
+    if (!basePrice) return undefined;
+    const next = trade.direction === "BUY" ? basePrice + offset : basePrice - offset;
+    return Number(next.toFixed(5));
+  }
+
+  private openPriceForTrade(tradeId: string) {
+    const row = this.db
+      .query(
+        `SELECT filled_price, requested_price FROM broker_orders
+         WHERE logical_trade_id = ?
+           AND action = 'OPEN'
+           AND position_ticket IS NOT NULL
+           AND position_ticket NOT IN ('','0')
+           AND filled_price IS NOT NULL
+           AND filled_price > 0
+         ORDER BY created_at ASC
+         LIMIT 1`,
+      )
+      .get(tradeId) as Row | null;
+    const filled = nullableNumber(row?.filled_price);
+    if (filled && filled > 0) return filled;
+    const requested = nullableNumber(row?.requested_price);
+    return requested && requested > 0 ? requested : undefined;
+  }
+
+  private reconcileHistoryDeal(
+    tradeId: string,
+    deal: Mt5HistoryDealInput,
+    action: string,
+    source: string,
+    positionTicket: string,
+  ) {
+    const trade = this.logicalTrade(tradeId);
+    if (!trade) return;
+    const evidence = [source, deal.comment, deal.dealTicket ? `deal:${deal.dealTicket}` : ""]
+      .filter(Boolean)
+      .join(" | ");
+    let updated: LogicalTrade = trade;
+    let closedLeg: number | undefined;
+    if (action === "OPEN") {
+      updated = {
+        ...trade,
+        status: "OPEN",
+        outOfSyncReason: undefined,
+        livePositionExists: true,
+        matchedBrokerTickets: positionTicket ? [positionTicket] : trade.matchedBrokerTickets,
+        brokerComment: deal.comment,
+        lastSnapshotAt: deal.time ?? new Date().toISOString(),
+        legs: trade.legs.map((leg) =>
+          leg.status === "PLANNED" ? { ...leg, status: "OPEN", brokerEvidence: evidence } : leg,
+        ),
+      };
+    } else if (action === "PARTIAL_CLOSE") {
+      const legId = historyDealLegId(deal);
+      const match = legId.match(/^tp(\d)$/);
+      closedLeg = match?.[1] ? Number(match[1]) : undefined;
+      if (!closedLeg) return;
+      const legs = trade.legs.map((leg) =>
+        leg.leg === closedLeg
+          ? { ...leg, status: "CLOSED" as const, brokerEvidence: evidence }
+          : leg,
+      );
+      const openPayload = this.originalOpenQueue(trade.id)?.payload;
+      updated = {
+        ...trade,
+        status: virtualTpStatusAfterLegClose(trade, legs, openPayload),
+        legs,
+      };
+    } else if (action === "FULL_CLOSE") {
+      updated = {
+        ...trade,
+        status: "CLOSED",
+        livePositionExists: false,
+        outOfSyncReason: undefined,
+        matchedBrokerTickets: positionTicket ? [positionTicket] : trade.matchedBrokerTickets,
+        brokerComment: deal.comment,
+        lastSnapshotAt: deal.time ?? new Date().toISOString(),
+        legs: trade.legs.map((leg) =>
+          leg.status === "CLOSED"
+            ? leg
+            : { ...leg, status: "SKIPPED" as const, brokerEvidence: evidence },
+        ),
+      };
+    }
+    if (JSON.stringify(updated) !== JSON.stringify(trade)) {
+      this.db
+        .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+        .run(updated.status, JSON.stringify(updated), trade.id);
+    }
+    if (closedLeg && positionTicket) {
+      this.queueSlStrategyAfterTpClose(updated, closedLeg, positionTicket);
+    }
   }
 
   mt5Accounts() {
@@ -2336,23 +2786,56 @@ class AppStore {
           "SELECT id, account_number, server, company, currency, balance, equity, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at FROM mt5_accounts ORDER BY account_number",
         )
         .all() as Row[]
-    ).map((row) => ({
-      id: String(row.id),
-      accountNumber: String(row.account_number),
-      server: String(row.server),
-      company: String(row.company),
-      currency: String(row.currency),
-      balance: Number(row.balance),
-      equity: Number(row.equity),
-      initialBalance: Number(row.initial_balance ?? row.balance),
-      marginMode: String(row.margin_mode),
-      heartbeatStatus: heartbeatFreshness(String(row.last_heartbeat_at)),
-      availableSymbols: parseJson<string[]>(String(row.available_symbols_json)),
-      lastHeartbeatAt: String(row.last_heartbeat_at),
-      openPositionCount: snapshots[String(row.id)]?.positions.length ?? 0,
-      pendingOrderCount: snapshots[String(row.id)]?.orders.length ?? 0,
-      lastSnapshotAt: snapshots[String(row.id)]?.updatedAt,
-    }));
+    ).map((row) => {
+      const snap = snapshots[String(row.id)];
+      const positions = (snap?.positions ?? []) as Array<Record<string, unknown>>;
+      const orders = (snap?.orders ?? []) as Array<Record<string, unknown>>;
+      const isExternalFlag = (record: Record<string, unknown>) =>
+        record.isExternal === true || record.isExternal === "true";
+      const appPositionsRaw = positions.filter((p) => !isExternalFlag(p));
+      const appOrdersRaw = orders.filter((o) => !isExternalFlag(o));
+      const externalPositions = positions.filter(isExternalFlag).map(externalRecord);
+      const externalOrders = orders.filter(isExternalFlag).map(externalRecord);
+      // App positions go through the same `externalRecord` strip — the shape is
+      // identical and the distinction is which array a row lives in, not what
+      // fields it carries. UI uses this for the Open Positions table.
+      const appPositions = appPositionsRaw.map(externalRecord);
+      const appOrders = appOrdersRaw.map(externalRecord);
+      // Surface the snapshot's per-symbol market quote so the UI can compute
+      // "current price" for open positions (BUY closes at bid, SELL at ask).
+      const symbols = (snap?.symbols ?? []) as Array<Record<string, unknown>>;
+      const accountId = String(row.id);
+      return {
+        id: accountId,
+        accountNumber: String(row.account_number),
+        server: String(row.server),
+        company: String(row.company),
+        currency: String(row.currency),
+        balance: Number(row.balance),
+        equity: Number(row.equity),
+        initialBalance: Number(row.initial_balance ?? row.balance),
+        marginMode: String(row.margin_mode),
+        heartbeatStatus: heartbeatFreshness(String(row.last_heartbeat_at)),
+        availableSymbols: parseJson<string[]>(String(row.available_symbols_json)),
+        lastHeartbeatAt: String(row.last_heartbeat_at),
+        // Counts split into app-driven vs external so the UI can show both
+        // without conflating manual positions with our auto-copy state.
+        openPositionCount: appPositions.length,
+        pendingOrderCount: appOrders.length,
+        externalPositionCount: externalPositions.length,
+        externalOrderCount: externalOrders.length,
+        appPositions,
+        appOrders,
+        externalPositions,
+        externalOrders,
+        symbols,
+        // Per-signal rollup for the History › Closed sub-tab. See
+        // `closedTradesForAccount` for the shape; broker-level leg detail is
+        // nested under each trade for the expand-row UX.
+        closedTrades: this.closedTradesForAccount(accountId),
+        lastSnapshotAt: snap?.updatedAt,
+      };
+    });
   }
 
   accountSlots() {
@@ -2586,6 +3069,66 @@ class AppStore {
     };
   }
 
+  /**
+   * Open VIRTUAL_TP plans for the given account. Kept as a diagnostics surface
+   * and backward-compatible app API while the app owns virtual TP decisions.
+   * Returns the original OPEN_TRADE payload, queue item id, matched broker
+   * position ticket, and compact logical-trade id.
+   */
+  activeVirtualTpPlans(accountId: string) {
+    const trades = this.logicalTrades().filter(
+      (trade) =>
+        trade.accountId === accountId &&
+        trade.status === "OPEN" &&
+        trade.executionMode === "VIRTUAL_TP" &&
+        trade.legs.some((leg) => leg.status === "OPEN" || leg.status === "HIT"),
+    );
+    const plans: Array<{
+      logicalTradeId: string;
+      shortId: string;
+      queueItemId: string;
+      symbol: string;
+      direction: string;
+      positionTicket: string;
+      payload: ExecutionQueueItem["payload"];
+    }> = [];
+    for (const trade of trades) {
+      // Find the original OPEN_TRADE queue item (not subsequent lifecycle ones).
+      const queueRow = this.db
+        .query(
+          `SELECT id, payload_json FROM queue_items
+           WHERE logical_trade_id = ?
+           ORDER BY created_at ASC LIMIT 1`,
+        )
+        .get(trade.id) as Row | null;
+      if (!queueRow) continue;
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(queueRow.payload_json));
+      if (payload.commandType !== "OPEN_TRADE") continue;
+      const openOrder = this.db
+        .query(
+          `SELECT position_ticket FROM broker_orders
+           WHERE logical_trade_id = ?
+             AND action = 'OPEN'
+             AND position_ticket IS NOT NULL
+             AND position_ticket NOT IN ('','0')
+             AND filled_price IS NOT NULL
+             AND filled_price > 0
+           ORDER BY created_at ASC LIMIT 1`,
+        )
+        .get(trade.id) as Row | null;
+      plans.push({
+        logicalTradeId: trade.id,
+        shortId: shortLogicalTradeId(trade.id),
+        queueItemId: String(queueRow.id),
+        symbol: payload.brokerSymbol ?? payload.canonicalSymbol ?? "",
+        direction: payload.direction ?? "",
+        positionTicket: String(openOrder?.position_ticket ?? ""),
+        payload,
+      });
+    }
+    return plans;
+  }
+
   brokerOrders(logicalTradeId: string) {
     return (
       this.db
@@ -2636,18 +3179,27 @@ class AppStore {
     }
     const initial = primary.initialBalance || primary.balance;
     const accountOrders = this.brokerOrdersForAccount(primary.id);
-    const brokerPnl = sumPnl(accountOrders);
-    const totalProfit = accountOrders.length ? brokerPnl : primary.equity - initial;
+    const realizedPnl = sumPnl(accountOrders);
+    const floatingPnl = floatingPnlFromPositions(
+      this.mt5SnapshotsByAccount()[primary.id]?.positions ?? [],
+    );
+    const totalProfit = roundCurrency(realizedPnl + floatingPnl);
+    const netDeposits = roundCurrency(primary.equity - initial - totalProfit);
     return {
       accountId: primary.id,
       currency: primary.currency,
       initialBalance: initial,
+      currentBalance: primary.balance,
+      currentEquity: primary.equity,
       totalProfit,
+      realizedPnl,
+      floatingPnl,
+      netDeposits,
       today: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 1))),
       thisWeek: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 7))),
       thisMonth: sumPnl(accountOrders.filter((order) => withinCurrentMonth(order.createdAt))),
       equityCurve: this.equityCurve(primary.id, initial, accountOrders),
-      monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders),
+      monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders, floatingPnl),
     };
   }
 
@@ -2698,7 +3250,11 @@ class AppStore {
     const points = [{ x: 0, equity, drawdown: 0 }];
     orders
       .filter((order) => order.pnlCurrency !== undefined)
-      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+      .sort(
+        (a, b) =>
+          Date.parse(normalizedDateInput(a.createdAt)) -
+          Date.parse(normalizedDateInput(b.createdAt)),
+      )
       .forEach((order, index) => {
         equity += order.pnlCurrency ?? 0;
         peak = Math.max(peak, equity);
@@ -2708,12 +3264,18 @@ class AppStore {
           drawdown: drawdownPercent(peak, equity),
         });
       });
-    if (points.length === 1)
+    const floatingPnl = floatingPnlFromPositions(
+      this.mt5SnapshotsByAccount()[accountId]?.positions ?? [],
+    );
+    const currentTradingEquity = roundCurrency(initial + sumPnl(orders) + floatingPnl);
+    if (points.length === 1 || points[points.length - 1]?.equity !== currentTradingEquity) {
+      peak = Math.max(peak, currentTradingEquity);
       points.push({
-        x: 1,
-        equity: account.equity,
-        drawdown: drawdownPercent(account.balance, account.equity),
+        x: points.length,
+        equity: currentTradingEquity,
+        drawdown: drawdownPercent(peak, currentTradingEquity),
       });
+    }
     return points;
   }
 
@@ -2721,19 +3283,26 @@ class AppStore {
     accountId: string,
     initialBalance: number,
     orders = this.brokerOrdersForAccount(accountId),
+    floatingPnl = floatingPnlFromPositions(
+      this.mt5SnapshotsByAccount()[accountId]?.positions ?? [],
+    ),
   ) {
     const account = this.mt5Accounts().find((item) => item.id === accountId);
     if (!account || initialBalance <= 0) return [];
     const byMonth = new Map<string, number>();
     for (const order of orders) {
-      const month = order.createdAt.slice(0, 7);
+      const month = monthKey(order.createdAt);
       byMonth.set(month, (byMonth.get(month) ?? 0) + (order.pnlCurrency ?? 0));
+    }
+    const currentMonth = new Date().toISOString().slice(0, 7);
+    if (floatingPnl !== 0) {
+      byMonth.set(currentMonth, (byMonth.get(currentMonth) ?? 0) + floatingPnl);
     }
     if (byMonth.size === 0) {
       return [
         {
-          month: new Date().toISOString().slice(0, 7),
-          returnPercent: ((account.equity - initialBalance) / initialBalance) * 100,
+          month: currentMonth,
+          returnPercent: 0,
         },
       ];
     }
@@ -2751,6 +3320,104 @@ class AppStore {
         )
         .all(accountId) as Row[]
     ).flatMap((row) => this.brokerOrders(String(row.logical_trade_id)));
+  }
+
+  /**
+   * Rolls up CLOSED logical trades on this account into a per-signal record for
+   * the History › Closed sub-tab. Each entry summarises the trade at signal
+   * level (entry ticket, weighted-avg open/close, total realized P/L, why it
+   * closed) plus a `legs[]` array of individual close events so the UI can
+   * expand for per-TP detail without a second roundtrip.
+   *
+   * Trades are considered "closed" when status === "CLOSED" — this excludes
+   * OPEN, PENDING, and OUT_OF_SYNC trades (which belong in History › Open).
+   */
+  closedTradesForAccount(accountId: string) {
+    const trades = this.logicalTrades().filter(
+      (trade) => trade.accountId === accountId && trade.status === "CLOSED",
+    );
+    return trades
+      .map((trade) => {
+        const orders = this.brokerOrders(trade.id);
+        const openEvents = orders.filter(isRealOpenBrokerOrder);
+        const closeEvents = orders.filter(
+          (o) => o.action === "FULL_CLOSE" || o.action === "PARTIAL_CLOSE",
+        );
+        // Without any close events we can't say the trade is "done" from the
+        // broker's perspective even if logical status is CLOSED — skip.
+        if (closeEvents.length === 0) return null;
+        const entry = openEvents[0];
+        const entryTicket = entry?.positionTicket || entry?.orderTicket || "";
+        const totalOpenVolume = openEvents.reduce((sum, o) => sum + (o.filledVolume ?? 0), 0);
+        const weightedOpenPrice =
+          totalOpenVolume > 0
+            ? openEvents.reduce((sum, o) => sum + (o.filledPrice ?? 0) * (o.filledVolume ?? 0), 0) /
+              totalOpenVolume
+            : (entry?.filledPrice ?? 0);
+        const totalCloseVolume = closeEvents.reduce((sum, o) => sum + (o.filledVolume ?? 0), 0);
+        const weightedClosePrice =
+          totalCloseVolume > 0
+            ? closeEvents.reduce(
+                (sum, o) => sum + (o.filledPrice ?? 0) * (o.filledVolume ?? 0),
+                0,
+              ) / totalCloseVolume
+            : 0;
+        const realizedPnl = closeEvents.reduce((sum, o) => sum + (o.pnlCurrency ?? 0), 0);
+        const closedAt = closeEvents
+          .map((o) => o.createdAt)
+          .sort()
+          .reverse()[0]!;
+        const result = deriveCloseResult(closeEvents.map((o) => o.source));
+        const origin = closeEvents.some((o) => o.source.startsWith("manual")) ? "manual" : "ea";
+        const tpLegs = trade.legs
+          .filter((leg) => leg.targetPrice !== undefined || leg.defaultDistance !== undefined)
+          .map((leg) => ({
+            leg: leg.leg,
+            targetPrice: leg.targetPrice,
+            hit: leg.status === "HIT" || leg.status === "CLOSED",
+          }));
+        const tpHits = tpLegs.filter((leg) => leg.hit).length;
+        const legs = closeEvents.map((order) => {
+          const legIndex = parseLegIndex(order.legId);
+          const matchingTpLeg =
+            legIndex !== undefined ? trade.legs.find((leg) => leg.leg === legIndex) : undefined;
+          return {
+            id: order.id,
+            action: order.action,
+            legId: order.legId,
+            legIndex,
+            targetPrice: matchingTpLeg?.targetPrice,
+            volume: order.filledVolume ?? 0,
+            price: order.filledPrice ?? 0,
+            pnl: order.pnlCurrency ?? 0,
+            source: order.source,
+            closedAt: order.createdAt,
+            orderTicket: order.orderTicket,
+            positionTicket: order.positionTicket,
+            dealTicket: order.dealTicket,
+          };
+        });
+        return {
+          tradeId: trade.id,
+          shortId: shortLogicalTradeId(trade.id),
+          ticket: entryTicket,
+          symbol: trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "unmapped",
+          direction: trade.direction,
+          origin,
+          volume: roundLot(totalOpenVolume),
+          openPrice: weightedOpenPrice,
+          closePrice: weightedClosePrice,
+          realizedPnl: roundCurrency(realizedPnl),
+          result,
+          closedAt,
+          tpLegs,
+          tpHitCount: tpHits,
+          tpTotal: tpLegs.length,
+          legs,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      .sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1));
   }
 
   mt5AccountLogs(accountId: string) {
@@ -3092,6 +3759,14 @@ class AppStore {
         marginMode: account.marginMode,
         openPositionCount: account.openPositionCount,
         pendingOrderCount: account.pendingOrderCount,
+        externalPositionCount: account.externalPositionCount,
+        externalOrderCount: account.externalOrderCount,
+        appPositions: account.appPositions,
+        appOrders: account.appOrders,
+        externalPositions: account.externalPositions,
+        externalOrders: account.externalOrders,
+        symbols: account.symbols,
+        closedTrades: account.closedTrades,
         lastSnapshotAt: account.lastSnapshotAt,
       })),
       parserResults: parsed.slice(0, 8).map((signal) => ({
@@ -3450,6 +4125,143 @@ class AppStore {
         created_at TEXT NOT NULL
       );
     `);
+    this.backfillStuckOutOfSyncTrades();
+  }
+
+  /**
+   * One-shot reconciliation for OUT_OF_SYNC logical_trades that already have a
+   * real close recorded in broker_orders. These got stuck because every
+   * snapshot poll used to overwrite their status back to OUT_OF_SYNC (race
+   * with the history sweep — see hasRecordedRealFullClose comment). The fix
+   * landed alongside this migration; this method heals trades that drifted
+   * before the fix was deployed.
+   *
+   * Two operations per affected trade:
+   * 1. Delete the synthetic 'manual' FULL_CLOSE row from snapshot-diff if a
+   *    real-source FULL_CLOSE exists for the same position — otherwise the
+   *    Closed view would count one close twice (once with pnl=null, once with
+   *    the real pnl).
+   * 2. Flip logical_trade.status to CLOSED + mark legs SKIPPED for any that
+   *    were still PLANNED (the close fired before the TPs ran).
+   *
+   * Idempotent across restarts: a CLOSED trade with no duplicate manual row
+   * matches nothing and the loop is a no-op.
+   */
+  private backfillStuckOutOfSyncTrades() {
+    const stuck = this.db
+      .query(`SELECT id, data_json FROM logical_trades WHERE status = 'OUT_OF_SYNC'`)
+      .all() as Row[];
+    if (stuck.length === 0) return;
+    let healed = 0;
+    for (const row of stuck) {
+      const tradeId = String(row.id);
+      const realClose = this.db
+        .query(
+          `SELECT position_ticket, source, broker_comment, pnl_currency, created_at
+           FROM broker_orders
+           WHERE logical_trade_id = ?
+             AND action = 'FULL_CLOSE'
+             AND source IN ('sl-hit','tp-hit','expert','stop-out','manual-terminal','manual-mobile','manual-web','history')
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(tradeId) as Row | null;
+      if (!realClose) {
+        const hasRecoverableOpen = this.db
+          .query(
+            `SELECT 1 FROM broker_orders
+             WHERE logical_trade_id = ?
+               AND (
+                 (
+                   action = 'OPEN'
+                   AND position_ticket IS NOT NULL
+                   AND position_ticket NOT IN ('','0')
+                   AND filled_price IS NOT NULL
+                   AND filled_price > 0
+                 )
+                 OR (
+                   action = 'PENDING_OPEN'
+                   AND order_ticket IS NOT NULL
+                   AND order_ticket NOT IN ('','0')
+                 )
+               )
+             LIMIT 1`,
+          )
+          .get(tradeId) as Row | null;
+        if (!hasRecoverableOpen) {
+          const trade = parseJson<LogicalTrade>(String(row.data_json));
+          const evidence =
+            "No broker OPEN row recorded; trade cannot be recovered from MT5 history";
+          const updated: LogicalTrade = {
+            ...trade,
+            status: "CANCELLED",
+            livePositionExists: false,
+            outOfSyncReason: undefined,
+            matchedBrokerTickets: [],
+            brokerComment: undefined,
+            legs: trade.legs.map((leg) =>
+              leg.status === "CLOSED"
+                ? leg
+                : { ...leg, status: "SKIPPED", brokerEvidence: evidence },
+            ),
+          };
+          this.db
+            .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+            .run("CANCELLED", JSON.stringify(updated), tradeId);
+          healed += 1;
+        }
+        continue;
+      }
+      const positionTicket = String(realClose.position_ticket ?? "");
+      if (positionTicket) {
+        // Drop the synthetic snapshot-diff row that pre-empted the real close.
+        // Targeted by the comment + source + position combo to avoid touching
+        // any actually-manual close the operator made through the terminal
+        // (those have source='manual-terminal', not source='manual').
+        this.db
+          .query(
+            `DELETE FROM broker_orders
+             WHERE logical_trade_id = ?
+               AND action = 'FULL_CLOSE'
+               AND source = 'manual'
+               AND position_ticket = ?
+               AND broker_comment = 'Manual terminal intervention detected from snapshot diff'`,
+          )
+          .run(tradeId, positionTicket);
+      }
+      const trade = parseJson<LogicalTrade>(String(row.data_json));
+      const evidence = [
+        String(realClose.source),
+        String(realClose.broker_comment ?? ""),
+        `pnl:${realClose.pnl_currency ?? "0"}`,
+      ]
+        .filter(Boolean)
+        .join(" | ");
+      const updated: LogicalTrade = {
+        ...trade,
+        status: "CLOSED",
+        livePositionExists: false,
+        outOfSyncReason: undefined,
+        matchedBrokerTickets: positionTicket ? [positionTicket] : trade.matchedBrokerTickets,
+        lastSnapshotAt: String(realClose.created_at),
+        legs: trade.legs.map((leg) =>
+          leg.status === "CLOSED" || leg.status === "HIT"
+            ? leg
+            : { ...leg, status: "SKIPPED" as const, brokerEvidence: evidence },
+        ),
+      };
+      this.db
+        .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+        .run("CLOSED", JSON.stringify(updated), tradeId);
+      healed += 1;
+    }
+    if (healed > 0) {
+      this.audit(
+        "logical-trade.backfill",
+        "info",
+        `Reconciled ${healed} stuck OUT_OF_SYNC trade${healed === 1 ? "" : "s"} with recorded close events`,
+        { healed, scanned: stuck.length },
+      );
+    }
   }
 
   private ensureMockProvider(profileId: string) {
@@ -3788,23 +4600,50 @@ class AppStore {
   }
 
   private reconcileSnapshotState(accountId: string, positions: unknown[], orders: unknown[]) {
-    const brokerRecords = [...positions, ...orders];
     for (const trade of this.logicalTrades().filter((item) => item.accountId === accountId)) {
-      const hasBrokerState = trade.legs.some((leg) => leg.status !== "PLANNED");
-      if (!hasBrokerState || trade.status === "CLOSED") continue;
+      const hasBrokerState =
+        trade.status !== "PLANNED" || trade.legs.some((leg) => leg.status !== "PLANNED");
+      // Skip trades we already know are done. Without the hasRecordedRealFullClose
+      // guard, a snapshot poll would race the MT5 history sweep — history sets
+      // status='CLOSED' when an SL/TP/expert close arrives, then 2 seconds later
+      // the next snapshot doesn't see the ticket in positions[] and overwrites
+      // status back to 'OUT_OF_SYNC'. That's how we ended up with 6 stuck
+      // trades on prod despite the closes being recorded correctly.
+      if (!hasBrokerState || trade.status === "CLOSED" || trade.status === "CANCELLED") continue;
+      if (this.hasRecordedRealFullClose(trade.id)) continue;
 
-      const matched = brokerRecords.some((record) => brokerRecordContainsTrade(record, trade.id));
-      if (matched && trade.status === "OUT_OF_SYNC") {
-        this.db
-          .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
-          .run("OPEN", JSON.stringify({ ...trade, status: "OPEN" }), trade.id);
-      }
-      if (!matched && trade.status !== "OUT_OF_SYNC") {
-        this.db
-          .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
-          .run("OUT_OF_SYNC", JSON.stringify({ ...trade, status: "OUT_OF_SYNC" }), trade.id);
-      }
+      const match = snapshotMatchForTrade(
+        positions,
+        orders,
+        trade,
+        this.brokerOrderTicketsForTrade(trade.id),
+      );
+      const updated = snapshotSyncTradeState(trade, match);
+      if (JSON.stringify(updated) === JSON.stringify(trade)) continue;
+      this.db
+        .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+        .run(updated.status, JSON.stringify(updated), trade.id);
     }
+  }
+
+  /**
+   * True if there's at least one FULL_CLOSE row in broker_orders whose source
+   * is a real DEAL_REASON close (TP hit, SL hit, EA close, manual terminal /
+   * mobile / web, stop-out). Excludes the synthetic 'manual' rows written by
+   * the snapshot-diff sweep so we don't treat a transient snapshot gap as
+   * proof the trade is over.
+   */
+  private hasRecordedRealFullClose(tradeId: string): boolean {
+    const row = this.db
+      .query(
+        `SELECT 1 FROM broker_orders
+         WHERE logical_trade_id = ?
+           AND action = 'FULL_CLOSE'
+           AND source IN ('sl-hit','tp-hit','expert','stop-out','manual-terminal','manual-mobile','manual-web','history')
+         LIMIT 1`,
+      )
+      .get(tradeId) as Row | null;
+    return Boolean(row);
   }
 
   private logicalTradesForDashboard() {
@@ -3815,6 +4654,11 @@ class AppStore {
         direction: trade.direction,
         status: trade.status,
         executionMode: trade.executionMode,
+        outOfSyncReason: trade.outOfSyncReason,
+        livePositionExists: trade.livePositionExists,
+        matchedBrokerTickets: trade.matchedBrokerTickets,
+        brokerComment: trade.brokerComment,
+        lastSnapshotAt: trade.lastSnapshotAt,
         legs: trade.legs.map((leg) => ({
           leg: leg.leg,
           targetPrice: leg.targetPrice,
@@ -3838,6 +4682,14 @@ class AppStore {
       .query("SELECT data_json FROM logical_trades WHERE id = ?")
       .get(tradeId) as Row | null;
     return row ? parseJson<LogicalTrade>(String(row.data_json)) : undefined;
+  }
+
+  private logicalTradeIdByShortId(shortId: string) {
+    if (!shortId) return "";
+    const matches = this.logicalTrades().filter(
+      (trade) => shortLogicalTradeId(trade.id) === shortId,
+    );
+    return matches.length === 1 ? matches[0]!.id : "";
   }
 
   private appendTradeCommand(tradeId: string, signal: ParsedSignal) {
@@ -3896,7 +4748,7 @@ class AppStore {
 
     const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
     const evidence = executionEvidence(input);
-    const virtualTpLeg = virtualTpLegFromBrokerComment(input.brokerComment);
+    const virtualTpLeg = virtualTpLegFromExecutionReport(payload, input);
     let updated: LogicalTrade = trade;
 
     if (input.status === "FAILED") {
@@ -3916,13 +4768,35 @@ class AppStore {
       );
       updated = {
         ...trade,
-        status: legs.every((leg) => leg.status === "CLOSED") ? "CLOSED" : trade.status,
+        status: virtualTpStatusAfterLegClose(trade, legs, payload),
         legs,
+      };
+      const positionTicket = input.positionTicket;
+      if (truthyBrokerTicket(positionTicket)) {
+        this.queueSlStrategyAfterTpClose(updated, virtualTpLeg, positionTicket);
+      }
+    } else if (isPendingOrderAcceptance(payload, input)) {
+      updated = {
+        ...trade,
+        status: "PENDING",
+        outOfSyncReason: undefined,
+        livePositionExists: false,
+        matchedBrokerTickets: input.orderTicket ? [input.orderTicket] : trade.matchedBrokerTickets,
+        brokerComment: input.brokerComment,
+        lastSnapshotAt: new Date().toISOString(),
+        legs: trade.legs.map((leg) =>
+          leg.status === "OPEN" ? { ...leg, status: "PLANNED" as const } : leg,
+        ),
       };
     } else if (payload.commandType === "OPEN_TRADE") {
       updated = {
         ...trade,
         status: "OPEN",
+        outOfSyncReason: undefined,
+        livePositionExists: undefined,
+        matchedBrokerTickets: undefined,
+        brokerComment: undefined,
+        lastSnapshotAt: undefined,
         legs: trade.legs.map((leg) =>
           leg.status === "PLANNED" ? { ...leg, status: "OPEN", brokerEvidence: evidence } : leg,
         ),
@@ -3958,7 +4832,8 @@ class AppStore {
     if (!row || !tradeId) return;
 
     const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
-    const pnl = this.computeBrokerOrderPnl(tradeId, payload, input);
+    const action = brokerActionForReport(payload, input);
+    const pnl = this.computeBrokerOrderPnl(tradeId, payload, input, action);
     const now = new Date().toISOString();
     this.db
       .query(
@@ -3971,7 +4846,7 @@ class AppStore {
         `broker_${nanoid(10)}`,
         tradeId,
         brokerLegId(payload, input),
-        brokerAction(payload.commandType),
+        action,
         input.queueItemId,
         input.accountId,
         input.orderTicket ?? "",
@@ -3986,7 +4861,7 @@ class AppStore {
         input.brokerComment,
         pnl.pnlCurrency,
         pnl.pnlPips,
-        brokerOrderSourceForPayload(payload),
+        brokerOrderSourceForPayload(payload, input),
         now,
       );
   }
@@ -3995,11 +4870,19 @@ class AppStore {
     const action = brokerAction(payload.commandType);
     const rows = this.brokerOrders(logicalTradeId).slice().reverse();
     if (action === "CANCEL_PENDING") {
-      const order = rows.find((row) => row.orderTicket && row.action === "OPEN");
+      const order = rows.find(
+        (row) =>
+          truthyBrokerTicket(row.orderTicket) &&
+          (row.action === "OPEN" || row.action === "PENDING_OPEN"),
+      );
       return { targetOrderTicket: order?.orderTicket, targetPositionTicket: order?.positionTicket };
     }
     const position = rows.find(
-      (row) => row.positionTicket && row.action !== "FULL_CLOSE" && row.action !== "PARTIAL_CLOSE",
+      (row) =>
+        truthyBrokerTicket(row.positionTicket) &&
+        row.action !== "FULL_CLOSE" &&
+        row.action !== "PARTIAL_CLOSE" &&
+        row.action !== "PENDING_OPEN",
     );
     return {
       targetPositionTicket: position?.positionTicket,
@@ -4020,7 +4903,12 @@ class AppStore {
     );
     const rows = this.db
       .query(
-        "SELECT logical_trade_id, leg_id, position_ticket, order_ticket FROM broker_orders WHERE account_id = ? AND action = 'OPEN' AND (position_ticket != '' OR order_ticket != '')",
+        `SELECT logical_trade_id, leg_id, position_ticket, order_ticket
+         FROM broker_orders
+         WHERE account_id = ?
+           AND action = 'OPEN'
+           AND position_ticket IS NOT NULL
+           AND position_ticket NOT IN ('','0')`,
       )
       .all(accountId) as Row[];
     for (const row of rows) {
@@ -4078,7 +4966,11 @@ class AppStore {
 
   private logicalTradeIdForHistoryDeal(deal: Mt5HistoryDealInput) {
     const fromComment = logicalTradeIdFromComment(deal.comment ?? "");
-    if (fromComment) return fromComment;
+    if (fromComment && this.logicalTrade(fromComment)) return fromComment;
+    const fromShortComment = this.logicalTradeIdByShortId(
+      shortLogicalTradeIdFromComment(deal.comment ?? ""),
+    );
+    if (fromShortComment) return fromShortComment;
     if (deal.positionTicket) {
       const row = this.db
         .query(
@@ -4102,11 +4994,30 @@ class AppStore {
     if (deal.positionTicket) {
       const row = this.db
         .query(
-          "SELECT * FROM broker_orders WHERE logical_trade_id = ? AND position_ticket = ? AND action = 'OPEN' ORDER BY created_at ASC LIMIT 1",
+          `SELECT * FROM broker_orders
+           WHERE logical_trade_id = ?
+             AND position_ticket = ?
+             AND action = 'OPEN'
+             AND filled_price IS NOT NULL
+             AND filled_price > 0
+           ORDER BY created_at ASC LIMIT 1`,
         )
         .get(tradeId, deal.positionTicket) as Row | null;
       if (row) return row;
     }
+    const realOpen = this.db
+      .query(
+        `SELECT * FROM broker_orders
+         WHERE logical_trade_id = ?
+           AND action = 'OPEN'
+           AND position_ticket IS NOT NULL
+           AND position_ticket NOT IN ('','0')
+           AND filled_price IS NOT NULL
+           AND filled_price > 0
+         ORDER BY created_at ASC LIMIT 1`,
+      )
+      .get(tradeId) as Row | null;
+    if (realOpen) return realOpen;
     return this.db
       .query(
         "SELECT * FROM broker_orders WHERE logical_trade_id = ? AND action = 'OPEN' ORDER BY created_at ASC LIMIT 1",
@@ -4123,15 +5034,28 @@ class AppStore {
     );
   }
 
+  private brokerOrderTicketsForTrade(tradeId: string) {
+    const rows = this.db
+      .query(
+        "SELECT position_ticket, order_ticket FROM broker_orders WHERE logical_trade_id = ? AND (position_ticket != '' OR order_ticket != '')",
+      )
+      .all(tradeId) as Row[];
+    return new Set(
+      rows
+        .flatMap((row) => [String(row.position_ticket || ""), String(row.order_ticket || "")])
+        .filter(Boolean),
+    );
+  }
+
   private computeBrokerOrderPnl(
     tradeId: string,
     payload: ExecutionQueueItem["payload"],
     input: ExecutionReportInput,
+    action = brokerAction(payload.commandType),
   ) {
     if (!input.filledPrice || !input.volume || !payload.direction) {
       return { pnlCurrency: null, pnlPips: null };
     }
-    const action = brokerAction(payload.commandType);
     if (
       action === "OPEN" ||
       action === "MODIFY_SL" ||
@@ -4142,7 +5066,14 @@ class AppStore {
     }
     const open = this.db
       .query(
-        "SELECT filled_price FROM broker_orders WHERE logical_trade_id = ? AND action = 'OPEN' AND filled_price IS NOT NULL ORDER BY created_at ASC LIMIT 1",
+        `SELECT filled_price FROM broker_orders
+         WHERE logical_trade_id = ?
+           AND action = 'OPEN'
+           AND position_ticket IS NOT NULL
+           AND position_ticket NOT IN ('','0')
+           AND filled_price IS NOT NULL
+           AND filled_price > 0
+         ORDER BY created_at ASC LIMIT 1`,
       )
       .get(tradeId) as Row | null;
     const openPrice = nullableNumber(open?.filled_price);
@@ -4204,7 +5135,37 @@ function brokerAction(commandType: string) {
   return commandType;
 }
 
-function brokerOrderSourceForPayload(payload: ExecutionQueueItem["payload"]) {
+function isPendingOrderAcceptance(
+  payload: ExecutionQueueItem["payload"],
+  input: ExecutionReportInput,
+) {
+  return (
+    payload.commandType === "OPEN_TRADE" &&
+    (payload.orderType === "LIMIT" || payload.orderType === "STOP") &&
+    !truthyBrokerTicket(input.positionTicket) &&
+    !truthyBrokerTicket(input.dealTicket) &&
+    Number(input.filledPrice ?? 0) <= 0
+  );
+}
+
+function truthyBrokerTicket(value: string | undefined): value is string {
+  return Boolean(value && value !== "0");
+}
+
+function brokerActionForReport(
+  payload: ExecutionQueueItem["payload"],
+  input: ExecutionReportInput,
+) {
+  if (isPendingOrderAcceptance(payload, input)) return "PENDING_OPEN";
+  if (virtualTpLegFromExecutionReport(payload, input) !== undefined) return "PARTIAL_CLOSE";
+  return brokerAction(payload.commandType);
+}
+
+function brokerOrderSourceForPayload(
+  payload: ExecutionQueueItem["payload"],
+  input?: ExecutionReportInput,
+) {
+  if (input && virtualTpLegFromExecutionReport(payload, input) !== undefined) return "app-close";
   switch (payload.commandType) {
     case "OPEN_TRADE":
       return "signal";
@@ -4225,7 +5186,7 @@ function brokerOrderSourceForPayload(payload: ExecutionQueueItem["payload"]) {
 }
 
 function brokerLegId(payload: ExecutionQueueItem["payload"], input: ExecutionReportInput) {
-  const virtualTp = virtualTpLegFromBrokerComment(input.brokerComment);
+  const virtualTp = virtualTpLegFromExecutionReport(payload, input);
   if (virtualTp !== undefined) return `tp${virtualTp}`;
   if (payload.partialClose?.kind === "TP_LEG") return `tp${payload.partialClose.value}`;
   if (payload.commandType === "OPEN_TRADE") return "entry";
@@ -4239,10 +5200,152 @@ function brokerPipSize(symbol: string) {
   return 0.0001;
 }
 
+/**
+ * Render active virtual-TP plans as a line-oriented diagnostics payload.
+ * Plans are separated by a blank line. Empty plan list yields planCount=0.
+ */
+function renderActiveVirtualTpPlansLine(
+  plans: ReturnType<AppStore["activeVirtualTpPlans"]>,
+): string {
+  if (plans.length === 0) return "planCount=0\n";
+  const blocks: string[] = [`planCount=${plans.length}`];
+  for (const plan of plans) {
+    const lines: string[] = [
+      "plan=begin",
+      `logicalTradeId=${plan.logicalTradeId}`,
+      `shortId=${plan.shortId}`,
+      `queueItemId=${plan.queueItemId}`,
+      `symbol=${plan.symbol}`,
+      `direction=${plan.direction}`,
+      `positionTicket=${plan.positionTicket}`,
+      `tpCount=${plan.payload.takeProfits?.length ?? 0}`,
+    ];
+    const tps = plan.payload.takeProfits ?? [];
+    for (const tp of tps) {
+      const k = `tp${tp.leg}`;
+      lines.push(
+        `${k}Price=${tp.price ?? 0}`,
+        `${k}Volume=${tp.volume ?? 0}`,
+        `${k}Allocation=${tp.allocationPercent ?? 0}`,
+        `${k}StrategyKind=${tp.strategy?.kind ?? "no-change"}`,
+        `${k}StrategyReferenceLeg=${tp.strategy?.kind === "set-sl-to-tp" ? tp.strategy.tpLeg : 0}`,
+        `${k}StrategyOffsetPips=${
+          tp.strategy && tp.strategy.kind !== "no-change" ? tp.strategy.offsetPips : 0
+        }`,
+      );
+    }
+    const runner = plan.payload.runner;
+    lines.push(
+      `runnerEnabled=${runner?.enabled ? "true" : "false"}`,
+      `runnerVolume=${runner?.lotSize ?? 0}`,
+      `runnerSlBehavior=${runner?.slBehavior ?? ""}`,
+      `runnerTrailPips=${runner?.trailPips ?? 0}`,
+      "plan=end",
+    );
+    blocks.push(lines.join("\n"));
+  }
+  return `${blocks.join("\n\n")}\n`;
+}
+
+/**
+ * Strip a raw snapshot position/order record down to the fields safe to expose
+ * to the UI for external (non-magic) entries. We expose enough for the
+ * operator to recognise the position (symbol, side, volume, prices, comment)
+ * but skip nothing — we never modify external positions, so all fields are
+ * read-only context.
+ */
+function externalRecord(record: Record<string, unknown>) {
+  return {
+    ticket: String(record.ticket ?? ""),
+    symbol: String(record.symbol ?? ""),
+    type: Number(record.type ?? 0),
+    volume: Number(record.volume ?? 0),
+    openPrice: Number(record.openPrice ?? 0),
+    sl: Number(record.sl ?? 0),
+    tp: Number(record.tp ?? 0),
+    profit: typeof record.profit === "number" ? record.profit : undefined,
+    magic: typeof record.magic === "number" ? record.magic : Number(record.magic ?? 0),
+    comment: String(record.comment ?? ""),
+  };
+}
+
 function brokerTicketFromSnapshot(record: unknown) {
   if (!record || typeof record !== "object") return "";
   const value = (record as Record<string, unknown>).ticket;
   return value === undefined || value === null ? "" : String(value);
+}
+
+function brokerCommentFromSnapshot(record: unknown) {
+  if (!record || typeof record !== "object") return "";
+  const value = (record as Record<string, unknown>).comment;
+  return value === undefined || value === null ? "" : String(value);
+}
+
+function brokerOpenPriceFromSnapshot(record: unknown) {
+  if (!record || typeof record !== "object") return undefined;
+  const value = Number((record as Record<string, unknown>).openPrice ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function quotesBySymbol(symbols: unknown[]) {
+  const quotes = new Map<string, { bid: number; ask: number; point?: number }>();
+  for (const record of symbols) {
+    if (!record || typeof record !== "object") continue;
+    const item = record as Record<string, unknown>;
+    const symbol = String(item.symbol ?? "").toUpperCase();
+    const bid = Number(item.bid ?? 0);
+    const ask = Number(item.ask ?? 0);
+    const point = Number(item.point ?? 0);
+    if (!symbol || !bid || !ask) continue;
+    quotes.set(symbol, { bid, ask, point: point > 0 ? point : undefined });
+  }
+  return quotes;
+}
+
+function virtualTpTargetPrice(
+  trade: LogicalTrade,
+  leg: LogicalTrade["legs"][number],
+  openPrice?: number,
+  point?: number,
+) {
+  if (leg.targetPrice) return leg.targetPrice;
+  if (!leg.defaultDistance || !openPrice) return undefined;
+  const symbol = trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "";
+  const delta = distanceToPriceDelta(symbol, leg.defaultDistance, point);
+  if (!delta) return undefined;
+  const price = trade.direction === "BUY" ? openPrice + delta : openPrice - delta;
+  return Number(price.toFixed(5));
+}
+
+function distanceToPriceDelta(
+  symbol: string,
+  distance: { value: number; unit: "PIPS" | "POINTS" },
+  point?: number,
+) {
+  if (!distance.value || distance.value <= 0) return 0;
+  if (distance.unit === "POINTS") {
+    return distance.value * (point && point > 0 ? point : brokerPipSize(symbol) / 10);
+  }
+  return distance.value * (point && point > 0 ? point * 10 : brokerPipSize(symbol));
+}
+
+function managedVirtualTpVolume(payload: ExecutionQueueItem["payload"]) {
+  const totalVolume = Number(payload.volume ?? 0);
+  if (!Number.isFinite(totalVolume) || totalVolume <= 0) return 0;
+  const runnerVolume = payload.runner?.enabled
+    ? Math.min(totalVolume, Math.max(0, Number(payload.runner.lotSize) || 0))
+    : 0;
+  return Number(Math.max(0, totalVolume - runnerVolume).toFixed(2));
+}
+
+function virtualTpStatusAfterLegClose(
+  trade: LogicalTrade,
+  legs: LogicalTrade["legs"],
+  payload?: ExecutionQueueItem["payload"],
+) {
+  const runnerEnabled = Boolean(payload?.runner?.enabled && Number(payload.runner.lotSize) > 0);
+  if (legs.every((leg) => leg.status === "CLOSED") && !runnerEnabled) return "CLOSED";
+  return trade.status === "CLOSED" ? "CLOSED" : "OPEN";
 }
 
 function logicalTradeIdFromComment(comment: string) {
@@ -4250,8 +5353,27 @@ function logicalTradeIdFromComment(comment: string) {
   return match?.[1] ?? "";
 }
 
+function shortLogicalTradeId(tradeId: string) {
+  if (tradeId.startsWith("trade_")) return tradeId.slice("trade_".length);
+  if (tradeId.startsWith("trade-")) return tradeId.slice("trade-".length);
+  return tradeId;
+}
+
+function shortLogicalTradeIdFromComment(comment: string) {
+  const compact = comment.match(/\bttc:([^:\s]+)/i);
+  if (compact?.[1]) return compact[1];
+  const legacy = logicalTradeIdFromComment(comment);
+  return legacy ? shortLogicalTradeId(legacy) : "";
+}
+
 function historyDealAction(deal: Mt5HistoryDealInput, positionStillOpen: boolean) {
-  const entry = String(deal.entry ?? "").toUpperCase();
+  const rawEntry = String(deal.entry ?? "").trim();
+  if (rawEntry !== "" && Number.isFinite(Number(rawEntry))) {
+    const entryNumber = Number(rawEntry);
+    if (entryNumber === 0) return "OPEN";
+    return positionStillOpen ? "PARTIAL_CLOSE" : "FULL_CLOSE";
+  }
+  const entry = rawEntry.toUpperCase();
   if (entry.includes("IN") && !entry.includes("OUT")) return "OPEN";
   return positionStillOpen ? "PARTIAL_CLOSE" : "FULL_CLOSE";
 }
@@ -4266,17 +5388,92 @@ function drawdownPercent(balance: number, equity: number) {
   return Number(Math.max(0, ((balance - equity) / balance) * 100).toFixed(2));
 }
 
+function roundCurrency(value: number) {
+  return Number((Number.isFinite(value) ? value : 0).toFixed(2));
+}
+
+function roundLot(value: number) {
+  return Number((Number.isFinite(value) ? value : 0).toFixed(2));
+}
+
+function parseLegIndex(legId: string): number | undefined {
+  const match = legId.match(/^tp(\d+)$/i);
+  if (match?.[1]) return Number(match[1]);
+  return undefined;
+}
+
+/**
+ * Reduce a collection of broker_orders.source values for the close events on a
+ * single trade into a single "Result" label for the parent row. The intent is
+ * to answer "what closed this trade?" at a glance — when the answer is mixed
+ * (e.g. TPs 1+2 hit, then SL fired on the runner), we say "Mixed" rather than
+ * picking one source and discarding the rest.
+ */
+function deriveCloseResult(sources: string[]): string {
+  if (sources.length === 0) return "—";
+  const unique = new Set(sources);
+  if (unique.has("stop-out")) return "Stop-out";
+  const isTp = (s: string) => s === "tp-hit";
+  const isSl = (s: string) => s === "sl-hit";
+  const isManual = (s: string) => s.startsWith("manual");
+  const hasTp = sources.some(isTp);
+  const hasSl = sources.some(isSl);
+  const hasManual = sources.some(isManual);
+  if (hasTp && hasSl) return "Mixed";
+  if (hasTp && hasManual) return "Mixed";
+  if (hasSl && hasManual) return "Mixed";
+  if (sources.every(isTp)) return "TP hit";
+  if (sources.every(isSl)) return "SL hit";
+  if (sources.every(isManual)) return "Manual";
+  if (sources.every((s) => s === "expert")) return "Closed by EA";
+  return "Mixed";
+}
+
+function isRealOpenBrokerOrder(order: {
+  action: string;
+  positionTicket: string;
+  filledPrice?: number;
+  filledVolume?: number;
+}) {
+  return (
+    order.action === "OPEN" &&
+    truthyBrokerTicket(order.positionTicket) &&
+    Number(order.filledPrice ?? 0) > 0 &&
+    Number(order.filledVolume ?? 0) > 0
+  );
+}
+
 function sumPnl(orders: Array<{ pnlCurrency?: number }>) {
-  return Number(orders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0).toFixed(2));
+  return roundCurrency(orders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0));
+}
+
+function floatingPnlFromPositions(positions: unknown[]) {
+  return roundCurrency(
+    positions.reduce<number>((sum, record) => {
+      if (!record || typeof record !== "object") return sum;
+      const profit = nullableNumber((record as Record<string, unknown>).profit);
+      return sum + (profit ?? 0);
+    }, 0),
+  );
+}
+
+function normalizedDateInput(value: string) {
+  return value.replace(/^(\d{4})\.(\d{2})\.(\d{2})(\s+)/, "$1-$2-$3T");
 }
 
 function withinDays(iso: string, days: number) {
-  const time = Date.parse(iso);
+  const time = Date.parse(normalizedDateInput(iso));
   return Number.isFinite(time) && Date.now() - time <= days * 24 * 60 * 60 * 1000;
 }
 
 function withinCurrentMonth(iso: string) {
-  return iso.slice(0, 7) === new Date().toISOString().slice(0, 7);
+  return monthKey(iso) === new Date().toISOString().slice(0, 7);
+}
+
+function monthKey(iso: string) {
+  const normalized = normalizedDateInput(iso);
+  const match = normalized.match(/^(\d{4})-(\d{2})/);
+  return match ? `${match[1]}-${match[2]}` : new Date().toISOString().slice(0, 7);
 }
 
 function heartbeatFreshness(iso: string) {
@@ -4386,6 +5583,35 @@ function virtualTpLegFromBrokerComment(comment: string) {
   return match?.[1] ? Number(match[1]) : undefined;
 }
 
+function virtualTpLegFromExecutionReport(
+  payload: ExecutionQueueItem["payload"],
+  input: ExecutionReportInput,
+) {
+  const fromComment = virtualTpLegFromBrokerComment(input.brokerComment);
+  if (fromComment !== undefined) return fromComment;
+  if (payload.commandType !== "OPEN_TRADE" || payload.executionMode !== "VIRTUAL_TP") {
+    return undefined;
+  }
+  const filledVolume = Number(input.volume ?? 0);
+  const plannedVolume = Number(payload.volume ?? 0);
+  if (!filledVolume || !plannedVolume || filledVolume >= plannedVolume) return undefined;
+  const price = Number(input.filledPrice ?? input.requestedPrice ?? 0);
+  if (!price) return undefined;
+  const pipSize = brokerPipSize(payload.brokerSymbol ?? payload.canonicalSymbol ?? "");
+  const tolerance = Math.max(0.00001, pipSize * 2);
+  let bestLeg: number | undefined;
+  let bestDistance = Number.POSITIVE_INFINITY;
+  for (const takeProfit of payload.takeProfits) {
+    if (!takeProfit.price) continue;
+    const distance = Math.abs(price - takeProfit.price);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestLeg = takeProfit.leg;
+    }
+  }
+  return bestLeg !== undefined && bestDistance <= tolerance ? bestLeg : undefined;
+}
+
 function tpHitLegFromText(text: string, trade: LogicalTrade): number | "all" | undefined {
   if (/\bFULL\s+TP\b/i.test(text)) return "all";
   const explicit = text.match(/\bTP\s*([1-4])\b/i);
@@ -4393,10 +5619,165 @@ function tpHitLegFromText(text: string, trade: LogicalTrade): number | "all" | u
   return trade.legs.find((leg) => leg.status !== "HIT" && leg.status !== "CLOSED")?.leg;
 }
 
-function brokerRecordContainsTrade(record: unknown, tradeId: string) {
-  if (!record || typeof record !== "object") return false;
-  const values = Object.values(record as Record<string, unknown>);
-  return values.some((value) => typeof value === "string" && value.includes(tradeId));
+interface SnapshotTradeMatch {
+  status: "matched" | "partial" | "pending" | "missing";
+  reason?: string;
+  livePositionExists: boolean;
+  matchedBrokerTickets: string[];
+  brokerComment?: string;
+  lastSnapshotAt: string;
+}
+
+function snapshotMatchForTrade(
+  positions: unknown[],
+  orders: unknown[],
+  trade: LogicalTrade,
+  knownTickets: Set<string>,
+): SnapshotTradeMatch {
+  const positionMatch = snapshotMatchForRecords(positions, trade, knownTickets);
+  if (positionMatch.status !== "missing") return positionMatch;
+  const orderMatch = snapshotMatchForRecords(orders, trade, knownTickets);
+  if (orderMatch.status === "missing") return orderMatch;
+  return {
+    ...orderMatch,
+    status: "pending",
+    livePositionExists: false,
+  };
+}
+
+function matchedBrokerRecordForTrade(
+  records: unknown[],
+  trade: LogicalTrade,
+  knownTickets: Set<string>,
+) {
+  const shortId = shortLogicalTradeId(trade.id);
+  for (const record of records) {
+    if (!record || typeof record !== "object") continue;
+    const values = Object.values(record as Record<string, unknown>).map((value) =>
+      value === undefined || value === null ? "" : String(value),
+    );
+    const ticket = brokerTicketFromSnapshot(record);
+    if (values.some((value) => value.includes(trade.id))) return record;
+    if (
+      shortId &&
+      values.some((value) => new RegExp(`(^|:)${escapeRegExp(shortId)}($|:)`).test(value))
+    ) {
+      return record;
+    }
+    if (ticket && knownTickets.has(ticket)) return record;
+  }
+  return undefined;
+}
+
+function snapshotMatchForRecords(
+  records: unknown[],
+  trade: LogicalTrade,
+  knownTickets: Set<string>,
+): SnapshotTradeMatch {
+  const now = new Date().toISOString();
+  const shortId = shortLogicalTradeId(trade.id);
+  for (const record of records) {
+    if (!record || typeof record !== "object") continue;
+    const values = Object.values(record as Record<string, unknown>).map((value) =>
+      value === undefined || value === null ? "" : String(value),
+    );
+    const ticket = brokerTicketFromSnapshot(record);
+    const comment = brokerCommentFromSnapshot(record);
+    if (values.some((value) => value.includes(trade.id))) {
+      return {
+        status: "matched",
+        livePositionExists: true,
+        matchedBrokerTickets: ticket ? [ticket] : [],
+        brokerComment: comment,
+        lastSnapshotAt: now,
+      };
+    }
+    const compactMatches =
+      shortId &&
+      values.some((value) => new RegExp(`(^|:)${escapeRegExp(shortId)}($|:)`).test(value));
+    if (compactMatches) {
+      return {
+        status: "matched",
+        livePositionExists: true,
+        matchedBrokerTickets: ticket ? [ticket] : [],
+        brokerComment: comment,
+        lastSnapshotAt: now,
+      };
+    }
+    const ticketMatches = Boolean(ticket && knownTickets.has(ticket));
+    if (ticketMatches) {
+      return {
+        status: "partial",
+        reason: "Live broker position exists, but EA tracking comment is truncated",
+        livePositionExists: true,
+        matchedBrokerTickets: ticket ? [ticket] : [],
+        brokerComment: comment,
+        lastSnapshotAt: now,
+      };
+    }
+  }
+  return {
+    status: "missing",
+    reason: "No matching broker position or order found in latest MT5 snapshot",
+    livePositionExists: false,
+    matchedBrokerTickets: [],
+    lastSnapshotAt: now,
+  };
+}
+
+function snapshotSyncTradeState(trade: LogicalTrade, match: SnapshotTradeMatch): LogicalTrade {
+  if (match.status === "matched") {
+    return {
+      ...trade,
+      status: "OPEN",
+      outOfSyncReason: undefined,
+      livePositionExists: true,
+      matchedBrokerTickets: match.matchedBrokerTickets,
+      brokerComment: match.brokerComment,
+      lastSnapshotAt: match.lastSnapshotAt,
+      legs: trade.legs.map((leg) =>
+        leg.status === "PLANNED" ? { ...leg, status: "OPEN" as const } : leg,
+      ),
+    };
+  }
+  if (match.status === "partial") {
+    return {
+      ...trade,
+      status: "OPEN",
+      outOfSyncReason: match.reason,
+      livePositionExists: true,
+      matchedBrokerTickets: match.matchedBrokerTickets,
+      brokerComment: match.brokerComment,
+      lastSnapshotAt: match.lastSnapshotAt,
+      legs: trade.legs.map((leg) =>
+        leg.status === "PLANNED" ? { ...leg, status: "OPEN" as const } : leg,
+      ),
+    };
+  }
+  if (match.status === "pending") {
+    return {
+      ...trade,
+      status: "PENDING",
+      outOfSyncReason: match.reason,
+      livePositionExists: false,
+      matchedBrokerTickets: match.matchedBrokerTickets,
+      brokerComment: match.brokerComment,
+      lastSnapshotAt: match.lastSnapshotAt,
+    };
+  }
+  return {
+    ...trade,
+    status: "OUT_OF_SYNC",
+    outOfSyncReason: match.reason,
+    livePositionExists: false,
+    matchedBrokerTickets: [],
+    brokerComment: undefined,
+    lastSnapshotAt: match.lastSnapshotAt,
+  };
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function queueRow(row: Row) {

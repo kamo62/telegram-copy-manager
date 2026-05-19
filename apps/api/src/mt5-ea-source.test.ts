@@ -2,8 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 const source = readFileSync("mt5/TelegramTC_EA.mq5", "utf8");
+const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as { version?: string };
 
 describe("MT5 Expert Advisor source", () => {
+  test("keeps EA version aligned with the canonical app package version", () => {
+    const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
+    expect(packageJson.version).toBeTruthy();
+    expect(eaVersion).toBe(packageJson.version);
+  });
+
   test("uses timer polling, WebRequest, typed MQL5 trade structures, and retcode reporting", () => {
     expect(source).toContain("EventSetTimer");
     expect(source).toContain("WebRequest");
@@ -24,6 +31,14 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain('HttpPostRetry("/mt5/history"');
     expect(source).toContain("DEAL_POSITION_ID");
     expect(source).toContain("DEAL_PROFIT");
+  });
+
+  test("posts newly added MT5 deals immediately from OnTradeTransaction", () => {
+    expect(source).toContain("void OnTradeTransaction");
+    expect(source).toContain("TRADE_TRANSACTION_DEAL_ADD");
+    expect(source).toContain("HistoryDealSelect(trans.deal)");
+    expect(source).toContain("PostHistoryDeal(trans.deal)");
+    expect(source).toContain('HttpPostRetry("/mt5/history"');
   });
 
   test("includes DEAL_REASON in the history payload so backend can distinguish TP/SL/manual closes", () => {
@@ -48,6 +63,32 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain(
       "SafeStopPrice(command.brokerSymbol, referencePrice, command.stopLoss, command.direction, true)",
     );
+  });
+
+  test("includes ALL broker positions in the snapshot (not just magic-matched) with isExternal flag", () => {
+    // PositionsJson / OrdersJson must no longer filter by MagicNumber. They
+    // tag non-magic entries with isExternal=true so the App can show them in
+    // the read-only External positions panel without conflating with app trades.
+    expect(source).toContain('\\"isExternal\\":%s');
+    expect(source).toContain(
+      "bool isExternal = (ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber",
+    );
+    expect(source).toContain(
+      "bool isExternal = (ulong)OrderGetInteger(ORDER_MAGIC) != MagicNumber",
+    );
+    // Sanity: the JSON exposes the raw magic so operators can distinguish
+    // manual clicks (magic=0) from other-EA trades (some other magic).
+    expect(source).toContain('\\"magic\\":%I64u');
+  });
+
+  test("keeps virtual TP ownership in the app instead of the EA", () => {
+    expect(source).not.toContain("AppManagedVirtualTp");
+    expect(source).not.toContain("struct VirtualTpState");
+    expect(source).not.toContain("virtualTpStates");
+    expect(source).not.toContain("RehydrateVirtualTpStates");
+    expect(source).not.toContain("ManageVirtualTakeProfits");
+    expect(source).not.toContain("CloseVirtualTpLeg");
+    expect(source).not.toContain("/mt5/active-plans");
   });
 
   test("trims the UTF-8 null terminator before POSTing JSON with WebRequest", () => {
@@ -161,41 +202,24 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("if(command.newStopLoss <= 0.0)");
   });
 
-  test("supports TP-leg partial closes and runner controls from backend payloads", () => {
+  test("supports TP-leg partial closes from backend payloads", () => {
     expect(source).toContain("double partialCloseVolume;");
     expect(source).toContain('ValueFor(body, "partialCloseVolume")');
     expect(source).toContain('command.partialCloseKind == "TP_LEG"');
     expect(source).toContain("No valid partial-close volume provided");
-    expect(source).toContain("RunnerVolume(command)");
-    expect(source).toContain("runnerSlBehavior");
-    expect(source).toContain("runnerTrailPips");
-    expect(source).toContain("ApplyRunnerAfterFinalTp");
-  });
-
-  test("applies configured TP strategy after a virtual TP leg is hit", () => {
-    expect(source).toContain("string tpStrategyKind[4];");
-    expect(source).toContain('ValueFor(body, "tp" + leg + "StrategyKind")');
-    expect(source).toContain("ApplyTpStrategyAfterHit");
-    expect(source).toContain("StrategyStopPrice");
-    expect(source).toMatch(
-      /CloseVirtualTpLeg\(index,\s*leg\)[\s\S]*ApplyTpStrategyAfterHit\(index,\s*leg\)/,
-    );
   });
 
   test("creates split child orders for each configured TP leg", () => {
     expect(source).toContain("ExecuteSplitOrders(command)");
     expect(source).toContain("for(int leg = 0; leg < 4; leg++)");
     expect(source).toContain("command.tpAllocation[leg]");
-    expect(source).toContain('StringFormat("telegram-tc:%s:tp%d"');
+    expect(source).toContain("CompactTradeTpComment(command.logicalTradeId, leg + 1)");
     expect(source).toContain("SafeStopPrice(command.brokerSymbol, referencePrice, command.tp[leg]");
   });
 
-  test("monitors virtual TP legs and closes planned partial volumes on timer", () => {
-    expect(source).toContain("ManageVirtualTakeProfits()");
-    expect(source).toContain("TrackVirtualTakeProfits(command, result)");
-    expect(source).toContain("struct VirtualTpState");
-    expect(source).toContain("CloseVirtualTpLeg");
-    expect(source).toContain("virtualTpStates");
+  test("uses compact trade comments for app-side reconciliation", () => {
+    expect(source).toContain("CompactTradeComment");
+    expect(source).toContain('return "ttc:" + CompactTradeId(logicalTradeId);');
   });
 
   test("uses backend-provided command volume with the EA default as fallback", () => {
@@ -213,12 +237,10 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("AccountInfoDouble(ACCOUNT_BALANCE)");
   });
 
-  test("uses backend-provided TP leg volumes for split orders and virtual TP closes", () => {
+  test("uses backend-provided TP leg volumes for split orders", () => {
     expect(source).toContain("double tpVolume[4];");
     expect(source).toContain('ValueFor(body, "tp" + leg + "Volume")');
     expect(source).toContain("LegVolume(command, leg, baseVolume)");
-    expect(source).toContain("virtualTpStates[slot].tpVolume[leg] = command.tpVolume[leg]");
-    expect(source).toContain("virtualTpStates[stateIndex].tpVolume[leg]");
   });
 
   test("applies backend-provided polling interval from line payloads", () => {

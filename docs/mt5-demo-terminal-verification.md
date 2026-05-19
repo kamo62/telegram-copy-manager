@@ -9,6 +9,7 @@ WebRequest behavior, broker retcodes, symbol constraints, and hedging/netting be
 - Build and run the API locally or from a reachable host.
 - Confirm `GET /api/health` returns `status: ok`.
 - Copy `mt5/TelegramTC_EA.mq5` into the terminal's `MQL5/Experts/` folder.
+- Confirm the EA `#property version` matches the root `package.json` version before compiling.
 - In MT5, add the deployed/reachable backend base URL under:
   `Tools -> Options -> Expert Advisors -> Allow WebRequest for listed URL`.
 - Use a demo account first. Do not run this on a live account.
@@ -58,7 +59,10 @@ For `VIRTUAL_TP`:
 
 - Open one position with TP1-TP4 in the backend payload.
 - Let price reach TP1 in demo conditions or manually use a close-to-market test symbol.
-- Confirm the EA closes the configured partial volume and reports the result.
+- Confirm the app detects the TP from MT5 quote snapshots, queues a ticket-specific
+  `CLOSE_PARTIAL`, and the EA executes that queued close and reports the result.
+- For no-provider-TP signals, confirm the app derives the target from the default TP distance
+  against the actual broker open price before queueing the partial close.
 
 For `SPLIT_ORDER`:
 

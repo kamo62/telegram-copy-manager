@@ -53,7 +53,7 @@ export function AccountHeader({
   }> = [
     { label: "Initial Balance", amount: kpis.initialBalance, delta: null, primary: false },
     {
-      label: "Total Profit",
+      label: "Trading P/L",
       amount: kpis.totalProfit.amount,
       delta: kpis.totalProfit.deltaPercent,
       primary: true,

@@ -5,6 +5,9 @@ export type GrowthSeries = {
   growth: [number[], number[]];
   drawdown: [number[], number[]];
   totalProfit: number;
+  realizedPnl?: number;
+  floatingPnl?: number;
+  netDeposits?: number;
   numberOfTrades: number;
 };
 
@@ -109,7 +112,13 @@ export function GrowthChart({ data, loading = false }: { data: GrowthSeries; loa
         <div>
           <h3 className="chart-card-title">Account growth</h3>
           <span className="chart-card-meta">
-            {data.numberOfTrades} trades · total profit ${data.totalProfit.toLocaleString()}
+            {data.numberOfTrades} trades · trading P/L ${data.totalProfit.toLocaleString()}
+            {data.netDeposits !== undefined
+              ? ` · net cashflow ${data.netDeposits.toLocaleString()}`
+              : ""}
+            {data.floatingPnl !== undefined
+              ? ` · floating ${data.floatingPnl.toLocaleString()}`
+              : ""}
           </span>
         </div>
         <div className="chart-toggle" role="tablist" aria-label="Chart view">

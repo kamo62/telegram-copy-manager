@@ -13,6 +13,16 @@ bun run build
 bun run docker:build
 ```
 
+## Version Alignment
+
+The root `package.json` `version` field is the canonical app version. Keep the MT5 EA version in
+`mt5/TelegramTC_EA.mq5` aligned with it. The EA source test suite enforces this by comparing
+`package.json` to the EA `#property version` value.
+
+When a change includes API fields, UI states, EA payload fields, or new workflows, use a minor
+version bump. Use a patch bump for backward-compatible fixes and a major bump for breaking API, DB,
+environment, or EA protocol changes.
+
 With the API already running on `http://127.0.0.1:8787`, run the local MT5 contract smoke:
 
 ```bash
@@ -33,6 +43,18 @@ the `/api` prefix:
 ```text
 http://192.168.0.100:18787/api
 ```
+
+The home server should use Docker Compose v2 through the Docker CLI plugin:
+
+```bash
+docker compose version
+docker compose up -d --build
+```
+
+Keep the legacy `docker-compose` v1 binary only as a fallback. The v1 command can fail on newer
+Docker image metadata with `KeyError: 'ContainerConfig'` during service recreation, even after the
+image builds successfully. Installing the Compose v2 plugin alone does not remove Docker images,
+restart the Docker daemon, or stop running containers.
 
 In MetaTrader 5, also add the backend origin to `Tools > Options > Expert Advisors > Allow
 WebRequest for listed URL`. The EA posts JSON to `/api/mt5/*`, and the backend tolerates the

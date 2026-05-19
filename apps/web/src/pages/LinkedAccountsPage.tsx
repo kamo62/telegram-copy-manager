@@ -1,7 +1,17 @@
-import { ArrowRight, Plug, Plus, Server } from "lucide-react";
+import { ArrowRight, Hand, Plug, Plus, Server } from "lucide-react";
+import type { ExternalBrokerPosition } from "../App";
 import { AccountRow } from "../components/AccountRow";
 import { EmptyState } from "../components/EmptyState";
 import { Panel } from "../components/Panel";
+import { useLocale } from "../contexts/LocaleContext";
+import { formatLot, formatNumber } from "../lib/format";
+
+type LinkedAccount = Parameters<typeof AccountRow>[0]["account"] & {
+  externalPositions?: ExternalBrokerPosition[];
+  externalOrders?: ExternalBrokerPosition[];
+  externalPositionCount?: number;
+  externalOrderCount?: number;
+};
 
 export function LinkedAccountsPage({
   slots,
@@ -20,13 +30,14 @@ export function LinkedAccountsPage({
     accountNumber: string;
     server: string;
   }>;
-  accounts: Parameters<typeof AccountRow>[0]["account"][];
+  accounts: LinkedAccount[];
   providers?: Array<{ id: string; title: string }>;
   providerLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
   onCreateSlot: (event: React.FormEvent<HTMLFormElement>) => void;
   onEditProviderLinks?: () => void;
   variant?: "page" | "live";
 }) {
+  const { locale } = useLocale();
   const linkedAccountIds = new Set(accounts.map((account) => account.id));
   const pendingSlots = slots.filter(
     (slot) => !slot.accountNumber && !linkedAccountIds.has(slot.id),
@@ -128,6 +139,7 @@ export function LinkedAccountsPage({
                       ) : null}
                     </div>
                   ) : null}
+                  <ExternalPositionsBlock account={account} locale={locale} />
                 </li>
               );
             })}
@@ -135,5 +147,79 @@ export function LinkedAccountsPage({
         </section>
       ) : null}
     </Panel>
+  );
+}
+
+/**
+ * Read-only block listing positions / pending orders the broker sees on this
+ * account that our EA didn't open — manual MT5 clicks, mobile/web terminal
+ * trades, other EAs running on the same account. The app never modifies these;
+ * they're surfaced so the operator can see what else is consuming margin /
+ * affecting equity / contributing to drawdown beyond app-driven trades.
+ */
+function ExternalPositionsBlock({ account, locale }: { account: LinkedAccount; locale: string }) {
+  const positions = account.externalPositions ?? [];
+  const orders = account.externalOrders ?? [];
+  if (positions.length === 0 && orders.length === 0) return null;
+  const totalProfit = positions.reduce((acc, p) => acc + (p.profit ?? 0), 0);
+  return (
+    <div className="external-positions-block">
+      <header className="external-positions-head">
+        <Hand aria-hidden="true" size={13} />
+        <span className="external-positions-label">External activity</span>
+        <span className="external-positions-meta">
+          {positions.length} position{positions.length === 1 ? "" : "s"} · {orders.length} pending ·
+          floating P/L{" "}
+          <strong className={totalProfit >= 0 ? "up" : "down"}>
+            {totalProfit >= 0 ? "+" : ""}
+            {formatNumber(totalProfit, { locale })}
+          </strong>
+        </span>
+      </header>
+      <p className="external-positions-hint">
+        Opened outside this app (manual terminal, mobile, web, or another EA). The app does not
+        manage these — they're shown so total account drawdown and margin usage are explainable.
+      </p>
+      {positions.length > 0 ? (
+        <ul className="external-positions-list">
+          {positions.map((position) => (
+            <li className="external-position-row" key={position.ticket}>
+              <span className={`external-position-side ${position.type === 0 ? "buy" : "sell"}`}>
+                {position.type === 0 ? "BUY" : "SELL"}
+              </span>
+              <strong className="external-position-symbol">{position.symbol}</strong>
+              <span className="external-position-vol">{formatLot(position.volume)}</span>
+              <span className="external-position-price">
+                @ {formatNumber(position.openPrice, { locale, maximumFractionDigits: 5 })}
+              </span>
+              {position.sl > 0 ? (
+                <span className="external-position-stop">
+                  SL {formatNumber(position.sl, { locale, maximumFractionDigits: 5 })}
+                </span>
+              ) : (
+                <span className="external-position-stop external-position-stop-missing">no SL</span>
+              )}
+              {position.tp > 0 ? (
+                <span className="external-position-stop">
+                  TP {formatNumber(position.tp, { locale, maximumFractionDigits: 5 })}
+                </span>
+              ) : null}
+              {position.profit !== undefined ? (
+                <span
+                  className={`external-position-profit ${position.profit >= 0 ? "up" : "down"}`}
+                >
+                  {position.profit >= 0 ? "+" : ""}
+                  {formatNumber(position.profit, { locale })}
+                </span>
+              ) : null}
+              <small className="external-position-source">
+                #{position.ticket} · magic {position.magic}
+                {position.comment ? ` · ${position.comment}` : ""}
+              </small>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }

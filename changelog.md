@@ -1,5 +1,129 @@
 # Changelog
 
+## 2026-05-19 (App-owned default TP runners)
+
+- Release impact: Minor. Bumped the canonical app version in `package.json` to `1.5.0` and kept the
+  MT5 EA `#property version` aligned at `1.5.0` because this adds app-owned default-TP runner
+  management while preserving the existing queue/report contract.
+- Fixed no-provider-TP virtual trades so the app derives the TP target from the configured default
+  distance and the actual broker open price, then queues a ticket-specific TP-leg partial close when
+  live MT5 quotes cross that derived target.
+- Runner-aware virtual TP closes now reserve the configured runner volume. For example, a `0.02`
+  order with a `0.01` runner closes `0.01` at the default 200-pip TP instead of trying to close the
+  whole position.
+- Added app-side runner management after the final TP leg confirms: break-even/last-TP modes queue
+  `MODIFY_SL`, and trail mode queues the existing EA `TRAILING_STOP` command against the broker
+  position ticket.
+- Removed the legacy EA-owned virtual-TP state machine, rehydration, and runner handling from
+  `mt5/TelegramTC_EA.mq5`. The EA now stays focused on execution, snapshots, broker-history
+  reporting, and explicit trailing-stop commands; virtual TP ownership lives in the app.
+- Added regressions for the KAL-style default-TP runner path and for keeping virtual-TP ownership out
+  of the EA source.
+
+## 2026-05-18 (Closed trade reconciliation fixes)
+
+- Release impact: Minor. Bumped the canonical app version in `package.json` to `1.4.0` and kept the
+  MT5 EA `#property version` aligned at `1.4.0` because this adds a `CANCELLED` logical-trade state
+  while preserving the existing EA/backend protocol.
+- Fixed closed-trade rollups for pending limit/stop orders so the initial broker acceptance row is
+  not counted as a filled position. Closed rows now use the actual MT5 fill for entry ticket,
+  volume, and weighted open price.
+- Hardened startup reconciliation for stuck `OUT_OF_SYNC` trades: persisted real broker close rows
+  heal to `CLOSED`, duplicate synthetic snapshot-diff close rows are removed, and unrecoverable
+  trades with no broker open evidence are marked `CANCELLED`.
+- Fixed the current typecheck/lint blockers in the API tests and closed-history UI.
+- Added regressions for pending-order close rollups, persisted startup backfill, and unrecoverable
+  out-of-sync cancellation.
+
+## 2026-05-18 (App-managed virtual TP)
+
+- Release impact: Minor. Bumped the canonical app version in `package.json` to `1.3.0` and kept the
+  MT5 EA `#property version` aligned at `1.3.0`.
+- Moved default virtual TP ownership into the backend application. Pending limit/stop orders now
+  remain `PENDING` with planned TP legs until MT5 history or a live position confirms the fill.
+- Added app-side TP detection from MT5 quote snapshots, idempotent TP-leg `CLOSE_PARTIAL` queueing,
+  post-close SL strategy queueing, and broker-history reconciliation for SL closes before TP
+  confirmation.
+- Changed the EA into a thinner executor/event reporter for virtual TP flow: it reports new deals
+  immediately from `OnTradeTransaction`, keeps snapshots/polling at one second, and throttles
+  heartbeat/history backfill work separately.
+- Added API and EA source regressions covering pending-order arming, app-managed TP1 close queueing,
+  SL strategy queueing, SL-history reconciliation, and transaction-driven history reporting.
+
+## 2026-05-18 (Pending order side labels)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.2.2` and kept the
+  MT5 EA `#property version` aligned at `1.2.2`.
+- Fixed the History Open pending-orders table so MT5 pending order enums such as `BUY_LIMIT` and
+  `BUY_STOP` render as BUY instead of being treated as SELL positions.
+- Added a web regression test for mixed buy/sell pending order snapshots.
+
+## 2026-05-18 (Compose restart policy)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.2.1` and kept the
+  MT5 EA `#property version` aligned at `1.2.1`.
+- Added `restart: unless-stopped` to the Docker Compose app service so the container comes back after
+  host or Docker daemon restarts.
+- Added a deployment-config regression test that protects the Compose restart policy.
+- Documented the restart policy in the home-server Docker notes.
+
+## 2026-05-18 (Deployment and versioning documentation)
+
+Documentation-only update; no runtime SemVer bump. `package.json` and the EA remain at `1.2.0`.
+
+- Documented root `package.json` as the canonical app version source and the requirement that the
+  MT5 EA `#property version` stays aligned.
+- Documented home-server Docker Compose v2 usage via `docker compose up -d --build`, including why
+  the legacy `docker-compose` v1 binary should not be used for rebuilds.
+- Added MT5 demo-terminal verification guidance to check EA/package version alignment before
+  compiling.
+
+## 2026-05-18 (Manual position visibility and cashflow-aware performance)
+
+- Release impact: Minor. Added root `package.json` as the canonical app version source at
+  `1.2.0`, and kept the EA `#property version` aligned at `1.2.0` because this adds new EA
+  snapshot fields, API response fields, and UI states.
+- Surfaced MT5 positions and pending orders opened outside Telegram TC directly on the Performance
+  view, while preserving the read-only external activity block under Linked Accounts.
+- Changed account performance rollups to separate realised trading P/L, live floating P/L, and
+  inferred net cashflow from deposits/withdrawals. Account growth now tracks trading equity instead
+  of treating later account deposits as profit or hiding floating manual P/L behind closed
+  broker-order history.
+- Normalised MT5 broker-history timestamps such as `2026.05.18 09:00:00` when calculating current
+  month/week/day performance buckets.
+- Limited EA virtual-TP rehydration to live `OPEN` plans so failed or genuinely out-of-sync trades
+  are not revived into the EA after a restart.
+- Added API and web regression coverage for deposit-aware account performance and visible external
+  manual positions.
+
+## 2026-05-18 (MT5 virtual TP and sync recovery)
+
+Hardens virtual TP management against broker comment truncation and makes sync uncertainty visible
+to the operator instead of silently dropping follow-up TP work.
+
+- Changed MT5 EA comments to compact stable IDs (`ttc:<shortId>` / `ttc:<shortId>:tpN`) while the
+  backend resolves those short IDs back to the full logical trade id from persisted trade data.
+- Made virtual TP state ticket-first in the EA. The EA now stores the position ticket when the trade
+  opens and uses it for virtual TP partial closes, SL strategy moves, runner moves, and trailing
+  before falling back to broker-comment matching.
+- Added EA diagnostics for virtual TP early-return paths including missing symbols, missing
+  position tickets, invalid close volume, invalid strategy prices, non-improving SL moves, invalid
+  runner trailing distance, and close retcode failures.
+- Fixed backend classification for generic virtual TP reports such as `Request executed` by matching
+  the reported partial-close price/volume back to the intended TP leg and recording it as
+  `PARTIAL_CLOSE`.
+- Fixed `/api/mt5/history` handling for numeric MT5 `DEAL_ENTRY` values so entry deals stay `OPEN`
+  and exit deals become `PARTIAL_CLOSE` or `FULL_CLOSE` based on the latest broker snapshot.
+- Improved snapshot reconciliation to match live broker state by full comment, compact id, known
+  order/position tickets, and broker-order mappings before marking a trade `OUT_OF_SYNC`.
+- Extended dashboard trade data and the History UI with out-of-sync reasons, matched broker tickets,
+  broker comments, last snapshot timestamps, and a warning presentation when broker evidence is
+  partial or missing.
+
+Verification added: EA source tests for ticket-first virtual TP and compact diagnostics, API tests
+for generic virtual TP partial-close reports, numeric history entries, and truncated-comment
+reconciliation, plus a web test for the History warning state.
+
 ## 2026-05-17 (MT5 trade lifecycle hardening)
 
 Closes the lifecycle review gaps around default TP visibility, lifecycle command safety, TP-leg

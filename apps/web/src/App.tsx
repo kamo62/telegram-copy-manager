@@ -8,6 +8,7 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import { KeyboardShortcutsOverlay } from "./components/KeyboardShortcutsOverlay";
 import { LiveRegion } from "./components/LiveRegion";
+import { OutOfSyncBanner } from "./components/OutOfSyncBanner";
 import { PendingSlotView } from "./components/PendingSlotView";
 import {
   ProviderConfigModal,
@@ -54,7 +55,12 @@ export interface DashboardSnapshot {
   accountPerformance?: {
     currency: string;
     initialBalance: number | null;
+    currentBalance?: number | null;
+    currentEquity?: number | null;
     totalProfit: number | null;
+    realizedPnl?: number | null;
+    floatingPnl?: number | null;
+    netDeposits?: number | null;
     today: number | null;
     thisWeek: number | null;
     thisMonth: number | null;
@@ -106,6 +112,18 @@ export interface DashboardSnapshot {
     marginMode: string;
     openPositionCount?: number;
     pendingOrderCount?: number;
+    externalPositionCount?: number;
+    externalOrderCount?: number;
+    appPositions?: ExternalBrokerPosition[];
+    appOrders?: ExternalBrokerPosition[];
+    externalPositions?: ExternalBrokerPosition[];
+    externalOrders?: ExternalBrokerPosition[];
+    symbols?: Array<{
+      symbol: string;
+      bid?: number;
+      ask?: number;
+    }>;
+    closedTrades?: ClosedTradeRow[];
     lastSnapshotAt?: string;
   }>;
   parserResults: Array<{
@@ -142,6 +160,11 @@ export interface DashboardSnapshot {
     direction: string;
     status: string;
     executionMode: string;
+    outOfSyncReason?: string;
+    livePositionExists?: boolean;
+    matchedBrokerTickets?: string[];
+    brokerComment?: string;
+    lastSnapshotAt?: string;
     legs: Array<{
       leg: number;
       targetPrice?: number;
@@ -151,7 +174,6 @@ export interface DashboardSnapshot {
       status: string;
     }>;
   }>;
-  brokerOrders?: Array<BrokerOrderRow>;
   symbolMappings: Array<{
     rawSymbol: string;
     canonicalSymbol: string;
@@ -171,22 +193,63 @@ export interface DashboardSnapshot {
   }>;
 }
 
-export interface BrokerOrderRow {
-  id: string;
-  logicalTradeId: string;
-  legId: string;
-  action: string;
-  orderTicket: string;
-  positionTicket: string;
-  dealTicket: string;
-  filledVolume?: number;
-  filledPrice?: number;
-  retcode: number;
-  brokerComment: string;
-  source?: string;
-  pnlCurrency?: number;
-  pnlPips?: number;
-  createdAt: string;
+/**
+ * A position or pending order the broker sees but our EA didn't open
+ * (manual MT5 click, mobile/web terminal, or another EA on the same account).
+ * Surfaced read-only so the operator can see what else is competing for
+ * margin / equity on their account. The app never modifies external positions.
+ */
+export interface ExternalBrokerPosition {
+  ticket: string;
+  symbol: string;
+  type: number;
+  volume: number;
+  openPrice: number;
+  sl: number;
+  tp: number;
+  profit?: number;
+  magic: number;
+  comment: string;
+}
+
+/**
+ * A fully-closed signal trade rolled up for the History › Closed sub-tab.
+ * Parent-level fields describe "what this trade was, overall" — entry
+ * ticket / weighted-avg open & close prices / total realized P/L / why it
+ * closed. The `legs[]` array carries per-close-event detail so the row can
+ * be expanded for TP/SL specifics without a separate API call.
+ */
+export interface ClosedTradeRow {
+  tradeId: string;
+  shortId: string;
+  ticket: string;
+  symbol: string;
+  direction: "BUY" | "SELL";
+  origin: "ea" | "manual";
+  volume: number;
+  openPrice: number;
+  closePrice: number;
+  realizedPnl: number;
+  result: string;
+  closedAt: string;
+  tpLegs: Array<{ leg: number; targetPrice?: number; hit: boolean }>;
+  tpHitCount: number;
+  tpTotal: number;
+  legs: Array<{
+    id: string;
+    action: "FULL_CLOSE" | "PARTIAL_CLOSE";
+    legId: string;
+    legIndex?: number;
+    targetPrice?: number;
+    volume: number;
+    price: number;
+    pnl: number;
+    source: string;
+    closedAt: string;
+    orderTicket: string;
+    positionTicket: string;
+    dealTicket: string;
+  }>;
 }
 
 export type { TelegramDialogSummary };
@@ -270,6 +333,7 @@ export function App({
   const [activeTab, setActiveTab] = useState<TabId>("performance");
   const [configProvider, setConfigProvider] = useState<ProviderRowData | null>(null);
   const [parserTab, setParserTab] = useState("Recent Parses");
+  const [historyTab, setHistoryTab] = useState<"Open" | "Closed">("Open");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [setupBusy, setSetupBusy] = useState(false);
   const [setupError, setSetupError] = useState("");
@@ -289,9 +353,6 @@ export function App({
   const [fixtureStatus, setFixtureStatus] = useState<Record<string, string>>({});
   const [aiReviewStatus, setAiReviewStatus] = useState<Record<string, string>>({});
   const [parserActionStatus, setParserActionStatus] = useState<Record<string, string>>({});
-  const [brokerOrdersByTrade, setBrokerOrdersByTrade] = useState<Record<string, BrokerOrderRow[]>>(
-    {},
-  );
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
@@ -544,6 +605,9 @@ export function App({
         number[],
       ],
       totalProfit: snapshot.accountPerformance?.totalProfit ?? 0,
+      realizedPnl: snapshot.accountPerformance?.realizedPnl ?? undefined,
+      floatingPnl: snapshot.accountPerformance?.floatingPnl ?? undefined,
+      netDeposits: snapshot.accountPerformance?.netDeposits ?? undefined,
       numberOfTrades: series.length,
     };
   }, [snapshot.accountPerformance, snapshot.executionLogs]);
@@ -889,25 +953,6 @@ export function App({
     await refreshDashboard();
   }
 
-  async function loadBrokerOrders(tradeId: string) {
-    if (brokerOrdersByTrade[tradeId]) {
-      setBrokerOrdersByTrade((current) => {
-        const next = { ...current };
-        delete next[tradeId];
-        return next;
-      });
-      return;
-    }
-    try {
-      const data = await apiGet<{ orders: BrokerOrderRow[] }>(
-        `/api/trades/${tradeId}/broker-orders`,
-      );
-      setBrokerOrdersByTrade((current) => ({ ...current, [tradeId]: data.orders }));
-    } catch {
-      // silent fail — broker orders are a drilldown, not core to UI
-    }
-  }
-
   async function createAccountSlot(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -1085,6 +1130,9 @@ export function App({
           ) : showDashboard ? (
             <>
               <AccountHeader data={accountHeaderData} loading={initialLoading} />
+              <OutOfSyncBanner
+                trades={snapshot.logicalTrades.filter((trade) => trade.status === "OUT_OF_SYNC")}
+              />
               {snapshot.mt5Accounts.length === 0 && sidebarPendingSlots.length === 0 ? (
                 <section className="live-empty">
                   <div className="live-empty-glyph" aria-hidden="true">
@@ -1124,7 +1172,13 @@ export function App({
             </>
           ) : null}
 
-          {showPerformance ? <PerformancePage data={growthData} loading={initialLoading} /> : null}
+          {showPerformance ? (
+            <PerformancePage
+              accounts={focusedAccount ? [focusedAccount] : snapshot.mt5Accounts}
+              data={growthData}
+              loading={initialLoading}
+            />
+          ) : null}
 
           {showEquityGuardian ? (
             <EquityGuardianPage
@@ -1211,10 +1265,10 @@ export function App({
 
             {showTrades ? (
               <HistoryPage
-                brokerOrdersByTrade={brokerOrdersByTrade}
-                loading={initialLoading}
-                onToggleBrokerOrders={(tradeId) => void loadBrokerOrders(tradeId)}
-                trades={snapshot.logicalTrades}
+                accounts={snapshot.mt5Accounts}
+                activeTab={historyTab}
+                focusedAccountId={selectedAccountId}
+                onTabChange={setHistoryTab}
               />
             ) : null}
 

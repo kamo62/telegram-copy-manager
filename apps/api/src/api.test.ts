@@ -1,4 +1,8 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { brokerOrderSourceForDealReason, createApi } from "./app";
 import type { TelegramAdapter, TelegramCapturedMessage, TelegramDialog } from "./telegram";
 
@@ -105,6 +109,130 @@ async function configureProviderWithAccount(
     headers: { "content-type": "application/json" },
   });
   return selected.provider.id;
+}
+
+async function approveGoldBuyLimit(app: ReturnType<typeof createApi>) {
+  const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+  await app.request(`/api/providers/${providerId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      riskMode: "fixed",
+      riskAmount: 0.04,
+      takeProfitLevels: [
+        { leg: 1, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+        { leg: 2, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 1 } },
+        { leg: 3, percentage: 25, strategy: { kind: "no-change" } },
+        { leg: 4, percentage: 25, strategy: { kind: "no-change" } },
+      ],
+    }),
+    headers: { "content-type": "application/json" },
+  });
+  const parsed = await json<{ parsedSignalId: string }>(
+    await app.request("/api/parser/parse", {
+      method: "POST",
+      body: JSON.stringify({
+        providerId,
+        accountId: "mt5-63442826",
+        rawText: "Gold buy limit\n\n4541-40\n\nSL 4535\n\nTP 4546\nTP 4553\nTP 4561\nTP 4579",
+      }),
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+  );
+  return { ...approval, shortId: approval.logicalTradeId.replace(/^trade[_-]/, "") };
+}
+
+async function reportPendingAccepted(
+  app: ReturnType<typeof createApi>,
+  input: { queueItemId: string; orderTicket?: string },
+) {
+  await app.request("/api/mt5/report", {
+    method: "POST",
+    body: JSON.stringify({
+      accountId: "mt5-63442826",
+      queueItemId: input.queueItemId,
+      status: "EXECUTED",
+      retcode: 10009,
+      retcodeExternal: 0,
+      brokerComment: "Request executed",
+      orderTicket: input.orderTicket ?? "247596888",
+      positionTicket: "0",
+      dealTicket: "0",
+      requestedPrice: 4541,
+      filledPrice: 0,
+      volume: 0.04,
+      errorText: "",
+    }),
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function reportGoldFill(
+  app: ReturnType<typeof createApi>,
+  input: { logicalTradeId: string; shortId: string; orderTicket?: string; positionTicket?: string },
+) {
+  await app.request("/api/mt5/history", {
+    method: "POST",
+    body: JSON.stringify({
+      accountId: "mt5-63442826",
+      deals: [
+        {
+          dealTicket: "244236610",
+          orderTicket: input.orderTicket ?? "247596888",
+          positionTicket: input.positionTicket ?? "247596888",
+          entry: "0",
+          reason: 3,
+          symbol: "XAUUSD",
+          price: 4540.9,
+          volume: 0.04,
+          profit: 0,
+          commission: 0,
+          swap: 0,
+          comment: `ttc:${input.shortId}`,
+          time: "2026.05.18 18:01:12",
+        },
+      ],
+    }),
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function sendGoldSnapshot(
+  app: ReturnType<typeof createApi>,
+  input: {
+    shortId: string;
+    bid: number;
+    positions?: unknown[];
+    orders?: unknown[];
+    positionTicket?: string;
+  },
+) {
+  await app.request("/api/mt5/snapshot", {
+    method: "POST",
+    body: JSON.stringify({
+      accountId: "mt5-63442826",
+      positions: input.positions ?? [
+        {
+          ticket: input.positionTicket ?? "247596888",
+          symbol: "XAUUSD",
+          type: 0,
+          volume: 0.04,
+          openPrice: 4540.9,
+          sl: 4535,
+          tp: 0,
+          profit: 0,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${input.shortId}`,
+        },
+      ],
+      orders: input.orders ?? [],
+      symbols: [{ symbol: "XAUUSD", bid: input.bid, ask: input.bid + 0.3 }],
+    }),
+    headers: { "content-type": "application/json" },
+  });
 }
 
 describe("Telegram TC API", () => {
@@ -917,6 +1045,390 @@ describe("Telegram TC API", () => {
     ]);
   });
 
+  test("classifies generic virtual TP execution reports as partial closes by intended leg", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+
+    const lease = await json<{ item: { id: string } | null }>(
+      await app.request("/api/mt5/poll?accountId=mt5-100200300"),
+    );
+    expect(lease.item?.id).toBe("queue-demo-1");
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: lease.item!.id,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request executed",
+        orderTicket: "50001",
+        positionTicket: "70001",
+        dealTicket: "60001",
+        requestedPrice: 1.085,
+        filledPrice: 1.0851,
+        volume: 0.1,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: lease.item!.id,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request executed",
+        orderTicket: "50002",
+        positionTicket: "70001",
+        dealTicket: "60002",
+        requestedPrice: 1.09,
+        filledPrice: 1.09,
+        volume: 0.03,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const dashboard = await json<{
+      logicalTrades: Array<{ id: string; legs: Array<{ leg: number; status: string }> }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.logicalTrades
+        .find((item) => item.id === "trade-demo-1")
+        ?.legs.map((leg) => [leg.leg, leg.status]),
+    ).toEqual([
+      [1, "CLOSED"],
+      [2, "OPEN"],
+      [3, "OPEN"],
+      [4, "OPEN"],
+    ]);
+
+    const brokerTrail = await json<{
+      orders: Array<{ action: string; legId: string; dealTicket: string; source: string }>;
+    }>(await app.request("/api/trades/trade-demo-1/broker-orders"));
+    expect(brokerTrail.orders.find((order) => order.dealTicket === "60002")).toMatchObject({
+      action: "PARTIAL_CLOSE",
+      legId: "tp1",
+      source: "app-close",
+    });
+  });
+
+  test("maps numeric MT5 history deal entries to open and partial-close actions", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const lease = await json<{ item: { id: string } | null }>(
+      await app.request("/api/mt5/poll?accountId=mt5-100200300"),
+    );
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: lease.item!.id,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request completed",
+        orderTicket: "50001",
+        positionTicket: "70001",
+        dealTicket: "60001",
+        requestedPrice: 1.085,
+        filledPrice: 1.0851,
+        volume: 0.1,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        positions: [{ ticket: "70001", symbol: "EURUSD.raw", volume: 0.07 }],
+        orders: [],
+        symbols: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const history = await app.request("/api/mt5/history", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        deals: [
+          {
+            dealTicket: "60002",
+            orderTicket: "50001",
+            positionTicket: "70001",
+            entry: "0",
+            symbol: "EURUSD.raw",
+            price: 1.0851,
+            volume: 0.1,
+            profit: 0,
+            commission: 0,
+            swap: 0,
+            comment: "ttc:demo-1",
+            time: "2026-05-10T12:00:00.000Z",
+          },
+          {
+            dealTicket: "60003",
+            orderTicket: "50002",
+            positionTicket: "70001",
+            entry: "1",
+            symbol: "EURUSD.raw",
+            price: 1.09,
+            volume: 0.03,
+            profit: 14.7,
+            commission: 0,
+            swap: 0,
+            comment: "ttc:demo-1:tp1",
+            time: "2026-05-10T12:05:00.000Z",
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(history.status).toBe(200);
+
+    const brokerTrail = await json<{
+      orders: Array<{ action: string; dealTicket: string; legId: string }>;
+    }>(await app.request("/api/trades/trade-demo-1/broker-orders"));
+    expect(brokerTrail.orders.find((order) => order.dealTicket === "60002")).toMatchObject({
+      action: "OPEN",
+      legId: "trade",
+    });
+    expect(brokerTrail.orders.find((order) => order.dealTicket === "60003")).toMatchObject({
+      action: "PARTIAL_CLOSE",
+      legId: "tp1",
+    });
+  });
+
+  test("keeps pending virtual-TP limit orders unarmed even when current price is beyond TP1", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+
+    await sendGoldSnapshot(app, {
+      shortId: approved.shortId,
+      bid: 4548,
+      positions: [],
+      orders: [
+        {
+          ticket: "247596888",
+          symbol: "XAUUSD",
+          type: 2,
+          volume: 0.04,
+          openPrice: 4541,
+          sl: 4535,
+          tp: 0,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ],
+    });
+
+    const dashboard = await json<{
+      logicalTrades: Array<{ id: string; status: string; legs: Array<{ status: string }> }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.logicalTrades.find((trade) => trade.id === approved.logicalTradeId),
+    ).toMatchObject({
+      status: "PENDING",
+      legs: [
+        { status: "PLANNED" },
+        { status: "PLANNED" },
+        { status: "PLANNED" },
+        { status: "PLANNED" },
+      ],
+    });
+
+    const noWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(noWork).toContain("status=NO_WORK");
+  });
+
+  test("queues one app-managed TP1 partial close only after the pending order fills", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+    await reportGoldFill(app, approved);
+
+    await sendGoldSnapshot(app, { shortId: approved.shortId, bid: 4546.2 });
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
+    expect(closeWork).toContain("partialCloseKind=TP_LEG");
+    expect(closeWork).toContain("partialCloseValue=1");
+    expect(closeWork).toContain("partialCloseVolume=0.01");
+    expect(closeWork).toContain("targetPositionTicket=247596888");
+
+    await sendGoldSnapshot(app, { shortId: approved.shortId, bid: 4547 });
+    const noDuplicate = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+    ).text();
+    expect(noDuplicate).toContain("status=NO_WORK");
+  });
+
+  test("confirms app-managed TP1 close before queueing the configured SL move", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+    await reportGoldFill(app, approved);
+    await sendGoldSnapshot(app, { shortId: approved.shortId, bid: 4546.2 });
+
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    const closeQueueId = closeWork.match(/queueItemId=([^\n]+)/)?.[1];
+    expect(closeQueueId).toBeTruthy();
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: closeQueueId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: `ttc:${approved.shortId}:tp1`,
+        orderTicket: "247597001",
+        positionTicket: "247596888",
+        dealTicket: "244236700",
+        requestedPrice: 4546,
+        filledPrice: 4546,
+        volume: 0.01,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const dashboard = await json<{
+      logicalTrades: Array<{ id: string; legs: Array<{ leg: number; status: string }> }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.logicalTrades
+        .find((trade) => trade.id === approved.logicalTradeId)
+        ?.legs.map((leg) => [leg.leg, leg.status]),
+    ).toEqual([
+      [1, "CLOSED"],
+      [2, "OPEN"],
+      [3, "OPEN"],
+      [4, "OPEN"],
+    ]);
+
+    const slWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(slWork).toContain("commandType=MODIFY_SL");
+    expect(slWork).toContain("newStopLoss=4540.9");
+    expect(slWork).toContain("targetPositionTicket=247596888");
+  });
+
+  test("reconciles an SL history close before TP confirmation without marking TP1 closed or failed", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+    await reportGoldFill(app, approved);
+
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        deals: [
+          {
+            dealTicket: "244236869",
+            orderTicket: "247597474",
+            positionTicket: "247596888",
+            entry: "1",
+            reason: 4,
+            symbol: "XAUUSD",
+            price: 4534.73,
+            volume: 0.04,
+            profit: -24.68,
+            commission: 0,
+            swap: 0,
+            comment: "[sl 4535.00]",
+            time: "2026.05.18 18:02:27",
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const dashboard = await json<{
+      logicalTrades: Array<{
+        id: string;
+        status: string;
+        legs: Array<{ leg: number; status: string }>;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.logicalTrades.find((trade) => trade.id === approved.logicalTradeId),
+    ).toMatchObject({
+      status: "CLOSED",
+      legs: [
+        { leg: 1, status: "SKIPPED" },
+        { leg: 2, status: "SKIPPED" },
+        { leg: 3, status: "SKIPPED" },
+        { leg: 4, status: "SKIPPED" },
+      ],
+    });
+  });
+
+  test("closed rollups ignore pending-order acceptance rows after the order fills", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+    await reportGoldFill(app, approved);
+
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        deals: [
+          {
+            dealTicket: "244236869",
+            orderTicket: "247597474",
+            positionTicket: "247596888",
+            entry: "1",
+            reason: 4,
+            symbol: "XAUUSD",
+            price: 4534.73,
+            volume: 0.04,
+            profit: -24.68,
+            commission: 0,
+            swap: 0,
+            comment: "[sl 4535.00]",
+            time: "2026.05.18 18:02:27",
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const dashboard = await json<{
+      mt5Accounts: Array<{
+        id: string;
+        closedTrades: Array<{
+          tradeId: string;
+          ticket: string;
+          volume: number;
+          openPrice: number;
+          closePrice: number;
+          realizedPnl: number;
+          result: string;
+        }>;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    const account = dashboard.mt5Accounts.find((item) => item.id === "mt5-63442826");
+    const closed = account?.closedTrades.find((trade) => trade.tradeId === approved.logicalTradeId);
+    expect(closed).toMatchObject({
+      ticket: "247596888",
+      volume: 0.04,
+      openPrice: 4540.9,
+      closePrice: 4534.73,
+      realizedPnl: -24.68,
+      result: "SL hit",
+    });
+  });
+
   test("records provider-announced TP hits without queueing unsupported MT5 work", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     const lease = await json<{ item: { id: string } | null }>(
@@ -1021,7 +1533,15 @@ describe("Telegram TC API", () => {
         pendingOrderCount: number;
         lastSnapshotAt?: string;
       }>;
-      logicalTrades: Array<{ id: string; status: string }>;
+      logicalTrades: Array<{
+        id: string;
+        status: string;
+        outOfSyncReason?: string;
+        livePositionExists?: boolean;
+        matchedBrokerTickets?: string[];
+        brokerComment?: string;
+        lastSnapshotAt?: string;
+      }>;
     }>(await app.request("/api/dashboard"));
     expect(synced.mt5Accounts[0]).toMatchObject({
       openPositionCount: 1,
@@ -1034,6 +1554,46 @@ describe("Telegram TC API", () => {
       method: "POST",
       body: JSON.stringify({
         accountId: "mt5-100200300",
+        positions: [
+          {
+            ticket: "50001",
+            symbol: "EURUSD.raw",
+            volume: 0.1,
+            comment: "telegram-tc-virtual-tp:trade-de",
+          },
+        ],
+        orders: [],
+        symbols: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const truncated = await json<{
+      logicalTrades: Array<{
+        id: string;
+        status: string;
+        outOfSyncReason?: string;
+        livePositionExists?: boolean;
+        matchedBrokerTickets?: string[];
+        brokerComment?: string;
+        lastSnapshotAt?: string;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    expect(truncated.logicalTrades.find((trade) => trade.id === "trade-demo-1")).toMatchObject({
+      status: "OPEN",
+      livePositionExists: true,
+      matchedBrokerTickets: ["50001"],
+      brokerComment: "telegram-tc-virtual-tp:trade-de",
+      outOfSyncReason: "Live broker position exists, but EA tracking comment is truncated",
+    });
+    expect(
+      truncated.logicalTrades.find((trade) => trade.id === "trade-demo-1")?.lastSnapshotAt,
+    ).toBeTruthy();
+
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
         positions: [],
         orders: [],
         symbols: [],
@@ -1041,12 +1601,19 @@ describe("Telegram TC API", () => {
       headers: { "content-type": "application/json" },
     });
 
-    const missing = await json<{ logicalTrades: Array<{ id: string; status: string }> }>(
-      await app.request("/api/dashboard"),
-    );
-    expect(missing.logicalTrades.find((trade) => trade.id === "trade-demo-1")?.status).toBe(
-      "OUT_OF_SYNC",
-    );
+    const missing = await json<{
+      logicalTrades: Array<{
+        id: string;
+        status: string;
+        outOfSyncReason?: string;
+        livePositionExists?: boolean;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    expect(missing.logicalTrades.find((trade) => trade.id === "trade-demo-1")).toMatchObject({
+      status: "OUT_OF_SYNC",
+      livePositionExists: false,
+      outOfSyncReason: "No matching broker position or order found in latest MT5 snapshot",
+    });
   });
 
   test("exposes a line-oriented MT5 poll payload for the MQL5 expert advisor", async () => {
@@ -2020,6 +2587,130 @@ describe("Telegram TC API", () => {
     expect(pollLine).toContain("runnerTrailPips=25");
   });
 
+  test("app-managed default TP closes the traded portion and moves runner SL to break-even", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY EURUSD",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const shortId = approval.logicalTradeId.replace(/^trade[_-]/, "");
+    const openWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(openWork).toContain("defaultTakeProfitValue=200");
+    expect(openWork).toContain("runnerVolume=0.01");
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approval.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: `ttc:${shortId}`,
+        orderTicket: "70001",
+        positionTicket: "70001",
+        dealTicket: "60001",
+        requestedPrice: 1.086,
+        filledPrice: 1.086,
+        volume: 0.02,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [
+          {
+            ticket: "70001",
+            symbol: "EURUSD.raw",
+            type: 0,
+            volume: 0.02,
+            openPrice: 1.086,
+            sl: 1.081,
+            tp: 0,
+            profit: 40,
+            magic: 26050901,
+            isExternal: false,
+            comment: `ttc:${shortId}`,
+          },
+        ],
+        orders: [],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.106, ask: 1.1062, point: 0.00001 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
+    expect(closeWork).toContain("partialCloseKind=TP_LEG");
+    expect(closeWork).toContain("partialCloseValue=1");
+    expect(closeWork).toContain("partialCloseVolume=0.01");
+    expect(closeWork).toContain("targetPositionTicket=70001");
+    const closeQueueId = closeWork.match(/queueItemId=([^\n]+)/)?.[1];
+    expect(closeQueueId).toBeTruthy();
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: closeQueueId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: `ttc:${shortId}:tp1`,
+        orderTicket: "70002",
+        positionTicket: "70001",
+        dealTicket: "60002",
+        requestedPrice: 1.106,
+        filledPrice: 1.106,
+        volume: 0.01,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const slWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(slWork).toContain("commandType=MODIFY_SL");
+    expect(slWork).toContain("newStopLoss=1.086");
+    expect(slWork).toContain("targetPositionTicket=70001");
+
+    const dashboard = await json<{
+      logicalTrades: Array<{ id: string; status: string; legs: Array<{ status: string }> }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.logicalTrades.find((trade) => trade.id === approval.logicalTradeId),
+    ).toMatchObject({
+      status: "OPEN",
+      legs: [{ status: "CLOSED" }],
+    });
+  });
+
   test("sends structured TP strategy fields to MT5 for virtual TP SL movement", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, {
@@ -2270,5 +2961,708 @@ describe("Telegram TC API", () => {
     // never blank for an unexpected broker code.
     expect(brokerOrderSourceForDealReason(undefined)).toBe("history");
     expect(brokerOrderSourceForDealReason(99)).toBe("history");
+  });
+
+  test("splits app-driven and external positions in the snapshot", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+    // Snapshot using the seeded demo account with one EA-opened position and
+    // two external positions (manual click, other-EA).
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        positions: [
+          {
+            ticket: "1",
+            symbol: "XAUUSD",
+            type: 0,
+            volume: 0.04,
+            openPrice: 4500,
+            sl: 4490,
+            tp: 0,
+            profit: 5,
+            magic: 26050901,
+            isExternal: false,
+            comment: "ttc:abc:tp1",
+          },
+          {
+            ticket: "2",
+            symbol: "EURUSD",
+            type: 0,
+            volume: 1.0,
+            openPrice: 1.085,
+            sl: 0,
+            tp: 0,
+            profit: -20,
+            magic: 0,
+            isExternal: true,
+            comment: "manual click",
+          },
+          {
+            ticket: "3",
+            symbol: "BTCUSD",
+            type: 1,
+            volume: 0.5,
+            openPrice: 78000,
+            sl: 0,
+            tp: 0,
+            profit: 150,
+            magic: 99999,
+            isExternal: true,
+            comment: "other-EA",
+          },
+        ],
+        orders: [],
+        symbols: [],
+      }),
+    });
+    const dash = await json<{
+      mt5Accounts: Array<{
+        id: string;
+        openPositionCount: number;
+        externalPositionCount: number;
+        externalPositions: Array<{ ticket: string }>;
+        appPositions: Array<{ ticket: string; symbol: string; magic: number }>;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    const account = dash.mt5Accounts.find((a) => a.id === "mt5-100200300");
+    expect(account).toBeDefined();
+    expect(account!.openPositionCount).toBe(1);
+    expect(account!.externalPositionCount).toBe(2);
+    expect(account!.externalPositions).toHaveLength(2);
+    expect(account!.appPositions).toHaveLength(1);
+    // The single EA-driven position (magic 26050901, XAUUSD) lives in appPositions —
+    // not externalPositions — so the Open sub-tab can colour-code origin per row.
+    expect(account!.appPositions[0]!.ticket).toBe("1");
+    expect(account!.appPositions[0]!.symbol).toBe("XAUUSD");
+    expect(account!.appPositions[0]!.magic).toBe(26050901);
+  });
+
+  test("closedTrades rolls up multi-leg close lifecycle with Mixed result + per-leg detail", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+    // Open the seeded demo trade via the EA's report channel.
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        queueItemId: "queue-demo-1",
+        accountId: "mt5-100200300",
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "ttc:demo-1",
+        orderTicket: "order-1",
+        positionTicket: "position-1",
+        dealTicket: "deal-open-1",
+        requestedPrice: 1.085,
+        filledPrice: 1.085,
+        volume: 0.1,
+      }),
+    });
+    // Close it in three legs: TP1 (reason=5), TP2 (reason=5), then SL (reason=4)
+    // wipes the remainder. The history-deals handler writes one broker_order
+    // per deal, which the rollup then groups under the parent logical trade.
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        deals: [
+          {
+            dealTicket: "deal-tp1",
+            orderTicket: "order-tp1",
+            positionTicket: "position-1",
+            entry: "1",
+            type: "1",
+            reason: 5,
+            symbol: "EURUSD.raw",
+            price: 1.09,
+            volume: 0.04,
+            profit: 20,
+            commission: 0,
+            swap: 0,
+            comment: "ttc:demo-1:tp1",
+            time: "2026.05.18 10:42:14",
+          },
+          {
+            dealTicket: "deal-tp2",
+            orderTicket: "order-tp2",
+            positionTicket: "position-1",
+            entry: "1",
+            type: "1",
+            reason: 5,
+            symbol: "EURUSD.raw",
+            price: 1.095,
+            volume: 0.04,
+            profit: 40,
+            commission: 0,
+            swap: 0,
+            comment: "ttc:demo-1:tp2",
+            time: "2026.05.18 10:51:03",
+          },
+          {
+            dealTicket: "deal-sl",
+            orderTicket: "order-sl",
+            positionTicket: "position-1",
+            entry: "1",
+            type: "1",
+            reason: 4,
+            symbol: "EURUSD.raw",
+            price: 1.08,
+            volume: 0.02,
+            profit: -10,
+            commission: 0,
+            swap: 0,
+            comment: "ttc:demo-1",
+            time: "2026.05.18 11:14:28",
+          },
+        ],
+      }),
+    });
+    type ClosedTrade = {
+      tradeId: string;
+      shortId: string;
+      ticket: string;
+      symbol: string;
+      direction: string;
+      origin: string;
+      result: string;
+      realizedPnl: number;
+      tpHitCount: number;
+      tpTotal: number;
+      legs: Array<{ source: string; legIndex?: number; pnl: number; volume: number }>;
+    };
+    const dash = await json<{
+      mt5Accounts: Array<{ id: string; closedTrades: ClosedTrade[] }>;
+    }>(await app.request("/api/dashboard"));
+    const account = dash.mt5Accounts.find((a) => a.id === "mt5-100200300");
+    expect(account).toBeDefined();
+    const closed = account!.closedTrades.find((t) => t.tradeId === "trade-demo-1");
+    expect(closed).toBeDefined();
+    // 2 TP-hit closes + 1 SL-hit close → operator should see "Mixed" so they
+    // don't think the trade was a clean win or a clean loss.
+    expect(closed!.result).toBe("Mixed");
+    // Net realized P/L = 20 + 40 + (-10) = 50 (verifies the sum is across all
+    // close legs, not just the final one).
+    expect(closed!.realizedPnl).toBe(50);
+    expect(closed!.origin).toBe("ea");
+    expect(closed!.ticket).toBe("position-1");
+    expect(closed!.legs).toHaveLength(3);
+    const tpSources = closed!.legs.filter((leg) => leg.source === "tp-hit");
+    const slSources = closed!.legs.filter((leg) => leg.source === "sl-hit");
+    expect(tpSources).toHaveLength(2);
+    expect(slSources).toHaveLength(1);
+  });
+
+  test("snapshot reconcile does not overwrite CLOSED status when a real close exists", async () => {
+    // Reproduces the production bug: after a sl-hit close was recorded via
+    // /api/mt5/history, the next snapshot poll (with the ticket no longer
+    // in positions[]) would race the history sweep and revert status back to
+    // OUT_OF_SYNC. The fix skips trades that have a real-source FULL_CLOSE.
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        queueItemId: "queue-demo-1",
+        accountId: "mt5-100200300",
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "ttc:demo-1",
+        orderTicket: "order-1",
+        positionTicket: "position-1",
+        dealTicket: "deal-open-1",
+        requestedPrice: 1.085,
+        filledPrice: 1.085,
+        volume: 0.1,
+      }),
+    });
+    // SL closes the position via history sweep.
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        deals: [
+          {
+            dealTicket: "deal-sl",
+            orderTicket: "order-sl",
+            positionTicket: "position-1",
+            entry: "1",
+            type: "1",
+            reason: 4,
+            symbol: "EURUSD.raw",
+            price: 1.08,
+            volume: 0.1,
+            profit: -50,
+            commission: 0,
+            swap: 0,
+            comment: "ttc:demo-1",
+            time: "2026.05.18 11:14:28",
+          },
+        ],
+      }),
+    });
+    // Now a snapshot arrives with no matching position. Before the fix this
+    // would flip status back to OUT_OF_SYNC. After the fix it should stay
+    // CLOSED.
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        positions: [],
+        orders: [],
+        symbols: [],
+      }),
+    });
+    const dash = await json<{
+      logicalTrades: Array<{ id: string; status: string }>;
+    }>(await app.request("/api/dashboard"));
+    const trade = dash.logicalTrades.find((t) => t.id === "trade-demo-1");
+    expect(trade).toBeDefined();
+    expect(trade!.status).toBe("CLOSED");
+  });
+
+  test("backfill heals stuck OUT_OF_SYNC trades that have a real close in broker_orders", async () => {
+    // Set up: a logical trade is stuck OUT_OF_SYNC (the pre-fix bug state)
+    // with both a synthetic 'manual' close (snapshot-diff) AND a real sl-hit
+    // close (history sweep) on the same position ticket. On next startup the
+    // backfill should flip status to CLOSED and dedupe the synthetic row.
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        queueItemId: "queue-demo-1",
+        accountId: "mt5-100200300",
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "ttc:demo-1",
+        orderTicket: "247596888",
+        positionTicket: "247596888",
+        dealTicket: "deal-open-1",
+        requestedPrice: 1.085,
+        filledPrice: 1.085,
+        volume: 0.1,
+      }),
+    });
+    // Force the trade into OUT_OF_SYNC by sending a snapshot with no matching
+    // position (this is how prod got stuck — snapshot saw nothing, no real
+    // close arrived in time, status flipped to OUT_OF_SYNC).
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        positions: [],
+        orders: [],
+        symbols: [],
+      }),
+    });
+    const dash = await json<{
+      logicalTrades: Array<{ id: string; status: string }>;
+    }>(await app.request("/api/dashboard"));
+    let trade = dash.logicalTrades.find((t) => t.id === "trade-demo-1");
+    // Pre-condition: synthetic 'manual' close was written AND status is now
+    // OUT_OF_SYNC (the stuck state).
+    expect(trade!.status).toBe("OUT_OF_SYNC");
+    // Now a real sl-hit deal lands. With the race-fix in place,
+    // reconcileSnapshotState should NOT re-stick it, AND the trade should be
+    // CLOSED on the next dashboard read.
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        deals: [
+          {
+            dealTicket: "deal-sl",
+            orderTicket: "order-sl",
+            positionTicket: "247596888",
+            entry: "1",
+            type: "1",
+            reason: 4,
+            symbol: "EURUSD.raw",
+            price: 1.08,
+            volume: 0.1,
+            profit: -50,
+            commission: 0,
+            swap: 0,
+            comment: "ttc:demo-1",
+            time: "2026.05.18 11:14:28",
+          },
+        ],
+      }),
+    });
+    const healedDash = await json<{
+      logicalTrades: Array<{ id: string; status: string }>;
+      mt5Accounts: Array<{
+        id: string;
+        closedTrades: Array<{
+          tradeId: string;
+          realizedPnl: number;
+          legs: Array<{ source: string }>;
+        }>;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    trade = healedDash.logicalTrades.find((t) => t.id === "trade-demo-1");
+    expect(trade!.status).toBe("CLOSED");
+    const account = healedDash.mt5Accounts.find((a) => a.id === "mt5-100200300");
+    const closed = account!.closedTrades.find((t) => t.tradeId === "trade-demo-1");
+    expect(closed).toBeDefined();
+    // The synthetic 'manual' close (pnl=null → 0) should be deduped, so only
+    // the real sl-hit close contributes to realizedPnl (= -50).
+    expect(closed!.realizedPnl).toBe(-50);
+    expect(closed!.legs.every((leg) => leg.source !== "manual")).toBe(true);
+  });
+
+  test("startup backfill heals already-stuck OUT_OF_SYNC trades from persisted broker history", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: true,
+      });
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          queueItemId: "queue-demo-1",
+          accountId: "mt5-100200300",
+          status: "EXECUTED",
+          retcode: 10009,
+          retcodeExternal: 0,
+          brokerComment: "ttc:demo-1",
+          orderTicket: "247596888",
+          positionTicket: "247596888",
+          dealTicket: "deal-open-1",
+          requestedPrice: 1.085,
+          filledPrice: 1.085,
+          volume: 0.1,
+        }),
+      });
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountId: "mt5-100200300",
+          positions: [],
+          orders: [],
+          symbols: [],
+        }),
+      });
+
+      const db = new Database(databasePath);
+      db.query(
+        `INSERT INTO broker_orders
+          (id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
+           requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment,
+           pnl_currency, pnl_pips, source, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        "broker-real-sl",
+        "trade-demo-1",
+        "trade",
+        "FULL_CLOSE",
+        "history",
+        "mt5-100200300",
+        "order-sl",
+        "247596888",
+        "deal-sl",
+        null,
+        0.1,
+        null,
+        1.08,
+        0,
+        0,
+        "[sl 1.08000]",
+        -50,
+        -50,
+        "sl-hit",
+        "2026.05.18 11:14:28",
+      );
+      db.close();
+
+      const restarted = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: false,
+      });
+      const dash = await json<{
+        logicalTrades: Array<{ id: string; status: string }>;
+        mt5Accounts: Array<{
+          id: string;
+          closedTrades: Array<{
+            tradeId: string;
+            realizedPnl: number;
+            legs: Array<{ source: string }>;
+          }>;
+        }>;
+      }>(await restarted.request("/api/dashboard"));
+      expect(dash.logicalTrades.find((trade) => trade.id === "trade-demo-1")?.status).toBe(
+        "CLOSED",
+      );
+      const closed = dash.mt5Accounts
+        .find((account) => account.id === "mt5-100200300")
+        ?.closedTrades.find((trade) => trade.tradeId === "trade-demo-1");
+      expect(closed?.realizedPnl).toBe(-50);
+      expect(closed?.legs.map((leg) => leg.source)).toEqual(["sl-hit"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("startup backfill cancels unrecoverable OUT_OF_SYNC trades with no broker open row", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: true,
+      });
+      const db = new Database(databasePath);
+      const row = db
+        .query("SELECT data_json FROM logical_trades WHERE id = ?")
+        .get("trade-demo-1") as { data_json: string } | null;
+      expect(row).toBeDefined();
+      const trade = { ...JSON.parse(row!.data_json), status: "OUT_OF_SYNC" };
+      db.query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?").run(
+        "OUT_OF_SYNC",
+        JSON.stringify(trade),
+        "trade-demo-1",
+      );
+      db.query(
+        `INSERT INTO broker_orders
+          (id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
+           requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment,
+           pnl_currency, pnl_pips, source, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        "broker-failed-open",
+        "trade-demo-1",
+        "entry",
+        "OPEN",
+        "queue-demo-1",
+        "mt5-100200300",
+        "0",
+        "0",
+        "0",
+        0.1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        "Invalid pending order price for current bid/ask or stop level",
+        null,
+        null,
+        "signal",
+        "2026-05-18T04:36:51.579Z",
+      );
+      db.close();
+
+      const restarted = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: false,
+      });
+      const dash = await json<{
+        logicalTrades: Array<{ id: string; status: string; legs: Array<{ status: string }> }>;
+      }>(await restarted.request("/api/dashboard"));
+      const cancelled = dash.logicalTrades.find((item) => item.id === "trade-demo-1");
+      expect(cancelled?.status).toBe("CANCELLED");
+      expect(cancelled?.legs.every((leg) => leg.status === "SKIPPED")).toBe(true);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("account performance separates deposits from trading PnL and includes floating manual positions", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        queueItemId: "queue-demo-1",
+        accountId: "mt5-100200300",
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "ttc:demo-1",
+        orderTicket: "order-1",
+        positionTicket: "position-1",
+        dealTicket: "deal-open-1",
+        requestedPrice: 1.085,
+        filledPrice: 1.085,
+        volume: 0.1,
+      }),
+    });
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        deals: [
+          {
+            dealTicket: "deal-close-1",
+            orderTicket: "order-close-1",
+            positionTicket: "position-1",
+            entry: "1",
+            type: "1",
+            reason: 4,
+            symbol: "EURUSD.raw",
+            price: 1.084,
+            volume: 0.1,
+            profit: -10,
+            commission: 0,
+            swap: 0,
+            comment: "ttc:demo-1",
+            time: "2026.05.18 09:00:00",
+          },
+        ],
+      }),
+    });
+    await app.request("/api/mt5/heartbeat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        balance: 10100,
+        equity: 10115,
+        availableSymbols: ["EURUSD.raw", "XAUUSD"],
+      }),
+    });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        positions: [
+          {
+            ticket: "manual-1",
+            symbol: "XAUUSD",
+            type: 1,
+            volume: 0.01,
+            openPrice: 4553.73,
+            sl: 4560,
+            tp: 4481.29,
+            profit: 25,
+            magic: 0,
+            isExternal: true,
+            comment: "",
+          },
+        ],
+        orders: [],
+        symbols: [],
+      }),
+    });
+
+    const perf = await json<{
+      initialBalance: number;
+      totalProfit: number;
+      realizedPnl: number;
+      floatingPnl: number;
+      netDeposits: number;
+      currentEquity: number;
+    }>(await app.request("/api/account/performance"));
+
+    expect(perf.initialBalance).toBe(10000);
+    expect(perf.realizedPnl).toBe(-10);
+    expect(perf.floatingPnl).toBe(25);
+    expect(perf.totalProfit).toBe(15);
+    expect(perf.netDeposits).toBe(100);
+    expect(perf.currentEquity).toBe(10115);
+  });
+
+  test("active-plans endpoint returns line-format diagnostics for app-managed virtual TP plans", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: false,
+    });
+    // No plans yet should produce planCount=0.
+    const empty = await (await app.request("/api/mt5/active-plans?accountId=mt5-100200300")).text();
+    expect(empty).toContain("planCount=0");
+
+    // Missing accountId returns 400.
+    const bad = await app.request("/api/mt5/active-plans");
+    expect(bad.status).toBe(400);
+
+    // With seeded demo data we should get at least one plan block with the
+    // structured plan=begin / plan=end markers and key=value lines.
+    const seeded = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+    await seeded.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: "queue-demo-1",
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request executed",
+        orderTicket: "50001",
+        positionTicket: "70001",
+        dealTicket: "60001",
+        requestedPrice: 1.085,
+        filledPrice: 1.0851,
+        volume: 0.1,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const text = await (
+      await seeded.request("/api/mt5/active-plans?accountId=mt5-100200300")
+    ).text();
+    expect(text).toContain("plan=begin");
+    expect(text).toContain("plan=end");
+    expect(text).toContain("logicalTradeId=");
+    expect(text).toMatch(/tp\dPrice=/);
+
+    await seeded.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        positions: [],
+        orders: [],
+        symbols: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const outOfSync = await (
+      await seeded.request("/api/mt5/active-plans?accountId=mt5-100200300")
+    ).text();
+    expect(outOfSync).toContain("planCount=0");
   });
 });

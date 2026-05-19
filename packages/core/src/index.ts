@@ -122,13 +122,18 @@ export interface LogicalTrade {
   accountId?: string;
   symbol: SymbolResolution;
   direction: Direction;
-  status: "PLANNED" | "OPEN" | "PENDING" | "CLOSED" | "OUT_OF_SYNC";
+  status: "PLANNED" | "OPEN" | "PENDING" | "CLOSED" | "OUT_OF_SYNC" | "CANCELLED";
   executionMode: ExecutionMode;
   entry?: PriceZone;
   stopLoss?: number;
   legs: TradeLeg[];
   commandHistory: Array<{ commandType: CommandType; text: string; at: string }>;
   openedAt: string;
+  outOfSyncReason?: string;
+  livePositionExists?: boolean;
+  matchedBrokerTickets?: string[];
+  brokerComment?: string;
+  lastSnapshotAt?: string;
 }
 
 export interface TradeLeg {
