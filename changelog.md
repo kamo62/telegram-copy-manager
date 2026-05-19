@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-05-19 (EA lifecycle command Journal logging)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.1` and kept the
+  MT5 EA `#property version` aligned at `1.6.1` because this adds observability without changing the
+  backend/EA command protocol.
+- Added MT5 Journal logging whenever the EA receives backend `status=WORK`, including command type,
+  queue id, logical trade id, symbol, target position/order tickets, partial-close fields, and
+  requested SL context.
+- Added focused logs for `MODIFY_SL`, `CLOSE_TRADE`/`CLOSE_PARTIAL`, and `TRAILING_STOP` execution
+  paths so recovered virtual-TP plans can be traced from backend recovery through EA-side work.
+- Added an EA source regression to keep the lifecycle command logging contract in place.
+
 ## 2026-05-19 (Virtual TP recovery and operator-state guard)
 
 - Release impact: Minor. Bumped the canonical app version in `package.json` to `1.6.0` and kept the

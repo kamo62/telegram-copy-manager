@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.6.0"
+#property version   "1.6.1"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -214,6 +214,8 @@ void PollAndExecute()
       return;
    }
 
+   PrintWorkCommand(command);
+
    if(command.commandType == "OPEN_TRADE")
       ExecuteOpenTrade(command);
    else if(command.commandType == "CANCEL_PENDING")
@@ -230,6 +232,23 @@ void PollAndExecute()
       ExecuteClose(command);
    else
       ReportFailure(command.queueItemId, "Unsupported command type", command.commandType);
+}
+
+void PrintWorkCommand(SignalCommand &command)
+{
+   PrintFormat("Telegram TC WORK command=%s queue=%s logicalTradeId=%s symbol=%s direction=%s targetPosition=%I64u targetOrder=%I64u volume=%.2f newSL=%.5f partialKind=%s partialValue=%.2f partialVolume=%.2f",
+      command.commandType,
+      command.queueItemId,
+      command.logicalTradeId,
+      command.brokerSymbol,
+      command.direction,
+      command.targetPositionTicket,
+      command.targetOrderTicket,
+      command.volume,
+      command.newStopLoss,
+      command.partialCloseKind,
+      command.partialCloseValue,
+      command.partialCloseVolume);
 }
 
 ENUM_ORDER_TYPE_FILLING FillingModeForSymbol(string symbol, bool pendingOrder)
@@ -533,6 +552,14 @@ void ExecuteTrailingStop(SignalCommand &command)
       return;
    }
 
+   PrintFormat("Telegram TC TRAILING_STOP queue=%s logicalTradeId=%s symbol=%s distance=%.8f tickets=%d targetPosition=%I64u",
+      command.queueItemId,
+      command.logicalTradeId,
+      command.brokerSymbol,
+      distance,
+      found,
+      command.targetPositionTicket);
+
    for(int index = 0; index < found; index++)
    {
       TrackTrailingStop(command, tickets[index], distance);
@@ -645,6 +672,14 @@ void ModifyPositionSl(SignalCommand &command, ulong ticket, double stopLoss)
    request.tp = PositionGetDouble(POSITION_TP);
    request.magic = MagicNumber;
 
+   PrintFormat("Telegram TC MODIFY_SL ticket=%I64u queue=%s logicalTradeId=%s symbol=%s newSL=%.5f currentTP=%.5f",
+      ticket,
+      command.queueItemId,
+      command.logicalTradeId,
+      request.symbol,
+      request.sl,
+      request.tp);
+
    bool sent = OrderSend(request, result);
     Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.sl, result.price, PositionGetDouble(POSITION_VOLUME), sent ? "" : IntegerToString(GetLastError()));
 }
@@ -728,6 +763,17 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
       ? SymbolInfoDouble(symbol, SYMBOL_BID)
       : SymbolInfoDouble(symbol, SYMBOL_ASK);
    request.comment = CompactTradeComment(command.logicalTradeId) + ":close";
+
+   PrintFormat("Telegram TC CLOSE command=%s ticket=%I64u queue=%s logicalTradeId=%s symbol=%s closeVolume=%.2f currentVolume=%.2f partialKind=%s targetPosition=%I64u",
+      command.commandType,
+      ticket,
+      command.queueItemId,
+      command.logicalTradeId,
+      symbol,
+      request.volume,
+      currentVolume,
+      command.partialCloseKind,
+      command.targetPositionTicket);
 
    bool sent = OrderSend(request, result);
     Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.price, result.price, request.volume, sent ? "" : IntegerToString(GetLastError()));

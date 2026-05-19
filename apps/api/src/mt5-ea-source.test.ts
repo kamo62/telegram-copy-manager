@@ -155,6 +155,16 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).not.toContain('availableSymbols\\":[\\"%s\\"]');
   });
 
+  test("logs incoming lifecycle work with ticket and trade context for MT5 Journal tracing", () => {
+    expect(source).toContain("Telegram TC WORK command=%s");
+    expect(source).toContain("queue=%s logicalTradeId=%s");
+    expect(source).toContain("targetPosition=%I64u");
+    expect(source).toContain("partialKind=%s partialValue=%.2f partialVolume=%.2f");
+    expect(source).toContain("Telegram TC MODIFY_SL ticket=%I64u");
+    expect(source).toContain("Telegram TC CLOSE command=%s ticket=%I64u");
+    expect(source).toContain("Telegram TC TRAILING_STOP queue=%s");
+  });
+
   test("validates pending-order prices against current bid ask and broker stop levels", () => {
     expect(source).toContain("ValidatePendingOrderPrice(command)");
     expect(source).toContain("SYMBOL_TRADE_STOPS_LEVEL");
