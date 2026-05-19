@@ -3,16 +3,31 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.001"
+#property version   "1.6.3"
 #property strict
 
-input string BackendBaseUrl = "https://your-api-host.example.com/api";
+input string BackendBaseUrl = "http://192.168.0.100:18787/api";
 input int    PollSeconds    = 1;
-input string LinkCode       = "";
+input string LinkCode       = "-UTN4-D6";
 input int    HistoryLookbackHours = 168;
+input int    HeartbeatSeconds = 5;
+input int    HistoryBackfillSeconds = 60;
 input double DefaultLots    = 0.10;
 input int    DeviationPoints = 20;
 input ulong  MagicNumber    = 26050901;
+// When > 0, every order's volume becomes SYMBOL_VOLUME_MIN × this multiplier,
+// overriding DefaultLots and any per-provider lot. Useful when you want
+// "smallest broker-acceptable size × N" across mixed asset classes (forex,
+// gold, indices, crypto) without configuring each one separately.
+// 0 = disabled (use DefaultLots / provider config / risk% as today).
+input double BrokerMinLotMultiplier = 0.0;
+// Safety net for stops. SYMBOL_TRADE_STOPS_LEVEL is the broker's minimum
+// distance from market for SL/TP. If our requested SL/TP sits closer than
+// stopsLevel × this multiplier, the EA pushes it out to that safe minimum
+// rather than letting the broker reject the order with retcode 10016
+// (INVALID_STOPS). 1.0 = exactly the broker minimum; 1.5 leaves a small
+// buffer for spread / price drift. 0 = disabled (send stops as-is).
+input double MinStopBufferMultiplier = 1.5;
 
 struct SignalCommand
 {
@@ -38,6 +53,8 @@ struct SignalCommand
    string trailingStopUnit;
    string partialCloseKind;
    double partialCloseValue;
+   double partialCloseVolume;
+   double partialCloseAllocation;
    ulong targetOrderTicket;
    ulong targetPositionTicket;
    ulong targetDealTicket;
@@ -46,29 +63,30 @@ struct SignalCommand
    double tpVolume[4];
 };
 
-struct VirtualTpState
+struct TrailingStopState
 {
    bool active;
    string queueItemId;
    string logicalTradeId;
    string symbol;
    string direction;
-   double baseVolume;
-   double tp[4];
-   double tpAllocation[4];
-   double tpVolume[4];
-   bool closed[4];
+   ulong positionTicket;
+   double distance;
 };
 
-VirtualTpState virtualTpStates[100];
-int virtualTpStateCount = 0;
+TrailingStopState trailingStopStates[100];
+int trailingStopStateCount = 0;
 int CurrentPollSeconds = 0;
+datetime LastHeartbeatSentAt = 0;
+datetime LastHistoryBackfillAt = 0;
 
 int OnInit()
 {
    CurrentPollSeconds = MathMax(1, PollSeconds);
    if(StringFind(BackendBaseUrl, "your-api-host.example.com") >= 0 || BackendBaseUrl == "")
       Print("Telegram TC: set BackendBaseUrl to your deployed API /api URL before enabling live polling.");
+   if(LinkCode == "")
+      Print("Telegram TC: LinkCode is empty — registrations will land in an unlabelled slot. Paste the link code from the App's Linked Accounts page.");
    EventSetTimer(CurrentPollSeconds);
    RegisterAccount();
    return(INIT_SUCCEEDED);
@@ -81,18 +99,41 @@ void OnDeinit(const int reason)
 
 void OnTimer()
 {
-   SendHeartbeat();
    SendSnapshot();
-   SendHistoryDeals();
-   ManageVirtualTakeProfits();
+   ManageTrailingStops();
    PollAndExecute();
+   datetime now = TimeLocal();
+   if(LastHeartbeatSentAt == 0 || now - LastHeartbeatSentAt >= MathMax(1, HeartbeatSeconds))
+   {
+      SendHeartbeat();
+      LastHeartbeatSentAt = now;
+   }
+   if(LastHistoryBackfillAt == 0 || now - LastHistoryBackfillAt >= MathMax(1, HistoryBackfillSeconds))
+   {
+      SendHistoryDeals();
+      LastHistoryBackfillAt = now;
+   }
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD || trans.deal == 0)
+      return;
+   if(!HistoryDealSelect(trans.deal))
+      return;
+   PostHistoryDeal(trans.deal);
 }
 
 void RegisterAccount()
 {
    string body = AccountPayload();
    string response = "";
-   HttpPost("/mt5/register", body, response);
+   // Registration is idempotent server-side (link code matches a single slot,
+   // duplicate registers just update the slot's last-known fields). Safe to
+   // retry across a container restart window.
+   HttpPostRetry("/mt5/register", body, response);
 }
 
 void SendHeartbeat()
@@ -106,7 +147,9 @@ void SendHeartbeat()
       JsonEscape(LinkCode)
    );
    string response = "";
-   HttpPost("/mt5/heartbeat", body, response);
+   // Heartbeat is a pure idempotent timestamp update — safe to retry across a
+   // container restart window so the slot doesn't appear stale to the App.
+   HttpPostRetry("/mt5/heartbeat", body, response);
 }
 
 void SendSnapshot()
@@ -119,7 +162,7 @@ void SendSnapshot()
       SymbolsMarketJson()
    );
    string response = "";
-   HttpPost("/mt5/snapshot", body, response);
+   HttpPostRetry("/mt5/snapshot", body, response);
 }
 
 void SendHistoryDeals()
@@ -134,7 +177,22 @@ void SendHistoryDeals()
       HistoryDealsJson()
    );
    string response = "";
-   HttpPost("/mt5/history", body, response);
+   // History is server-side dedup'd by deal_ticket, so retrying duplicate
+   // payloads is a no-op. Safe to retry across a deploy window.
+   HttpPostRetry("/mt5/history", body, response);
+}
+
+void PostHistoryDeal(ulong ticket)
+{
+   if(!IsTelegramTcHistoryDeal(ticket))
+      return;
+   string body = StringFormat(
+      "{\"accountId\":\"mt5-%I64d\",\"deals\":[%s]}",
+      AccountInfoInteger(ACCOUNT_LOGIN),
+      HistoryDealJson(ticket)
+   );
+   string response = "";
+   HttpPostRetry("/mt5/history", body, response);
 }
 
 void PollAndExecute()
@@ -149,12 +207,14 @@ void PollAndExecute()
    if(StringFind(response, "status=WORK") < 0)
       return;
 
-   SignalCommand command;
+   SignalCommand command = {};
    if(!ParseCommand(response, command))
    {
       ReportFailure(command.queueItemId, "Could not parse poll payload", "parser");
       return;
    }
+
+   PrintWorkCommand(command);
 
    if(command.commandType == "OPEN_TRADE")
       ExecuteOpenTrade(command);
@@ -174,6 +234,53 @@ void PollAndExecute()
       ReportFailure(command.queueItemId, "Unsupported command type", command.commandType);
 }
 
+void PrintWorkCommand(SignalCommand &command)
+{
+   PrintFormat("Telegram TC WORK command=%s queue=%s logicalTradeId=%s symbol=%s direction=%s targetPosition=%I64u targetOrder=%I64u volume=%.2f newSL=%.5f partialKind=%s partialValue=%.2f partialVolume=%.2f",
+      command.commandType,
+      command.queueItemId,
+      command.logicalTradeId,
+      command.brokerSymbol,
+      command.direction,
+      command.targetPositionTicket,
+      command.targetOrderTicket,
+      command.volume,
+      command.newStopLoss,
+      command.partialCloseKind,
+      command.partialCloseValue,
+      command.partialCloseVolume);
+}
+
+ENUM_ORDER_TYPE_FILLING FillingModeForSymbol(string symbol, bool pendingOrder)
+{
+   if(pendingOrder)
+      return ORDER_FILLING_RETURN;
+
+   long fillingMode = SymbolInfoInteger(symbol, SYMBOL_FILLING_MODE);
+   ENUM_SYMBOL_TRADE_EXECUTION execMode =
+      (ENUM_SYMBOL_TRADE_EXECUTION)SymbolInfoInteger(symbol, SYMBOL_TRADE_EXEMODE);
+
+   // Market / Exchange execution: ORDER_FILLING_RETURN is invalid for instant deals.
+   // OctaFX returns retcode 10030 (Unsupported filling mode) when RETURN is used for
+   // market-execution symbols such as crypto pairs. Prefer FOK, then IOC, and default
+   // to FOK when the broker reports an empty mask (typical for some MetaQuotes builds).
+   if(execMode == SYMBOL_TRADE_EXECUTION_MARKET || execMode == SYMBOL_TRADE_EXECUTION_EXCHANGE)
+   {
+      if((fillingMode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+         return ORDER_FILLING_FOK;
+      if((fillingMode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+         return ORDER_FILLING_IOC;
+      return ORDER_FILLING_FOK;
+   }
+
+   // Instant / Request execution: RETURN is the canonical choice.
+   if((fillingMode & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+      return ORDER_FILLING_IOC;
+   if((fillingMode & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+      return ORDER_FILLING_FOK;
+   return ORDER_FILLING_RETURN;
+}
+
 bool ExecuteOpenTrade(SignalCommand &command)
 {
    if(!EnsureSymbol(command.brokerSymbol))
@@ -191,7 +298,7 @@ bool ExecuteOpenTrade(SignalCommand &command)
    request.magic = MagicNumber;
    request.volume = CommandVolume(command);
    request.deviation = DeviationPoints;
-   request.comment = StringFormat("telegram-tc:%s", command.logicalTradeId);
+   request.comment = CompactTradeComment(command.logicalTradeId);
 
    if(command.orderType == "LIMIT" || command.orderType == "STOP")
    {
@@ -203,28 +310,56 @@ bool ExecuteOpenTrade(SignalCommand &command)
       request.action = TRADE_ACTION_PENDING;
       request.price = command.entryFrom;
       request.type_time = ORDER_TIME_GTC;
-      request.type_filling = ORDER_FILLING_RETURN;
+      request.type_filling = FillingModeForSymbol(command.brokerSymbol, true);
       request.type = PendingOrderType(command.direction, command.orderType);
    }
    else
    {
       request.action = TRADE_ACTION_DEAL;
-      request.type_filling = ORDER_FILLING_IOC;
+      request.type_filling = FillingModeForSymbol(command.brokerSymbol, false);
       request.type = command.direction == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-      request.price = command.direction == "BUY"
-         ? SymbolInfoDouble(command.brokerSymbol, SYMBOL_ASK)
-         : SymbolInfoDouble(command.brokerSymbol, SYMBOL_BID);
+      request.price = MarketReferencePrice(command);
    }
 
+   // Compute defaults against a non-zero price. If the live tick is still
+   // unavailable (rare after EnsureSymbol's wait), fall back to the last
+   // SymbolInfoDouble read so we don't ship the order naked.
+   double referencePrice = request.price;
+   if(referencePrice <= 0.0)
+      referencePrice = MarketReferencePrice(command);
    if(command.stopLoss <= 0.0)
-      command.stopLoss = DefaultStopLossPrice(command, request.price);
+      command.stopLoss = DefaultStopLossPrice(command, referencePrice);
    if(command.tp[0] <= 0.0)
-      command.tp[0] = DefaultTakeProfitPrice(command, request.price);
+      command.tp[0] = DefaultTakeProfitPrice(command, referencePrice);
+   if(command.tp[0] > 0.0 && command.tpAllocation[0] <= 0.0)
+      command.tpAllocation[0] = 100.0;
 
-   request.sl = command.stopLoss;
-   request.tp = command.executionMode == "SPLIT_ORDER" ? command.tp[0] : 0.0;
+   if(command.stopLoss <= 0.0 || command.tp[0] <= 0.0)
+   {
+      PrintFormat("Telegram TC OPEN_TRADE WARNING %s missing protective stops: sl=%.5f tp=%.5f refPrice=%.5f (signal lacked them and defaults could not be computed)",
+         command.brokerSymbol, command.stopLoss, command.tp[0], referencePrice);
+   }
+
+   request.sl = SafeStopPrice(command.brokerSymbol, referencePrice, command.stopLoss, command.direction, true);
+   double rawTp = command.executionMode == "SPLIT_ORDER" ? command.tp[0] : 0.0;
+   request.tp = rawTp > 0.0
+      ? SafeStopPrice(command.brokerSymbol, referencePrice, rawTp, command.direction, false)
+      : 0.0;
+
+   PrintFormat("Telegram TC OPEN_TRADE symbol=%s side=%s type=%s vol=%.2f price=%.5f sl=%.5f filling=%d execMode=%d",
+      command.brokerSymbol, command.direction, command.orderType,
+      request.volume, request.price, request.sl,
+      (int)request.type_filling,
+      (int)SymbolInfoInteger(command.brokerSymbol, SYMBOL_TRADE_EXEMODE));
 
    bool sent = OrderSend(request, result);
+   int sendErr = sent ? 0 : GetLastError();
+
+   PrintFormat("Telegram TC OrderSend RESULT sent=%s retcode=%u (%s) deal=%I64u order=%I64u price=%.5f err=%d",
+      sent ? "true" : "false",
+      result.retcode, result.comment,
+      result.deal, result.order, result.price, sendErr);
+
    Report(
       command.queueItemId,
       IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED",
@@ -237,11 +372,9 @@ bool ExecuteOpenTrade(SignalCommand &command)
       request.price,
       result.price,
       request.volume,
-      sent ? "" : IntegerToString(GetLastError())
+      sent ? "" : IntegerToString(sendErr)
    );
    bool ok = sent && IsTradeSuccess(result.retcode);
-   if(ok)
-      TrackVirtualTakeProfits(command, result);
    return ok;
 }
 
@@ -267,9 +400,9 @@ bool ExecuteSplitOrders(SignalCommand &command)
       request.magic = MagicNumber;
       request.volume = LegVolume(command, leg, baseVolume);
       request.deviation = DeviationPoints;
-      request.comment = StringFormat("telegram-tc:%s:tp%d", command.logicalTradeId, leg + 1);
-      request.sl = command.stopLoss;
-      request.tp = command.tp[leg];
+      request.comment = CompactTradeTpComment(command.logicalTradeId, leg + 1);
+      request.sl = SafeStopPrice(command.brokerSymbol, referencePrice, command.stopLoss, command.direction, true);
+      request.tp = SafeStopPrice(command.brokerSymbol, referencePrice, command.tp[leg], command.direction, false);
 
       if(command.orderType == "LIMIT" || command.orderType == "STOP")
       {
@@ -281,13 +414,13 @@ bool ExecuteSplitOrders(SignalCommand &command)
          request.action = TRADE_ACTION_PENDING;
          request.price = command.entryFrom;
          request.type_time = ORDER_TIME_GTC;
-         request.type_filling = ORDER_FILLING_RETURN;
+         request.type_filling = FillingModeForSymbol(command.brokerSymbol, true);
          request.type = PendingOrderType(command.direction, command.orderType);
       }
       else
       {
          request.action = TRADE_ACTION_DEAL;
-         request.type_filling = ORDER_FILLING_IOC;
+         request.type_filling = FillingModeForSymbol(command.brokerSymbol, false);
          request.type = command.direction == "BUY" ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
          request.price = command.direction == "BUY"
             ? SymbolInfoDouble(command.brokerSymbol, SYMBOL_ASK)
@@ -323,27 +456,15 @@ bool ExecuteSplitOrders(SignalCommand &command)
 
 void ExecuteCancelPending(SignalCommand &command)
 {
-   if(command.targetOrderTicket > 0)
+   ulong tickets[];
+   int found = CollectPendingOrderTickets(command, tickets);
+   if(found <= 0)
    {
-      RemovePendingOrder(command, command.targetOrderTicket);
-      return;
-   }
-   bool found = false;
-   for(int index = OrdersTotal() - 1; index >= 0; index--)
-   {
-      ulong ticket = OrderGetTicket(index);
-      if(ticket == 0)
-         continue;
-      if(!OrderMatchesCommand(command))
-         continue;
-
-      found = true;
-      RemovePendingOrder(command, ticket);
-      return;
-   }
-
-   if(!found)
       ReportFailure(command.queueItemId, "No matching pending order found", command.brokerSymbol);
+      return;
+   }
+   for(int index = 0; index < found; index++)
+      RemovePendingOrder(command, tickets[index]);
 }
 
 void RemovePendingOrder(SignalCommand &command, ulong ticket)
@@ -359,37 +480,43 @@ void RemovePendingOrder(SignalCommand &command, ulong ticket)
 
 void ExecuteMoveSlToBreakeven(SignalCommand &command)
 {
-   ulong ticket = FindPositionTicket(command);
-   if(ticket == 0 || !PositionSelectByTicket(ticket))
+   ulong tickets[];
+   int found = CollectPositionTickets(command, tickets);
+   if(found <= 0)
    {
       ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
       return;
    }
 
-   double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-   ModifyPositionSl(command, ticket, openPrice);
+   for(int index = 0; index < found; index++)
+   {
+      if(!PositionSelectByTicket(tickets[index]))
+         continue;
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      ModifyPositionSl(command, tickets[index], openPrice);
+   }
 }
 
 void ExecuteModifySl(SignalCommand &command)
 {
-   ulong ticket = FindPositionTicket(command);
-   if(ticket == 0)
+   if(command.newStopLoss <= 0.0)
+   {
+      ReportFailure(command.queueItemId, "No valid stop loss provided", command.commandType);
+      return;
+   }
+   ulong tickets[];
+   int found = CollectPositionTickets(command, tickets);
+   if(found <= 0)
    {
       ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
       return;
    }
-   ModifyPositionSl(command, ticket, command.newStopLoss);
+   for(int index = 0; index < found; index++)
+      ModifyPositionSl(command, tickets[index], command.newStopLoss);
 }
 
 void ExecuteModifyTp(SignalCommand &command)
 {
-   ulong ticket = FindPositionTicket(command);
-   if(ticket == 0)
-   {
-      ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
-      return;
-   }
-
    double takeProfit = FirstTakeProfit(command);
    if(takeProfit <= 0.0)
    {
@@ -397,21 +524,19 @@ void ExecuteModifyTp(SignalCommand &command)
       return;
    }
 
-   ModifyPositionTp(command, ticket, takeProfit);
-}
-
-void ExecuteTrailingStop(SignalCommand &command)
-{
-   ulong ticket = FindPositionTicket(command);
-   if(ticket == 0 || !PositionSelectByTicket(ticket))
+   ulong tickets[];
+   int found = CollectPositionTickets(command, tickets);
+   if(found <= 0)
    {
       ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
       return;
    }
+   for(int index = 0; index < found; index++)
+      ModifyPositionTp(command, tickets[index], takeProfit);
+}
 
-   string symbol = PositionGetString(POSITION_SYMBOL);
-   long positionType = PositionGetInteger(POSITION_TYPE);
-   double currentSl = PositionGetDouble(POSITION_SL);
+void ExecuteTrailingStop(SignalCommand &command)
+{
    double distance = TrailingStopDistance(command);
    if(distance <= 0.0)
    {
@@ -419,31 +544,119 @@ void ExecuteTrailingStop(SignalCommand &command)
       return;
    }
 
-   double nextSl = 0.0;
-   if(positionType == POSITION_TYPE_BUY)
+   ulong tickets[];
+   int found = CollectPositionTickets(command, tickets);
+   if(found <= 0)
    {
-      nextSl = SymbolInfoDouble(symbol, SYMBOL_BID) - distance;
-      if(currentSl > 0.0 && nextSl <= currentSl)
-      {
-         ReportFailure(command.queueItemId, "Trailing stop would not improve current SL", command.trailingStopUnit);
-         return;
-      }
+      ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
+      return;
    }
-   else
+
+   PrintFormat("Telegram TC TRAILING_STOP queue=%s logicalTradeId=%s symbol=%s distance=%.8f tickets=%d targetPosition=%I64u",
+      command.queueItemId,
+      command.logicalTradeId,
+      command.brokerSymbol,
+      distance,
+      found,
+      command.targetPositionTicket);
+
+   for(int index = 0; index < found; index++)
    {
-      nextSl = SymbolInfoDouble(symbol, SYMBOL_ASK) + distance;
-      if(currentSl > 0.0 && nextSl >= currentSl)
+      TrackTrailingStop(command, tickets[index], distance);
+      ApplyTrailingStopToTicket(command, tickets[index], distance);
+   }
+}
+
+void TrackTrailingStop(SignalCommand &command, ulong ticket, double distance)
+{
+   for(int index = 0; index < trailingStopStateCount; index++)
+   {
+      if(trailingStopStates[index].positionTicket == ticket)
       {
-         ReportFailure(command.queueItemId, "Trailing stop would not improve current SL", command.trailingStopUnit);
+         trailingStopStates[index].active = true;
+         trailingStopStates[index].queueItemId = command.queueItemId;
+         trailingStopStates[index].logicalTradeId = command.logicalTradeId;
+         trailingStopStates[index].symbol = command.brokerSymbol;
+         trailingStopStates[index].direction = command.direction;
+         trailingStopStates[index].distance = distance;
          return;
       }
    }
 
+   if(trailingStopStateCount >= ArraySize(trailingStopStates))
+      return;
+
+   int slot = trailingStopStateCount;
+   trailingStopStateCount++;
+   trailingStopStates[slot].active = true;
+   trailingStopStates[slot].queueItemId = command.queueItemId;
+   trailingStopStates[slot].logicalTradeId = command.logicalTradeId;
+   trailingStopStates[slot].symbol = command.brokerSymbol;
+   trailingStopStates[slot].direction = command.direction;
+   trailingStopStates[slot].positionTicket = ticket;
+   trailingStopStates[slot].distance = distance;
+}
+
+void ManageTrailingStops()
+{
+   for(int index = 0; index < trailingStopStateCount; index++)
+   {
+      if(!trailingStopStates[index].active)
+         continue;
+      SignalCommand command = {};
+      command.queueItemId = trailingStopStates[index].queueItemId;
+      command.logicalTradeId = trailingStopStates[index].logicalTradeId;
+      command.brokerSymbol = trailingStopStates[index].symbol;
+      command.direction = trailingStopStates[index].direction;
+      command.targetPositionTicket = trailingStopStates[index].positionTicket;
+      if(!PositionSelectByTicket(trailingStopStates[index].positionTicket))
+      {
+         trailingStopStates[index].active = false;
+         continue;
+      }
+      ApplyTrailingStopToTicket(command, trailingStopStates[index].positionTicket, trailingStopStates[index].distance);
+   }
+}
+
+bool ApplyTrailingStopToTicket(SignalCommand &command, ulong ticket, double distance)
+{
+   if(!PositionSelectByTicket(ticket))
+      return false;
+
+   string symbol = PositionGetString(POSITION_SYMBOL);
+   long positionType = PositionGetInteger(POSITION_TYPE);
+   double currentSl = PositionGetDouble(POSITION_SL);
+   double nextSl = 0.0;
+   if(positionType == POSITION_TYPE_BUY)
+      nextSl = SymbolInfoDouble(symbol, SYMBOL_BID) - distance;
+   else
+      nextSl = SymbolInfoDouble(symbol, SYMBOL_ASK) + distance;
+
+   if(!TrailingStopImproves(positionType, currentSl, nextSl))
+      return false;
+
    ModifyPositionSl(command, ticket, nextSl);
+   return true;
+}
+
+bool TrailingStopImproves(long positionType, double currentSl, double nextSl)
+{
+   if(nextSl <= 0.0)
+      return false;
+   if(currentSl <= 0.0)
+      return true;
+   if(positionType == POSITION_TYPE_BUY)
+      return nextSl > currentSl;
+   return nextSl < currentSl;
 }
 
 void ModifyPositionSl(SignalCommand &command, ulong ticket, double stopLoss)
 {
+   if(stopLoss <= 0.0)
+   {
+      ReportFailure(command.queueItemId, "No valid stop loss provided", command.commandType);
+      return;
+   }
    if(!PositionSelectByTicket(ticket))
    {
       ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
@@ -455,9 +668,17 @@ void ModifyPositionSl(SignalCommand &command, ulong ticket, double stopLoss)
    request.action = TRADE_ACTION_SLTP;
    request.position = ticket;
    request.symbol = PositionGetString(POSITION_SYMBOL);
-   request.sl = stopLoss;
+   request.sl = NormalizeStopPrice(request.symbol, stopLoss);
    request.tp = PositionGetDouble(POSITION_TP);
    request.magic = MagicNumber;
+
+   PrintFormat("Telegram TC MODIFY_SL ticket=%I64u queue=%s logicalTradeId=%s symbol=%s newSL=%.5f currentTP=%.5f",
+      ticket,
+      command.queueItemId,
+      command.logicalTradeId,
+      request.symbol,
+      request.sl,
+      request.tp);
 
    bool sent = OrderSend(request, result);
     Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.sl, result.price, PositionGetDouble(POSITION_VOLUME), sent ? "" : IntegerToString(GetLastError()));
@@ -477,7 +698,7 @@ void ModifyPositionTp(SignalCommand &command, ulong ticket, double takeProfit)
    request.position = ticket;
    request.symbol = PositionGetString(POSITION_SYMBOL);
    request.sl = PositionGetDouble(POSITION_SL);
-   request.tp = takeProfit;
+   request.tp = NormalizeStopPrice(request.symbol, takeProfit);
    request.magic = MagicNumber;
 
    bool sent = OrderSend(request, result);
@@ -486,8 +707,21 @@ void ModifyPositionTp(SignalCommand &command, ulong ticket, double takeProfit)
 
 void ExecuteClose(SignalCommand &command)
 {
-   ulong ticket = FindPositionTicket(command);
-   if(ticket == 0 || !PositionSelectByTicket(ticket))
+   ulong tickets[];
+   int found = CollectPositionTickets(command, tickets);
+   if(found <= 0)
+   {
+      ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
+      return;
+   }
+
+   for(int index = 0; index < found; index++)
+      ClosePositionTicket(command, tickets[index]);
+}
+
+void ClosePositionTicket(SignalCommand &command, ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket))
    {
       ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
       return;
@@ -496,9 +730,24 @@ void ExecuteClose(SignalCommand &command)
    string symbol = PositionGetString(POSITION_SYMBOL);
    long positionType = PositionGetInteger(POSITION_TYPE);
    double currentVolume = PositionGetDouble(POSITION_VOLUME);
-   double closeVolume = currentVolume;
+   double closeVolume = command.commandType == "CLOSE_PARTIAL" ? 0.0 : currentVolume;
    if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "PERCENT")
       closeVolume = NormalizeVolume(symbol, currentVolume * command.partialCloseValue / 100.0);
+   else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "TP_LEG")
+   {
+      if(command.partialCloseVolume > 0.0)
+         closeVolume = NormalizeVolume(symbol, command.partialCloseVolume);
+      else if(command.partialCloseAllocation > 0.0)
+         closeVolume = NormalizeVolume(symbol, currentVolume * command.partialCloseAllocation / 100.0);
+   }
+   else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "LOTS")
+      closeVolume = NormalizeVolume(symbol, command.partialCloseValue);
+
+   if(closeVolume <= 0.0)
+   {
+      ReportFailure(command.queueItemId, "No valid partial-close volume provided", command.commandType);
+      return;
+   }
 
    MqlTradeRequest request = {};
    MqlTradeResult result = {};
@@ -508,131 +757,26 @@ void ExecuteClose(SignalCommand &command)
    request.volume = MathMin(closeVolume, currentVolume);
    request.deviation = DeviationPoints;
    request.magic = MagicNumber;
+   request.type_filling = FillingModeForSymbol(symbol, false);
    request.type = positionType == POSITION_TYPE_BUY ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
    request.price = positionType == POSITION_TYPE_BUY
       ? SymbolInfoDouble(symbol, SYMBOL_BID)
       : SymbolInfoDouble(symbol, SYMBOL_ASK);
-   request.comment = StringFormat("telegram-tc-close:%s", command.logicalTradeId);
+   request.comment = CompactTradeComment(command.logicalTradeId) + ":close";
+
+   PrintFormat("Telegram TC CLOSE command=%s ticket=%I64u queue=%s logicalTradeId=%s symbol=%s closeVolume=%.2f currentVolume=%.2f partialKind=%s targetPosition=%I64u",
+      command.commandType,
+      ticket,
+      command.queueItemId,
+      command.logicalTradeId,
+      symbol,
+      request.volume,
+      currentVolume,
+      command.partialCloseKind,
+      command.targetPositionTicket);
 
    bool sent = OrderSend(request, result);
     Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.price, result.price, request.volume, sent ? "" : IntegerToString(GetLastError()));
-}
-
-void TrackVirtualTakeProfits(SignalCommand &command, MqlTradeResult &result)
-{
-   if(command.executionMode != "VIRTUAL_TP")
-      return;
-
-   if(virtualTpStateCount >= ArraySize(virtualTpStates))
-      return;
-
-   bool hasTp = false;
-   for(int leg = 0; leg < 4; leg++)
-   {
-      if(command.tp[leg] > 0.0)
-         hasTp = true;
-   }
-   if(!hasTp)
-      return;
-
-   int slot = virtualTpStateCount;
-   virtualTpStateCount++;
-   virtualTpStates[slot].active = true;
-   virtualTpStates[slot].queueItemId = command.queueItemId;
-   virtualTpStates[slot].logicalTradeId = command.logicalTradeId;
-   virtualTpStates[slot].symbol = command.brokerSymbol;
-   virtualTpStates[slot].direction = command.direction;
-   virtualTpStates[slot].baseVolume = result.volume > 0.0 ? result.volume : CommandVolume(command);
-
-   for(int leg = 0; leg < 4; leg++)
-   {
-      virtualTpStates[slot].tp[leg] = command.tp[leg];
-      virtualTpStates[slot].tpAllocation[leg] = command.tpAllocation[leg];
-      virtualTpStates[slot].tpVolume[leg] = command.tpVolume[leg];
-      virtualTpStates[slot].closed[leg] = false;
-   }
-}
-
-void ManageVirtualTakeProfits()
-{
-   for(int index = 0; index < virtualTpStateCount; index++)
-   {
-      if(!virtualTpStates[index].active)
-         continue;
-      if(!EnsureSymbol(virtualTpStates[index].symbol))
-         continue;
-
-      double price = virtualTpStates[index].direction == "BUY"
-         ? SymbolInfoDouble(virtualTpStates[index].symbol, SYMBOL_BID)
-         : SymbolInfoDouble(virtualTpStates[index].symbol, SYMBOL_ASK);
-
-      for(int leg = 0; leg < 4; leg++)
-      {
-         if(virtualTpStates[index].closed[leg] || virtualTpStates[index].tp[leg] <= 0.0)
-            continue;
-         bool hit = virtualTpStates[index].direction == "BUY"
-            ? price >= virtualTpStates[index].tp[leg]
-            : price <= virtualTpStates[index].tp[leg];
-         if(hit && CloseVirtualTpLeg(index, leg))
-            virtualTpStates[index].closed[leg] = true;
-      }
-   }
-}
-
-bool CloseVirtualTpLeg(int stateIndex, int leg)
-{
-   SignalCommand command;
-   command.queueItemId = virtualTpStates[stateIndex].queueItemId;
-   command.logicalTradeId = virtualTpStates[stateIndex].logicalTradeId;
-   command.brokerSymbol = virtualTpStates[stateIndex].symbol;
-
-   ulong ticket = FindPositionTicket(command);
-   if(ticket == 0 || !PositionSelectByTicket(ticket))
-      return false;
-
-   string symbol = PositionGetString(POSITION_SYMBOL);
-   long positionType = PositionGetInteger(POSITION_TYPE);
-   double currentVolume = PositionGetDouble(POSITION_VOLUME);
-   double requestedVolume = virtualTpStates[stateIndex].tpVolume[leg] > 0.0
-      ? virtualTpStates[stateIndex].tpVolume[leg]
-      : virtualTpStates[stateIndex].baseVolume * virtualTpStates[stateIndex].tpAllocation[leg] / 100.0;
-   double closeVolume = NormalizeVolume(
-      symbol,
-      requestedVolume
-   );
-   if(closeVolume <= 0.0)
-      return false;
-
-   MqlTradeRequest request = {};
-   MqlTradeResult result = {};
-   request.action = TRADE_ACTION_DEAL;
-   request.position = ticket;
-   request.symbol = symbol;
-   request.volume = MathMin(closeVolume, currentVolume);
-   request.deviation = DeviationPoints;
-   request.magic = MagicNumber;
-   request.type = positionType == POSITION_TYPE_BUY ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-   request.price = positionType == POSITION_TYPE_BUY
-      ? SymbolInfoDouble(symbol, SYMBOL_BID)
-      : SymbolInfoDouble(symbol, SYMBOL_ASK);
-   request.comment = StringFormat("telegram-tc-virtual-tp:%s:tp%d", virtualTpStates[stateIndex].logicalTradeId, leg + 1);
-
-   bool sent = OrderSend(request, result);
-   Report(
-      virtualTpStates[stateIndex].queueItemId,
-      IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED",
-      result.retcode,
-      result.retcode_external,
-      result.comment,
-      result.order,
-      ticket,
-      result.deal,
-      request.price,
-      result.price,
-      request.volume,
-      sent ? "" : IntegerToString(GetLastError())
-   );
-   return sent && IsTradeSuccess(result.retcode);
 }
 
 ulong FindPositionTicket(SignalCommand &command)
@@ -649,6 +793,54 @@ ulong FindPositionTicket(SignalCommand &command)
       return ticket;
    }
    return 0;
+}
+
+int CollectPositionTickets(SignalCommand &command, ulong &tickets[])
+{
+   ArrayResize(tickets, 0);
+   if(command.targetPositionTicket > 0 && PositionSelectByTicket(command.targetPositionTicket))
+   {
+      ArrayResize(tickets, 1);
+      tickets[0] = command.targetPositionTicket;
+      return 1;
+   }
+
+   for(int index = PositionsTotal() - 1; index >= 0; index--)
+   {
+      ulong ticket = PositionGetTicket(index);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(!PositionMatchesCommand(command))
+         continue;
+      int next = ArraySize(tickets);
+      ArrayResize(tickets, next + 1);
+      tickets[next] = ticket;
+   }
+   return ArraySize(tickets);
+}
+
+int CollectPendingOrderTickets(SignalCommand &command, ulong &tickets[])
+{
+   ArrayResize(tickets, 0);
+   if(command.targetOrderTicket > 0)
+   {
+      ArrayResize(tickets, 1);
+      tickets[0] = command.targetOrderTicket;
+      return 1;
+   }
+
+   for(int index = OrdersTotal() - 1; index >= 0; index--)
+   {
+      ulong ticket = OrderGetTicket(index);
+      if(ticket == 0)
+         continue;
+      if(!OrderMatchesCommand(command))
+         continue;
+      int next = ArraySize(tickets);
+      ArrayResize(tickets, next + 1);
+      tickets[next] = ticket;
+   }
+   return ArraySize(tickets);
 }
 
 bool PositionMatchesCommand(SignalCommand &command)
@@ -673,9 +865,39 @@ bool MatchesLogicalTradeComment(string brokerComment, string logicalTradeId)
 {
    if(logicalTradeId == "")
       return true;
-   return StringFind(brokerComment, logicalTradeId) >= 0;
+   if(StringFind(brokerComment, logicalTradeId) >= 0)
+      return true;
+   return StringFind(brokerComment, CompactTradeId(logicalTradeId)) >= 0;
 }
 
+string CompactTradeId(string logicalTradeId)
+{
+   if(StringFind(logicalTradeId, "trade_") == 0)
+      return StringSubstr(logicalTradeId, 6);
+   if(StringFind(logicalTradeId, "trade-") == 0)
+      return StringSubstr(logicalTradeId, 6);
+   return logicalTradeId;
+}
+
+string CompactTradeComment(string logicalTradeId)
+{
+   return "ttc:" + CompactTradeId(logicalTradeId);
+}
+
+string CompactTradeTpComment(string logicalTradeId, int leg)
+{
+   return CompactTradeComment(logicalTradeId) + ":tp" + IntegerToString(leg);
+}
+
+// Snapshot includes ALL positions, not just magic-matched. External (manual,
+// other-EA, mobile-opened) positions are flagged isExternal=true so the App can:
+//   1. Show them in a read-only "External positions" panel — operator sees what
+//      else is competing for margin / equity in this account.
+//   2. Distinguish app-attributed drawdown (only our magic) from total-equity
+//      drawdown (everything) in the Equity Guardian.
+//   3. Avoid mislabelling a vanished external position as "the EA closed
+//      something we forgot about" in the snapshot-diff reconciler.
+// The App never modifies external positions — visibility only.
 string PositionsJson()
 {
    string json = "[";
@@ -685,15 +907,14 @@ string PositionsJson()
       ulong ticket = PositionGetTicket(index);
       if(ticket == 0 || !PositionSelectByTicket(ticket))
          continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber)
-         continue;
+      bool isExternal = (ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber;
 
       if(!first)
          json += ",";
       first = false;
 
       json += StringFormat(
-         "{\"ticket\":\"%I64u\",\"symbol\":\"%s\",\"type\":%d,\"volume\":%.2f,\"openPrice\":%.8f,\"sl\":%.8f,\"tp\":%.8f,\"profit\":%.2f,\"comment\":\"%s\"}",
+         "{\"ticket\":\"%I64u\",\"symbol\":\"%s\",\"type\":%d,\"volume\":%.2f,\"openPrice\":%.8f,\"sl\":%.8f,\"tp\":%.8f,\"profit\":%.2f,\"magic\":%I64u,\"isExternal\":%s,\"comment\":\"%s\"}",
          ticket,
          JsonEscape(PositionGetString(POSITION_SYMBOL)),
          (int)PositionGetInteger(POSITION_TYPE),
@@ -702,6 +923,8 @@ string PositionsJson()
          PositionGetDouble(POSITION_SL),
          PositionGetDouble(POSITION_TP),
          PositionGetDouble(POSITION_PROFIT),
+         (ulong)PositionGetInteger(POSITION_MAGIC),
+         isExternal ? "true" : "false",
          JsonEscape(PositionGetString(POSITION_COMMENT))
       );
    }
@@ -718,15 +941,14 @@ string OrdersJson()
       ulong ticket = OrderGetTicket(index);
       if(ticket == 0)
          continue;
-      if((ulong)OrderGetInteger(ORDER_MAGIC) != MagicNumber)
-         continue;
+      bool isExternal = (ulong)OrderGetInteger(ORDER_MAGIC) != MagicNumber;
 
       if(!first)
          json += ",";
       first = false;
 
       json += StringFormat(
-         "{\"ticket\":\"%I64u\",\"symbol\":\"%s\",\"type\":%d,\"volume\":%.2f,\"openPrice\":%.8f,\"sl\":%.8f,\"tp\":%.8f,\"comment\":\"%s\"}",
+         "{\"ticket\":\"%I64u\",\"symbol\":\"%s\",\"type\":%d,\"volume\":%.2f,\"openPrice\":%.8f,\"sl\":%.8f,\"tp\":%.8f,\"magic\":%I64u,\"isExternal\":%s,\"comment\":\"%s\"}",
          ticket,
          JsonEscape(OrderGetString(ORDER_SYMBOL)),
          (int)OrderGetInteger(ORDER_TYPE),
@@ -734,6 +956,8 @@ string OrdersJson()
          OrderGetDouble(ORDER_PRICE_OPEN),
          OrderGetDouble(ORDER_SL),
          OrderGetDouble(ORDER_TP),
+         (ulong)OrderGetInteger(ORDER_MAGIC),
+         isExternal ? "true" : "false",
          JsonEscape(OrderGetString(ORDER_COMMENT))
       );
    }
@@ -751,33 +975,52 @@ string HistoryDealsJson()
       ulong ticket = HistoryDealGetTicket(index);
       if(ticket == 0)
          continue;
-      string comment = HistoryDealGetString(ticket, DEAL_COMMENT);
-      long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
-      if((ulong)magic != MagicNumber && StringFind(comment, "telegram-tc") < 0)
+      if(!IsTelegramTcHistoryDeal(ticket))
          continue;
 
       if(!first)
          json += ",";
       first = false;
-      json += StringFormat(
-         "{\"dealTicket\":\"%I64u\",\"orderTicket\":\"%I64u\",\"positionTicket\":\"%I64u\",\"entry\":\"%d\",\"type\":\"%d\",\"symbol\":\"%s\",\"price\":%.8f,\"volume\":%.2f,\"profit\":%.2f,\"commission\":%.2f,\"swap\":%.2f,\"comment\":\"%s\",\"time\":\"%s\"}",
-         ticket,
-         (ulong)HistoryDealGetInteger(ticket, DEAL_ORDER),
-         (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID),
-         (int)HistoryDealGetInteger(ticket, DEAL_ENTRY),
-         (int)HistoryDealGetInteger(ticket, DEAL_TYPE),
-         JsonEscape(HistoryDealGetString(ticket, DEAL_SYMBOL)),
-         HistoryDealGetDouble(ticket, DEAL_PRICE),
-         HistoryDealGetDouble(ticket, DEAL_VOLUME),
-         HistoryDealGetDouble(ticket, DEAL_PROFIT),
-         HistoryDealGetDouble(ticket, DEAL_COMMISSION),
-         HistoryDealGetDouble(ticket, DEAL_SWAP),
-         JsonEscape(comment),
-         TimeToString((datetime)HistoryDealGetInteger(ticket, DEAL_TIME), TIME_DATE|TIME_SECONDS)
-      );
+      json += HistoryDealJson(ticket);
    }
    json += "]";
    return json;
+}
+
+bool IsTelegramTcHistoryDeal(ulong ticket)
+{
+   string comment = HistoryDealGetString(ticket, DEAL_COMMENT);
+   long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
+   return (ulong)magic == MagicNumber ||
+          StringFind(comment, "telegram-tc") >= 0 ||
+          StringFind(comment, "ttc:") >= 0;
+}
+
+string HistoryDealJson(ulong ticket)
+{
+   string comment = HistoryDealGetString(ticket, DEAL_COMMENT);
+   // DEAL_REASON tells us *why* the deal happened: SL hit, TP hit, manual
+   // client click, EA-driven, mobile/web close, stop-out, etc. Without it
+   // the backend can't distinguish "TP hit" from "operator closed manually"
+   // and every close looks the same in the History trail.
+   int dealReason = (int)HistoryDealGetInteger(ticket, DEAL_REASON);
+   return StringFormat(
+      "{\"dealTicket\":\"%I64u\",\"orderTicket\":\"%I64u\",\"positionTicket\":\"%I64u\",\"entry\":\"%d\",\"type\":\"%d\",\"reason\":%d,\"symbol\":\"%s\",\"price\":%.8f,\"volume\":%.2f,\"profit\":%.2f,\"commission\":%.2f,\"swap\":%.2f,\"comment\":\"%s\",\"time\":\"%s\"}",
+      ticket,
+      (ulong)HistoryDealGetInteger(ticket, DEAL_ORDER),
+      (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID),
+      (int)HistoryDealGetInteger(ticket, DEAL_ENTRY),
+      (int)HistoryDealGetInteger(ticket, DEAL_TYPE),
+      dealReason,
+      JsonEscape(HistoryDealGetString(ticket, DEAL_SYMBOL)),
+      HistoryDealGetDouble(ticket, DEAL_PRICE),
+      HistoryDealGetDouble(ticket, DEAL_VOLUME),
+      HistoryDealGetDouble(ticket, DEAL_PROFIT),
+      HistoryDealGetDouble(ticket, DEAL_COMMISSION),
+      HistoryDealGetDouble(ticket, DEAL_SWAP),
+      JsonEscape(comment),
+      TimeToString((datetime)HistoryDealGetInteger(ticket, DEAL_TIME), TIME_DATE|TIME_SECONDS)
+   );
 }
 
 string SymbolsMarketJson()
@@ -806,11 +1049,17 @@ string SymbolsMarketJson()
 
 string SymbolMarketJson(string symbol)
 {
+   MqlTick tick;
+   bool hasTick = SymbolInfoTick(symbol, tick);
+   double bid = hasTick ? tick.bid : SymbolInfoDouble(symbol, SYMBOL_BID);
+   double ask = hasTick ? tick.ask : SymbolInfoDouble(symbol, SYMBOL_ASK);
+   long timeMsc = hasTick ? tick.time_msc : 0;
    return StringFormat(
-      "{\"symbol\":\"%s\",\"bid\":%.8f,\"ask\":%.8f,\"volumeMin\":%.2f,\"volumeMax\":%.2f,\"volumeStep\":%.2f,\"point\":%.8f,\"digits\":%d}",
+      "{\"symbol\":\"%s\",\"bid\":%.8f,\"ask\":%.8f,\"timeMsc\":%I64d,\"volumeMin\":%.2f,\"volumeMax\":%.2f,\"volumeStep\":%.2f,\"point\":%.8f,\"digits\":%d}",
       JsonEscape(symbol),
-      SymbolInfoDouble(symbol, SYMBOL_BID),
-      SymbolInfoDouble(symbol, SYMBOL_ASK),
+      bid,
+      ask,
+      timeMsc,
       SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN),
       SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX),
       SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP),
@@ -856,6 +1105,8 @@ bool ParseCommand(string body, SignalCommand &command)
    command.trailingStopUnit = ValueFor(body, "trailingStopUnit");
    command.partialCloseKind = ValueFor(body, "partialCloseKind");
    command.partialCloseValue = StringToDouble(ValueFor(body, "partialCloseValue"));
+   command.partialCloseVolume = StringToDouble(ValueFor(body, "partialCloseVolume"));
+   command.partialCloseAllocation = StringToDouble(ValueFor(body, "partialCloseAllocation"));
    command.targetOrderTicket = (ulong)StringToInteger(ValueFor(body, "targetOrderTicket"));
    command.targetPositionTicket = (ulong)StringToInteger(ValueFor(body, "targetPositionTicket"));
    command.targetDealTicket = (ulong)StringToInteger(ValueFor(body, "targetDealTicket"));
@@ -933,6 +1184,15 @@ bool ValidatePendingOrderPrice(SignalCommand &command)
 
 double CommandBaseVolume(SignalCommand &command)
 {
+   // BrokerMinLotMultiplier overrides EVERYTHING when set. Operators use this
+   // when they want a single sizing knob that works across asset classes
+   // (e.g., "always 2× whatever the broker's smallest order is").
+   if(BrokerMinLotMultiplier > 0.0)
+   {
+      double minVol = SymbolInfoDouble(command.brokerSymbol, SYMBOL_VOLUME_MIN);
+      if(minVol > 0.0)
+         return minVol * BrokerMinLotMultiplier;
+   }
    if(command.volume > 0.0)
       return command.volume;
    if(command.riskPercent > 0.0)
@@ -942,6 +1202,53 @@ double CommandBaseVolume(SignalCommand &command)
          return riskVolume;
    }
    return DefaultLots;
+}
+
+// Pushes a requested SL/TP price out to the broker's safe minimum distance
+// from market when it's too close. Without this, BTCUSD trades with a
+// 50-pip ($5) SL get rejected with retcode 10016 because OctaFX's
+// SYMBOL_TRADE_STOPS_LEVEL for crypto is typically ~100 points ($10).
+// Returns the (possibly adjusted) safe stop price.
+double SafeStopPrice(string symbol, double referencePrice, double requestedStop,
+                     string direction, bool isStopLoss)
+{
+   if(requestedStop <= 0.0 || MinStopBufferMultiplier <= 0.0)
+      return requestedStop;
+   if(referencePrice <= 0.0)
+      return requestedStop;
+
+   long stopLevel = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopLevel <= 0)
+      return requestedStop;
+
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(point <= 0.0)
+      return requestedStop;
+
+   double minDistance = (double)stopLevel * point * MinStopBufferMultiplier;
+   double currentDistance = MathAbs(referencePrice - requestedStop);
+   if(currentDistance >= minDistance)
+      return requestedStop;
+
+   // Direction of the SL/TP relative to market:
+   //   BUY  → SL below price, TP above price
+   //   SELL → SL above price, TP below price
+   bool stopBelowPrice = (direction == "BUY" && isStopLoss) ||
+                         (direction == "SELL" && !isStopLoss);
+   double safe = stopBelowPrice ? referencePrice - minDistance
+                                 : referencePrice + minDistance;
+   PrintFormat("Telegram TC SafeStopPrice: %s %s adjusted %.5f → %.5f (broker min %ld pts × %.2f buffer = %.5f distance)",
+      symbol, isStopLoss ? "SL" : "TP", requestedStop, safe,
+      stopLevel, MinStopBufferMultiplier, minDistance);
+   return safe;
+}
+
+double NormalizeStopPrice(string symbol, double price)
+{
+   if(price <= 0.0)
+      return price;
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   return NormalizeDouble(price, digits);
 }
 
 double CommandVolume(SignalCommand &command)
@@ -1030,7 +1337,24 @@ bool EnsureSymbol(string symbol)
       return false;
    if(!SymbolSelect(symbol, true))
       return false;
-   return SymbolInfoInteger(symbol, SYMBOL_SELECT) != 0;
+   if(SymbolInfoInteger(symbol, SYMBOL_SELECT) == 0)
+      return false;
+
+   // SymbolSelect makes the symbol visible to SymbolInfoDouble, but for symbols
+   // that aren't on any open chart (e.g. BTCUSD when the EA runs on GBPUSD),
+   // BID/ASK can be 0 for the first 100–500ms until the first tick arrives.
+   // Without waiting, SL/TP defaults computed off price=0 silently return 0
+   // and the order goes out naked. Wait up to 2s for a real tick.
+   MqlTick tick;
+   for(int attempt = 0; attempt < 40; attempt++)
+   {
+      if(SymbolInfoTick(symbol, tick) && tick.bid > 0.0 && tick.ask > 0.0)
+         return true;
+      Sleep(50);
+   }
+   PrintFormat("Telegram TC EnsureSymbol: %s selected but no fresh tick after 2s — proceeding (SL/TP defaults may be missed)",
+      symbol);
+   return true;
 }
 
 double NormalizeVolume(string symbol, double requested)
@@ -1138,11 +1462,33 @@ bool HttpGet(string path, string &response)
    return HttpRequest("GET", path, "", data, response);
 }
 
+// Idempotent GET with exponential backoff. Sized to ride out a 5–15 s container
+// restart (200 ms + 400 + 800 + 1600 = ~3 s gap, 5 attempts = ~3 s total).
+bool HttpGetRetry(string path, string &response)
+{
+   char data[];
+   return HttpRequestRetry("GET", path, "", data, response, 5);
+}
+
 bool HttpPost(string path, string body, string &response)
 {
    char data[];
    StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(data) > 0 && data[ArraySize(data) - 1] == 0)
+      ArrayResize(data, ArraySize(data) - 1);
    return HttpRequest("POST", path, "Content-Type: application/json\r\n", data, response);
+}
+
+// Retry-safe POST for idempotent endpoints — snapshot, history, heartbeat,
+// register. NEVER use for /report (an execution report must be sent exactly
+// once or we risk double-attributing a fill on the backend).
+bool HttpPostRetry(string path, string body, string &response)
+{
+   char data[];
+   StringToCharArray(body, data, 0, WHOLE_ARRAY, CP_UTF8);
+   if(ArraySize(data) > 0 && data[ArraySize(data) - 1] == 0)
+      ArrayResize(data, ArraySize(data) - 1);
+   return HttpRequestRetry("POST", path, "Content-Type: application/json\r\n", data, response, 5);
 }
 
 bool HttpRequest(string method, string path, string headers, char &data[], string &response)
@@ -1152,18 +1498,46 @@ bool HttpRequest(string method, string path, string headers, char &data[], strin
    string url = BackendBaseUrl + path;
    ResetLastError();
    int status = WebRequest(method, url, headers, 8000, data, result, resultHeaders);
+   int lastErr = GetLastError();
    if(status == -1)
    {
-      PrintFormat("Telegram TC WebRequest failed: %d. Add %s to allowed WebRequest URLs.", GetLastError(), BackendBaseUrl);
+      PrintFormat("Telegram TC WebRequest CONNECT FAILED err=%d url=%s (add URL to allowed WebRequest list if err=4014/4060)",
+         lastErr, url);
       return false;
    }
    response = CharArrayToString(result, 0, -1, CP_UTF8);
    if(status < 200 || status >= 300)
    {
-      PrintFormat("Telegram TC HTTP %d: %s", status, response);
+      PrintFormat("Telegram TC HTTP %d err=%d method=%s path=%s body=%s",
+         status, lastErr, method, path,
+         (StringLen(response) > 0 ? response : "(empty)"));
       return false;
    }
    return true;
+}
+
+// Retry wrapper for idempotent calls. Exponential backoff (200, 400, 800,
+// 1600 ms) lets the EA ride out a typical 5-15 s `docker compose up -d` swap
+// without flooding the Experts tab with `HTTP 1001/1003 err=5203` noise from
+// the brief connect-failures-mid-request window.
+//
+// SAFE: /snapshot, /history (deal-ticket dedup), /heartbeat (idem),
+//       /register (link-code dedup).
+// UNSAFE: /poll-line leases work server-side; /report must be sent exactly once.
+bool HttpRequestRetry(string method, string path, string headers, char &data[], string &response, int maxAttempts)
+{
+   for(int attempt = 1; attempt <= maxAttempts; attempt++)
+   {
+      if(HttpRequest(method, path, headers, data, response))
+         return true;
+      if(attempt < maxAttempts)
+      {
+         int backoffMs = 200 << (attempt - 1);  // 200, 400, 800, 1600 ms
+         if(backoffMs > 2000) backoffMs = 2000;
+         Sleep(backoffMs);
+      }
+   }
+   return false;
 }
 
 string JsonEscape(string value)

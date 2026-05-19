@@ -153,9 +153,9 @@ export function SettingsPage({
         </SettingsSection>
 
         <SettingsSection
-          description="How often the dashboard polls for fresh provider, queue, and broker state."
+          description="How often the dashboard polls for fresh provider, queue, and broker state, and how long an approved signal blocks an identical retry."
           icon={<Timer aria-hidden="true" size={18} />}
-          title="Polling"
+          title="Polling & dedup"
         >
           <div className="settings-grid">
             <Field
@@ -170,6 +170,22 @@ export function SettingsPage({
                 min="1"
                 name="pollingIntervalSeconds"
                 step="1"
+                type="number"
+              />
+            </Field>
+            <Field
+              hint="How long an approved signal blocks an identical retry. Lower this when trading news, where the same provider re-issues quickly. Range 60–3600."
+              htmlFor="dedupWindowSeconds"
+              label="Signal dedup window (seconds)"
+            >
+              <input
+                className="settings-input mono"
+                defaultValue={settings.dedupWindowSeconds}
+                id="dedupWindowSeconds"
+                max="3600"
+                min="60"
+                name="dedupWindowSeconds"
+                step="30"
                 type="number"
               />
             </Field>

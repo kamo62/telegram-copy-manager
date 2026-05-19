@@ -76,12 +76,7 @@ export function SymbolMappingModal({
   }
 
   return (
-    <div
-      className="modal-overlay"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
+    <div className="modal-overlay">
       <div
         aria-labelledby="symbol-mapping-title"
         aria-modal="true"

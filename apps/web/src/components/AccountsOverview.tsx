@@ -32,9 +32,17 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
           <div>
             <span>Connected</span>
             <strong>
-              {formatNumber(onlineCount, { locale, minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+              {formatNumber(onlineCount, {
+                locale,
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 0,
+              })}
               <span className="accounts-overview-stats-divider"> / </span>
-              {formatNumber(accounts.length, { locale, minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+              {formatNumber(accounts.length, {
+                locale,
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 0,
+              })}
             </strong>
           </div>
           <div>

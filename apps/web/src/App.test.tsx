@@ -15,8 +15,11 @@ const snapshot: DashboardSnapshot = {
     pollingIntervalSeconds: 2,
     allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
     azureOpenAIKeyConfigured: false,
+    dedupWindowSeconds: 300,
   },
-  telegramSessions: [{ id: "session-1", phone: "+27821234567", status: "CONNECTED" }],
+  telegramSessions: [
+    { id: "session-1", phone: "+27821234567", status: "CONNECTED", profileId: "profile-current" },
+  ],
   providers: [
     {
       id: "provider-alpha",
@@ -151,14 +154,23 @@ describe("App dashboard", () => {
   });
 
   test("shows an empty-state CTA on Live when no account is connected", () => {
-    const view = render(<App initialSnapshot={{ ...snapshot, mt5Accounts: [], accountSlots: [] }} />);
+    const view = render(
+      <App initialSnapshot={{ ...snapshot, mt5Accounts: [], accountSlots: [] }} />,
+    );
 
     expect(view.getByText("No MT5 account connected yet")).toBeTruthy();
     expect(view.getByRole("button", { name: "Open Linked Accounts" })).toBeTruthy();
   });
 
   test("scopes provider, parser, history, and symbol panels behind their tabs", () => {
-    const view = render(<App initialSnapshot={snapshot} />);
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          telegramSessions: [{ ...snapshot.telegramSessions[0]!, profileId: "profile-current" }],
+        }}
+      />,
+    );
 
     clickTab(view, "Providers");
     expect(view.getByText("Provider paused")).toBeTruthy();
@@ -172,8 +184,10 @@ describe("App dashboard", () => {
     expect(within(parserLab).getByLabelText("Classification for Alpha FX Signals")).toBeTruthy();
 
     clickTab(view, "History");
-    expect(view.getByText("TP1")).toBeTruthy();
-    expect(view.getByText("1.105")).toBeTruthy();
+    clickTab(view, "Closed");
+    // No closed trades in the seed snapshot — the Closed sub-tab should land
+    // on the empty state, which proves the sub-tab swap worked.
+    expect(view.getByText("No closed trades yet")).toBeTruthy();
 
     clickTab(view, "Symbol Settings");
     expect(view.getByText("XAUUSD.r")).toBeTruthy();
@@ -206,9 +220,39 @@ describe("App dashboard", () => {
     clickSidebar(view, "Telegram Setup");
     expect(view.getByText("Available dialogs")).toBeTruthy();
     expect(view.getByText("Real FX Channel")).toBeTruthy();
-    expect(
-      view.getByRole("button", { name: "Add Real FX Channel as a provider" }),
-    ).toBeTruthy();
+    expect(view.getByRole("button", { name: "Add Real FX Channel as a provider" })).toBeTruthy();
+  });
+
+  test("lets the operator resync providers after a new Telegram session connects", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url).startsWith("/api/telegram/dialogs")) {
+        return Response.json({
+          dialogs: [
+            { id: "dialog-alpha", title: "Alpha FX Signals", type: "channel", unreadCount: 0 },
+          ],
+        });
+      }
+      if (String(url) === "/api/providers/resync-current-session") {
+        return Response.json({
+          rebound: [{ providerId: "provider-alpha" }],
+          stillOffline: [],
+        });
+      }
+      return Response.json(snapshot);
+    }) as typeof fetch;
+    const view = render(<App initialSnapshot={snapshot} />);
+
+    clickSidebar(view, "Telegram Setup");
+    fireEvent.click(view.getByRole("button", { name: "Resync providers" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/providers/resync-current-session")).toBe(true),
+    );
+    const resyncCall = calls.find((call) => call.url === "/api/providers/resync-current-session");
+    expect(resyncCall?.init?.method).toBe("POST");
+    expect(String(resyncCall?.init?.body)).toContain("profile-current");
   });
 
   test("lets the operator enable provider auto-copy from the dashboard", async () => {
@@ -245,6 +289,9 @@ describe("App dashboard", () => {
     fireEvent.change(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
       target: { value: "0.2" },
     });
+    fireEvent.change(view.getByLabelText("TP1 strategy action"), {
+      target: { value: "no-change" },
+    });
     fireEvent.click(
       view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
     );
@@ -258,7 +305,7 @@ describe("App dashboard", () => {
       riskMode: "fixed",
       riskAmount: 0.2,
       takeProfitLevels: [
-        { leg: 1, percentage: 25 },
+        { leg: 1, percentage: 25, strategy: { kind: "no-change" } },
         { leg: 2, percentage: 25 },
         { leg: 3, percentage: 25 },
         { leg: 4, percentage: 25 },
@@ -339,6 +386,7 @@ describe("App dashboard", () => {
       defaultTakeProfitPips: 200,
       azureOpenAIApiKey: "",
       pollingIntervalSeconds: 5,
+      dedupWindowSeconds: 300,
       allowedOrderTypes: ["MARKET"],
     });
   });
@@ -428,14 +476,275 @@ describe("App dashboard", () => {
     });
   });
 
-  test("shows the History empty state when there are no trades", () => {
+  test("Live shows an OUT_OF_SYNC banner when a trade has drifted from the broker", () => {
     globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
       Response.json(snapshot)) as typeof fetch;
     const view = render(
-      <App initialSnapshot={{ ...snapshot, logicalTrades: [] }} />,
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          logicalTrades: [
+            {
+              ...snapshot.logicalTrades[0]!,
+              status: "OUT_OF_SYNC",
+              outOfSyncReason: "Live broker position exists, but EA tracking comment is truncated",
+              livePositionExists: true,
+              matchedBrokerTickets: ["70001"],
+              brokerComment: "telegram-tc-virtual-tp:trade_iQ",
+              lastSnapshotAt: "2026-05-18T06:04:00.000Z",
+            },
+          ],
+        }}
+      />,
     );
+    // Banner is on the default Live view — no clicking required.
+    expect(view.getByText("1 trade out of sync")).toBeTruthy();
+    // Detail hidden until expanded so the banner stays low-noise at rest.
+    expect(
+      view.queryByText("Live broker position exists, but EA tracking comment is truncated"),
+    ).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: /trade.*out of sync/i }));
+    expect(
+      view.getByText("Live broker position exists, but EA tracking comment is truncated"),
+    ).toBeTruthy();
+    expect(view.getByText("ticket 70001")).toBeTruthy();
+  });
+
+  test("shows the History empty state when there are no closed trades", () => {
+    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json(snapshot)) as typeof fetch;
+    const view = render(<App initialSnapshot={{ ...snapshot, logicalTrades: [] }} />);
     clickTab(view, "History");
-    expect(view.getByText("No trades yet. Approved signals will appear here.")).toBeTruthy();
+    clickTab(view, "Closed");
+    expect(view.getByText("No closed trades yet")).toBeTruthy();
+  });
+
+  test("History › Closed groups partial closes under a parent row and reveals per-leg detail on expand", () => {
+    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json(snapshot)) as typeof fetch;
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          mt5Accounts: [
+            {
+              ...snapshot.mt5Accounts[0]!,
+              closedTrades: [
+                {
+                  tradeId: "trade_a3kZ9X",
+                  shortId: "a3kZ9X",
+                  ticket: "247552341",
+                  symbol: "XAUUSD",
+                  direction: "BUY",
+                  origin: "ea",
+                  volume: 0.04,
+                  openPrice: 3380.5,
+                  closePrice: 3388.0,
+                  realizedPnl: 14,
+                  result: "Mixed",
+                  closedAt: "2026-05-18T11:14:28.000Z",
+                  tpLegs: [
+                    { leg: 1, targetPrice: 3392, hit: true },
+                    { leg: 2, targetPrice: 3400, hit: true },
+                    { leg: 3, targetPrice: 3410, hit: false },
+                    { leg: 4, targetPrice: 3420, hit: false },
+                  ],
+                  tpHitCount: 2,
+                  tpTotal: 4,
+                  legs: [
+                    {
+                      id: "ord-tp1",
+                      action: "PARTIAL_CLOSE",
+                      legId: "tp1",
+                      legIndex: 1,
+                      targetPrice: 3392,
+                      volume: 0.01,
+                      price: 3392,
+                      pnl: 11.5,
+                      source: "tp-hit",
+                      closedAt: "2026-05-18T10:42:14.000Z",
+                      orderTicket: "",
+                      positionTicket: "247552341",
+                      dealTicket: "",
+                    },
+                    {
+                      id: "ord-tp2",
+                      action: "PARTIAL_CLOSE",
+                      legId: "tp2",
+                      legIndex: 2,
+                      targetPrice: 3400,
+                      volume: 0.01,
+                      price: 3400,
+                      pnl: 19.5,
+                      source: "tp-hit",
+                      closedAt: "2026-05-18T10:51:03.000Z",
+                      orderTicket: "",
+                      positionTicket: "247552341",
+                      dealTicket: "",
+                    },
+                    {
+                      id: "ord-sl",
+                      action: "FULL_CLOSE",
+                      legId: "trade",
+                      legIndex: undefined,
+                      targetPrice: undefined,
+                      volume: 0.02,
+                      price: 3372,
+                      pnl: -17,
+                      source: "sl-hit",
+                      closedAt: "2026-05-18T11:14:28.000Z",
+                      orderTicket: "",
+                      positionTicket: "247552341",
+                      dealTicket: "",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+
+    clickTab(view, "History");
+    clickTab(view, "Closed");
+
+    // Parent row: counts, ticket, symbol, side, result.
+    expect(view.getByText(/1 closed trade/)).toBeTruthy();
+    expect(view.getByText("#247552341")).toBeTruthy();
+    expect(view.getByText("XAUUSD")).toBeTruthy();
+    expect(view.getByText("Mixed")).toBeTruthy();
+    expect(view.getByText("2/4 SL")).toBeTruthy();
+
+    // Detail row hidden until expand.
+    expect(view.queryByText("trade_a3kZ9X")).toBeNull();
+
+    fireEvent.click(view.getByRole("button", { name: "Expand trade detail" }));
+    expect(view.getByText("trade_a3kZ9X")).toBeTruthy();
+    // Each close event should surface its own source label.
+    expect(view.getAllByText("TP1 hit").length).toBeGreaterThan(0);
+    expect(view.getAllByText("TP2 hit").length).toBeGreaterThan(0);
+    expect(view.getAllByText("SL hit").length).toBeGreaterThan(0);
+  });
+
+  test("History › Open is the default sub-tab and shows EA-vs-external positions", () => {
+    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json(snapshot)) as typeof fetch;
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          mt5Accounts: [
+            {
+              ...snapshot.mt5Accounts[0]!,
+              appPositions: [
+                {
+                  ticket: "247552341",
+                  symbol: "XAUUSD",
+                  type: 0,
+                  volume: 0.04,
+                  openPrice: 3380.5,
+                  sl: 3370.0,
+                  tp: 3400.0,
+                  profit: 2.6,
+                  magic: 901,
+                  comment: "ttc:trade-x",
+                },
+              ],
+              externalPositions: [
+                {
+                  ticket: "247552999",
+                  symbol: "BTCUSD",
+                  type: 1,
+                  volume: 0.01,
+                  openPrice: 70000,
+                  sl: 0,
+                  tp: 0,
+                  profit: -5.4,
+                  magic: 0,
+                  comment: "",
+                },
+              ],
+              symbols: [
+                { symbol: "XAUUSD", bid: 3382.3, ask: 3382.5 },
+                { symbol: "BTCUSD", bid: 69990, ask: 70020 },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+
+    clickTab(view, "History");
+    // "Open" is the default sub-tab, so we should see the position table right away.
+    expect(view.getByText(/2 positions open/)).toBeTruthy();
+    expect(view.getByText("XAUUSD")).toBeTruthy();
+    expect(view.getByText("BTCUSD")).toBeTruthy();
+    expect(view.getByText("#247552341")).toBeTruthy();
+    expect(view.getByText("#247552999")).toBeTruthy();
+    // EA chip appears on the EA-driven row, Manual chip on the external row.
+    expect(view.getAllByText(/^EA/).length).toBeGreaterThan(0);
+    expect(view.getByText("Manual")).toBeTruthy();
+  });
+
+  test("History › Open labels pending MT5 order sides from order enums", () => {
+    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json(snapshot)) as typeof fetch;
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          mt5Accounts: [
+            {
+              ...snapshot.mt5Accounts[0]!,
+              appOrders: [
+                {
+                  ticket: "247552509",
+                  symbol: "XAUUSD",
+                  type: 2,
+                  volume: 0.04,
+                  openPrice: 4507,
+                  sl: 4501,
+                  tp: 0,
+                  magic: 26050901,
+                  comment: "ttc:buy-limit",
+                },
+                {
+                  ticket: "247582170",
+                  symbol: "XAUUSD",
+                  type: 4,
+                  volume: 0.04,
+                  openPrice: 4518,
+                  sl: 4512,
+                  tp: 0,
+                  magic: 26050901,
+                  comment: "ttc:buy-stop",
+                },
+              ],
+              externalOrders: [
+                {
+                  ticket: "247562546",
+                  symbol: "XAUUSD",
+                  type: 3,
+                  volume: 0.03,
+                  openPrice: 4527.97,
+                  sl: 4521.54,
+                  tp: 0,
+                  magic: 0,
+                  comment: "",
+                },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+
+    clickTab(view, "History");
+    const pending = view.getByRole("heading", { name: "Pending orders (3)" }).closest("section");
+    if (!pending) throw new Error("Pending orders section not found");
+    expect(within(pending).getAllByText("BUY")).toHaveLength(2);
+    expect(within(pending).getAllByText("SELL")).toHaveLength(1);
   });
 
   test("shows the Logs empty states when queue + execution logs are empty", () => {
@@ -488,5 +797,54 @@ describe("App dashboard", () => {
       const dot = document.querySelector(".status-bar .live-dot");
       expect(dot?.className).toContain("error");
     });
+  });
+
+  test("shows GramJS Telegram adapter as healthy when backend health is OK", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          health: { status: "ok", database: "connected", telegramAdapter: "gramjs" },
+        }}
+      />,
+    );
+
+    const telegramChip = view.getByText("TG gramjs").closest(".chip");
+    expect(telegramChip?.querySelector(".chip-dot")?.className).toContain("ok");
+  });
+
+  test("surfaces external manual MT5 positions on the Performance view", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          mt5Accounts: [
+            {
+              ...snapshot.mt5Accounts[0]!,
+              externalPositionCount: 1,
+              externalOrderCount: 0,
+              externalPositions: [
+                {
+                  ticket: "247564387",
+                  symbol: "XAUUSD",
+                  type: 1,
+                  volume: 0.01,
+                  openPrice: 4553.73,
+                  sl: 4560,
+                  tp: 4481.29,
+                  profit: 11.65,
+                  magic: 0,
+                  comment: "",
+                },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(view.getByText("External activity")).toBeTruthy();
+    expect(view.getByText("XAUUSD")).toBeTruthy();
+    expect(view.getByText(/247564387/)).toBeTruthy();
   });
 });

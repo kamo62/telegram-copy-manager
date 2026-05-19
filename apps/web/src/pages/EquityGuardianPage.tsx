@@ -47,9 +47,10 @@ export function EquityGuardianPage({
         ) : null}
         {guardians.map((guardian) => {
           const tone = severity(guardian.currentDrawdown, guardian.threshold);
-          const ratio = guardian.threshold > 0
-            ? Math.min(100, (guardian.currentDrawdown / guardian.threshold) * 100)
-            : 0;
+          const ratio =
+            guardian.threshold > 0
+              ? Math.min(100, (guardian.currentDrawdown / guardian.threshold) * 100)
+              : 0;
           return (
             <form
               className="row-item guardian-row"
@@ -83,12 +84,10 @@ export function EquityGuardianPage({
               </div>
               <div className="guardian-numbers">
                 <span>
-                  Current{" "}
-                  <strong>{formatPercent(guardian.currentDrawdown, { locale })}</strong>
+                  Current <strong>{formatPercent(guardian.currentDrawdown, { locale })}</strong>
                 </span>
                 <span>
-                  Threshold{" "}
-                  <strong>{formatPercent(guardian.threshold, { locale })}</strong>
+                  Threshold <strong>{formatPercent(guardian.threshold, { locale })}</strong>
                 </span>
               </div>
               <div className="guardian-actions">

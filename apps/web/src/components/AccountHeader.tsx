@@ -38,7 +38,10 @@ function formatDelta(
 export function AccountHeader({
   data,
   loading = false,
-}: { data: AccountHeaderData; loading?: boolean }) {
+}: {
+  data: AccountHeaderData;
+  loading?: boolean;
+}) {
   const { connectedPlatform, kpis, currency } = data;
   const { locale } = useLocale();
 
@@ -50,7 +53,7 @@ export function AccountHeader({
   }> = [
     { label: "Initial Balance", amount: kpis.initialBalance, delta: null, primary: false },
     {
-      label: "Total Profit",
+      label: "Trading P/L",
       amount: kpis.totalProfit.amount,
       delta: kpis.totalProfit.deltaPercent,
       primary: true,

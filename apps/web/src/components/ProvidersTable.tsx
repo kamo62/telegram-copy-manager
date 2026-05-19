@@ -1,7 +1,13 @@
 import { Settings as SettingsIcon } from "lucide-react";
 import { useLocale } from "../contexts/LocaleContext";
 import { useSortableTable } from "../hooks/useSortableTable";
-import { formatLot, formatNumber, formatPercent, formatPips, formatRelativeTime } from "../lib/format";
+import {
+  formatLot,
+  formatNumber,
+  formatPercent,
+  formatPips,
+  formatRelativeTime,
+} from "../lib/format";
 import { SkeletonRow } from "./Skeleton";
 import { Tag } from "./Tag";
 
@@ -14,6 +20,7 @@ export interface ProviderRowData {
   riskProfile: string;
   lotSize: number;
   lastMessageAt: string;
+  ingestionStatus?: string;
   pips?: number;
   winRate?: number;
   averageDrawdown?: number;
@@ -100,7 +107,10 @@ export function ProvidersTable({
         <tbody>
           {loading && providers.length === 0
             ? Array.from({ length: 6 }, (_, index) => (
-                <SkeletonRow columns={accounts.length > 0 ? 13 : 12} key={`provider-skeleton-${index}`} />
+                <SkeletonRow
+                  columns={accounts.length > 0 ? 13 : 12}
+                  key={`provider-skeleton-${index}`}
+                />
               ))
             : null}
           {!loading && providers.length === 0 ? (
@@ -127,9 +137,7 @@ export function ProvidersTable({
                   ? "—"
                   : formatPercent(provider.winRate * 100, { locale })}
               </td>
-              <td className="num-cell">
-                {formatNumber(provider.averageDrawdown, { locale })}
-              </td>
+              <td className="num-cell">{formatNumber(provider.averageDrawdown, { locale })}</td>
               <td className="num-cell">{formatNumber(provider.pnl, { locale })}</td>
               <td className="num-cell">{formatNumber(provider.profit, { locale })}</td>
               <td className="num-cell">{formatNumber(provider.gain, { locale })}</td>
@@ -137,6 +145,11 @@ export function ProvidersTable({
                 <Tag tone={provider.enabled ? "good" : "muted"}>
                   {provider.enabled ? "Auto-copy enabled" : "Provider paused"}
                 </Tag>
+                {provider.ingestionStatus && provider.enabled ? (
+                  <Tag tone={provider.ingestionStatus === "polling" ? "good" : "warn"}>
+                    {provider.ingestionStatus === "polling" ? "Polling" : "Telegram offline"}
+                  </Tag>
+                ) : null}
               </td>
               {accounts.length > 0 ? (
                 <td className="provider-account-cell">
@@ -156,9 +169,7 @@ export function ProvidersTable({
                           className={`account-chip ${linked ? "is-on" : "is-off"}`}
                           disabled={disabled}
                           key={account.id}
-                          onClick={() =>
-                            onToggleAccountLink?.(account.id, provider.id, !linked)
-                          }
+                          onClick={() => onToggleAccountLink?.(account.id, provider.id, !linked)}
                           title={
                             disabled
                               ? "Enable the provider before linking accounts"
@@ -207,4 +218,3 @@ export function ProvidersTable({
     </div>
   );
 }
-

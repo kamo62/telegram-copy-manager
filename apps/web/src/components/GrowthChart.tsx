@@ -5,13 +5,13 @@ export type GrowthSeries = {
   growth: [number[], number[]];
   drawdown: [number[], number[]];
   totalProfit: number;
+  realizedPnl?: number;
+  floatingPnl?: number;
+  netDeposits?: number;
   numberOfTrades: number;
 };
 
-export function GrowthChart({
-  data,
-  loading = false,
-}: { data: GrowthSeries; loading?: boolean }) {
+export function GrowthChart({ data, loading = false }: { data: GrowthSeries; loading?: boolean }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<{
     destroy: () => void;
@@ -27,6 +27,7 @@ export function GrowthChart({
     async function initPlot() {
       const container = containerRef.current;
       if (!container) return;
+      if (!canvas2dSupported()) return;
       // Dynamic import so uplot only touches the DOM at runtime, not at module-load.
       const [{ default: uPlot }] = await Promise.all([
         import("uplot"),
@@ -111,7 +112,13 @@ export function GrowthChart({
         <div>
           <h3 className="chart-card-title">Account growth</h3>
           <span className="chart-card-meta">
-            {data.numberOfTrades} trades · total profit ${data.totalProfit.toLocaleString()}
+            {data.numberOfTrades} trades · trading P/L ${data.totalProfit.toLocaleString()}
+            {data.netDeposits !== undefined
+              ? ` · net cashflow ${data.netDeposits.toLocaleString()}`
+              : ""}
+            {data.floatingPnl !== undefined
+              ? ` · floating ${data.floatingPnl.toLocaleString()}`
+              : ""}
           </span>
         </div>
         <div className="chart-toggle" role="tablist" aria-label="Chart view">
@@ -139,6 +146,11 @@ export function GrowthChart({
       <footer className="chart-card-foot">Number of trades</footer>
     </section>
   );
+}
+
+function canvas2dSupported() {
+  const canvas = document.createElement("canvas");
+  return Boolean(canvas.getContext("2d"));
 }
 
 export function buildPlaceholderGrowth(executedCount: number): GrowthSeries {

@@ -2,10 +2,10 @@ services:
   app:
     build: .
     image: telegram-tc:local
+    restart: unless-stopped
     ports:
-      - "8787:8787"
-    environment:
-      DATABASE_PATH: /app/data/telegram-tc.db
-      TELEGRAM_ADAPTER: mock
+      - "18787:8787"
+    env_file:
+      - .env.production
     volumes:
       - ./data:/app/data

@@ -278,7 +278,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     options: TelegramFetchOptions = {},
   ) {
     const client = await this.connectedClient(sessionId);
-    const entity = this.dialogEntities.get(this.dialogKey(sessionId, dialogId)) ?? dialogId;
+    const entity = await this.resolveDialogEntity(client, sessionId, dialogId);
     const messages: TelegramCapturedMessage[] = [];
     const fromTime = options.dateFrom ? new Date(options.dateFrom).getTime() : undefined;
     const toTime = options.dateTo ? new Date(options.dateTo).getTime() : undefined;
@@ -306,6 +306,22 @@ class GramjsTelegramAdapter implements TelegramAdapter {
       });
     }
     return messages;
+  }
+
+  private async resolveDialogEntity(client: GramjsClient, sessionId: string, dialogId: string) {
+    const key = this.dialogKey(sessionId, dialogId);
+    const cached = this.dialogEntities.get(key);
+    if (cached) return cached;
+
+    const dialogs = await client.getDialogs({ limit: 100 });
+    for (const dialog of dialogs) {
+      const id = String(dialog.id ?? dialog.entity?.id ?? dialog.inputEntity?.channelId);
+      this.dialogEntities.set(
+        this.dialogKey(sessionId, id),
+        dialog.entity ?? dialog.inputEntity ?? dialog,
+      );
+    }
+    return this.dialogEntities.get(key) ?? dialogId;
   }
 
   private async connectedClient(sessionId: string) {

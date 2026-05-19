@@ -53,6 +53,8 @@ export interface SymbolResolution {
     | "provider_alias"
     | "account_override"
     | "global_alias"
+    | "broker_exact"
+    | "broker_variant"
     | "prefix_suffix"
     | "fallback";
   warnings: string[];
@@ -65,14 +67,19 @@ export interface PriceZone {
 
 export interface TakeProfitTarget {
   leg: number;
-  price: number;
+  price?: number;
   allocationPercent: number;
   volume?: number;
+  targetSource?: "explicit" | "default-distance";
+  defaultDistance?: DistanceInstruction;
+  strategy?: TakeProfitStrategy;
 }
 
 export interface PartialCloseInstruction {
   kind: "PERCENT" | "TP_LEG" | "LOTS";
   value: number;
+  allocationPercent?: number;
+  volume?: number;
 }
 
 export interface DistanceInstruction {
@@ -113,23 +120,52 @@ export interface LogicalTrade {
   id: string;
   providerId?: string;
   accountId?: string;
+  source?: TradeSource;
   symbol: SymbolResolution;
   direction: Direction;
-  status: "PLANNED" | "OPEN" | "PENDING" | "CLOSED" | "OUT_OF_SYNC";
+  status: "PLANNED" | "OPEN" | "PENDING" | "CLOSED" | "OUT_OF_SYNC" | "CANCELLED";
   executionMode: ExecutionMode;
   entry?: PriceZone;
   stopLoss?: number;
   legs: TradeLeg[];
   commandHistory: Array<{ commandType: CommandType; text: string; at: string }>;
   openedAt: string;
+  outOfSyncReason?: string;
+  livePositionExists?: boolean;
+  matchedBrokerTickets?: string[];
+  brokerComment?: string;
+  lastSnapshotAt?: string;
+}
+
+export interface TradeSource {
+  parsedSignalId: string;
+  rawMessageId: string;
+  telegramMessageId: string;
+  messageDate: string;
+  rawText: string;
 }
 
 export interface TradeLeg {
   leg: number;
-  targetPrice: number;
+  targetPrice?: number;
+  targetSource?: "explicit" | "default-distance";
+  defaultDistance?: DistanceInstruction;
   allocationPercent: number;
+  strategy?: TakeProfitStrategy;
   status: "PLANNED" | "OPEN" | "HIT" | "CLOSED" | "SKIPPED" | "FAILED" | "UNKNOWN";
   brokerEvidence?: string;
+}
+
+export type TakeProfitStrategy =
+  | { kind: "set-sl-to-entry"; offsetPips: number }
+  | { kind: "set-sl-to-tp"; tpLeg: number; offsetPips: number }
+  | { kind: "no-change" };
+
+export interface RunnerConfig {
+  enabled: boolean;
+  lotSize: number;
+  slBehavior: "break-even" | "last-tp" | "trail" | string;
+  trailPips: number;
 }
 
 export interface LifecycleMatch {
@@ -160,6 +196,7 @@ export interface ExecutionQueueItem {
     partialClose?: PartialCloseInstruction;
     takeProfits: TakeProfitTarget[];
     defaultTakeProfit?: DistanceInstruction;
+    runner?: RunnerConfig;
     executionMode: ExecutionMode;
     volume?: number;
     riskPercent?: number;
@@ -202,6 +239,28 @@ const BUILT_IN_ALIASES: Record<string, string> = {
   NASDAQ: "NAS100",
 };
 
+const BROKER_SYMBOL_VARIANTS: Record<string, string[]> = {
+  BTCUSD: ["BTCUSD", "BTCUSD#", "BTCUSDm", "BTCUSD.raw", "BTCUSD.r", "BTCUSD.pro"],
+  DJI30: ["DJI30", "DJI30#", "DJI30.raw", "DJI30.r", "US30", "US30#", "US30.raw", "US30.r"],
+  EURUSD: ["EURUSD", "EURUSD#", "EURUSDm", "EURUSD.raw", "EURUSD.r", "EURUSD.pro"],
+  GBPUSD: ["GBPUSD", "GBPUSD#", "GBPUSDm", "GBPUSD.raw", "GBPUSD.r", "GBPUSD.pro"],
+  NAS100: ["NAS100", "NAS100#", "NAS100.raw", "NAS100.r", "USTEC", "USTEC#", "USTEC.raw"],
+  US30: ["US30", "US30#", "US30.raw", "US30.r", "DJI30", "DJI30#", "DJI30.raw", "DJI30.r"],
+  XAGUSD: ["XAGUSD", "XAGUSD#", "XAGUSDm", "XAGUSD.raw", "XAGUSD.r", "SILVER", "SILVER#"],
+  XAUUSD: [
+    "XAUUSD",
+    "XAUUSD#",
+    "XAUUSDm",
+    "XAUUSD.raw",
+    "XAUUSD.r",
+    "XAUUSD.pro",
+    "GOLD",
+    "GOLD#",
+    "GOLD.raw",
+    "GOLD.r",
+  ],
+};
+
 const COMMAND_ALIASES = new Set([
   "BUY",
   "SELL",
@@ -237,6 +296,13 @@ export function canonicalKey(value: string): string {
   return value.toUpperCase().trim();
 }
 
+function brokerSymbolKey(value: string): string {
+  return value
+    .toUpperCase()
+    .replace(/[\s/_.#-]/g, "")
+    .trim();
+}
+
 export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): SymbolResolution {
   const raw = rawSymbol.trim();
   const normalized = normalizeSymbolText(raw);
@@ -249,7 +315,8 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
     ...(context.globalAliases ?? {}),
   };
   const globalMatch = findAliasMatch(raw, builtInOrGlobal);
-  const canonicalSymbol = providerMatch ?? globalMatch ?? normalized.replace("/", "");
+  const canonicalSymbol =
+    providerMatch ?? globalMatch ?? canonicalFromBrokerVariant(raw) ?? normalized.replace("/", "");
   let mappingSource: SymbolResolution["mappingSource"] = providerMatch
     ? "provider_alias"
     : globalMatch
@@ -268,18 +335,48 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
   }
 
   const account = context.accountId ? context.accountMappings?.[context.accountId] : undefined;
+  const availableBrokerSymbols = normalizedSymbolList(account?.availableBrokerSymbols);
   let brokerSymbol = canonicalSymbol;
   if (account?.canonicalOverrides?.[canonicalSymbol]) {
     brokerSymbol = account.canonicalOverrides[canonicalSymbol];
     mappingSource = "account_override";
-  } else if (account?.prefix || account?.suffix) {
-    brokerSymbol = `${account.prefix ?? ""}${canonicalSymbol}${account.suffix ?? ""}`;
-    mappingSource = "prefix_suffix";
+  } else if (availableBrokerSymbols.length) {
+    const exact = findAvailableBrokerSymbol([canonicalSymbol], availableBrokerSymbols);
+    if (exact) {
+      brokerSymbol = exact;
+      mappingSource = "broker_exact";
+    } else {
+      const variant = findAvailableBrokerSymbol(
+        brokerVariantCandidates(canonicalSymbol).filter(
+          (candidate) => candidate !== canonicalSymbol,
+        ),
+        availableBrokerSymbols,
+      );
+      if (variant) {
+        brokerSymbol = variant;
+        mappingSource = "broker_variant";
+      } else {
+        const prefixSuffix = findAvailableBrokerSymbol(
+          prefixSuffixCandidates(canonicalSymbol, account),
+          availableBrokerSymbols,
+        );
+        if (prefixSuffix) {
+          brokerSymbol = prefixSuffix;
+          mappingSource = "prefix_suffix";
+        }
+      }
+    }
+  } else {
+    const prefixSuffix = prefixSuffixCandidates(canonicalSymbol, account)[0];
+    if (prefixSuffix) {
+      brokerSymbol = prefixSuffix;
+      mappingSource = "prefix_suffix";
+    }
   }
 
   if (
-    account?.excludeSymbols?.includes(brokerSymbol) ||
-    account?.excludeSymbols?.includes(canonicalSymbol)
+    symbolListIncludes(account?.excludeSymbols, brokerSymbol) ||
+    symbolListIncludes(account?.excludeSymbols, canonicalSymbol)
   ) {
     warnings.push("Symbol is excluded for this account");
     return {
@@ -292,7 +389,10 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
     };
   }
 
-  if (account?.includeSymbols?.length && !account.includeSymbols.includes(brokerSymbol)) {
+  if (
+    account?.includeSymbols?.length &&
+    !symbolListIncludes(account.includeSymbols, brokerSymbol)
+  ) {
     warnings.push("Symbol is outside the account include list");
     return {
       rawSymbol: raw,
@@ -304,10 +404,7 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
     };
   }
 
-  if (
-    account?.availableBrokerSymbols?.length &&
-    !account.availableBrokerSymbols.includes(brokerSymbol)
-  ) {
+  if (availableBrokerSymbols.length && !symbolListIncludes(availableBrokerSymbols, brokerSymbol)) {
     warnings.push("Broker symbol was mapped but is not in the EA-reported symbol list");
     return {
       rawSymbol: raw,
@@ -355,7 +452,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
         mappingSource: "fallback" as const,
         warnings: ["No provider symbol found"],
       };
-  const newStopLoss = commandType === "MODIFY_SL" ? extractPriceNearToken(text, "SL") : undefined;
+  const newStopLoss = commandType === "MODIFY_SL" ? extractLifecyclePrice(text, "SL") : undefined;
   const trailingStop = commandType === "TRAILING_STOP" ? extractTrailingStop(upper) : undefined;
   const partialClose = commandType === "CLOSE_PARTIAL" ? extractPartialClose(upper) : undefined;
   const quotedSignal =
@@ -397,6 +494,12 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     if (takeProfits.length === 0 && !defaultTakeProfit) missingFields.push("takeProfit");
   } else if (commandType !== "NO_SIGNAL" && !rawSymbol && commandType !== "CLOSE_TRADE") {
     if (!inheritedSymbol?.canonicalSymbol) missingFields.push("symbol");
+  }
+  if (commandType === "MODIFY_SL" && newStopLoss === undefined) {
+    missingFields.push("newStopLoss");
+  }
+  if (commandType === "TRAILING_STOP" && !trailingStop) {
+    missingFields.push("trailingStop");
   }
 
   if (commandType !== "NO_SIGNAL" && effectiveMappingStatus !== "mapped") {
@@ -451,6 +554,8 @@ export function shouldRequireManualReview(signal: ParsedSignal): boolean {
     signal.confidence < 0.75 ||
     signal.mappingStatus !== "mapped" ||
     (signal.commandType === "OPEN_TRADE" && signal.missingFields.length > 0) ||
+    (signal.commandType !== "OPEN_TRADE" &&
+      signal.missingFields.some((field) => field !== "symbol")) ||
     signal.commandType === "TRADE_SETUP" ||
     signal.commandType === "NO_SIGNAL" ||
     (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol"))
@@ -463,6 +568,7 @@ export function createLogicalTradeFromSignal(
     id: string;
     providerId?: string;
     accountId?: string;
+    source?: TradeSource;
     executionMode: ExecutionMode;
     allocation?: number[];
   },
@@ -470,11 +576,12 @@ export function createLogicalTradeFromSignal(
   if (signal.commandType !== "OPEN_TRADE" || !signal.direction) {
     throw new Error("Only open trade signals can create a logical trade");
   }
-  const allocation = normalizeAllocation(options.allocation, signal.takeProfits.length);
+  const legs = logicalTradeLegs(signal, options.allocation);
   return {
     id: options.id,
     providerId: options.providerId ?? signal.providerId,
     accountId: options.accountId ?? signal.accountId,
+    ...(options.source ? { source: options.source } : {}),
     symbol: {
       rawSymbol: signal.rawSymbol ?? "",
       canonicalSymbol: signal.canonicalSymbol,
@@ -488,12 +595,7 @@ export function createLogicalTradeFromSignal(
     executionMode: options.executionMode,
     entry: signal.entry,
     stopLoss: signal.stopLoss,
-    legs: signal.takeProfits.map((target, index) => ({
-      leg: target.leg,
-      targetPrice: target.price,
-      allocationPercent: allocation[index] ?? target.allocationPercent,
-      status: "PLANNED",
-    })),
+    legs,
     commandHistory: [
       { commandType: signal.commandType, text: signal.originalText, at: new Date().toISOString() },
     ],
@@ -561,10 +663,17 @@ export function buildExecutionCommand(
     executionMode?: ExecutionMode;
     volume?: number;
     riskPercent?: number;
+    runner?: RunnerConfig;
   },
 ): ExecutionQueueItem {
   const takeProfits = withTakeProfitVolumes(
     normalizeTakeProfitAllocations(signal.takeProfits, signal.commandType),
+    signal.commandType,
+    options.volume,
+    options.runner,
+  );
+  const partialClose = withPartialCloseVolume(
+    signal.partialClose,
     signal.commandType,
     options.volume,
   );
@@ -584,9 +693,10 @@ export function buildExecutionCommand(
       defaultStopLoss: signal.defaultStopLoss,
       newStopLoss: signal.newStopLoss,
       trailingStop: signal.trailingStop,
-      partialClose: signal.partialClose,
+      partialClose,
       takeProfits,
       defaultTakeProfit: signal.defaultTakeProfit,
+      runner: normalizeRunnerConfig(options.runner, options.volume),
       executionMode: options.executionMode ?? "VIRTUAL_TP",
       volume: options.volume,
       riskPercent: options.riskPercent,
@@ -605,16 +715,61 @@ function findAliasMatch(rawSymbol: string, aliases?: Record<string, string>): st
   if (!aliases) return undefined;
   const rawKey = canonicalKey(rawSymbol);
   const normalizedRaw = normalizeSymbolText(rawSymbol);
+  const brokerRaw = brokerSymbolKey(rawSymbol);
   for (const [alias, canonical] of Object.entries(aliases)) {
-    if (canonicalKey(alias) === rawKey || normalizeSymbolText(alias) === normalizedRaw) {
+    if (
+      canonicalKey(alias) === rawKey ||
+      normalizeSymbolText(alias) === normalizedRaw ||
+      brokerSymbolKey(alias) === brokerRaw
+    ) {
       return normalizeSymbolText(canonical).replace("/", "");
     }
   }
   return undefined;
 }
 
+function canonicalFromBrokerVariant(rawSymbol: string): string | undefined {
+  const rawKey = brokerSymbolKey(rawSymbol);
+  for (const [canonical, variants] of Object.entries(BROKER_SYMBOL_VARIANTS)) {
+    if (brokerSymbolKey(canonical) === rawKey) return canonical;
+    if (variants.some((variant) => brokerSymbolKey(variant) === rawKey)) return canonical;
+  }
+  return undefined;
+}
+
 function isRecognizedCanonical(symbol: string): boolean {
   return DEFAULT_CANONICAL_SYMBOLS.has(symbol) || /^[A-Z]{6}$/.test(symbol);
+}
+
+function brokerVariantCandidates(canonicalSymbol: string): string[] {
+  return uniqueSymbols([canonicalSymbol, ...(BROKER_SYMBOL_VARIANTS[canonicalSymbol] ?? [])]);
+}
+
+function prefixSuffixCandidates(canonicalSymbol: string, account?: AccountSymbolMapping): string[] {
+  if (!account?.prefix && !account?.suffix) return [];
+  return [`${account.prefix ?? ""}${canonicalSymbol}${account.suffix ?? ""}`];
+}
+
+function findAvailableBrokerSymbol(candidates: string[], availableBrokerSymbols: string[]) {
+  for (const candidate of candidates) {
+    const match = availableBrokerSymbols.find(
+      (symbol) => symbol.toUpperCase() === candidate.toUpperCase(),
+    );
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function normalizedSymbolList(values?: string[]) {
+  return values?.map((value) => value.trim()).filter(Boolean) ?? [];
+}
+
+function symbolListIncludes(values: string[] | undefined, symbol: string) {
+  return Boolean(values?.some((value) => value.toUpperCase() === symbol.toUpperCase()));
+}
+
+function uniqueSymbols(values: string[]) {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function extractSignalCandidate(text: string) {
@@ -817,7 +972,7 @@ function inferDirectionFromPrices(
   stopLoss?: number,
   takeProfits: TakeProfitTarget[] = [],
 ): Direction | undefined {
-  if (!entry || stopLoss === undefined || !takeProfits[0]) return undefined;
+  if (!entry || stopLoss === undefined || !takeProfits[0]?.price) return undefined;
   const entryMid = entry.to === undefined ? entry.from : (entry.from + entry.to) / 2;
   const firstTarget = takeProfits[0].price;
   if (firstTarget > entryMid && stopLoss < entryMid) return "BUY";
@@ -932,6 +1087,13 @@ function extractPriceNearToken(text: string, token: string): number | undefined 
   return match?.[1] ? Number(match[1]) : undefined;
 }
 
+function extractLifecyclePrice(text: string, token: string): number | undefined {
+  const near = extractPriceNearToken(text, token);
+  if (near !== undefined) return near;
+  const numbers = [...text.matchAll(/\b\d+(?:\.\d+)?\b/g)].map((match) => Number(match[0]));
+  return numbers.at(-1);
+}
+
 function extractTakeProfits(text: string): TakeProfitTarget[] {
   const targets = new Map<number, number>();
   const tpRegex = /\bTP\s*([1-4])\b\s*(?:[:@]|-|=)?\s*(\d+(?:\.\d+)?)/gi;
@@ -1044,6 +1206,34 @@ function normalizeAllocation(allocation: number[] | undefined, takeProfitCount: 
   return values;
 }
 
+function logicalTradeLegs(signal: ParsedSignal, allocationInput?: number[]): TradeLeg[] {
+  if (signal.takeProfits.length > 0) {
+    const allocation = normalizeAllocation(allocationInput, signal.takeProfits.length);
+    return signal.takeProfits.map((target, index) => ({
+      leg: target.leg,
+      targetPrice: target.price,
+      targetSource: target.targetSource ?? "explicit",
+      allocationPercent: allocation[index] ?? target.allocationPercent,
+      strategy: target.strategy,
+      status: "PLANNED",
+    }));
+  }
+
+  if (signal.defaultTakeProfit) {
+    return [
+      {
+        leg: 1,
+        targetSource: "default-distance",
+        defaultDistance: signal.defaultTakeProfit,
+        allocationPercent: 100,
+        status: "PLANNED",
+      },
+    ];
+  }
+
+  return [];
+}
+
 function normalizeTakeProfitAllocations(
   takeProfits: TakeProfitTarget[],
   commandType: CommandType,
@@ -1062,16 +1252,50 @@ function withTakeProfitVolumes(
   takeProfits: TakeProfitTarget[],
   commandType: CommandType,
   totalVolume?: number,
+  runner?: RunnerConfig,
 ): TakeProfitTarget[] {
   if (commandType !== "OPEN_TRADE" || takeProfits.length === 0 || !totalVolume) {
     return takeProfits;
   }
 
-  const volumes = splitVolumeByCent(totalVolume, takeProfits.length);
+  const runnerVolume = runner?.enabled ? Math.min(runner.lotSize, totalVolume) : 0;
+  const tradedVolume = Math.max(0, totalVolume - runnerVolume);
+  const volumes = splitVolumeByCent(tradedVolume, takeProfits.length);
   return takeProfits.map((target, index) => ({
     ...target,
     volume: volumes[index],
   }));
+}
+
+function withPartialCloseVolume(
+  partialClose: PartialCloseInstruction | undefined,
+  commandType: CommandType,
+  totalVolume?: number,
+): PartialCloseInstruction | undefined {
+  if (commandType !== "CLOSE_PARTIAL" || !partialClose) return partialClose;
+  if (partialClose.volume !== undefined) return partialClose;
+  if (partialClose.kind !== "TP_LEG" || !totalVolume || !partialClose.allocationPercent) {
+    return partialClose;
+  }
+  return {
+    ...partialClose,
+    volume: Number(((totalVolume * partialClose.allocationPercent) / 100).toFixed(2)),
+  };
+}
+
+function normalizeRunnerConfig(
+  runner: RunnerConfig | undefined,
+  totalVolume?: number,
+): RunnerConfig | undefined {
+  if (!runner?.enabled || !totalVolume) return undefined;
+  const lotSize = Math.min(Math.max(0, runner.lotSize), totalVolume);
+  if (lotSize <= 0) return undefined;
+  return {
+    enabled: true,
+    lotSize,
+    slBehavior: runner.slBehavior,
+    trailPips: runner.trailPips,
+  };
 }
 
 function splitVolumeByCent(totalVolume: number, count: number): number[] {

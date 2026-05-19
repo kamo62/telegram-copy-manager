@@ -35,10 +35,7 @@ function isPlainJsonBody(body: unknown): body is object {
   return true;
 }
 
-export async function apiFetch<T = unknown>(
-  input: string,
-  opts: ApiOptions = {},
-): Promise<T> {
+export async function apiFetch<T = unknown>(input: string, opts: ApiOptions = {}): Promise<T> {
   const { timeoutMs = 15_000, body, headers, signal, ...rest } = opts;
   const requestId = randomId();
   const controller = new AbortController();

@@ -1,0 +1,127 @@
+Telegram TC Source-Available Non-Commercial License
+Version 1.0
+
+Copyright (c) 2026 Kamogelo. All rights reserved.
+
+This license is intended to make the source code visible and usable for personal,
+educational, evaluation, and other non-commercial purposes, while reserving all
+commercial rights to the copyright holder.
+
+This is not an open-source license as defined by the Open Source Initiative,
+because commercial use is restricted.
+
+1. Definitions
+
+"Software" means the Telegram TC source code, documentation, build files,
+scripts, assets, binaries, releases, and any other files distributed with this
+repository.
+
+"Licensor" means the copyright holder named above, or any successor owner of
+the Software.
+
+"You" means any person or legal entity receiving, copying, modifying, running,
+or distributing the Software.
+
+"Non-Commercial Use" means use that is not intended for, directed toward, or
+substantially connected to commercial advantage or monetary compensation. This
+includes personal learning, personal evaluation, private research, and private
+operation for your own individual use. For clarity, running the Software for
+your own personal trading account is Non-Commercial Use only if you are not
+selling, hosting, sublicensing, managing, or otherwise monetizing the Software
+or a service based on it for someone else.
+
+"Commercial Use" means any use that is intended for, directed toward, or
+substantially connected to commercial advantage or monetary compensation. This
+includes, without limitation:
+
+- selling, licensing, renting, leasing, or sublicensing the Software;
+- selling access to the Software;
+- offering the Software as a paid hosted service, SaaS product, managed service,
+  copy-trading service, trading automation service, or white-label product;
+- bundling the Software into a paid product, paid platform, client deliverable,
+  or commercial service;
+- using the Software to provide paid work, paid support, paid consulting,
+  managed accounts, paid trading operations, or paid signals/copying services
+  for any third party;
+- using the Software inside a for-profit organisation, unless the Licensor has
+  given written permission.
+
+"Commercial License" means a separate written agreement signed by the Licensor
+that grants Commercial Use rights and includes royalty, revenue-share, or other
+payment terms.
+
+2. Non-Commercial Grant
+
+Subject to this license, the Licensor grants You a limited, worldwide,
+non-exclusive, non-transferable, non-sublicensable, revocable, royalty-free
+license to:
+
+- view, copy, and run the Software;
+- modify the Software for Non-Commercial Use;
+- distribute copies of the Software or modified versions of the Software for
+  Non-Commercial Use, provided that You include this license and preserve all
+  copyright, attribution, and license notices.
+
+3. Commercial Rights Reserved
+
+No Commercial Use rights are granted under this license.
+
+If You want to make any Commercial Use of the Software, You must obtain a
+Commercial License from the Licensor before doing so. The Commercial License
+must be in writing and must include royalty, revenue-share, or other payment
+terms agreed with the Licensor.
+
+Using the Software commercially without a Commercial License is not permitted.
+
+4. No Trademark Rights
+
+This license does not grant You any right to use the names, trademarks, logos,
+branding, domain names, or other source identifiers of Telegram TC or the
+Licensor, except as required for reasonable attribution and license notices.
+
+5. No Financial Advice
+
+The Software relates to trading automation. The Software is provided as
+software only and does not constitute financial, investment, trading, legal,
+tax, or professional advice. You are solely responsible for how You configure
+and use it, including any trading outcomes, broker fees, losses, account
+restrictions, or regulatory obligations.
+
+6. Third-Party Software
+
+Third-party dependencies and components remain subject to their own licenses.
+This license applies only to the Software owned by the Licensor.
+
+7. Termination
+
+Your rights under this license terminate automatically if You breach any term
+of this license. After termination, You must stop using, copying, modifying,
+and distributing the Software, and You must delete or destroy copies in Your
+possession or control, except where retention is required by law.
+
+8. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT,
+SECURITY, AVAILABILITY, ACCURACY, OR ERROR-FREE OPERATION.
+
+9. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE LICENSOR WILL NOT BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR
+PUNITIVE DAMAGES, OR FOR ANY LOSS OF PROFITS, REVENUE, DATA, GOODWILL,
+TRADING CAPITAL, TRADING OPPORTUNITY, OR BUSINESS INTERRUPTION, ARISING FROM
+OR RELATED TO THE SOFTWARE OR THIS LICENSE, EVEN IF ADVISED OF THE POSSIBILITY
+OF SUCH DAMAGES.
+
+10. No Waiver
+
+Failure by the Licensor to enforce any term of this license is not a waiver of
+the Licensor's right to enforce that term or any other term later.
+
+11. Contact for Commercial Licensing
+
+For Commercial Use, contact the Licensor to agree a separate royalty-bearing
+Commercial License before selling, hosting, sublicensing, bundling, or otherwise
+commercially monetizing the Software.

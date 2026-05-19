@@ -21,7 +21,13 @@ const SHORTCUTS: Shortcut[] = [
   { keys: ["Esc"], description: "Close dialogs and overlays" },
 ];
 
-export function KeyboardShortcutsOverlay({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function KeyboardShortcutsOverlay({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
   const ref = useRef<HTMLDivElement | null>(null);
   useFocusTrap(ref, open, onClose);
 
@@ -43,6 +49,9 @@ export function KeyboardShortcutsOverlay({ open, onClose }: { open: boolean; onC
       className="modal-overlay"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") onClose();
       }}
       role="dialog"
     >

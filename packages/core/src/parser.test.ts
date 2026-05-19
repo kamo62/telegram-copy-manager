@@ -145,6 +145,7 @@ describe("deterministic signal parser", () => {
   test("preserves trailing stop pips and points for broker-side conversion", () => {
     const trailPips = parseSignalText("Trail stop Gold by 50 pips", context);
     const trailPoints = parseSignalText("XAUUSD trailing SL 500 points", context);
+    const trailWithoutDistance = parseSignalText("Trail stop Gold", context);
 
     expect(trailPips.commandType).toBe("TRAILING_STOP");
     expect(trailPips.trailingStop).toEqual({ value: 50, unit: "PIPS" });
@@ -154,6 +155,24 @@ describe("deterministic signal parser", () => {
     expect(trailPoints.warnings).not.toContain(
       "Trailing stop pips/points must be converted using the broker symbol point size",
     );
+    expect(trailWithoutDistance.commandType).toBe("TRAILING_STOP");
+    expect(trailWithoutDistance.missingFields).toContain("trailingStop");
+    expect(shouldRequireManualReview(trailWithoutDistance)).toBe(true);
+  });
+
+  test("requires review for modify-SL lifecycle commands that do not include a stop price", () => {
+    const missingPrice = parseSignalText("Modify SL EURUSD", context);
+    const validPrice = parseSignalText("Modify SL EURUSD 1.0830", context);
+
+    expect(missingPrice.commandType).toBe("MODIFY_SL");
+    expect(missingPrice.newStopLoss).toBeUndefined();
+    expect(missingPrice.missingFields).toContain("newStopLoss");
+    expect(shouldRequireManualReview(missingPrice)).toBe(true);
+
+    expect(validPrice.commandType).toBe("MODIFY_SL");
+    expect(validPrice.newStopLoss).toBe(1.083);
+    expect(validPrice.missingFields).not.toContain("newStopLoss");
+    expect(shouldRequireManualReview(validPrice)).toBe(false);
   });
 
   test("parses KAL VIP style gold limit signals and ignores result chatter", () => {
@@ -388,5 +407,83 @@ describe("symbol resolver", () => {
       },
     });
     expect(unavailable.mappingStatus).toBe("unavailable");
+  });
+
+  test("prefers EA-reported exact broker symbols over configured suffixes", () => {
+    const octaContext: ParserContext = {
+      accountId: "mt5-octa",
+      accountMappings: {
+        "mt5-octa": {
+          accountId: "mt5-octa",
+          suffix: ".raw",
+          availableBrokerSymbols: ["BTCUSD", "XAUUSD", "EURUSD"],
+        },
+      },
+    };
+
+    expect(resolveSymbol("BTCUSD", octaContext)).toMatchObject({
+      canonicalSymbol: "BTCUSD",
+      brokerSymbol: "BTCUSD",
+      mappingStatus: "mapped",
+    });
+    expect(resolveSymbol("GOLD", octaContext)).toMatchObject({
+      canonicalSymbol: "XAUUSD",
+      brokerSymbol: "XAUUSD",
+      mappingStatus: "mapped",
+    });
+  });
+
+  test("maps known broker variants only when the EA reports those symbols", () => {
+    const variantContext: ParserContext = {
+      accountId: "mt5-variant",
+      accountMappings: {
+        "mt5-variant": {
+          accountId: "mt5-variant",
+          availableBrokerSymbols: ["BTCUSDm", "BTCUSD.raw", "GOLD#"],
+        },
+      },
+    };
+
+    expect(resolveSymbol("BTCUSD", variantContext)).toMatchObject({
+      canonicalSymbol: "BTCUSD",
+      brokerSymbol: "BTCUSDm",
+      mappingStatus: "mapped",
+    });
+    expect(resolveSymbol("GOLD", variantContext)).toMatchObject({
+      canonicalSymbol: "XAUUSD",
+      brokerSymbol: "GOLD#",
+      mappingStatus: "mapped",
+    });
+
+    const unavailable = resolveSymbol("XAUUSD", {
+      accountId: "mt5-no-gold",
+      accountMappings: {
+        "mt5-no-gold": {
+          accountId: "mt5-no-gold",
+          availableBrokerSymbols: ["BTCUSDm"],
+        },
+      },
+    });
+    expect(unavailable.mappingStatus).toBe("unavailable");
+  });
+
+  test("uses configured prefix and suffix after exact and known-variant matching", () => {
+    const suffixContext: ParserContext = {
+      accountId: "mt5-suffix",
+      accountMappings: {
+        "mt5-suffix": {
+          accountId: "mt5-suffix",
+          prefix: "m.",
+          suffix: ".pro",
+          availableBrokerSymbols: ["m.EURUSD.pro"],
+        },
+      },
+    };
+
+    expect(resolveSymbol("EURUSD", suffixContext)).toMatchObject({
+      canonicalSymbol: "EURUSD",
+      brokerSymbol: "m.EURUSD.pro",
+      mappingStatus: "mapped",
+    });
   });
 });

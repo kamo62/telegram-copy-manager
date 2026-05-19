@@ -135,6 +135,51 @@ describe("logical trade lifecycle", () => {
     expect(queueItem.payload.brokerSymbol).toBe("EURUSD.raw");
   });
 
+  test("creates a visible logical TP leg for default-only market trades", () => {
+    const defaultOnly = parseSignalText("BUY EURUSD", {
+      providerId,
+      accountId: "mt5-demo-1",
+      accountMappings: {
+        "mt5-demo-1": {
+          accountId: "mt5-demo-1",
+          canonicalOverrides: {},
+          suffix: ".raw",
+          includeSymbols: ["EURUSD.raw"],
+          excludeSymbols: [],
+          availableBrokerSymbols: ["EURUSD.raw"],
+        },
+      },
+      defaultStopLoss: { value: 50, unit: "PIPS" },
+      defaultTakeProfit: { value: 200, unit: "PIPS" },
+    });
+
+    const trade = createLogicalTradeFromSignal(defaultOnly, {
+      id: "trade-default",
+      providerId,
+      accountId: "mt5-demo-1",
+      executionMode: "VIRTUAL_TP",
+    });
+    const queueItem = buildExecutionCommand(defaultOnly, {
+      id: "queue-default",
+      accountId: "mt5-demo-1",
+      logicalTradeId: trade.id,
+      volume: 0.1,
+    });
+
+    expect(defaultOnly.takeProfits).toEqual([]);
+    expect(queueItem.payload.takeProfits).toEqual([]);
+    expect(queueItem.payload.defaultTakeProfit).toEqual({ value: 200, unit: "PIPS" });
+    expect(trade.legs).toHaveLength(1);
+    expect(trade.legs[0]).toMatchObject({
+      leg: 1,
+      allocationPercent: 100,
+      status: "PLANNED",
+      targetSource: "default-distance",
+      defaultDistance: { value: 200, unit: "PIPS" },
+    });
+    expect((trade.legs[0] as { targetPrice?: number }).targetPrice).toBeUndefined();
+  });
+
   test("splits channel-owned volume across TP legs before handing work to MT5", () => {
     const queueItem = buildExecutionCommand(openSignal, {
       id: "queue-1",
