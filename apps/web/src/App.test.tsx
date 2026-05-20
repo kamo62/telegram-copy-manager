@@ -340,6 +340,46 @@ describe("App dashboard", () => {
     });
   });
 
+  test("explains scaled TP allocations without final-TP wording when a runner is configured", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          providers: [
+            {
+              ...snapshot.providers[0]!,
+              riskAmount: 0.03,
+              takeProfitLevels: [
+                { leg: 1, percentage: 30, strategy: { kind: "set-sl-to-entry", offsetPips: 1 } },
+                { leg: 2, percentage: 0, strategy: { kind: "no-change" } },
+                { leg: 3, percentage: 30, strategy: { kind: "no-change" } },
+              ],
+              runner: {
+                enabled: true,
+                lotSize: 0.01,
+                slBehavior: "break-even",
+                trailPips: 10,
+              },
+            },
+          ],
+        }}
+      />,
+    );
+
+    clickTab(view, "Providers");
+    fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
+
+    const modalText = view.getByRole("dialog").textContent ?? "";
+    expect(modalText).toContain(
+      "TP percentages total 60%; the app treats them as weights across 0.02 lots assigned to TP closes. Runner stays separate.",
+    );
+    expect(modalText).toContain("Runner remains open");
+    expect(modalText).toContain("after TP3");
+    expect(modalText).toContain("50% effective");
+    expect(modalText).not.toContain("anything that isn't allocated");
+    expect(modalText).not.toContain("final TP");
+  });
+
   test("lets the operator test the current provider configuration before saving", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {

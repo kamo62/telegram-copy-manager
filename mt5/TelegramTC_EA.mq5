@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.6.7"
+#property version   "1.6.8"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";

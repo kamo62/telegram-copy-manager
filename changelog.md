@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-05-20 (Provider modal TP allocation copy)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.8` and kept the
+  MT5 EA `#property version` aligned at `1.6.8` for the repo version guard.
+- Reworded the provider TP allocation hint and runner summary so they describe scaled TP
+  percentages and the configured TP sequence instead of referring to a confusing "final TP".
+- Tightened provider strategy dropdown sizing so "Leave SL unchanged" rows stay aligned with the
+  delete control and use the same dropdown treatment as the rest of the modal.
+
 ## 2026-05-20 (Provider TP pickup and manual close accounting)
 
 - Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.7` and kept the

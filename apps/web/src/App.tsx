@@ -93,17 +93,7 @@ export interface DashboardSnapshot {
     breaches: unknown[];
   }>;
   telegramSessions: Array<{ id: string; phone: string; status: string; profileId?: string }>;
-  providers: Array<{
-    id: string;
-    dialogId: string;
-    title: string;
-    enabled: boolean;
-    parserMode: string;
-    riskProfile: string;
-    lotSize: number;
-    lastMessageAt: string;
-    ingestionStatus?: string;
-  }>;
+  providers: ProviderRowData[];
   mt5Accounts: Array<{
     id: string;
     accountNumber: string;
