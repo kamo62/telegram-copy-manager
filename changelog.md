@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-05-20 (Small-runner virtual TP close sizing)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.5` and kept the
+  MT5 EA `#property version` aligned at `1.6.5` because this is a backwards-compatible backend
+  virtual-TP sizing fix with no EA/backend protocol change.
+- Fixed app-managed virtual TP close sizing for small trades with a configured runner. When the
+  broker-filled volume minus runner volume leaves a managed TP slice smaller than the broker lot
+  step, the backend now falls back to the already-planned TP leg volume instead of rounding the close
+  request to zero and leaving TP1 unqueued.
+- Added a regression for the live SELL 4488 / TP1 4483 shape: 0.02 lots with a 0.01 runner and a
+  25% TP1 allocation must still queue a 0.01-lot TP1 close when price crosses TP1.
+
 ## 2026-05-19 (Stale-snapshot SL close reconciliation)
 
 - Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.4` and kept the

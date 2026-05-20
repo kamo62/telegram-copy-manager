@@ -144,6 +144,40 @@ async function approveGoldBuyLimit(app: ReturnType<typeof createApi>) {
   return { ...approval, shortId: approval.logicalTradeId.replace(/^trade[_-]/, "") };
 }
 
+async function approveGoldSellSmallRunnerLimit(app: ReturnType<typeof createApi>) {
+  const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+  await app.request(`/api/providers/${providerId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      riskMode: "fixed",
+      riskAmount: 0.02,
+      runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+      takeProfitLevels: [
+        { leg: 1, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+        { leg: 2, percentage: 25, strategy: { kind: "no-change" } },
+        { leg: 3, percentage: 25, strategy: { kind: "no-change" } },
+        { leg: 4, percentage: 25, strategy: { kind: "no-change" } },
+      ],
+    }),
+    headers: { "content-type": "application/json" },
+  });
+  const parsed = await json<{ parsedSignalId: string }>(
+    await app.request("/api/parser/parse", {
+      method: "POST",
+      body: JSON.stringify({
+        providerId,
+        accountId: "mt5-63442826",
+        rawText: "Gold sell limit\n\n4488-89\n\nSL 4494\n\nTP 4483\nTP 4476\nTP 4468\nTP 4454",
+      }),
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+  );
+  return { ...approval, shortId: approval.logicalTradeId.replace(/^trade[_-]/, "") };
+}
+
 async function reportPendingAccepted(
   app: ReturnType<typeof createApi>,
   input: { queueItemId: string; orderTicket?: string },
@@ -1373,6 +1407,81 @@ describe("Telegram TC API", () => {
     expect(closeWork).toContain("partialCloseValue=1");
     expect(closeWork).toContain("partialCloseVolume=0.02");
     expect(closeWork).toContain("targetPositionTicket=247596888");
+  });
+
+  test("uses planned TP volume when small runner allocation would round below broker minimum", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldSellSmallRunnerLimit(app);
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request executed",
+        orderTicket: "247694735",
+        positionTicket: "0",
+        dealTicket: "0",
+        requestedPrice: 4488,
+        filledPrice: 0,
+        volume: 0.02,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        deals: [
+          {
+            dealTicket: "244348195",
+            orderTicket: "247694735",
+            positionTicket: "247694735",
+            entry: "0",
+            reason: 3,
+            symbol: "XAUUSD",
+            price: 4488.46,
+            volume: 0.02,
+            profit: 0,
+            commission: 0,
+            swap: 0,
+            comment: `ttc:${approved.shortId}`,
+            time: "2026.05.20 11:30:10",
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    await sendGoldSnapshot(app, {
+      shortId: approved.shortId,
+      bid: 4482.6,
+      positions: [
+        {
+          ticket: "247694735",
+          symbol: "XAUUSD",
+          type: 1,
+          volume: 0.02,
+          openPrice: 4488.46,
+          sl: 4494,
+          tp: 0,
+          profit: 11,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ],
+    });
+
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
+    expect(closeWork).toContain("partialCloseKind=TP_LEG");
+    expect(closeWork).toContain("partialCloseValue=1");
+    expect(closeWork).toContain("partialCloseVolume=0.01");
+    expect(closeWork).toContain("targetPositionTicket=247694735");
   });
 
   test("confirms app-managed TP1 close before queueing the configured SL move", async () => {

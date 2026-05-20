@@ -2507,8 +2507,17 @@ class AppStore {
     const managedVolume = managedVirtualTpVolume(open.payload, brokerOpenVolume);
     const allocatedVolume =
       managedVolume > 0 ? Number(((managedVolume * leg.allocationPercent) / 100).toFixed(2)) : 0;
+    const plannedVolume = plannedTp?.volume && plannedTp.volume > 0 ? plannedTp.volume : 0;
+    const fallbackVolume =
+      plannedVolume > 0 && managedVolume > 0
+        ? Number(Math.min(plannedVolume, managedVolume).toFixed(2))
+        : plannedVolume;
     const volume =
-      brokerOpenVolume !== undefined ? allocatedVolume : (plannedTp?.volume ?? allocatedVolume);
+      brokerOpenVolume !== undefined
+        ? allocatedVolume > 0
+          ? allocatedVolume
+          : fallbackVolume
+        : (plannedTp?.volume ?? allocatedVolume);
     if (!volume || volume <= 0) return false;
     const item: ExecutionQueueItem = {
       id: `queue_${nanoid(10)}`,
