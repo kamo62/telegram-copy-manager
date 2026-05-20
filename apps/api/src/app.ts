@@ -849,7 +849,7 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, last_message_at FROM providers ORDER BY title",
+          "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at FROM providers ORDER BY title",
         )
         .all() as Row[]
     )
@@ -858,18 +858,30 @@ class AppStore {
           this.allowDemoData ||
           (String(row.profile_id) !== "profile-demo" && String(row.dialog_id) !== "dialog-alpha"),
       )
-      .map((row) => ({
-        id: String(row.id),
-        profileId: String(row.profile_id),
-        dialogId: String(row.dialog_id),
-        title: String(row.title),
-        kind: String(row.kind),
-        enabled: Boolean(row.enabled),
-        parserMode: String(row.parser_mode),
-        riskProfile: String(row.risk_profile),
-        lotSize: Number(row.lot_size),
-        lastMessageAt: String(row.last_message_at),
-      }));
+      .map((row) => {
+        const config = row.provider_config_json
+          ? parseJson<Partial<ProviderExecutionConfig>>(String(row.provider_config_json))
+          : undefined;
+        return {
+          id: String(row.id),
+          profileId: String(row.profile_id),
+          dialogId: String(row.dialog_id),
+          title: String(row.title),
+          kind: String(row.kind),
+          enabled: Boolean(row.enabled),
+          parserMode: String(row.parser_mode),
+          riskProfile: String(row.risk_profile),
+          lotSize: Number(row.lot_size),
+          riskMode: config?.riskMode,
+          riskAmount: config?.riskAmount,
+          takeProfitLevels:
+            config && "takeProfitLevels" in config
+              ? normalizeProviderTpLevels(config.takeProfitLevels)
+              : undefined,
+          runner: config?.runner,
+          lastMessageAt: String(row.last_message_at),
+        };
+      });
   }
 
   connectedTelegramSession(profileId?: string) {
@@ -1065,10 +1077,13 @@ class AppStore {
     const accountId = input.accountId ?? this.defaultParserAccountId();
     const parsed = parseSignalText(input.rawText, this.parserContext(providerId, accountId));
     const config = input.config ?? this.providerConfig(providerId);
+    const settings = this.appSettings();
     return {
       providerId,
       accountId,
-      parsed: applyProviderExecutionConfig(parsed, config),
+      parsed: applyProviderExecutionConfig(parsed, config, {
+        defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" },
+      }),
       config,
     };
   }
@@ -1687,7 +1702,10 @@ class AppStore {
       return { statusCode: 409, error: "Signal has already been approved or queued" };
     }
 
-    const signalForQueue = applyProviderExecutionConfig(signal, providerConfig);
+    const defaultTakeProfit = { value: settings.defaultTakeProfitPips, unit: "PIPS" as const };
+    const signalForQueue = applyProviderExecutionConfig(signal, providerConfig, {
+      defaultTakeProfit,
+    });
     if (signal.commandType === "OPEN_TRADE") {
       const targetSignals = targetAccountIds.map((targetAccountId) => {
         const signalForTarget =
@@ -1696,7 +1714,9 @@ class AppStore {
             : parseSignalText(signal.originalText, this.parserContext(providerId, targetAccountId));
         return {
           accountId: targetAccountId,
-          signal: applyProviderExecutionConfig(signalForTarget, providerConfig),
+          signal: applyProviderExecutionConfig(signalForTarget, providerConfig, {
+            defaultTakeProfit,
+          }),
         };
       });
       for (const target of targetSignals) {
@@ -1781,6 +1801,7 @@ class AppStore {
                   this.parserContext(providerId, targetAccountId),
                 ),
                 providerConfig,
+                { defaultTakeProfit },
               );
         const match = matchLifecycleCommandToTrade(
           targetSignal,
@@ -5796,14 +5817,16 @@ function heartbeatFreshness(iso: string) {
 function normalizeProviderTpLevels(
   levels?: ProviderTakeProfitLevelInput[],
 ): ProviderTakeProfitLevel[] {
-  const source = levels?.length
-    ? levels
-    : Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
-        leg: index + 1,
-        percentage: 25,
-        strategy: { kind: "no-change" as const },
-      }));
-  const cleaned = source
+  if (levels === undefined) {
+    return Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
+      leg: index + 1,
+      percentage: 25,
+      strategy: { kind: "no-change" as const },
+    }));
+  }
+  if (levels.length === 0) return [];
+
+  const cleaned = levels
     .map((level, index) => ({
       leg: Number.isFinite(level.leg) && level.leg > 0 ? Math.round(level.leg) : index + 1,
       percentage: Math.max(0, Number(level.percentage) || 0),
@@ -5812,10 +5835,10 @@ function normalizeProviderTpLevels(
     .slice(0, MAX_PROVIDER_TP_LEVELS);
   const total = cleaned.reduce((sum, level) => sum + level.percentage, 0);
   if (total <= 0) {
-    return Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
-      leg: index + 1,
-      percentage: 25,
-      strategy: { kind: "no-change" },
+    const equal = 100 / cleaned.length;
+    return cleaned.map((level) => ({
+      ...level,
+      percentage: Number(equal.toFixed(2)),
     }));
   }
   return cleaned.map((level) => ({
@@ -5871,19 +5894,38 @@ function strategyOffsetPips(value: string) {
 function applyProviderExecutionConfig(
   signal: ParsedSignal,
   config: ProviderExecutionConfig,
+  defaults?: Pick<ParsedSignal, "defaultTakeProfit">,
 ): ParsedSignal {
-  if (signal.commandType !== "OPEN_TRADE" || signal.takeProfits.length === 0) return signal;
+  if (signal.commandType !== "OPEN_TRADE") return signal;
+  if (signal.takeProfits.length === 0) {
+    return signal.defaultTakeProfit || !defaults?.defaultTakeProfit
+      ? signal
+      : { ...signal, defaultTakeProfit: defaults.defaultTakeProfit };
+  }
+  const useDefaultTp =
+    config.takeProfitLevels.length === 0 ||
+    (config.takeProfitLevels.length === 1 && !config.runner?.enabled);
+  if (useDefaultTp) {
+    return {
+      ...signal,
+      takeProfits: [],
+      defaultTakeProfit: signal.defaultTakeProfit ?? defaults?.defaultTakeProfit,
+    };
+  }
   const levelsByLeg = new Map(config.takeProfitLevels.map((level) => [level.leg, level]));
+  const configuredLegs = new Set(config.takeProfitLevels.map((level) => level.leg));
   return {
     ...signal,
-    takeProfits: signal.takeProfits.map((target, index) => {
-      const level = levelsByLeg.get(target.leg) ?? config.takeProfitLevels[index];
-      return {
-        ...target,
-        allocationPercent: level?.percentage ?? target.allocationPercent,
-        strategy: level?.strategy ?? target.strategy ?? { kind: "no-change" },
-      };
-    }),
+    takeProfits: signal.takeProfits
+      .filter((target) => configuredLegs.has(target.leg))
+      .map((target, index) => {
+        const level = levelsByLeg.get(target.leg) ?? config.takeProfitLevels[index];
+        return {
+          ...target,
+          allocationPercent: level?.percentage ?? target.allocationPercent,
+          strategy: level?.strategy ?? target.strategy ?? { kind: "no-change" },
+        };
+      }),
   };
 }
 

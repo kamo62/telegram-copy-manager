@@ -2536,6 +2536,84 @@ describe("Telegram TC API", () => {
     ]);
   });
 
+  test("preserves an empty provider TP config and falls back to app default TP", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+
+    const update = await app.request("/api/providers/provider-alpha", {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(update.status).toBe(200);
+
+    const saved = await json<{ config: { takeProfitLevels: unknown[] } }>(
+      await app.request("/api/providers/provider-alpha/config"),
+    );
+    expect(saved.config.takeProfitLevels).toEqual([]);
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approve = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approve.status).toBe(200);
+
+    const payload = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+    expect(payload).toContain("defaultTakeProfitValue=200");
+    expect(payload).toContain("defaultTakeProfitUnit=PIPS");
+    expect(payload).not.toContain("tp1=1.091");
+    expect(payload).not.toContain("tp2=1.095");
+  });
+
+  test("empty provider TP config keeps app SL and TP defaults for bare market signals", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+
+    await app.request("/api/providers/provider-alpha", {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          rawText: "BUY EURUSD",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approve = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approve.status).toBe(200);
+
+    const payload = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+    expect(payload).toContain("defaultStopLossValue=50");
+    expect(payload).toContain("defaultStopLossUnit=PIPS");
+    expect(payload).toContain("defaultTakeProfitValue=200");
+    expect(payload).toContain("defaultTakeProfitUnit=PIPS");
+  });
+
   test("uses provider channel lot size and ignores Telegram-provided lot and risk hints", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
 
@@ -3093,6 +3171,97 @@ describe("Telegram TC API", () => {
       status: "OPEN",
       legs: [{ status: "CLOSED" }],
     });
+  });
+
+  test("single configured TP without runner closes the full lot at the app default TP", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 100, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const shortId = approval.logicalTradeId.replace(/^trade[_-]/, "");
+    const openWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(openWork).toContain("defaultTakeProfitValue=200");
+    expect(openWork).toContain("runnerEnabled=false");
+    expect(openWork).not.toContain("tp1=1.091");
+    expect(openWork).not.toContain("tp2=1.095");
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approval.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: `ttc:${shortId}`,
+        orderTicket: "70001",
+        positionTicket: "70001",
+        dealTicket: "60001",
+        requestedPrice: 1.086,
+        filledPrice: 1.086,
+        volume: 0.02,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [
+          {
+            ticket: "70001",
+            symbol: "EURUSD.raw",
+            type: 0,
+            volume: 0.02,
+            openPrice: 1.086,
+            sl: 1.081,
+            tp: 0,
+            profit: 40,
+            magic: 26050901,
+            isExternal: false,
+            comment: `ttc:${shortId}`,
+          },
+        ],
+        orders: [],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.106, ask: 1.1062, point: 0.00001 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
+    expect(closeWork).toContain("partialCloseKind=TP_LEG");
+    expect(closeWork).toContain("partialCloseValue=1");
+    expect(closeWork).toContain("partialCloseVolume=0.02");
+    expect(closeWork).toContain("targetPositionTicket=70001");
   });
 
   test("sends structured TP strategy fields to MT5 for virtual TP SL movement", async () => {

@@ -138,10 +138,10 @@ export function ProviderConfigModal({
 
   useEffect(() => {
     if (provider) {
-      setRiskMode("fixed");
-      setRiskAmount(provider.lotSize.toFixed(2));
-      setTps(DEFAULT_TPS);
-      setRunner(DEFAULT_RUNNER);
+      setRiskMode(provider.riskMode ?? "fixed");
+      setRiskAmount((provider.riskAmount ?? provider.lotSize).toFixed(2));
+      setTps(provider.takeProfitLevels !== undefined ? provider.takeProfitLevels : DEFAULT_TPS);
+      setRunner(provider.runner ?? DEFAULT_RUNNER);
       setTestRawText(DEFAULT_TEST_MESSAGE);
       setTestResult(null);
       setTestBusy(false);
@@ -209,7 +209,6 @@ export function ProviderConfigModal({
   }
 
   function deleteTp(index: number) {
-    if (tps.length <= 1) return;
     setTps(tps.filter((_tp, i) => i !== index).map((tp, i) => ({ ...tp, leg: i + 1 })));
   }
 
@@ -482,7 +481,7 @@ export function ProviderConfigModal({
                   Add a take-profit level
                 </button>
               ) : null}
-              {totalPercent !== 100 ? (
+              {totalPercent !== 100 && tps.length > 0 ? (
                 <p className="config-hint">
                   TPs total {totalPercent}% — anything that isn't allocated will close on the final
                   TP unless a runner is configured below.

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-05-20 (Provider TP cardinality and default TP fallback)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.6` and kept the
+  MT5 EA `#property version` aligned at `1.6.6` because this fixes provider config semantics and
+  frontend modal behaviour without changing the EA/backend protocol.
+- Preserved empty provider take-profit configs as "no configured provider TPs" instead of silently
+  recreating TP1-TP4. Explicit message TPs are then ignored for that provider and the app-wide
+  default TP distance is used.
+- Kept provider TP cardinality capped at four for now, while making one configured TP close the full
+  non-runner lot at the app default TP instead of reusing Telegram message TP lines.
+- Let the provider config modal delete the final TP row and reload saved provider TP/runner config
+  from the dashboard snapshot.
+
 ## 2026-05-20 (Small-runner virtual TP close sizing)
 
 - Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.5` and kept the
