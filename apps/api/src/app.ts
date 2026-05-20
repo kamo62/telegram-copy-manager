@@ -2409,20 +2409,19 @@ class AppStore {
         .query("SELECT id FROM broker_orders WHERE deal_ticket = ? LIMIT 1")
         .get(deal.dealTicket) as Row | null;
       if (exists) continue;
-      const tradeId = this.logicalTradeIdForHistoryDeal(deal);
-      if (!tradeId) continue;
+      const tradeId =
+        this.logicalTradeIdForHistoryDeal(deal) ?? externalHistoryTradeId(input.accountId, deal);
+      if (!tradeId || !deal.symbol || !deal.volume) continue;
       const open = this.openBrokerOrderForDeal(tradeId, deal);
       const positionTicket = String(deal.positionTicket || open?.position_ticket || "");
-      const action = this.historyDealActionForTrade(
-        tradeId,
-        deal,
-        positionTicket,
-        this.positionStillOpen(input.accountId, positionTicket),
-      );
+      const positionStillOpen = this.positionStillOpen(input.accountId, positionTicket);
+      const action = this.logicalTrade(tradeId)
+        ? this.historyDealActionForTrade(tradeId, deal, positionTicket, positionStillOpen)
+        : historyDealAction(deal, positionStillOpen);
       const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
       const trade = this.logicalTrade(tradeId);
       const signedPips =
-        openPrice && deal.price
+        trade && openPrice && deal.price
           ? trade?.direction === "SELL"
             ? openPrice - deal.price
             : deal.price - openPrice
@@ -2481,7 +2480,9 @@ class AppStore {
           source,
           deal.time ?? new Date().toISOString(),
         );
-      this.reconcileHistoryDeal(tradeId, deal, action, source, positionTicket);
+      if (trade) {
+        this.reconcileHistoryDeal(tradeId, deal, action, source, positionTicket);
+      }
       recorded += 1;
     }
     return { accountId: input.accountId, received: input.deals.length, recorded };
@@ -5317,7 +5318,7 @@ class AppStore {
         .get(deal.orderTicket) as Row | null;
       if (row) return String(row.logical_trade_id);
     }
-    return "";
+    return undefined;
   }
 
   private openBrokerOrderForDeal(tradeId: string, deal: Mt5HistoryDealInput) {
@@ -5696,6 +5697,16 @@ function shortLogicalTradeIdFromComment(comment: string) {
   return legacy ? shortLogicalTradeId(legacy) : "";
 }
 
+function externalHistoryTradeId(accountId: string, deal: Mt5HistoryDealInput) {
+  const ticket = String(deal.positionTicket || deal.orderTicket || deal.dealTicket || "").trim();
+  if (!ticket) return undefined;
+  return `external_${safeHistoryKey(accountId)}_${safeHistoryKey(ticket)}`;
+}
+
+function safeHistoryKey(value: string) {
+  return value.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "unknown";
+}
+
 function historyDealAction(deal: Mt5HistoryDealInput, positionStillOpen: boolean) {
   const rawEntry = String(deal.entry ?? "").trim();
   if (rawEntry !== "" && Number.isFinite(Number(rawEntry))) {
@@ -5902,10 +5913,7 @@ function applyProviderExecutionConfig(
       ? signal
       : { ...signal, defaultTakeProfit: defaults.defaultTakeProfit };
   }
-  const useDefaultTp =
-    config.takeProfitLevels.length === 0 ||
-    (config.takeProfitLevels.length === 1 && !config.runner?.enabled);
-  if (useDefaultTp) {
+  if (config.takeProfitLevels.length === 0) {
     return {
       ...signal,
       takeProfits: [],

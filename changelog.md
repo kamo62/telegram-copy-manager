@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-05-20 (Provider TP pickup and manual close accounting)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.7` and kept the
+  MT5 EA `#property version` aligned at `1.6.7` because this corrects provider TP fallback logic and
+  realized P/L accounting without changing the EA/backend payload schema.
+- Corrected provider TP handling: empty provider TP config still falls back to the app-wide default
+  TP, but a provider configured with TP levels now uses matching Telegram TP lines when they exist.
+- Kept the single-TP/no-runner fallback to the app-wide TP only for messages that do not contain a
+  provider TP to pick up.
+- Included external/manual broker history deals in the EA history feed and recorded unmatched
+  history deals under stable external trade ids so closed manual MT5 trades move from floating P/L
+  into realized P/L, equity curve, drawdown, and monthly performance.
+
 ## 2026-05-20 (Provider TP cardinality and default TP fallback)
 
 - Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.6` and kept the
@@ -8,8 +21,7 @@
 - Preserved empty provider take-profit configs as "no configured provider TPs" instead of silently
   recreating TP1-TP4. Explicit message TPs are then ignored for that provider and the app-wide
   default TP distance is used.
-- Kept provider TP cardinality capped at four for now, while making one configured TP close the full
-  non-runner lot at the app default TP instead of reusing Telegram message TP lines.
+- Kept provider TP cardinality capped at four for now.
 - Let the provider config modal delete the final TP row and reload saved provider TP/runner config
   from the dashboard snapshot.
 

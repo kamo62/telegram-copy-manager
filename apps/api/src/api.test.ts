@@ -3173,7 +3173,7 @@ describe("Telegram TC API", () => {
     });
   });
 
-  test("single configured TP without runner closes the full lot at the app default TP", async () => {
+  test("single configured TP without runner uses provider-picked Telegram TP when present", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, {
       availableSymbols: ["EURUSD.raw"],
@@ -3206,9 +3206,10 @@ describe("Telegram TC API", () => {
     );
     const shortId = approval.logicalTradeId.replace(/^trade[_-]/, "");
     const openWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
-    expect(openWork).toContain("defaultTakeProfitValue=200");
+    expect(openWork).not.toContain("defaultTakeProfitValue=200");
     expect(openWork).toContain("runnerEnabled=false");
-    expect(openWork).not.toContain("tp1=1.091");
+    expect(openWork).toContain("tp1=1.091");
+    expect(openWork).toContain("tp1Allocation=100");
     expect(openWork).not.toContain("tp2=1.095");
 
     await app.request("/api/mt5/report", {
@@ -3251,7 +3252,7 @@ describe("Telegram TC API", () => {
           },
         ],
         orders: [],
-        symbols: [{ symbol: "EURUSD.raw", bid: 1.106, ask: 1.1062, point: 0.00001 }],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.091, ask: 1.0912, point: 0.00001 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -3262,6 +3263,41 @@ describe("Telegram TC API", () => {
     expect(closeWork).toContain("partialCloseValue=1");
     expect(closeWork).toContain("partialCloseVolume=0.02");
     expect(closeWork).toContain("targetPositionTicket=70001");
+  });
+
+  test("single configured TP without runner falls back to app default TP when no Telegram TP exists", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 100, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY EURUSD",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" });
+
+    const openWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(openWork).toContain("defaultTakeProfitValue=200");
+    expect(openWork).toContain("runnerEnabled=false");
   });
 
   test("sends structured TP strategy fields to MT5 for virtual TP SL movement", async () => {
@@ -4478,6 +4514,69 @@ describe("Telegram TC API", () => {
     expect(perf.totalProfit).toBe(15);
     expect(perf.netDeposits).toBe(100);
     expect(perf.currentEquity).toBe(10115);
+  });
+
+  test("account performance realizes closed external manual history deals", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    const history = await json<{ recorded: number }>(
+      await app.request("/api/mt5/history", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountId: "mt5-100200300",
+          deals: [
+            {
+              dealTicket: "manual-open-1",
+              orderTicket: "manual-order-open-1",
+              positionTicket: "manual-position-1",
+              entry: "0",
+              type: "0",
+              reason: 0,
+              symbol: "XAUUSD",
+              price: 4553.73,
+              volume: 0.01,
+              profit: 0,
+              commission: 0,
+              swap: 0,
+              comment: "",
+              time: "2026.05.20 09:00:00",
+            },
+            {
+              dealTicket: "manual-close-1",
+              orderTicket: "manual-order-close-1",
+              positionTicket: "manual-position-1",
+              entry: "1",
+              type: "1",
+              reason: 0,
+              symbol: "XAUUSD",
+              price: 4558.73,
+              volume: 0.01,
+              profit: 12.34,
+              commission: -0.34,
+              swap: 0.1,
+              comment: "",
+              time: "2026.05.20 09:05:00",
+            },
+          ],
+        }),
+      }),
+    );
+    expect(history.recorded).toBe(2);
+
+    const perf = await json<{
+      realizedPnl: number;
+      floatingPnl: number;
+      totalProfit: number;
+    }>(await app.request("/api/account/performance"));
+
+    expect(perf.realizedPnl).toBe(12.1);
+    expect(perf.floatingPnl).toBe(0);
+    expect(perf.totalProfit).toBe(12.1);
   });
 
   test("active-plans endpoint returns line-format diagnostics for app-managed virtual TP plans", async () => {
