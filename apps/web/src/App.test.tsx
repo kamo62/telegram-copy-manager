@@ -406,6 +406,45 @@ describe("App dashboard", () => {
     });
   });
 
+  test("preserves percent-risk amount when provider settings are saved without edits", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          providers: [
+            {
+              ...snapshot.providers[0]!,
+              riskMode: "percent",
+              riskAmount: 1.5,
+              lotSize: 0.02,
+            },
+          ],
+        }}
+      />,
+    );
+    clickTab(view, "Providers");
+    fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
+    fireEvent.click(
+      view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
+    );
+
+    await waitFor(() => {
+      const settingsCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
+      expect(settingsCall).toBeTruthy();
+      expect(JSON.parse(String(settingsCall?.init?.body))).toMatchObject({
+        lotSize: 0.02,
+        riskMode: "percent",
+        riskAmount: 1.5,
+      });
+    });
+  });
+
   test("lets the operator remove every provider TP level before saving", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {

@@ -1,10 +1,11 @@
 # Changelog
 
-## 2026-05-21 v1.9.0 (Provider statistics and drawdown export)
+## 1.9.0 - 2026-05-21 (Minor)
 
-- Release impact: Minor. Adds backward-compatible dashboard/API statistics, persisted equity curve
-  rows, provider copied-drawdown fields, and provider performance CSV export without changing the EA
-  protocol; the EA `#property version` was kept aligned with the canonical app version.
+Release impact: Minor because this adds backward-compatible dashboard/API statistics, persisted
+equity curve rows, provider copied-drawdown fields, and provider performance CSV export without
+changing the EA protocol.
+
 - Added heartbeat-sampled minute equity curve storage with account/provider state tables and sparse
   drawdown events so the Performance chart and statistics can reflect floating equity drift.
 - Added account/provider statistics for Profit/Return, Win/Loss, Risk/Drawdown, Quality, Streaks,
@@ -14,10 +15,11 @@
 - Added provider performance CSV export from the Providers panel, including linked accounts, win
   rate, P/L, average drawdown, and copied drawdown.
 
-## 2026-05-21 v1.8.1 (MT5 closed-position ledger repair)
+## 1.8.1 - 2026-05-21 (Patch)
 
-- Release impact: Patch. Keeps the default parser expansion intact while fixing a backward-compatible
-  broker-history reconciliation issue.
+Release impact: Patch because this keeps the default parser expansion intact while fixing a
+backward-compatible broker-history reconciliation issue.
+
 - Upgraded existing app-recorded partial close rows to `FULL_CLOSE` when MT5 broker history confirms
   that cumulative closed volume covers the original broker open volume, so app-managed trades appear
   in History > Closed like MT5's Positions ledger.
@@ -26,10 +28,11 @@
 - Added startup repair for already-open logical trades whose recorded close rows fully cover the
   broker open volume, allowing deployed databases to heal stale ledger rows after restart.
 
-## 2026-05-21 v1.8.0 (Default parser expansion)
+## 1.8.0 - 2026-05-21 (Minor)
 
-- Release impact: Minor. Adds backward-compatible default parser behaviour and additive parser API
-  response fields for multi-entry posts.
+Release impact: Minor because this adds backward-compatible default parser behaviour and additive
+parser API response fields for multi-entry posts.
+
 - Added default directional zone parsing so messages such as `4512 / 4500 / 4580 / Buy zones`
   produce one pending limit signal per standalone price line, using the provider default symbol plus
   the app default SL and TP distances.
@@ -88,6 +91,40 @@
   the account currency moved out of the monospaced amount text.
 - Changed closed-history Result to a compact net chip (`Win`, `Loss`, `BE`) while keeping close reason
   such as `Mixed`, `SL hit`, `Manual`, or `TP hit` in the expanded detail and tooltip.
+
+## 1.6.11 - 2026-05-21 (Patch)
+
+Release impact: Patch because this tightens provider-config PATCH persistence and startup
+close-coverage repair without changing the EA command protocol or public API contracts.
+
+- Persisted null-only provider TP reset patches while preserving existing risk and runner config.
+- Required every broker position ticket on a logical trade to be covered before startup repair treats
+  partial-close history as terminal.
+- Added regressions for null-only TP resets and multi-ticket close coverage.
+
+## 1.6.10 - 2026-05-21 (Patch)
+
+Release impact: Patch because this fixes provider-config review regressions without changing
+the EA command protocol or public API contracts.
+
+- Preserved `% of balance` provider risk amounts when opening and saving the provider modal without
+  editing the risk field.
+- Accepted `null` provider TP arrays as missing config and normalized them through the default TP
+  fallback instead of throwing during provider update/read paths.
+- Added focused API and UI regressions for the PR review fixes.
+
+## 1.6.9 - 2026-05-21 (Patch)
+
+Release impact: Patch because this fixes backend parser/reconciliation behaviour without changing
+the EA command protocol or public API contracts.
+
+- Restored the app default TP when provider TP filtering removes every Telegram TP leg from an
+  otherwise valid signal.
+- Prevented app-managed virtual TPs from queueing a close when the actual broker fill is fully
+  reserved for the configured runner.
+- Summed split broker OPEN fills before treating history or startup-repair closes as terminal.
+- Added regressions for the provider TP fallback, runner-only virtual TP sizing, history close
+  classification, and startup backfill coverage paths.
 
 ## 2026-05-20 (Provider modal TP allocation copy)
 

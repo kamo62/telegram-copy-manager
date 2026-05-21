@@ -298,7 +298,7 @@ export function createApi(options: ApiOptions = {}) {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
-      takeProfitLevels?: ProviderTakeProfitLevelInput[];
+      takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     }>();
     return c.json(store.updateProvider(c.req.param("id"), body));
@@ -1030,7 +1030,7 @@ class AppStore {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
-      takeProfitLevels?: ProviderTakeProfitLevelInput[];
+      takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     },
   ) {
@@ -1047,12 +1047,21 @@ class AppStore {
         positiveNumber(input.lotSize, current.lotSize),
         id,
       );
-    if (input.riskMode || input.takeProfitLevels || input.runner) {
+    const hasProviderConfigPatch =
+      input.riskMode !== undefined ||
+      input.riskAmount !== undefined ||
+      "takeProfitLevels" in input ||
+      input.runner !== undefined;
+    if (hasProviderConfigPatch) {
+      const existingConfig = this.providerConfig(id);
       this.saveProviderConfig(id, {
-        riskMode: input.riskMode ?? "fixed",
-        riskAmount: positiveNumber(input.riskAmount ?? input.lotSize, current.lotSize),
-        takeProfitLevels: normalizeProviderTpLevels(input.takeProfitLevels),
-        runner: input.runner,
+        riskMode: input.riskMode ?? existingConfig.riskMode,
+        riskAmount: positiveNumber(input.riskAmount, existingConfig.riskAmount),
+        takeProfitLevels:
+          "takeProfitLevels" in input
+            ? normalizeProviderTpLevels(input.takeProfitLevels)
+            : existingConfig.takeProfitLevels,
+        runner: input.runner === undefined ? existingConfig.runner : input.runner,
       });
     }
     this.audit("provider.update", "info", "Provider settings updated", {
@@ -2789,7 +2798,7 @@ class AppStore {
     const fallbackVolume =
       plannedVolume > 0 && managedVolume > 0
         ? Number(Math.min(plannedVolume, managedVolume).toFixed(2))
-        : plannedVolume;
+        : 0;
     const volume =
       brokerOpenVolume !== undefined
         ? allocatedVolume > 0
@@ -3042,33 +3051,29 @@ class AppStore {
     if (truthyBrokerTicket(positionTicket)) {
       const exact = this.db
         .query(
-          `SELECT filled_volume FROM broker_orders
+          `SELECT COALESCE(SUM(filled_volume), 0) AS volume FROM broker_orders
            WHERE logical_trade_id = ?
              AND position_ticket = ?
              AND action = 'OPEN'
              AND filled_volume IS NOT NULL
-             AND filled_volume > 0
-           ORDER BY created_at ASC
-           LIMIT 1`,
+             AND filled_volume > 0`,
         )
         .get(tradeId, positionTicket) as Row | null;
-      const exactVolume = nullableNumber(exact?.filled_volume);
+      const exactVolume = nullableNumber(exact?.volume);
       if (exactVolume && exactVolume > 0) return exactVolume;
     }
     const row = this.db
       .query(
-        `SELECT filled_volume FROM broker_orders
+        `SELECT COALESCE(SUM(filled_volume), 0) AS volume FROM broker_orders
          WHERE logical_trade_id = ?
            AND action = 'OPEN'
            AND position_ticket IS NOT NULL
            AND position_ticket NOT IN ('','0')
            AND filled_volume IS NOT NULL
-           AND filled_volume > 0
-         ORDER BY created_at ASC
-         LIMIT 1`,
+           AND filled_volume > 0`,
       )
       .get(tradeId) as Row | null;
-    const volume = nullableNumber(row?.filled_volume);
+    const volume = nullableNumber(row?.volume);
     return volume && volume > 0 ? volume : undefined;
   }
 
@@ -6097,10 +6102,20 @@ class AppStore {
       )
       .all(tradeId) as Row[];
 
+    const openVolumeByTicket = new Map<string, number>();
     for (const openRow of openRows) {
       const openVolume = nullableNumber(openRow.filled_volume);
       if (!openVolume || openVolume <= 0) continue;
-      const positionTicket = String(openRow.position_ticket ?? "");
+      const rawPositionTicket = String(openRow.position_ticket ?? "");
+      const positionTicket = truthyBrokerTicket(rawPositionTicket) ? rawPositionTicket : "";
+      openVolumeByTicket.set(
+        positionTicket,
+        (openVolumeByTicket.get(positionTicket) ?? 0) + openVolume,
+      );
+    }
+
+    let coveringClose: Row | null = null;
+    for (const [positionTicket, openVolume] of openVolumeByTicket) {
       const params = [tradeId];
       let ticketFilter = "";
       if (truthyBrokerTicket(positionTicket)) {
@@ -6121,12 +6136,18 @@ class AppStore {
         )
         .all(...params) as Row[];
       let closedVolume = 0;
+      let ticketCoveringClose: Row | null = null;
       for (const closeRow of closeRows) {
         closedVolume += nullableNumber(closeRow.filled_volume) ?? 0;
-        if (closedVolume >= openVolume - CLOSE_VOLUME_EPSILON) return closeRow;
+        if (closedVolume >= openVolume - CLOSE_VOLUME_EPSILON) {
+          ticketCoveringClose = closeRow;
+          break;
+        }
       }
+      if (!ticketCoveringClose) return null;
+      coveringClose = ticketCoveringClose;
     }
-    return null;
+    return coveringClose;
   }
 
   private logicalTradesForDashboard() {
@@ -7168,9 +7189,9 @@ function heartbeatFreshness(iso: string) {
 }
 
 function normalizeProviderTpLevels(
-  levels?: ProviderTakeProfitLevelInput[],
+  levels?: ProviderTakeProfitLevelInput[] | null,
 ): ProviderTakeProfitLevel[] {
-  if (levels === undefined) {
+  if (!Array.isArray(levels)) {
     return Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
       leg: index + 1,
       percentage: 25,
@@ -7264,18 +7285,26 @@ function applyProviderExecutionConfig(
   }
   const levelsByLeg = new Map(config.takeProfitLevels.map((level) => [level.leg, level]));
   const configuredLegs = new Set(config.takeProfitLevels.map((level) => level.leg));
+  const takeProfits = signal.takeProfits
+    .filter((target) => configuredLegs.has(target.leg))
+    .map((target, index) => {
+      const level = levelsByLeg.get(target.leg) ?? config.takeProfitLevels[index];
+      return {
+        ...target,
+        allocationPercent: level?.percentage ?? target.allocationPercent,
+        strategy: level?.strategy ?? target.strategy ?? { kind: "no-change" },
+      };
+    });
+  if (takeProfits.length === 0) {
+    return {
+      ...signal,
+      takeProfits: [],
+      defaultTakeProfit: signal.defaultTakeProfit ?? defaults?.defaultTakeProfit,
+    };
+  }
   return {
     ...signal,
-    takeProfits: signal.takeProfits
-      .filter((target) => configuredLegs.has(target.leg))
-      .map((target, index) => {
-        const level = levelsByLeg.get(target.leg) ?? config.takeProfitLevels[index];
-        return {
-          ...target,
-          allocationPercent: level?.percentage ?? target.allocationPercent,
-          strategy: level?.strategy ?? target.strategy ?? { kind: "no-change" },
-        };
-      }),
+    takeProfits,
   };
 }
 
