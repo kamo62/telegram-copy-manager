@@ -1,6 +1,7 @@
 import "./test-setup";
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import packageJson from "../../../package.json";
 import { App, type DashboardSnapshot } from "./App";
 
 afterEach(() => cleanup());
@@ -1062,6 +1063,15 @@ describe("App dashboard", () => {
       const dot = document.querySelector(".status-bar .live-dot");
       expect(dot?.className).toContain("error");
     });
+  });
+
+  test("StatusBar shows last sync, routing placeholder, and app version", () => {
+    const view = render(<App initialSnapshot={snapshot} />);
+    expect(view.getByText("Last sync:")).toBeTruthy();
+    expect(view.getByText("Routing:")).toBeTruthy();
+    expect(view.getByText("Sticky + Early reset")).toBeTruthy();
+    expect(view.getByText("Version:")).toBeTruthy();
+    expect(view.getByText(packageJson.version)).toBeTruthy();
   });
 
   test("shows GramJS Telegram adapter as healthy when backend health is OK", () => {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.2 - 2026-05-21 (Patch)
+
+Release impact: Patch because this adds status-bar visibility for dashboard sync and app version
+metadata without changing backend contracts or EA command behaviour.
+
+- Added a status-bar sync strip with last successful dashboard sync time, routing placeholder, and
+  app version.
+
 ## 1.9.1 - 2026-05-21 (Patch)
 
 Release impact: Patch because this fixes MT5 history reconciliation and schema bootstrap

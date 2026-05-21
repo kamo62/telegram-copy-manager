@@ -64,9 +64,9 @@ h3 {
   position: sticky;
   top: 0;
   z-index: 30;
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
-  justify-content: space-between;
   height: 32px;
   padding: 0 14px;
   font-family: var(--font-ui);
@@ -82,6 +82,7 @@ h3 {
   color: var(--ink-dim);
   white-space: nowrap;
   overflow: hidden;
+  gap: 14px;
 }
 
 .status-bar > .brand {
@@ -103,6 +104,48 @@ h3 {
   align-items: center;
   gap: 14px;
   overflow: hidden;
+  justify-content: flex-end;
+}
+
+.status-bar > div:last-child {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.status-bar .sync-strip {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 16px;
+  justify-self: start;
+  overflow: hidden;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.status-bar .sync-metric {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-dim);
+}
+
+.status-bar .sync-label {
+  flex: 0 0 auto;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.status-bar .sync-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-bar .sync-routing {
+  min-width: 150px;
 }
 
 .status-bar .chip {
@@ -131,6 +174,7 @@ h3 {
 }
 
 .status-bar .live-dot {
+  flex: 0 0 auto;
   width: 7px;
   height: 7px;
   border-radius: 50%;

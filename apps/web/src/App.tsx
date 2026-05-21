@@ -1,5 +1,6 @@
 import { Server } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import packageJson from "../../../package.json";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountsOverview } from "./components/AccountsOverview";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
@@ -328,6 +329,9 @@ export function App({
   const [initialLoading, setInitialLoading] = useState(!initialSnapshot);
   const [refreshing, setRefreshing] = useState(false);
   const [lastPollError, setLastPollError] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<string | null>(
+    initialSnapshot ? new Date().toISOString() : null,
+  );
   const [activeView, setActiveView] = useState("dashboard");
   const [activeTab, setActiveTab] = useState<TabId>("performance");
   const [configProvider, setConfigProvider] = useState<ProviderRowData | null>(null);
@@ -389,6 +393,7 @@ export function App({
         if (active) {
           setSnapshot(data);
           setLastPollError(false);
+          setLastSyncAt(new Date().toISOString());
         }
       } catch {
         if (active) setLastPollError(true);
@@ -633,6 +638,7 @@ export function App({
       const data = await apiGet<DashboardSnapshot>("/api/dashboard");
       setSnapshot(data);
       setLastPollError(false);
+      setLastSyncAt(new Date().toISOString());
     } catch {
       setLastPollError(true);
     } finally {
@@ -1134,8 +1140,10 @@ export function App({
       <LiveRegion />
       <KeyboardShortcutsOverlay onClose={() => setShortcutsOpen(false)} open={shortcutsOpen} />
       <StatusBar
+        appVersion={packageJson.version}
         database={snapshot.health.database}
         lastPollError={lastPollError}
+        lastSyncAt={lastSyncAt}
         onCommandPalette={() => setCommandPaletteOpen(true)}
         onRefresh={refreshDashboard}
         queuePending={queuePending}

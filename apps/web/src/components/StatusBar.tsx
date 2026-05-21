@@ -1,22 +1,28 @@
-import { RefreshCw, TerminalSquare } from "lucide-react";
+import { ArrowLeftRight, RefreshCw, Tag, TerminalSquare } from "lucide-react";
 import { useEffect, useState } from "react";
 import { formatUtcClock } from "../lib/format";
 
 export function StatusBar({
+  appVersion,
   database,
   lastPollError,
+  lastSyncAt,
   onCommandPalette,
   onRefresh,
   queuePending,
   refreshing,
+  routingMode = "Sticky + Early reset",
   telegramAdapter,
 }: {
+  appVersion: string;
   database: string;
   lastPollError: boolean;
+  lastSyncAt: string | null;
   onCommandPalette: () => void;
   onRefresh: () => void;
   queuePending: number;
   refreshing: boolean;
+  routingMode?: string;
   telegramAdapter: string;
 }) {
   const now = formatUtcClock();
@@ -45,10 +51,35 @@ export function StatusBar({
       : telegramAdapter === "mock"
         ? "warn"
         : "error";
+  const lastSyncLabel = lastSyncAt
+    ? new Intl.DateTimeFormat(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).format(new Date(lastSyncAt))
+    : "Pending";
 
   return (
     <header className="status-bar">
       <h1 className="brand">TG-TC · Operations</h1>
+      <div className="sync-strip">
+        <span aria-label={liveDotLabel} className={liveDotClass} role="img" title={liveDotLabel} />
+        <span className="sync-metric">
+          <span className="sync-label">Last sync:</span>
+          <span className="sync-value">{lastSyncLabel}</span>
+        </span>
+        <span className="sync-metric sync-routing">
+          <ArrowLeftRight size={13} aria-hidden="true" />
+          <span className="sync-label">Routing:</span>
+          <span className="sync-value">{routingMode}</span>
+        </span>
+        <span className="sync-metric">
+          <Tag size={13} aria-hidden="true" />
+          <span className="sync-label">Version:</span>
+          <span className="sync-value">{appVersion}</span>
+        </span>
+      </div>
       <div className="chips">
         <span className="chip">
           <span className={`chip-dot ${database === "connected" ? "ok" : "warn"}`} />
@@ -68,7 +99,6 @@ export function StatusBar({
         ) : null}
       </div>
       <div>
-        <span aria-label={liveDotLabel} className={liveDotClass} role="img" title={liveDotLabel} />
         <button
           aria-label="Open command palette"
           className="refresh-btn"
