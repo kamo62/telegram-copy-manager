@@ -1021,12 +1021,21 @@ class AppStore {
         positiveNumber(input.lotSize, current.lotSize),
         id,
       );
-    if (input.riskMode || input.takeProfitLevels || input.runner) {
+    const hasProviderConfigPatch =
+      input.riskMode !== undefined ||
+      input.riskAmount !== undefined ||
+      "takeProfitLevels" in input ||
+      input.runner !== undefined;
+    if (hasProviderConfigPatch) {
+      const existingConfig = this.providerConfig(id);
       this.saveProviderConfig(id, {
-        riskMode: input.riskMode ?? "fixed",
-        riskAmount: positiveNumber(input.riskAmount ?? input.lotSize, current.lotSize),
-        takeProfitLevels: normalizeProviderTpLevels(input.takeProfitLevels),
-        runner: input.runner,
+        riskMode: input.riskMode ?? existingConfig.riskMode,
+        riskAmount: positiveNumber(input.riskAmount, existingConfig.riskAmount),
+        takeProfitLevels:
+          "takeProfitLevels" in input
+            ? normalizeProviderTpLevels(input.takeProfitLevels)
+            : existingConfig.takeProfitLevels,
+        runner: input.runner === undefined ? existingConfig.runner : input.runner,
       });
     }
     this.audit("provider.update", "info", "Provider settings updated", {
@@ -4950,6 +4959,7 @@ class AppStore {
       );
     }
 
+    let coveringClose: Row | null = null;
     for (const [positionTicket, openVolume] of openVolumeByTicket) {
       const params = [tradeId];
       let ticketFilter = "";
@@ -4971,12 +4981,18 @@ class AppStore {
         )
         .all(...params) as Row[];
       let closedVolume = 0;
+      let ticketCoveringClose: Row | null = null;
       for (const closeRow of closeRows) {
         closedVolume += nullableNumber(closeRow.filled_volume) ?? 0;
-        if (closedVolume >= openVolume - CLOSE_VOLUME_EPSILON) return closeRow;
+        if (closedVolume >= openVolume - CLOSE_VOLUME_EPSILON) {
+          ticketCoveringClose = closeRow;
+          break;
+        }
       }
+      if (!ticketCoveringClose) return null;
+      coveringClose = ticketCoveringClose;
     }
-    return null;
+    return coveringClose;
   }
 
   private logicalTradesForDashboard() {

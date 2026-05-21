@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.11 - 2026-05-21 (Patch)
+
+Release impact: Patch because this tightens provider-config PATCH persistence and startup
+close-coverage repair without changing the EA command protocol or public API contracts.
+
+- Persisted null-only provider TP reset patches while preserving existing risk and runner config.
+- Required every broker position ticket on a logical trade to be covered before startup repair treats
+  partial-close history as terminal.
+- Added regressions for null-only TP resets and multi-ticket close coverage.
+
 ## 1.6.10 - 2026-05-21 (Patch)
 
 Release impact: Patch because this fixes provider-config review regressions without changing
