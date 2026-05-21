@@ -1,4 +1,4 @@
-import { ArrowLeftRight, RefreshCw, Tag, TerminalSquare } from "lucide-react";
+import { RefreshCw, Tag, TerminalSquare } from "lucide-react";
 import { useEffect, useState } from "react";
 import { formatUtcClock } from "../lib/format";
 
@@ -11,7 +11,6 @@ export function StatusBar({
   onRefresh,
   queuePending,
   refreshing,
-  routingMode = "Sticky + Early reset",
   telegramAdapter,
 }: {
   appVersion: string;
@@ -22,7 +21,6 @@ export function StatusBar({
   onRefresh: () => void;
   queuePending: number;
   refreshing: boolean;
-  routingMode?: string;
   telegramAdapter: string;
 }) {
   const now = formatUtcClock();
@@ -68,11 +66,6 @@ export function StatusBar({
         <span className="sync-metric">
           <span className="sync-label">Last sync:</span>
           <span className="sync-value">{lastSyncLabel}</span>
-        </span>
-        <span className="sync-metric sync-routing">
-          <ArrowLeftRight size={13} aria-hidden="true" />
-          <span className="sync-label">Routing:</span>
-          <span className="sync-value">{routingMode}</span>
         </span>
         <span className="sync-metric">
           <Tag size={13} aria-hidden="true" />

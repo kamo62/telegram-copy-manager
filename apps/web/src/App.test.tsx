@@ -1065,11 +1065,9 @@ describe("App dashboard", () => {
     });
   });
 
-  test("StatusBar shows last sync, routing placeholder, and app version", () => {
+  test("StatusBar shows last sync and app version", () => {
     const view = render(<App initialSnapshot={snapshot} />);
     expect(view.getByText("Last sync:")).toBeTruthy();
-    expect(view.getByText("Routing:")).toBeTruthy();
-    expect(view.getByText("Sticky + Early reset")).toBeTruthy();
     expect(view.getByText("Version:")).toBeTruthy();
     expect(view.getByText(packageJson.version)).toBeTruthy();
   });

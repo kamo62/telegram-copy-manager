@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.3 - 2026-05-21 (Patch)
+
+Release impact: Patch because this removes an unused status-bar placeholder without changing
+backend contracts or EA command behaviour.
+
+- Removed the routing placeholder from the status bar because routing is not used by this
+  application.
+
 ## 1.9.2 - 2026-05-21 (Patch)
 
 Release impact: Patch because this adds status-bar visibility for dashboard sync and app version
