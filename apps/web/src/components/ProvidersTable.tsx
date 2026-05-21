@@ -19,6 +19,22 @@ export interface ProviderRowData {
   parserMode: string;
   riskProfile: string;
   lotSize: number;
+  riskMode?: "fixed" | "percent";
+  riskAmount?: number;
+  takeProfitLevels?: Array<{
+    leg: number;
+    percentage: number;
+    strategy:
+      | { kind: "set-sl-to-entry"; offsetPips: number }
+      | { kind: "set-sl-to-tp"; tpLeg: number; offsetPips: number }
+      | { kind: "no-change" };
+  }>;
+  runner?: {
+    enabled: boolean;
+    lotSize: number;
+    slBehavior: "break-even" | "last-tp" | "trail";
+    trailPips: number;
+  };
   lastMessageAt: string;
   ingestionStatus?: string;
   pips?: number;

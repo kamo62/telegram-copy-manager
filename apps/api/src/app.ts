@@ -64,6 +64,7 @@ const defaultGlobalAliases = {
 };
 
 const defaultProviderAliases: Record<string, Record<string, string>> = {};
+const CLOSE_VOLUME_EPSILON = 0.000001;
 
 type SymbolAliasScope = "global" | "provider";
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
@@ -293,7 +294,7 @@ export function createApi(options: ApiOptions = {}) {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
-      takeProfitLevels?: ProviderTakeProfitLevelInput[];
+      takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     }>();
     return c.json(store.updateProvider(c.req.param("id"), body));
@@ -848,7 +849,7 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, last_message_at FROM providers ORDER BY title",
+          "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at FROM providers ORDER BY title",
         )
         .all() as Row[]
     )
@@ -857,18 +858,30 @@ class AppStore {
           this.allowDemoData ||
           (String(row.profile_id) !== "profile-demo" && String(row.dialog_id) !== "dialog-alpha"),
       )
-      .map((row) => ({
-        id: String(row.id),
-        profileId: String(row.profile_id),
-        dialogId: String(row.dialog_id),
-        title: String(row.title),
-        kind: String(row.kind),
-        enabled: Boolean(row.enabled),
-        parserMode: String(row.parser_mode),
-        riskProfile: String(row.risk_profile),
-        lotSize: Number(row.lot_size),
-        lastMessageAt: String(row.last_message_at),
-      }));
+      .map((row) => {
+        const config = row.provider_config_json
+          ? parseJson<Partial<ProviderExecutionConfig>>(String(row.provider_config_json))
+          : undefined;
+        return {
+          id: String(row.id),
+          profileId: String(row.profile_id),
+          dialogId: String(row.dialog_id),
+          title: String(row.title),
+          kind: String(row.kind),
+          enabled: Boolean(row.enabled),
+          parserMode: String(row.parser_mode),
+          riskProfile: String(row.risk_profile),
+          lotSize: Number(row.lot_size),
+          riskMode: config?.riskMode,
+          riskAmount: config?.riskAmount,
+          takeProfitLevels:
+            config && "takeProfitLevels" in config
+              ? normalizeProviderTpLevels(config.takeProfitLevels)
+              : undefined,
+          runner: config?.runner,
+          lastMessageAt: String(row.last_message_at),
+        };
+      });
   }
 
   connectedTelegramSession(profileId?: string) {
@@ -991,7 +1004,7 @@ class AppStore {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
-      takeProfitLevels?: ProviderTakeProfitLevelInput[];
+      takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     },
   ) {
@@ -1008,12 +1021,21 @@ class AppStore {
         positiveNumber(input.lotSize, current.lotSize),
         id,
       );
-    if (input.riskMode || input.takeProfitLevels || input.runner) {
+    const hasProviderConfigPatch =
+      input.riskMode !== undefined ||
+      input.riskAmount !== undefined ||
+      "takeProfitLevels" in input ||
+      input.runner !== undefined;
+    if (hasProviderConfigPatch) {
+      const existingConfig = this.providerConfig(id);
       this.saveProviderConfig(id, {
-        riskMode: input.riskMode ?? "fixed",
-        riskAmount: positiveNumber(input.riskAmount ?? input.lotSize, current.lotSize),
-        takeProfitLevels: normalizeProviderTpLevels(input.takeProfitLevels),
-        runner: input.runner,
+        riskMode: input.riskMode ?? existingConfig.riskMode,
+        riskAmount: positiveNumber(input.riskAmount, existingConfig.riskAmount),
+        takeProfitLevels:
+          "takeProfitLevels" in input
+            ? normalizeProviderTpLevels(input.takeProfitLevels)
+            : existingConfig.takeProfitLevels,
+        runner: input.runner === undefined ? existingConfig.runner : input.runner,
       });
     }
     this.audit("provider.update", "info", "Provider settings updated", {
@@ -1064,10 +1086,13 @@ class AppStore {
     const accountId = input.accountId ?? this.defaultParserAccountId();
     const parsed = parseSignalText(input.rawText, this.parserContext(providerId, accountId));
     const config = input.config ?? this.providerConfig(providerId);
+    const settings = this.appSettings();
     return {
       providerId,
       accountId,
-      parsed: applyProviderExecutionConfig(parsed, config),
+      parsed: applyProviderExecutionConfig(parsed, config, {
+        defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" },
+      }),
       config,
     };
   }
@@ -1686,7 +1711,10 @@ class AppStore {
       return { statusCode: 409, error: "Signal has already been approved or queued" };
     }
 
-    const signalForQueue = applyProviderExecutionConfig(signal, providerConfig);
+    const defaultTakeProfit = { value: settings.defaultTakeProfitPips, unit: "PIPS" as const };
+    const signalForQueue = applyProviderExecutionConfig(signal, providerConfig, {
+      defaultTakeProfit,
+    });
     if (signal.commandType === "OPEN_TRADE") {
       const targetSignals = targetAccountIds.map((targetAccountId) => {
         const signalForTarget =
@@ -1695,7 +1723,9 @@ class AppStore {
             : parseSignalText(signal.originalText, this.parserContext(providerId, targetAccountId));
         return {
           accountId: targetAccountId,
-          signal: applyProviderExecutionConfig(signalForTarget, providerConfig),
+          signal: applyProviderExecutionConfig(signalForTarget, providerConfig, {
+            defaultTakeProfit,
+          }),
         };
       });
       for (const target of targetSignals) {
@@ -1780,6 +1810,7 @@ class AppStore {
                   this.parserContext(providerId, targetAccountId),
                 ),
                 providerConfig,
+                { defaultTakeProfit },
               );
         const match = matchLifecycleCommandToTrade(
           targetSignal,
@@ -2387,18 +2418,19 @@ class AppStore {
         .query("SELECT id FROM broker_orders WHERE deal_ticket = ? LIMIT 1")
         .get(deal.dealTicket) as Row | null;
       if (exists) continue;
-      const tradeId = this.logicalTradeIdForHistoryDeal(deal);
-      if (!tradeId) continue;
+      const tradeId =
+        this.logicalTradeIdForHistoryDeal(deal) ?? externalHistoryTradeId(input.accountId, deal);
+      if (!tradeId || !deal.symbol || !deal.volume) continue;
       const open = this.openBrokerOrderForDeal(tradeId, deal);
       const positionTicket = String(deal.positionTicket || open?.position_ticket || "");
-      const action = historyDealAction(
-        deal,
-        this.positionStillOpen(input.accountId, positionTicket),
-      );
+      const positionStillOpen = this.positionStillOpen(input.accountId, positionTicket);
+      const action = this.logicalTrade(tradeId)
+        ? this.historyDealActionForTrade(tradeId, deal, positionTicket, positionStillOpen)
+        : historyDealAction(deal, positionStillOpen);
       const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
       const trade = this.logicalTrade(tradeId);
       const signedPips =
-        openPrice && deal.price
+        trade && openPrice && deal.price
           ? trade?.direction === "SELL"
             ? openPrice - deal.price
             : deal.price - openPrice
@@ -2457,7 +2489,9 @@ class AppStore {
           source,
           deal.time ?? new Date().toISOString(),
         );
-      this.reconcileHistoryDeal(tradeId, deal, action, source, positionTicket);
+      if (trade) {
+        this.reconcileHistoryDeal(tradeId, deal, action, source, positionTicket);
+      }
       recorded += 1;
     }
     return { accountId: input.accountId, received: input.deals.length, recorded };
@@ -2504,8 +2538,17 @@ class AppStore {
     const managedVolume = managedVirtualTpVolume(open.payload, brokerOpenVolume);
     const allocatedVolume =
       managedVolume > 0 ? Number(((managedVolume * leg.allocationPercent) / 100).toFixed(2)) : 0;
+    const plannedVolume = plannedTp?.volume && plannedTp.volume > 0 ? plannedTp.volume : 0;
+    const fallbackVolume =
+      plannedVolume > 0 && managedVolume > 0
+        ? Number(Math.min(plannedVolume, managedVolume).toFixed(2))
+        : 0;
     const volume =
-      brokerOpenVolume !== undefined ? allocatedVolume : (plannedTp?.volume ?? allocatedVolume);
+      brokerOpenVolume !== undefined
+        ? allocatedVolume > 0
+          ? allocatedVolume
+          : fallbackVolume
+        : (plannedTp?.volume ?? allocatedVolume);
     if (!volume || volume <= 0) return false;
     const item: ExecutionQueueItem = {
       id: `queue_${nanoid(10)}`,
@@ -2752,34 +2795,76 @@ class AppStore {
     if (truthyBrokerTicket(positionTicket)) {
       const exact = this.db
         .query(
-          `SELECT filled_volume FROM broker_orders
+          `SELECT COALESCE(SUM(filled_volume), 0) AS volume FROM broker_orders
            WHERE logical_trade_id = ?
              AND position_ticket = ?
              AND action = 'OPEN'
              AND filled_volume IS NOT NULL
-             AND filled_volume > 0
-           ORDER BY created_at ASC
-           LIMIT 1`,
+             AND filled_volume > 0`,
         )
         .get(tradeId, positionTicket) as Row | null;
-      const exactVolume = nullableNumber(exact?.filled_volume);
+      const exactVolume = nullableNumber(exact?.volume);
       if (exactVolume && exactVolume > 0) return exactVolume;
     }
     const row = this.db
       .query(
-        `SELECT filled_volume FROM broker_orders
+        `SELECT COALESCE(SUM(filled_volume), 0) AS volume FROM broker_orders
          WHERE logical_trade_id = ?
            AND action = 'OPEN'
            AND position_ticket IS NOT NULL
            AND position_ticket NOT IN ('','0')
            AND filled_volume IS NOT NULL
-           AND filled_volume > 0
-         ORDER BY created_at ASC
-         LIMIT 1`,
+           AND filled_volume > 0`,
       )
       .get(tradeId) as Row | null;
-    const volume = nullableNumber(row?.filled_volume);
+    const volume = nullableNumber(row?.volume);
     return volume && volume > 0 ? volume : undefined;
+  }
+
+  private closeVolumeForTrade(tradeId: string, positionTicket?: string) {
+    const params = [tradeId];
+    let ticketFilter = "";
+    if (truthyBrokerTicket(positionTicket)) {
+      ticketFilter = "AND position_ticket = ?";
+      params.push(positionTicket);
+    }
+    const row = this.db
+      .query(
+        `SELECT COALESCE(SUM(filled_volume), 0) AS volume
+         FROM broker_orders
+         WHERE logical_trade_id = ?
+           ${ticketFilter}
+           AND action IN ('FULL_CLOSE','PARTIAL_CLOSE')
+           AND filled_volume IS NOT NULL
+           AND filled_volume > 0`,
+      )
+      .get(...params) as Row | null;
+    return nullableNumber(row?.volume) ?? 0;
+  }
+
+  private closeVolumeCoversOpen(
+    tradeId: string,
+    positionTicket: string | undefined,
+    nextCloseVolume: number | undefined,
+  ) {
+    const openVolume = this.openVolumeForTrade(tradeId, positionTicket);
+    const volume = nullableNumber(nextCloseVolume);
+    if (!openVolume || !volume || volume <= 0) return false;
+    return (
+      this.closeVolumeForTrade(tradeId, positionTicket) + volume >=
+      openVolume - CLOSE_VOLUME_EPSILON
+    );
+  }
+
+  private historyDealActionForTrade(
+    tradeId: string,
+    deal: Mt5HistoryDealInput,
+    positionTicket: string,
+    positionStillOpen: boolean,
+  ) {
+    const action = historyDealAction(deal, positionStillOpen);
+    if (action !== "PARTIAL_CLOSE") return action;
+    return this.closeVolumeCoversOpen(tradeId, positionTicket, deal.volume) ? "FULL_CLOSE" : action;
   }
 
   private reconcileHistoryDeal(
@@ -4300,9 +4385,9 @@ class AppStore {
     let healed = 0;
     for (const row of stuck) {
       const tradeId = String(row.id);
-      const realClose = this.db
+      const fullClose = this.db
         .query(
-          `SELECT position_ticket, source, broker_comment, pnl_currency, created_at
+          `SELECT id, action, position_ticket, source, broker_comment, pnl_currency, created_at
            FROM broker_orders
            WHERE logical_trade_id = ?
              AND action = 'FULL_CLOSE'
@@ -4310,6 +4395,7 @@ class AppStore {
            ORDER BY created_at DESC LIMIT 1`,
         )
         .get(tradeId) as Row | null;
+      const realClose = fullClose ?? this.coveringCloseForTrade(tradeId);
       if (!realClose) {
         const recoverableOpen = this.db
           .query(
@@ -4359,6 +4445,11 @@ class AppStore {
           healed += 1;
         }
         continue;
+      }
+      if (String(realClose.action) !== "FULL_CLOSE" && realClose.id) {
+        this.db
+          .query("UPDATE broker_orders SET action = 'FULL_CLOSE' WHERE id = ?")
+          .run(String(realClose.id));
       }
       const positionTicket = String(realClose.position_ticket ?? "");
       if (positionTicket) {
@@ -4840,7 +4931,68 @@ class AppStore {
          LIMIT 1`,
       )
       .get(tradeId) as Row | null;
-    return Boolean(row);
+    return Boolean(row) || Boolean(this.coveringCloseForTrade(tradeId));
+  }
+
+  private coveringCloseForTrade(tradeId: string) {
+    const openRows = this.db
+      .query(
+        `SELECT position_ticket, filled_volume
+         FROM broker_orders
+         WHERE logical_trade_id = ?
+           AND action = 'OPEN'
+           AND filled_volume IS NOT NULL
+           AND filled_volume > 0
+         ORDER BY created_at ASC`,
+      )
+      .all(tradeId) as Row[];
+
+    const openVolumeByTicket = new Map<string, number>();
+    for (const openRow of openRows) {
+      const openVolume = nullableNumber(openRow.filled_volume);
+      if (!openVolume || openVolume <= 0) continue;
+      const rawPositionTicket = String(openRow.position_ticket ?? "");
+      const positionTicket = truthyBrokerTicket(rawPositionTicket) ? rawPositionTicket : "";
+      openVolumeByTicket.set(
+        positionTicket,
+        (openVolumeByTicket.get(positionTicket) ?? 0) + openVolume,
+      );
+    }
+
+    let coveringClose: Row | null = null;
+    for (const [positionTicket, openVolume] of openVolumeByTicket) {
+      const params = [tradeId];
+      let ticketFilter = "";
+      if (truthyBrokerTicket(positionTicket)) {
+        ticketFilter = "AND position_ticket = ?";
+        params.push(positionTicket);
+      }
+      const closeRows = this.db
+        .query(
+          `SELECT id, action, position_ticket, source, broker_comment, pnl_currency, created_at, filled_volume
+           FROM broker_orders
+           WHERE logical_trade_id = ?
+             ${ticketFilter}
+             AND action IN ('FULL_CLOSE','PARTIAL_CLOSE')
+             AND source != 'manual'
+             AND filled_volume IS NOT NULL
+             AND filled_volume > 0
+           ORDER BY created_at ASC`,
+        )
+        .all(...params) as Row[];
+      let closedVolume = 0;
+      let ticketCoveringClose: Row | null = null;
+      for (const closeRow of closeRows) {
+        closedVolume += nullableNumber(closeRow.filled_volume) ?? 0;
+        if (closedVolume >= openVolume - CLOSE_VOLUME_EPSILON) {
+          ticketCoveringClose = closeRow;
+          break;
+        }
+      }
+      if (!ticketCoveringClose) return null;
+      coveringClose = ticketCoveringClose;
+    }
+    return coveringClose;
   }
 
   private logicalTradesForDashboard() {
@@ -5187,7 +5339,7 @@ class AppStore {
         .get(deal.orderTicket) as Row | null;
       if (row) return String(row.logical_trade_id);
     }
-    return "";
+    return undefined;
   }
 
   private openBrokerOrderForDeal(tradeId: string, deal: Mt5HistoryDealInput) {
@@ -5566,6 +5718,16 @@ function shortLogicalTradeIdFromComment(comment: string) {
   return legacy ? shortLogicalTradeId(legacy) : "";
 }
 
+function externalHistoryTradeId(accountId: string, deal: Mt5HistoryDealInput) {
+  const ticket = String(deal.positionTicket || deal.orderTicket || deal.dealTicket || "").trim();
+  if (!ticket) return undefined;
+  return `external_${safeHistoryKey(accountId)}_${safeHistoryKey(ticket)}`;
+}
+
+function safeHistoryKey(value: string) {
+  return value.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "unknown";
+}
+
 function historyDealAction(deal: Mt5HistoryDealInput, positionStillOpen: boolean) {
   const rawEntry = String(deal.entry ?? "").trim();
   if (rawEntry !== "" && Number.isFinite(Number(rawEntry))) {
@@ -5685,16 +5847,18 @@ function heartbeatFreshness(iso: string) {
 }
 
 function normalizeProviderTpLevels(
-  levels?: ProviderTakeProfitLevelInput[],
+  levels?: ProviderTakeProfitLevelInput[] | null,
 ): ProviderTakeProfitLevel[] {
-  const source = levels?.length
-    ? levels
-    : Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
-        leg: index + 1,
-        percentage: 25,
-        strategy: { kind: "no-change" as const },
-      }));
-  const cleaned = source
+  if (!Array.isArray(levels)) {
+    return Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
+      leg: index + 1,
+      percentage: 25,
+      strategy: { kind: "no-change" as const },
+    }));
+  }
+  if (levels.length === 0) return [];
+
+  const cleaned = levels
     .map((level, index) => ({
       leg: Number.isFinite(level.leg) && level.leg > 0 ? Math.round(level.leg) : index + 1,
       percentage: Math.max(0, Number(level.percentage) || 0),
@@ -5703,10 +5867,10 @@ function normalizeProviderTpLevels(
     .slice(0, MAX_PROVIDER_TP_LEVELS);
   const total = cleaned.reduce((sum, level) => sum + level.percentage, 0);
   if (total <= 0) {
-    return Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
-      leg: index + 1,
-      percentage: 25,
-      strategy: { kind: "no-change" },
+    const equal = 100 / cleaned.length;
+    return cleaned.map((level) => ({
+      ...level,
+      percentage: Number(equal.toFixed(2)),
     }));
   }
   return cleaned.map((level) => ({
@@ -5762,19 +5926,43 @@ function strategyOffsetPips(value: string) {
 function applyProviderExecutionConfig(
   signal: ParsedSignal,
   config: ProviderExecutionConfig,
+  defaults?: Pick<ParsedSignal, "defaultTakeProfit">,
 ): ParsedSignal {
-  if (signal.commandType !== "OPEN_TRADE" || signal.takeProfits.length === 0) return signal;
+  if (signal.commandType !== "OPEN_TRADE") return signal;
+  if (signal.takeProfits.length === 0) {
+    return signal.defaultTakeProfit || !defaults?.defaultTakeProfit
+      ? signal
+      : { ...signal, defaultTakeProfit: defaults.defaultTakeProfit };
+  }
+  if (config.takeProfitLevels.length === 0) {
+    return {
+      ...signal,
+      takeProfits: [],
+      defaultTakeProfit: signal.defaultTakeProfit ?? defaults?.defaultTakeProfit,
+    };
+  }
   const levelsByLeg = new Map(config.takeProfitLevels.map((level) => [level.leg, level]));
-  return {
-    ...signal,
-    takeProfits: signal.takeProfits.map((target, index) => {
+  const configuredLegs = new Set(config.takeProfitLevels.map((level) => level.leg));
+  const takeProfits = signal.takeProfits
+    .filter((target) => configuredLegs.has(target.leg))
+    .map((target, index) => {
       const level = levelsByLeg.get(target.leg) ?? config.takeProfitLevels[index];
       return {
         ...target,
         allocationPercent: level?.percentage ?? target.allocationPercent,
         strategy: level?.strategy ?? target.strategy ?? { kind: "no-change" },
       };
-    }),
+    });
+  if (takeProfits.length === 0) {
+    return {
+      ...signal,
+      takeProfits: [],
+      defaultTakeProfit: signal.defaultTakeProfit ?? defaults?.defaultTakeProfit,
+    };
+  }
+  return {
+    ...signal,
+    takeProfits,
   };
 }
 

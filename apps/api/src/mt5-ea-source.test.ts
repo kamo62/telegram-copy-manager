@@ -37,6 +37,19 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("DEAL_PROFIT");
   });
 
+  test("reports external manual history deals so account PnL can realize after close", () => {
+    const historyDealsJson = source.match(
+      /string HistoryDealsJson\(\)[\s\S]*?\n}\n\nbool IsTelegramTcHistoryDeal/,
+    )?.[0];
+    const postHistoryDeal = source.match(
+      /void PostHistoryDeal\(ulong ticket\)[\s\S]*?\n}\n\nvoid PollAndExecute/,
+    )?.[0];
+    expect(historyDealsJson).toBeTruthy();
+    expect(postHistoryDeal).toBeTruthy();
+    expect(historyDealsJson).not.toContain("IsTelegramTcHistoryDeal(ticket)");
+    expect(postHistoryDeal).not.toContain("if(!IsTelegramTcHistoryDeal(ticket))");
+  });
+
   test("posts newly added MT5 deals immediately from OnTradeTransaction", () => {
     expect(source).toContain("void OnTradeTransaction");
     expect(source).toContain("TRADE_TRANSACTION_DEAL_ADD");

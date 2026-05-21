@@ -313,6 +313,112 @@ describe("App dashboard", () => {
     });
   });
 
+  test("preserves percent-risk amount when provider settings are saved without edits", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          providers: [
+            {
+              ...snapshot.providers[0]!,
+              riskMode: "percent",
+              riskAmount: 1.5,
+              lotSize: 0.02,
+            },
+          ],
+        }}
+      />,
+    );
+    clickTab(view, "Providers");
+    fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
+    fireEvent.click(
+      view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
+    );
+
+    await waitFor(() => {
+      const settingsCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
+      expect(settingsCall).toBeTruthy();
+      expect(JSON.parse(String(settingsCall?.init?.body))).toMatchObject({
+        lotSize: 0.02,
+        riskMode: "percent",
+        riskAmount: 1.5,
+      });
+    });
+  });
+
+  test("lets the operator remove every provider TP level before saving", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+    clickTab(view, "Providers");
+    fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
+
+    for (const leg of [4, 3, 2, 1]) {
+      fireEvent.click(view.getByRole("button", { name: `Delete TP${leg}` }));
+    }
+    fireEvent.click(
+      view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
+    );
+
+    await waitFor(() => {
+      const settingsCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
+      expect(settingsCall).toBeTruthy();
+      expect(JSON.parse(String(settingsCall?.init?.body))).toMatchObject({
+        takeProfitLevels: [],
+      });
+    });
+  });
+
+  test("explains scaled TP allocations without final-TP wording when a runner is configured", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          providers: [
+            {
+              ...snapshot.providers[0]!,
+              riskAmount: 0.03,
+              takeProfitLevels: [
+                { leg: 1, percentage: 30, strategy: { kind: "set-sl-to-entry", offsetPips: 1 } },
+                { leg: 2, percentage: 0, strategy: { kind: "no-change" } },
+                { leg: 3, percentage: 30, strategy: { kind: "no-change" } },
+              ],
+              runner: {
+                enabled: true,
+                lotSize: 0.01,
+                slBehavior: "break-even",
+                trailPips: 10,
+              },
+            },
+          ],
+        }}
+      />,
+    );
+
+    clickTab(view, "Providers");
+    fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
+
+    const modalText = view.getByRole("dialog").textContent ?? "";
+    expect(modalText).toContain(
+      "TP percentages total 60%; the app treats them as weights across 0.02 lots assigned to TP closes. Runner stays separate.",
+    );
+    expect(modalText).toContain("Runner remains open");
+    expect(modalText).toContain("after TP3");
+    expect(modalText).toContain("50% effective");
+    expect(modalText).not.toContain("anything that isn't allocated");
+    expect(modalText).not.toContain("final TP");
+  });
+
   test("lets the operator test the current provider configuration before saving", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {

@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.6.3"
+#property version   "1.6.11"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -184,8 +184,6 @@ void SendHistoryDeals()
 
 void PostHistoryDeal(ulong ticket)
 {
-   if(!IsTelegramTcHistoryDeal(ticket))
-      return;
    string body = StringFormat(
       "{\"accountId\":\"mt5-%I64d\",\"deals\":[%s]}",
       AccountInfoInteger(ACCOUNT_LOGIN),
@@ -974,8 +972,6 @@ string HistoryDealsJson()
    {
       ulong ticket = HistoryDealGetTicket(index);
       if(ticket == 0)
-         continue;
-      if(!IsTelegramTcHistoryDeal(ticket))
          continue;
 
       if(!first)

@@ -49,6 +49,17 @@ export function strategyLabel(strategy: TpStrategy): string {
   }
 }
 
+function formatPercent(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");
+}
+
+function effectiveTpPercentages(tps: TpStrategyLevel[]): number[] {
+  if (tps.length === 0) return [];
+  const total = tps.reduce((sum, tp) => sum + Math.max(0, tp.percentage), 0);
+  if (total <= 0) return tps.map(() => 100 / tps.length);
+  return tps.map((tp) => (Math.max(0, tp.percentage) / total) * 100);
+}
+
 /** Best-effort migration of legacy freeform strings into the structured shape. */
 export function parseLegacyStrategy(value: string): TpStrategy {
   const trimmed = value.trim().toLowerCase();
@@ -138,10 +149,10 @@ export function ProviderConfigModal({
 
   useEffect(() => {
     if (provider) {
-      setRiskMode("fixed");
-      setRiskAmount(provider.lotSize.toFixed(2));
-      setTps(DEFAULT_TPS);
-      setRunner(DEFAULT_RUNNER);
+      setRiskMode(provider.riskMode ?? "fixed");
+      setRiskAmount((provider.riskAmount ?? provider.lotSize).toFixed(2));
+      setTps(provider.takeProfitLevels !== undefined ? provider.takeProfitLevels : DEFAULT_TPS);
+      setRunner(provider.runner ?? DEFAULT_RUNNER);
       setTestRawText(DEFAULT_TEST_MESSAGE);
       setTestResult(null);
       setTestBusy(false);
@@ -209,7 +220,6 @@ export function ProviderConfigModal({
   }
 
   function deleteTp(index: number) {
-    if (tps.length <= 1) return;
     setTps(tps.filter((_tp, i) => i !== index).map((tp, i) => ({ ...tp, leg: i + 1 })));
   }
 
@@ -261,6 +271,11 @@ export function ProviderConfigModal({
   const reservedRunner = runner.enabled ? Math.min(runner.lotSize, totalOrder) : 0;
   const tradedPortion = Math.max(0, totalOrder - reservedRunner);
   const totalPercent = tps.reduce((acc, tp) => acc + tp.percentage, 0);
+  const effectivePercents = effectiveTpPercentages(tps);
+  const lastTpLabel = tps.length ? `TP${tps[tps.length - 1]!.leg}` : "the TP sequence";
+  const tpCloseBasis = runner.enabled
+    ? `${numberFmt.format(tradedPortion)} lots assigned to TP closes`
+    : "the full order";
 
   return (
     <div className="modal-overlay">
@@ -347,7 +362,7 @@ export function ProviderConfigModal({
                 </span>
                 <input
                   aria-label={`Channel lot size for ${provider.title}`}
-                  defaultValue={provider.lotSize.toFixed(2)}
+                  defaultValue={(provider.riskAmount ?? provider.lotSize).toFixed(2)}
                   inputMode="decimal"
                   name="lotSize"
                   onChange={(event) => setRiskAmount(event.target.value)}
@@ -424,7 +439,9 @@ export function ProviderConfigModal({
                       +
                     </button>
                   </div>
-                  <div className="config-strategy-controls">
+                  <div
+                    className={`config-strategy-controls config-strategy-controls-${tp.strategy.kind}`}
+                  >
                     <select
                       aria-label={`TP${tp.leg} strategy action`}
                       className="config-strategy-input"
@@ -482,10 +499,12 @@ export function ProviderConfigModal({
                   Add a take-profit level
                 </button>
               ) : null}
-              {totalPercent !== 100 ? (
+              {totalPercent !== 100 && tps.length > 0 ? (
                 <p className="config-hint">
-                  TPs total {totalPercent}% — anything that isn't allocated will close on the final
-                  TP unless a runner is configured below.
+                  {totalPercent <= 0
+                    ? `TP percentages are all 0%; the app splits ${tpCloseBasis} equally across the configured TPs.`
+                    : `TP percentages total ${formatPercent(totalPercent)}%; the app treats them as weights across ${tpCloseBasis}.`}
+                  {runner.enabled ? " Runner stays separate." : ""}
                 </p>
               ) : null}
             </div>
@@ -496,12 +515,12 @@ export function ProviderConfigModal({
               <h3 className="config-section-title">Runner</h3>
               <label className="config-toggle">
                 <input
-                  aria-label="Enable runner after final TP"
+                  aria-label="Keep runner open after TP sequence"
                   checked={runner.enabled}
                   onChange={(event) => setRunner({ ...runner, enabled: event.target.checked })}
                   type="checkbox"
                 />
-                <span>Leave a runner open after the final TP</span>
+                <span>Keep runner open after the TP sequence</span>
               </label>
             </header>
             {runner.enabled ? (
@@ -558,7 +577,7 @@ export function ProviderConfigModal({
               </div>
             ) : (
               <p className="config-hint config-hint-soft">
-                Off — when the final TP hits, the position closes fully.
+                Off — the full order is assigned to the configured TP levels.
               </p>
             )}
           </section>
@@ -575,7 +594,10 @@ export function ProviderConfigModal({
                 <span>Allocated to TPs</span>
                 <strong>{numberFmt.format(tradedPortion)}</strong>
                 <small>
-                  {tps.length} levels · {totalPercent}%
+                  {tps.length} levels ·{" "}
+                  {totalPercent === 100
+                    ? "100%"
+                    : `${formatPercent(totalPercent)}% entered, scaled`}
                 </small>
               </div>
               <div className="config-resume-stat">
@@ -593,20 +615,25 @@ export function ProviderConfigModal({
               </div>
             </div>
             <ol className="config-resume-list">
-              {tps.map((tp) => {
-                const closed = (tradedPortion * tp.percentage) / 100;
+              {tps.map((tp, index) => {
+                const effectivePercent = effectivePercents[index] ?? 0;
+                const closed = (tradedPortion * effectivePercent) / 100;
                 return (
                   <li key={tp.leg}>
                     <strong>TP{tp.leg}</strong> hit · close{" "}
-                    <span className="num">{numberFmt.format(closed)}</span> lots
+                    <span className="num">{numberFmt.format(closed)}</span> lots{" "}
+                    <span className="config-resume-percent">
+                      ({formatPercent(effectivePercent)}% effective)
+                    </span>
                     <span className="config-resume-strategy"> · {strategyLabel(tp.strategy)}</span>
                   </li>
                 );
               })}
               {runner.enabled ? (
                 <li className="config-resume-runner">
-                  <strong>After final TP</strong> · keep{" "}
-                  <span className="num">{numberFmt.format(reservedRunner)}</span> lots open ·{" "}
+                  <strong>Runner remains open</strong> · keep{" "}
+                  <span className="num">{numberFmt.format(reservedRunner)}</span> lots after{" "}
+                  {lastTpLabel} ·{" "}
                   {runner.slBehavior === "trail"
                     ? `trailing ${runner.trailPips} pips`
                     : runner.slBehavior === "last-tp"

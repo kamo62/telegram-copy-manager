@@ -1,5 +1,98 @@
 # Changelog
 
+## 1.6.11 - 2026-05-21 (Patch)
+
+Release impact: Patch because this tightens provider-config PATCH persistence and startup
+close-coverage repair without changing the EA command protocol or public API contracts.
+
+- Persisted null-only provider TP reset patches while preserving existing risk and runner config.
+- Required every broker position ticket on a logical trade to be covered before startup repair treats
+  partial-close history as terminal.
+- Added regressions for null-only TP resets and multi-ticket close coverage.
+
+## 1.6.10 - 2026-05-21 (Patch)
+
+Release impact: Patch because this fixes provider-config review regressions without changing
+the EA command protocol or public API contracts.
+
+- Preserved `% of balance` provider risk amounts when opening and saving the provider modal without
+  editing the risk field.
+- Accepted `null` provider TP arrays as missing config and normalized them through the default TP
+  fallback instead of throwing during provider update/read paths.
+- Added focused API and UI regressions for the PR review fixes.
+
+## 1.6.9 - 2026-05-21 (Patch)
+
+Release impact: Patch because this fixes backend parser/reconciliation behaviour without changing
+the EA command protocol or public API contracts.
+
+- Restored the app default TP when provider TP filtering removes every Telegram TP leg from an
+  otherwise valid signal.
+- Prevented app-managed virtual TPs from queueing a close when the actual broker fill is fully
+  reserved for the configured runner.
+- Summed split broker OPEN fills before treating history or startup-repair closes as terminal.
+- Added regressions for the provider TP fallback, runner-only virtual TP sizing, history close
+  classification, and startup backfill coverage paths.
+
+## 2026-05-20 (Provider modal TP allocation copy)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.8` and kept the
+  MT5 EA `#property version` aligned at `1.6.8` for the repo version guard.
+- Reworded the provider TP allocation hint and runner summary so they describe scaled TP
+  percentages and the configured TP sequence instead of referring to a confusing "final TP".
+- Tightened provider strategy dropdown sizing so "Leave SL unchanged" rows stay aligned with the
+  delete control and use the same dropdown treatment as the rest of the modal.
+
+## 2026-05-20 (Provider TP pickup and manual close accounting)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.7` and kept the
+  MT5 EA `#property version` aligned at `1.6.7` because this corrects provider TP fallback logic and
+  realized P/L accounting without changing the EA/backend payload schema.
+- Corrected provider TP handling: empty provider TP config still falls back to the app-wide default
+  TP, but a provider configured with TP levels now uses matching Telegram TP lines when they exist.
+- Kept the single-TP/no-runner fallback to the app-wide TP only for messages that do not contain a
+  provider TP to pick up.
+- Included external/manual broker history deals in the EA history feed and recorded unmatched
+  history deals under stable external trade ids so closed manual MT5 trades move from floating P/L
+  into realized P/L, equity curve, drawdown, and monthly performance.
+
+## 2026-05-20 (Provider TP cardinality and default TP fallback)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.6` and kept the
+  MT5 EA `#property version` aligned at `1.6.6` because this fixes provider config semantics and
+  frontend modal behaviour without changing the EA/backend protocol.
+- Preserved empty provider take-profit configs as "no configured provider TPs" instead of silently
+  recreating TP1-TP4. Explicit message TPs are then ignored for that provider and the app-wide
+  default TP distance is used.
+- Kept provider TP cardinality capped at four for now.
+- Let the provider config modal delete the final TP row and reload saved provider TP/runner config
+  from the dashboard snapshot.
+
+## 2026-05-20 (Small-runner virtual TP close sizing)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.5` and kept the
+  MT5 EA `#property version` aligned at `1.6.5` because this is a backwards-compatible backend
+  virtual-TP sizing fix with no EA/backend protocol change.
+- Fixed app-managed virtual TP close sizing for small trades with a configured runner. When the
+  broker-filled volume minus runner volume leaves a managed TP slice smaller than the broker lot
+  step, the backend now falls back to the already-planned TP leg volume instead of rounding the close
+  request to zero and leaving TP1 unqueued.
+- Added a regression for the live SELL 4488 / TP1 4483 shape: 0.02 lots with a 0.01 runner and a
+  25% TP1 allocation must still queue a 0.01-lot TP1 close when price crosses TP1.
+
+## 2026-05-19 (Stale-snapshot SL close reconciliation)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.4` and kept the
+  MT5 EA `#property version` aligned at `1.6.4` because this is a backwards-compatible backend
+  reconciliation fix with no EA/backend protocol change.
+- Fixed MT5 history close classification when the latest snapshot is stale. If an SL/TP/history
+  deal's close volume covers the remaining broker-open volume, the backend now records it as a
+  terminal `FULL_CLOSE` instead of leaving it as a non-TP `PARTIAL_CLOSE`.
+- Startup repair now heals older `OUT_OF_SYNC` trades whose recorded close rows cumulatively cover
+  the open volume, including rows that were previously mis-recorded as `PARTIAL_CLOSE`.
+- Added regressions for full-volume SL closes, TP1-then-SL remaining-volume closes, and startup
+  healing of stale partial-close broker history.
+
 ## 2026-05-19 (PR review fixes: poll lease safety and filled-volume virtual TP sizing)
 
 - Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.3` and kept the
