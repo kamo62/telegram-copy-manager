@@ -362,7 +362,7 @@ export function ProviderConfigModal({
                 </span>
                 <input
                   aria-label={`Channel lot size for ${provider.title}`}
-                  defaultValue={provider.lotSize.toFixed(2)}
+                  defaultValue={(provider.riskAmount ?? provider.lotSize).toFixed(2)}
                   inputMode="decimal"
                   name="lotSize"
                   onChange={(event) => setRiskAmount(event.target.value)}

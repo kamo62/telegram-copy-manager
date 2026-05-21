@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.10 - 2026-05-21 (Patch)
+
+Release impact: Patch because this fixes provider-config review regressions without changing
+the EA command protocol or public API contracts.
+
+- Preserved `% of balance` provider risk amounts when opening and saving the provider modal without
+  editing the risk field.
+- Accepted `null` provider TP arrays as missing config and normalized them through the default TP
+  fallback instead of throwing during provider update/read paths.
+- Added focused API and UI regressions for the PR review fixes.
+
 ## 1.6.9 - 2026-05-21 (Patch)
 
 Release impact: Patch because this fixes backend parser/reconciliation behaviour without changing

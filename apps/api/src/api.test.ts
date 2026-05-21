@@ -2733,6 +2733,38 @@ describe("Telegram TC API", () => {
     ]);
   });
 
+  test("normalizes null provider TP config without failing provider updates", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+
+    const update = await app.request("/api/providers/provider-alpha", {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.2,
+        takeProfitLevels: null,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(update.status).toBe(200);
+
+    const saved = await json<{
+      config: {
+        takeProfitLevels: Array<{
+          leg: number;
+          percentage: number;
+          strategy: { kind: string };
+        }>;
+      };
+    }>(await app.request("/api/providers/provider-alpha/config"));
+
+    expect(saved.config.takeProfitLevels).toEqual([
+      { leg: 1, percentage: 25, strategy: { kind: "no-change" } },
+      { leg: 2, percentage: 25, strategy: { kind: "no-change" } },
+      { leg: 3, percentage: 25, strategy: { kind: "no-change" } },
+      { leg: 4, percentage: 25, strategy: { kind: "no-change" } },
+    ]);
+  });
+
   test("preserves an empty provider TP config and falls back to app default TP", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     await app.request("/api/mt5/poll-line?accountId=mt5-100200300");

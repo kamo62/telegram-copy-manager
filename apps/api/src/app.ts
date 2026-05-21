@@ -294,7 +294,7 @@ export function createApi(options: ApiOptions = {}) {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
-      takeProfitLevels?: ProviderTakeProfitLevelInput[];
+      takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     }>();
     return c.json(store.updateProvider(c.req.param("id"), body));
@@ -1004,7 +1004,7 @@ class AppStore {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
-      takeProfitLevels?: ProviderTakeProfitLevelInput[];
+      takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     },
   ) {
@@ -5831,9 +5831,9 @@ function heartbeatFreshness(iso: string) {
 }
 
 function normalizeProviderTpLevels(
-  levels?: ProviderTakeProfitLevelInput[],
+  levels?: ProviderTakeProfitLevelInput[] | null,
 ): ProviderTakeProfitLevel[] {
-  if (levels === undefined) {
+  if (!Array.isArray(levels)) {
     return Array.from({ length: MAX_PROVIDER_TP_LEVELS }, (_, index) => ({
       leg: index + 1,
       percentage: 25,
