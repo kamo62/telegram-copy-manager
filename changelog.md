@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.9 - 2026-05-21 (Patch)
+
+Release impact: Patch because this fixes backend parser/reconciliation behaviour without changing
+the EA command protocol or public API contracts.
+
+- Restored the app default TP when provider TP filtering removes every Telegram TP leg from an
+  otherwise valid signal.
+- Prevented app-managed virtual TPs from queueing a close when the actual broker fill is fully
+  reserved for the configured runner.
+- Summed split broker OPEN fills before treating history or startup-repair closes as terminal.
+- Added regressions for the provider TP fallback, runner-only virtual TP sizing, history close
+  classification, and startup backfill coverage paths.
+
 ## 2026-05-20 (Provider modal TP allocation copy)
 
 - Release impact: Patch. Bumped the canonical app version in `package.json` to `1.6.8` and kept the
