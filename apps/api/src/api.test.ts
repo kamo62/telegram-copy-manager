@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { brokerOrderSourceForDealReason, createApi } from "./app";
@@ -4433,6 +4433,263 @@ describe("Telegram TC API", () => {
     expect(result.received).toBe(1001);
     expect(result.recorded).toBe(1);
     expect(result.updated).toBe(0);
+  });
+
+  test("broker history normalizes dotted MT5 timestamps before persisting rows", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: true,
+      });
+
+      await app.request("/api/mt5/history", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountId: "mt5-100200300",
+          deals: [
+            {
+              dealTicket: "manual-dotted-close",
+              orderTicket: "manual-dotted-order",
+              positionTicket: "manual-dotted-position",
+              entry: "1",
+              type: "1",
+              reason: 0,
+              symbol: "XAUUSD",
+              price: 4558.73,
+              volume: 0.01,
+              profit: 12,
+              commission: 0,
+              swap: 0,
+              comment: "",
+              time: "2026.05.18 10:42:14",
+            },
+          ],
+        }),
+      });
+
+      const db = new Database(databasePath, { readonly: true });
+      const row = db
+        .query("SELECT created_at FROM broker_orders WHERE deal_ticket = ?")
+        .get("manual-dotted-close") as { created_at: string } | null;
+      db.close();
+      expect(row?.created_at).toBe("2026-05-18T10:42:14.000Z");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("external close summaries refresh when existing history deal tickets are repaired", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: true,
+      });
+
+      const firstSync = await json<{ recorded: number }>(
+        await app.request("/api/mt5/history", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            accountId: "mt5-100200300",
+            deals: [
+              {
+                dealTicket: "manual-repair-open",
+                orderTicket: "manual-repair-open-order",
+                positionTicket: "manual-repair-position",
+                entry: "0",
+                type: "0",
+                reason: 0,
+                symbol: "XAUUSD",
+                price: 4550,
+                volume: 0.01,
+                profit: 0,
+                commission: 0,
+                swap: 0,
+                comment: "",
+                timeMsc: Date.UTC(2026, 4, 18, 10, 40, 0),
+              },
+              {
+                dealTicket: "manual-repair-close",
+                orderTicket: "manual-repair-close-order",
+                positionTicket: "manual-repair-position",
+                entry: "1",
+                type: "1",
+                reason: 0,
+                symbol: "XAUUSD",
+                price: 4558,
+                volume: 0.01,
+                profit: 10,
+                commission: 0,
+                swap: 0,
+                comment: "",
+                timeMsc: Date.UTC(2026, 4, 18, 10, 45, 0),
+              },
+            ],
+          }),
+        }),
+      );
+      expect(firstSync.recorded).toBe(2);
+
+      const repair = await json<{ updated: number }>(
+        await app.request("/api/mt5/history", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            accountId: "mt5-100200300",
+            deals: [
+              {
+                dealTicket: "manual-repair-close",
+                orderTicket: "manual-repair-close-order",
+                positionTicket: "manual-repair-position",
+                entry: "1",
+                type: "1",
+                reason: 0,
+                symbol: "XAUUSD",
+                price: 4560,
+                volume: 0.01,
+                profit: 12.5,
+                commission: -0.25,
+                swap: 0,
+                comment: "",
+                timeMsc: Date.UTC(2026, 4, 18, 10, 50, 0),
+              },
+            ],
+          }),
+        }),
+      );
+      expect(repair.updated).toBe(1);
+
+      const db = new Database(databasePath, { readonly: true });
+      const row = db
+        .query(
+          "SELECT pnl_currency, close_at FROM external_closes WHERE position_ticket = ? LIMIT 1",
+        )
+        .get("manual-repair-position") as { pnl_currency: number; close_at: string } | null;
+      db.close();
+      expect(row).toMatchObject({
+        pnl_currency: 12.25,
+        close_at: "2026-05-18T10:50:00.000Z",
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("history close coverage orders unsafe-integer MT5 deal tickets exactly", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        seedDemoData: true,
+      });
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          queueItemId: "queue-demo-1",
+          accountId: "mt5-100200300",
+          status: "EXECUTED",
+          retcode: 10009,
+          retcodeExternal: 0,
+          brokerComment: "ttc:demo-1",
+          orderTicket: "9007199254740990",
+          positionTicket: "9007199254740990",
+          dealTicket: "9007199254740994",
+          requestedPrice: 1.085,
+          filledPrice: 1.085,
+          volume: 0.02,
+        }),
+      });
+
+      const db = new Database(databasePath);
+      db.query(
+        `INSERT INTO broker_orders
+          (id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
+           requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment,
+           pnl_currency, pnl_pips, source, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        "broker-unsafe-ticket-partial",
+        "trade-demo-1",
+        "trade",
+        "PARTIAL_CLOSE",
+        "history",
+        "mt5-100200300",
+        "9007199254740995",
+        "9007199254740990",
+        "9007199254740995",
+        null,
+        0.01,
+        null,
+        1.09,
+        0,
+        0,
+        "ttc:demo-1:tp1",
+        5,
+        50,
+        "tp-hit",
+        "2026-05-18T11:00:00.000Z",
+      );
+      db.close();
+
+      await app.request("/api/mt5/history", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountId: "mt5-100200300",
+          deals: [
+            {
+              dealTicket: "9007199254740996",
+              orderTicket: "9007199254740996",
+              positionTicket: "9007199254740990",
+              entry: "1",
+              type: "1",
+              reason: 5,
+              symbol: "EURUSD.raw",
+              price: 1.095,
+              volume: 0.01,
+              profit: 10,
+              commission: 0,
+              swap: 0,
+              comment: "ttc:demo-1:tp2",
+              time: "2026.05.18 10:00:00",
+            },
+          ],
+        }),
+      });
+
+      const reader = new Database(databasePath, { readonly: true });
+      const row = reader
+        .query("SELECT action FROM broker_orders WHERE deal_ticket = ?")
+        .get("9007199254740996") as { action: string } | null;
+      reader.close();
+      expect(row?.action).toBe("FULL_CLOSE");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("canonical SQL migration creates external close history storage", async () => {
+    const migration = await readFile(join(process.cwd(), "migrations/0001_initial.sql"), "utf8");
+    const db = new Database(":memory:");
+    try {
+      db.exec(migration);
+      const table = db
+        .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_closes'")
+        .get() as { name: string } | null;
+      expect(table?.name).toBe("external_closes");
+    } finally {
+      db.close();
+    }
   });
 
   test("closedTrades rolls up multi-leg close lifecycle with Mixed close reason and winning net result", async () => {

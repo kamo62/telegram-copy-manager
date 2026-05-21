@@ -2501,6 +2501,8 @@ class AppStore {
         }
         const oldPnl = nullableNumber(exists.pnl_currency);
         const delta = roundCurrency(pnlCurrency - (oldPnl ?? 0));
+        const oldPips = nullableNumber(exists.pnl_pips);
+        const pipsDelta = pnlPips === null ? 0 : Number((pnlPips - (oldPips ?? 0)).toFixed(1));
         this.db
           .query(
             `UPDATE broker_orders
@@ -2549,6 +2551,16 @@ class AppStore {
         });
         if (trade) {
           this.reconcileHistoryDeal(tradeId, deal, action, source, positionTicket);
+        } else {
+          this.recordExternalHistoryDeal(
+            input.accountId,
+            deal,
+            action,
+            source,
+            delta,
+            pipsDelta,
+            createdAt,
+          );
         }
         continue;
       }
@@ -6701,8 +6713,11 @@ function truthyBrokerTicket(value: string | undefined): value is string {
 
 function numericTicket(value: string | undefined) {
   if (!value || !/^\d+$/.test(value)) return null;
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
 }
 
 function brokerActionForReport(
@@ -6964,7 +6979,18 @@ function historyDealTimestamp(deal: Mt5HistoryDealInput) {
   if (Number.isFinite(timeMsc) && timeMsc > 0) {
     return new Date(timeMsc).toISOString();
   }
-  return deal.time ?? new Date().toISOString();
+  return parseBrokerTimestamp(deal.time) ?? new Date().toISOString();
+}
+
+function parseBrokerTimestamp(value: string | undefined) {
+  if (!value?.trim()) return undefined;
+  const normalized = normalizedDateInput(value.trim());
+  const timestamp = Date.parse(hasTimezoneSuffix(normalized) ? normalized : `${normalized}Z`);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
+
+function hasTimezoneSuffix(value: string) {
+  return /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
 }
 
 function directionFromOpenDealType(type: string | undefined) {

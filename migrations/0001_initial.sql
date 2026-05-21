@@ -270,6 +270,28 @@ CREATE INDEX IF NOT EXISTS idx_broker_orders_trade_created ON broker_orders(logi
 CREATE INDEX IF NOT EXISTS idx_broker_orders_position_created ON broker_orders(position_ticket, created_at);
 CREATE INDEX IF NOT EXISTS idx_broker_orders_order_created ON broker_orders(order_ticket, created_at);
 
+CREATE TABLE IF NOT EXISTS external_closes (
+  account_id TEXT NOT NULL,
+  position_ticket TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  volume REAL,
+  open_price REAL,
+  open_at TEXT,
+  open_deal_ticket TEXT,
+  close_price REAL,
+  close_at TEXT,
+  close_deal_ticket TEXT,
+  pnl_currency REAL,
+  pnl_pips REAL,
+  source TEXT,
+  magic INTEGER NOT NULL DEFAULT 0,
+  comment TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (account_id, position_ticket)
+);
+
 CREATE TABLE IF NOT EXISTS parser_fixtures (
   id TEXT PRIMARY KEY,
   provider_label TEXT NOT NULL,

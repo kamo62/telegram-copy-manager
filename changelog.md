@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.9.1 - 2026-05-21 (Patch)
+
+Release impact: Patch because this fixes MT5 history reconciliation and schema bootstrap
+correctness without changing public API or EA command contracts.
+
+- Normalized MT5 broker-history `time` strings to ISO timestamps before persisting broker-order rows.
+- Compared large MT5 deal tickets in exact integer space when ordering close-volume history.
+- Kept external manual close summaries in sync when repeated history syncs repair existing deal rows.
+- Added the `external_closes` table to the canonical SQL migration.
+
 ## 1.9.0 - 2026-05-21 (Minor)
 
 Release impact: Minor because this adds backward-compatible dashboard/API statistics, persisted
