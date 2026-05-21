@@ -479,6 +479,9 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   if (direction && rawSymbol && commandType === "OPEN_TRADE") {
     matchedPatternIds.push(entry ? "open.direction-symbol-entry" : "open.direction-symbol-market");
   }
+  if (commandType === "OPEN_TRADE" && isDirectionalZoneSignal(upper)) {
+    matchedPatternIds.push("open.directional-entry-zones");
+  }
   if (takeProfits.length > 0) {
     matchedPatternIds.push("targets.tp");
   }
@@ -547,6 +550,22 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     accountId: context.accountId,
     fingerprint: createMessageFingerprint(original),
   };
+}
+
+export function parseSignalTexts(
+  originalText: string,
+  context: ParserContext = {},
+): ParsedSignal[] {
+  const base = parseSignalText(originalText, context);
+  const candidate = extractSignalCandidate(originalText.replace(/\r\n/g, "\n").trim());
+  const prices = extractDirectionalZonePrices(candidate.text);
+  if (base.commandType !== "OPEN_TRADE" || prices.length <= 1) return [base];
+
+  return prices.map((price, index) => ({
+    ...base,
+    entry: { from: price },
+    fingerprint: createMessageFingerprint(`${base.originalText}\nzone-entry:${index + 1}:${price}`),
+  }));
 }
 
 export function shouldRequireManualReview(signal: ParsedSignal): boolean {
@@ -925,6 +944,7 @@ function hasOpenTradeIntent(upper: string): boolean {
   const startsWithTrade = /^\s*(BUY|SELL)\b/.test(upper);
   return (
     (hasDirection && hasSymbol && (hasRiskPlan || /\b(LIMIT|STOP)\b/.test(upper))) ||
+    (hasDirection && isDirectionalZoneSignal(upper)) ||
     (hasDirection && hasEntryPlan && hasRiskPlan && hasTargetPlan) ||
     (hasEntryPlan && hasRiskPlan && hasTargetPlan) ||
     (startsWithTrade && !/\b(PIPS?|MISSED|HIT\s+SL)\b/.test(upper))
@@ -981,6 +1001,7 @@ function inferDirectionFromPrices(
 }
 
 function detectOrderType(upper: string): OrderType {
+  if (isDirectionalZoneSignal(upper)) return "LIMIT";
   if (/\bLIMIT\b/.test(upper)) return "LIMIT";
   if (/\bSTOP\b/.test(upper)) return "STOP";
   return "MARKET";
@@ -1038,6 +1059,11 @@ function extractEntry(
     return { from: Number(zone[1]), to: normalizeZoneEnd(zone[1], zone[2]) };
   }
 
+  const singleEntry = text.match(/\bENTRY\s*[:@]?\s*(\d+(?:\.\d+)?)/i);
+  if (singleEntry?.[1]) {
+    return { from: Number(singleEntry[1]) };
+  }
+
   const standaloneZone = text.match(/(?:^|\n)\s*(\d+(?:\.\d+)?)\s*(?:-|TO)\s*(\d+(?:\.\d+)?)/i);
   if (standaloneZone?.[1] && standaloneZone[2]) {
     return {
@@ -1070,6 +1096,22 @@ function extractEntry(
   }
 
   return undefined;
+}
+
+function isDirectionalZoneSignal(upper: string): boolean {
+  return (
+    /\b(BUY|SELL)\s+ZONES?\b|\bZONES?\s+(BUY|SELL)\b/.test(upper) &&
+    extractDirectionalZonePrices(upper).length > 0
+  );
+}
+
+function extractDirectionalZonePrices(text: string): number[] {
+  if (!/\b(BUY|SELL)\s+ZONES?\b|\bZONES?\s+(BUY|SELL)\b/i.test(text)) return [];
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^\d+(?:\.\d+)?$/.test(line))
+    .map(Number);
 }
 
 function extractStopLoss(text: string): number | undefined {

@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.6.8"
+#property version   "1.9.0"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -139,10 +139,11 @@ void RegisterAccount()
 void SendHeartbeat()
 {
    string body = StringFormat(
-      "{\"accountId\":\"mt5-%I64d\",\"balance\":%.2f,\"equity\":%.2f,\"availableSymbols\":%s,\"linkCode\":\"%s\"}",
+      "{\"accountId\":\"mt5-%I64d\",\"balance\":%.2f,\"equity\":%.2f,\"profit\":%.2f,\"availableSymbols\":%s,\"linkCode\":\"%s\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
+      AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
       JsonEscape(LinkCode)
    );
@@ -1001,21 +1002,24 @@ string HistoryDealJson(ulong ticket)
    // and every close looks the same in the History trail.
    int dealReason = (int)HistoryDealGetInteger(ticket, DEAL_REASON);
    return StringFormat(
-      "{\"dealTicket\":\"%I64u\",\"orderTicket\":\"%I64u\",\"positionTicket\":\"%I64u\",\"entry\":\"%d\",\"type\":\"%d\",\"reason\":%d,\"symbol\":\"%s\",\"price\":%.8f,\"volume\":%.2f,\"profit\":%.2f,\"commission\":%.2f,\"swap\":%.2f,\"comment\":\"%s\",\"time\":\"%s\"}",
+      "{\"dealTicket\":\"%I64u\",\"orderTicket\":\"%I64u\",\"positionTicket\":\"%I64u\",\"entry\":\"%d\",\"type\":\"%d\",\"reason\":%d,\"magic\":%I64d,\"symbol\":\"%s\",\"price\":%.8f,\"volume\":%.2f,\"profit\":%.2f,\"commission\":%.2f,\"swap\":%.2f,\"fee\":%.2f,\"comment\":\"%s\",\"time\":\"%s\",\"timeMsc\":%I64d}",
       ticket,
       (ulong)HistoryDealGetInteger(ticket, DEAL_ORDER),
       (ulong)HistoryDealGetInteger(ticket, DEAL_POSITION_ID),
       (int)HistoryDealGetInteger(ticket, DEAL_ENTRY),
       (int)HistoryDealGetInteger(ticket, DEAL_TYPE),
       dealReason,
+      HistoryDealGetInteger(ticket, DEAL_MAGIC),
       JsonEscape(HistoryDealGetString(ticket, DEAL_SYMBOL)),
       HistoryDealGetDouble(ticket, DEAL_PRICE),
       HistoryDealGetDouble(ticket, DEAL_VOLUME),
       HistoryDealGetDouble(ticket, DEAL_PROFIT),
       HistoryDealGetDouble(ticket, DEAL_COMMISSION),
       HistoryDealGetDouble(ticket, DEAL_SWAP),
+      HistoryDealGetDouble(ticket, DEAL_FEE),
       JsonEscape(comment),
-      TimeToString((datetime)HistoryDealGetInteger(ticket, DEAL_TIME), TIME_DATE|TIME_SECONDS)
+      TimeToString((datetime)HistoryDealGetInteger(ticket, DEAL_TIME), TIME_DATE|TIME_SECONDS),
+      HistoryDealGetInteger(ticket, DEAL_TIME_MSC)
    );
 }
 
@@ -1415,13 +1419,14 @@ string AccountPayload()
       ? "HEDGING"
       : "NETTING";
    return StringFormat(
-      "{\"accountNumber\":\"%I64d\",\"server\":\"%s\",\"company\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"marginMode\":\"%s\",\"availableSymbols\":%s,\"linkCode\":\"%s\"}",
+      "{\"accountNumber\":\"%I64d\",\"server\":\"%s\",\"company\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"profit\":%.2f,\"marginMode\":\"%s\",\"availableSymbols\":%s,\"linkCode\":\"%s\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       JsonEscape(AccountInfoString(ACCOUNT_SERVER)),
       JsonEscape(AccountInfoString(ACCOUNT_COMPANY)),
       JsonEscape(AccountInfoString(ACCOUNT_CURRENCY)),
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
+      AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
       JsonEscape(LinkCode)

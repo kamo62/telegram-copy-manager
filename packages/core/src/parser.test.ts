@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   type ParserContext,
   parseSignalText,
+  parseSignalTexts,
   resolveSymbol,
   shouldRequireManualReview,
 } from "./index";
@@ -233,6 +234,86 @@ describe("deterministic signal parser", () => {
     expect(signal.missingFields).not.toContain("stopLoss");
     expect(signal.missingFields).not.toContain("takeProfit");
     expect(shouldRequireManualReview(signal)).toBe(false);
+  });
+
+  test("splits directional zone posts into one defaulted pending limit per price line", () => {
+    const kalContext: ParserContext = {
+      providerId: "kal-vip",
+      accountId: "mt5-demo-1",
+      globalAliases: { GOLD: "XAUUSD" },
+      providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+      accountMappings: context.accountMappings,
+      defaultStopLoss: { value: 50, unit: "PIPS" },
+      defaultTakeProfit: { value: 200, unit: "PIPS" },
+    };
+
+    const signals = parseSignalTexts("4512 \n4500 \n4580\n\nBuy zones", kalContext);
+
+    expect(signals).toHaveLength(3);
+    expect(signals.map((signal) => signal.entry?.from)).toEqual([4512, 4500, 4580]);
+    expect(new Set(signals.map((signal) => signal.fingerprint)).size).toBe(3);
+    for (const signal of signals) {
+      expect(signal.commandType).toBe("OPEN_TRADE");
+      expect(signal.direction).toBe("BUY");
+      expect(signal.orderType).toBe("LIMIT");
+      expect(signal.rawSymbol).toBe("XAUUSD");
+      expect(signal.brokerSymbol).toBe("XAUUSD.r");
+      expect(signal.defaultStopLoss).toEqual({ value: 50, unit: "PIPS" });
+      expect(signal.defaultTakeProfit).toEqual({ value: 200, unit: "PIPS" });
+      expect(signal.matchedPatternIds).toContain("open.directional-entry-zones");
+      expect(shouldRequireManualReview(signal)).toBe(false);
+    }
+
+    const replyChatter = parseSignalTexts(
+      [
+        "Quoted signal:",
+        "4512 ",
+        "4500 ",
+        "4580",
+        "",
+        "Buy zones",
+        "",
+        "Comment:",
+        "Usually Sl depends on the entry model",
+      ].join("\n"),
+      kalContext,
+    );
+    expect(replyChatter).toHaveLength(1);
+    expect(replyChatter[0]!.commandType).toBe("NO_SIGNAL");
+  });
+
+  test("parses broker copier NEW ORDER blocks without treating ticket numbers as entries", () => {
+    const result = parseSignalText(
+      [
+        "NEW ORDER - XAUUSD Buy Stop 📈",
+        "# 218981501",
+        "",
+        "----------{ NEW }----------",
+        "Entry: 4723.00 [Lots: 0.01]",
+        "SL:    4717.00",
+        "TP:    4735.00",
+        "---------------------------",
+      ].join("\n"),
+      {
+        accountId: "mt5-demo-1",
+        accountMappings: {
+          "mt5-demo-1": {
+            accountId: "mt5-demo-1",
+            availableBrokerSymbols: ["XAUUSD"],
+          },
+        },
+      },
+    );
+
+    expect(result.commandType).toBe("OPEN_TRADE");
+    expect(result.rawSymbol).toBe("XAUUSD");
+    expect(result.direction).toBe("BUY");
+    expect(result.orderType).toBe("STOP");
+    expect(result.entry).toEqual({ from: 4723 });
+    expect(result.stopLoss).toBe(4717);
+    expect(result.takeProfits.map((target) => target.price)).toEqual([4735]);
+    expect(result.lotSize).toBe(0.01);
+    expect(shouldRequireManualReview(result)).toBe(false);
   });
 
   test("inherits quoted signal context for close-half replies", () => {

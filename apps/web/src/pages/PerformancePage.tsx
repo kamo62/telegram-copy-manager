@@ -1,11 +1,50 @@
+import { useEffect, useMemo, useState } from "react";
 import { GrowthChart, type GrowthSeries } from "../components/GrowthChart";
 import { useLocale } from "../contexts/LocaleContext";
-import { formatLot, formatNumber } from "../lib/format";
+import { apiGet } from "../lib/api";
+import { formatLot, formatNumber, formatPercent } from "../lib/format";
+
+type PerformanceView = "overview" | "statistics";
+type StatsRange = "7d" | "30d" | "90d" | "all";
+type StatsScope = "account" | "provider";
+
+export interface AccountStatsData {
+  scope: StatsScope;
+  range: StatsRange;
+  currency: string;
+  generatedAt: string;
+  profitReturn: { totalPnl: number; roiPercent: number; bestDay: number; worstDay: number };
+  winLoss: {
+    wins: number;
+    losses: number;
+    breakEven: number;
+    winRate: number;
+    averageWin: number;
+    averageLoss: number;
+  };
+  riskDrawdown: {
+    maxDrawdown: number;
+    maxDrawdownPct: number;
+    currentDrawdown: number;
+    averageActiveDrawdown: number;
+    recoveryFactor: number;
+  };
+  quality: {
+    profitFactor: number;
+    grossProfit: number;
+    grossLoss: number;
+    averageTrade: number;
+    expectancy: number;
+  };
+  streaks: { current: string; maxWins: number; maxLosses: number };
+  timing: { averageTradeMinutes: number; bestWeekday: string; worstWeekday: string };
+}
 
 export function PerformancePage({
   accounts = [],
   data,
   loading = false,
+  providers = [],
 }: {
   accounts?: Array<{
     id: string;
@@ -37,12 +76,233 @@ export function PerformancePage({
   }>;
   data: GrowthSeries;
   loading?: boolean;
+  providers?: Array<{ id: string; title: string }>;
 }) {
+  const [view, setView] = useState<PerformanceView>("overview");
+  const [range, setRange] = useState<StatsRange>("30d");
+  const [scope, setScope] = useState<StatsScope>("account");
+  const [providerId, setProviderId] = useState("");
+  const [stats, setStats] = useState<AccountStatsData | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState("");
+  const account = accounts[0];
+  const effectiveProviderId = scope === "provider" ? providerId || providers[0]?.id || "" : "";
+
+  useEffect(() => {
+    if (view !== "statistics" || !account?.id) return;
+    const controller = new AbortController();
+    setStatsLoading(true);
+    setStatsError("");
+    const params = new URLSearchParams({ range, scope });
+    if (scope === "provider" && effectiveProviderId) params.set("providerId", effectiveProviderId);
+    apiGet<AccountStatsData>(`/api/accounts/${account.id}/stats?${params.toString()}`, {
+      signal: controller.signal,
+    })
+      .then((payload) => setStats(payload))
+      .catch((error) => {
+        if ((error as Error).name !== "AbortError") setStatsError((error as Error).message);
+      })
+      .finally(() => setStatsLoading(false));
+    return () => controller.abort();
+  }, [account?.id, effectiveProviderId, range, scope, view]);
+
   return (
     <div aria-labelledby="tab-performance" id="tabpanel-performance" role="tabpanel">
-      <GrowthChart data={data} loading={loading} />
-      <ExternalActivityPanel accounts={accounts} />
+      <div className="performance-mode-tabs" role="tablist" aria-label="Performance view">
+        <button
+          aria-selected={view === "overview"}
+          className={view === "overview" ? "active" : ""}
+          onClick={() => setView("overview")}
+          role="tab"
+          type="button"
+        >
+          Overview
+        </button>
+        <button
+          aria-selected={view === "statistics"}
+          className={view === "statistics" ? "active" : ""}
+          onClick={() => setView("statistics")}
+          role="tab"
+          type="button"
+        >
+          Statistics
+        </button>
+      </div>
+      {view === "overview" ? (
+        <>
+          <GrowthChart data={data} loading={loading} />
+          <ExternalActivityPanel accounts={accounts} />
+        </>
+      ) : (
+        <StatisticsView
+          error={statsError}
+          loading={statsLoading}
+          providers={providers}
+          providerId={effectiveProviderId}
+          range={range}
+          scope={scope}
+          setProviderId={setProviderId}
+          setRange={setRange}
+          setScope={setScope}
+          stats={stats}
+        />
+      )}
     </div>
+  );
+}
+
+function StatisticsView({
+  error,
+  loading,
+  providerId,
+  providers,
+  range,
+  scope,
+  setProviderId,
+  setRange,
+  setScope,
+  stats,
+}: {
+  error: string;
+  loading: boolean;
+  providerId: string;
+  providers: Array<{ id: string; title: string }>;
+  range: StatsRange;
+  scope: StatsScope;
+  setProviderId: (value: string) => void;
+  setRange: (value: StatsRange) => void;
+  setScope: (value: StatsScope) => void;
+  stats: AccountStatsData | null;
+}) {
+  const { locale } = useLocale();
+  const cards = useMemo(
+    () =>
+      stats
+        ? [
+            {
+              title: "Profit / Return",
+              metrics: [
+                [
+                  "Total P/L",
+                  formatNumber(stats.profitReturn.totalPnl, { locale, minimumFractionDigits: 0 }),
+                ],
+                ["ROI", formatPercent(stats.profitReturn.roiPercent, { locale })],
+                ["Best day", formatNumber(stats.profitReturn.bestDay, { locale })],
+                ["Worst day", formatNumber(stats.profitReturn.worstDay, { locale })],
+              ],
+            },
+            {
+              title: "Win / Loss",
+              metrics: [
+                ["Win rate", formatPercent(stats.winLoss.winRate * 100, { locale })],
+                ["Wins", String(stats.winLoss.wins)],
+                ["Losses", String(stats.winLoss.losses)],
+                ["Avg win", formatNumber(stats.winLoss.averageWin, { locale })],
+                ["Avg loss", formatNumber(stats.winLoss.averageLoss, { locale })],
+              ],
+            },
+            {
+              title: "Risk / Drawdown",
+              metrics: [
+                ["Max DD", formatNumber(stats.riskDrawdown.maxDrawdown, { locale })],
+                ["Max DD %", formatPercent(stats.riskDrawdown.maxDrawdownPct, { locale })],
+                ["Current DD", formatNumber(stats.riskDrawdown.currentDrawdown, { locale })],
+                [
+                  "Avg active DD",
+                  formatNumber(stats.riskDrawdown.averageActiveDrawdown, { locale }),
+                ],
+                ["Recovery", formatNumber(stats.riskDrawdown.recoveryFactor, { locale })],
+              ],
+            },
+            {
+              title: "Quality",
+              metrics: [
+                ["Profit factor", formatNumber(stats.quality.profitFactor, { locale })],
+                ["Gross profit", formatNumber(stats.quality.grossProfit, { locale })],
+                ["Gross loss", formatNumber(stats.quality.grossLoss, { locale })],
+                ["Expectancy", formatNumber(stats.quality.expectancy, { locale })],
+              ],
+            },
+            {
+              title: "Streaks",
+              metrics: [
+                ["Current", stats.streaks.current],
+                ["Max wins", String(stats.streaks.maxWins)],
+                ["Max losses", String(stats.streaks.maxLosses)],
+              ],
+            },
+            {
+              title: "Timing",
+              metrics: [
+                [
+                  "Avg duration",
+                  `${formatNumber(stats.timing.averageTradeMinutes, { locale })} min`,
+                ],
+                ["Best weekday", stats.timing.bestWeekday],
+                ["Worst weekday", stats.timing.worstWeekday],
+              ],
+            },
+          ]
+        : [],
+    [locale, stats],
+  );
+  return (
+    <section className="statistics-panel" aria-label="Account statistics">
+      <header className="statistics-toolbar">
+        <div className="statistics-filter-group">
+          <select
+            aria-label="Statistics date range"
+            value={range}
+            onChange={(event) => setRange(event.target.value as StatsRange)}
+          >
+            <option value="7d">7d</option>
+            <option value="30d">30d</option>
+            <option value="90d">90d</option>
+            <option value="all">All</option>
+          </select>
+          <select
+            aria-label="Statistics scope"
+            value={scope}
+            onChange={(event) => setScope(event.target.value as StatsScope)}
+          >
+            <option value="account">Account</option>
+            <option value="provider">Provider</option>
+          </select>
+          {scope === "provider" ? (
+            <select
+              aria-label="Statistics provider"
+              value={providerId}
+              onChange={(event) => setProviderId(event.target.value)}
+            >
+              {providers.map((provider) => (
+                <option key={provider.id} value={provider.id}>
+                  {provider.title}
+                </option>
+              ))}
+            </select>
+          ) : null}
+        </div>
+      </header>
+      {error ? <p className="statistics-error">{error}</p> : null}
+      {loading && !stats ? <p className="statistics-loading">Loading statistics…</p> : null}
+      {stats ? (
+        <div className="statistics-card-grid">
+          {cards.map((card) => (
+            <article className="statistics-card" key={card.title}>
+              <h3>{card.title}</h3>
+              <dl>
+                {card.metrics.map(([label, value]) => (
+                  <div key={label}>
+                    <dt>{label}</dt>
+                    <dd>{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </article>
+          ))}
+        </div>
+      ) : null}
+    </section>
   );
 }
 

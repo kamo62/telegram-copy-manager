@@ -12,11 +12,12 @@ export interface AccountHeaderData {
     eaActive: boolean;
   };
   kpis: {
-    initialBalance: number | null;
+    balance: number | null;
+    equity: number | null;
     totalProfit: { amount: number | null; deltaPercent: number | null };
-    thisMonth: { amount: number | null; deltaPercent: number | null };
-    thisWeek: { amount: number | null; deltaPercent: number | null };
     today: { amount: number | null; deltaPercent: number | null };
+    thisWeek: { amount: number | null; deltaPercent: number | null };
+    thisMonth: { amount: number | null; deltaPercent: number | null };
   };
   currency: string;
 }
@@ -51,24 +52,25 @@ export function AccountHeader({
     delta: number | null;
     primary?: boolean;
   }> = [
-    { label: "Initial Balance", amount: kpis.initialBalance, delta: null, primary: false },
+    { label: "Balance", amount: kpis.balance, delta: null, primary: false },
+    { label: "Equity", amount: kpis.equity, delta: null, primary: false },
     {
       label: "Trading P/L",
       amount: kpis.totalProfit.amount,
       delta: kpis.totalProfit.deltaPercent,
       primary: true,
     },
-    {
-      label: "This Month",
-      amount: kpis.thisMonth.amount,
-      delta: kpis.thisMonth.deltaPercent,
-    },
+    { label: "Today", amount: kpis.today.amount, delta: kpis.today.deltaPercent },
     {
       label: "This Week",
       amount: kpis.thisWeek.amount,
       delta: kpis.thisWeek.deltaPercent,
     },
-    { label: "Today", amount: kpis.today.amount, delta: kpis.today.deltaPercent },
+    {
+      label: "This Month",
+      amount: kpis.thisMonth.amount,
+      delta: kpis.thisMonth.deltaPercent,
+    },
   ];
 
   return (
@@ -102,23 +104,23 @@ export function AccountHeader({
       </div>
 
       <div className="account-kpis anim-stagger">
-        {loading && kpis.initialBalance === null
-          ? Array.from({ length: 5 }, (_, index) => (
+        {loading && kpis.balance === null
+          ? Array.from({ length: 6 }, (_, index) => (
               <div className="kpi" key={`kpi-skeleton-${index}`}>
                 <SkeletonStat />
               </div>
             ))
           : null}
-        {!(loading && kpis.initialBalance === null) &&
+        {!(loading && kpis.balance === null) &&
           kpiList.map((kpi) => {
             const delta = formatDelta(kpi.delta, locale);
             return (
               <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
-                <span className="kpi-label">{kpi.label}</span>
-                <strong className="kpi-amount">
-                  <span className="kpi-currency">{currency}</span>
-                  {formatNumber(kpi.amount, { locale })}
-                </strong>
+                <span className="kpi-label">
+                  <span>{kpi.label}</span>
+                  {currency ? <span className="kpi-label-currency">· {currency}</span> : null}
+                </span>
+                <strong className="kpi-amount">{formatNumber(kpi.amount, { locale })}</strong>
                 <span className={`kpi-delta kpi-delta-${delta.tone}`}>{delta.text}</span>
               </div>
             );

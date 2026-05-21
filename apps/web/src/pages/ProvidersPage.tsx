@@ -1,3 +1,4 @@
+import { Download } from "lucide-react";
 import { Panel } from "../components/Panel";
 import {
   type ProviderAccountLinkOption,
@@ -10,6 +11,7 @@ export function ProvidersPage({
   onConfigure,
   onDelete,
   onToggle,
+  onExport,
   loading = false,
   accounts = [],
   providerLinks = [],
@@ -19,6 +21,7 @@ export function ProvidersPage({
   onConfigure: (provider: ProviderRowData) => void;
   onDelete: (provider: ProviderRowData) => void;
   onToggle: (provider: ProviderRowData) => void;
+  onExport?: () => void;
   loading?: boolean;
   accounts?: ProviderAccountLinkOption[];
   providerLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
@@ -26,6 +29,17 @@ export function ProvidersPage({
 }) {
   return (
     <Panel className="wide-panel" title="Providers">
+      <div className="provider-panel-toolbar">
+        <button
+          aria-label="Export provider performance"
+          className="btn btn-ghost btn-small provider-export-btn"
+          onClick={onExport}
+          type="button"
+        >
+          <Download size={14} aria-hidden="true" />
+          Export
+        </button>
+      </div>
       {accounts.length > 0 ? (
         <p className="panel-intro">
           Use the <strong>Copied by</strong> chips to choose which MT5 accounts copy each provider.
