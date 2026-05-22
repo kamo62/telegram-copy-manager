@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.10.0 - 2026-05-22 (Minor)
+
+Release impact: Minor because this adds backward-compatible dashboard risk-threshold controls,
+provider return percentage fields, frontend font/loading improvements, and development-server
+collision protection without changing the EA command protocol.
+
+- Added self-hosted dashboard fonts, reusable money/stat display
+  primitives, and richer currency-aware performance/history/provider values.
+- Tightened the Live header platform card so account metadata stays compact beside the KPI strip.
+- Kept workspace pages in the initial app bundle so stale local dev-server tabs no longer fail when
+  switching tabs with a dynamic page import.
+- Added global and per-account drawdown display thresholds, keeping danger thresholds at or above
+  warn thresholds and preserving omitted per-account overrides on partial updates.
+- Resynced per-account risk override fields after backend normalization so clamped warn/danger
+  values are reflected immediately in Settings.
+- Kept the legacy provider performance `gain` API/CSV field while adding `gainPct`/`gain_pct` for
+  initial-balance return percentages.
+- Made the Vite dev server fail loudly if port `5173` is already occupied, avoiding misleading lazy
+  module import failures from unrelated local services.
+
 ## 1.9.3 - 2026-05-21 (Patch)
 
 Release impact: Patch because this removes an unused status-bar placeholder without changing

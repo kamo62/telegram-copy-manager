@@ -1,6 +1,15 @@
-import { Sliders, Sparkles, Timer, TrendingUp } from "lucide-react";
+import { ShieldAlert, Sliders, Sparkles, Timer, TrendingUp } from "lucide-react";
+import { useEffect, useState } from "react";
 import type { DashboardSnapshot } from "../App";
 import { Panel } from "../components/Panel";
+
+interface AccountThresholdsRow {
+  id: string;
+  accountNumber: string;
+  currency: string;
+  drawdownWarnPctOverride: number | null;
+  drawdownDangerPctOverride: number | null;
+}
 
 interface FieldProps {
   label: string;
@@ -51,10 +60,18 @@ export function SettingsPage({
   settings,
   onSubmit,
   onSaveForm,
+  accounts = [],
+  onAccountRiskThresholdsSave,
 }: {
   settings: DashboardSnapshot["appSettings"];
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
   onSaveForm: (form: HTMLFormElement) => void;
+  accounts?: AccountThresholdsRow[];
+  onAccountRiskThresholdsSave?: (
+    accountId: string,
+    warnPct: number | null,
+    dangerPct: number | null,
+  ) => void;
 }) {
   return (
     <Panel className="wide-panel" title="Settings">
@@ -126,6 +143,47 @@ export function SettingsPage({
                 min="1"
                 name="defaultTakeProfitPips"
                 step="1"
+                type="number"
+              />
+            </Field>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection
+          description="When a drawdown crosses these percentages the dashboard tints the value amber (warn) or red (danger). Per-account overrides live alongside each connected account."
+          icon={<ShieldAlert aria-hidden="true" size={18} />}
+          title="Risk display thresholds"
+        >
+          <div className="settings-grid">
+            <Field
+              hint="Amber tone applied to drawdown values at or above this percent of peak equity."
+              htmlFor="drawdownWarnPct"
+              label="Warn at (%)"
+            >
+              <input
+                className="settings-input mono"
+                defaultValue={settings.drawdownWarnPct}
+                id="drawdownWarnPct"
+                max="100"
+                min="0"
+                name="drawdownWarnPct"
+                step="0.5"
+                type="number"
+              />
+            </Field>
+            <Field
+              hint="Red tone applied to drawdown values at or above this percent. Should be higher than the warn threshold."
+              htmlFor="drawdownDangerPct"
+              label="Danger at (%)"
+            >
+              <input
+                className="settings-input mono"
+                defaultValue={settings.drawdownDangerPct}
+                id="drawdownDangerPct"
+                max="100"
+                min="0"
+                name="drawdownDangerPct"
+                step="0.5"
                 type="number"
               />
             </Field>
@@ -228,6 +286,129 @@ export function SettingsPage({
           </button>
         </div>
       </form>
+
+      {accounts.length > 0 && onAccountRiskThresholdsSave ? (
+        <AccountRiskThresholdsSection accounts={accounts} onSave={onAccountRiskThresholdsSave} />
+      ) : null}
     </Panel>
+  );
+}
+
+function AccountRiskThresholdsSection({
+  accounts,
+  onSave,
+}: {
+  accounts: AccountThresholdsRow[];
+  onSave: (accountId: string, warnPct: number | null, dangerPct: number | null) => void;
+}) {
+  return (
+    <SettingsSection
+      description="Per-account warn / danger overrides. Leave a field blank to fall back to the global percentages above."
+      icon={<ShieldAlert aria-hidden="true" size={18} />}
+      title="Per-account risk overrides"
+    >
+      <table className="data-table account-thresholds-table">
+        <thead>
+          <tr>
+            <th scope="col">Account</th>
+            <th className="num" scope="col">
+              Warn (%)
+            </th>
+            <th className="num" scope="col">
+              Danger (%)
+            </th>
+            <th scope="col" aria-label="Actions" />
+          </tr>
+        </thead>
+        <tbody>
+          {accounts.map((account) => (
+            <AccountThresholdRow account={account} key={account.id} onSave={onSave} />
+          ))}
+        </tbody>
+      </table>
+    </SettingsSection>
+  );
+}
+
+function AccountThresholdRow({
+  account,
+  onSave,
+}: {
+  account: AccountThresholdsRow;
+  onSave: (accountId: string, warnPct: number | null, dangerPct: number | null) => void;
+}) {
+  const initialWarn =
+    account.drawdownWarnPctOverride === null ? "" : String(account.drawdownWarnPctOverride);
+  const initialDanger =
+    account.drawdownDangerPctOverride === null ? "" : String(account.drawdownDangerPctOverride);
+  const [warn, setWarn] = useState(initialWarn);
+  const [danger, setDanger] = useState(initialDanger);
+  useEffect(() => {
+    setWarn(initialWarn);
+    setDanger(initialDanger);
+  }, [initialWarn, initialDanger]);
+  const dirty = warn !== initialWarn || danger !== initialDanger;
+  return (
+    <tr>
+      <th className="data-table-row-head" scope="row">
+        <strong>{account.accountNumber}</strong>
+        <span className="data-table-subtle">{account.currency}</span>
+      </th>
+      <td className="num-cell">
+        <input
+          aria-label={`Warn % override for ${account.accountNumber}`}
+          className="settings-input mono"
+          max="100"
+          min="0"
+          onChange={(event) => setWarn(event.target.value)}
+          placeholder="—"
+          step="0.5"
+          type="number"
+          value={warn}
+        />
+      </td>
+      <td className="num-cell">
+        <input
+          aria-label={`Danger % override for ${account.accountNumber}`}
+          className="settings-input mono"
+          max="100"
+          min="0"
+          onChange={(event) => setDanger(event.target.value)}
+          placeholder="—"
+          step="0.5"
+          type="number"
+          value={danger}
+        />
+      </td>
+      <td className="data-table-actions">
+        <button
+          className="btn btn-ghost btn-small"
+          disabled={!dirty}
+          onClick={() =>
+            onSave(
+              account.id,
+              warn === "" ? null : Number(warn),
+              danger === "" ? null : Number(danger),
+            )
+          }
+          type="button"
+        >
+          Save
+        </button>
+        {(warn !== "" || danger !== "") && (
+          <button
+            className="btn btn-ghost btn-small"
+            onClick={() => {
+              setWarn("");
+              setDanger("");
+              onSave(account.id, null, null);
+            }}
+            type="button"
+          >
+            Use global
+          </button>
+        )}
+      </td>
+    </tr>
   );
 }

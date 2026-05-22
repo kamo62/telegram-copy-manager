@@ -21,11 +21,13 @@ export function HistoryPage({
   onTabChange,
   accounts,
   focusedAccountId,
+  currency,
 }: {
   activeTab: HistoryTab;
   onTabChange: (tab: HistoryTab) => void;
   accounts: HistoryAccount[];
   focusedAccountId: string | null;
+  currency?: string;
 }) {
   return (
     <Panel
@@ -36,9 +38,17 @@ export function HistoryPage({
       title="Trade history"
     >
       {activeTab === "Open" ? (
-        <OpenPositionsTable accounts={accounts} focusedAccountId={focusedAccountId} />
+        <OpenPositionsTable
+          accounts={accounts}
+          focusedAccountId={focusedAccountId}
+          currency={currency}
+        />
       ) : (
-        <ClosedPositionsTable accounts={accounts} focusedAccountId={focusedAccountId} />
+        <ClosedPositionsTable
+          accounts={accounts}
+          focusedAccountId={focusedAccountId}
+          currency={currency}
+        />
       )}
     </Panel>
   );

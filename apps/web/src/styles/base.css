@@ -3606,14 +3606,20 @@ h3 {
 
 .statistics-card dt {
   font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--ink-faint);
 }
 
 .statistics-card dd {
   margin: 0;
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   font-size: 13px;
+  font-weight: 600;
   color: var(--ink);
+  line-height: 1.2;
 }
 
 .statistics-error,
@@ -5476,7 +5482,7 @@ select.config-strategy-input {
 
 .account-header {
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(0, 2fr);
+  grid-template-columns: minmax(320px, 0.75fr) minmax(0, 1.5fr);
   gap: 18px;
   padding: 18px 20px;
   background: var(--panel);
@@ -5488,7 +5494,7 @@ select.config-strategy-input {
 .account-header-section {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -5504,8 +5510,9 @@ select.config-strategy-input {
 
 .account-platform-card {
   display: flex;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 10px;
+  width: min(100%, 420px);
+  padding: 10px 12px;
   background: var(--panel-2);
   border: 1px solid var(--line-subtle);
   border-radius: var(--radius);
@@ -5529,14 +5536,14 @@ select.config-strategy-input {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .account-platform-card-grid {
   display: grid;
   grid-template-columns: auto 1fr;
   column-gap: 12px;
-  row-gap: 4px;
+  row-gap: 3px;
   margin: 0;
 }
 
@@ -5585,7 +5592,7 @@ select.config-strategy-input {
 
 .account-kpis {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   align-items: stretch;
 }
@@ -5605,6 +5612,14 @@ select.config-strategy-input {
   padding-left: 0;
 }
 
+.kpi-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
 .kpi-label {
   display: inline-flex;
   align-items: baseline;
@@ -5612,9 +5627,15 @@ select.config-strategy-input {
   flex-wrap: wrap;
   font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.06em;
   color: var(--ink-faint);
-  text-transform: none;
+  text-transform: uppercase;
+}
+
+.kpi-spark-placeholder {
+  display: block;
+  height: 28px;
+  margin-top: 6px;
 }
 
 .kpi-label-currency {
@@ -5636,6 +5657,7 @@ select.config-strategy-input {
 .kpi-primary .kpi-amount {
   color: var(--ink);
   font-size: 22px;
+  letter-spacing: 0;
 }
 
 .kpi-delta {
@@ -5666,6 +5688,157 @@ select.config-strategy-input {
   background: var(--panel-2);
 }
 
+/* KPI icon badges — small tinted square in the corner of each KPI card.
+   Borrowed from Codex LB's stats grid for at-a-glance metric scanability. */
+.kpi-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.kpi-badge-blue {
+  background: hsl(218 85% 42% / 0.1);
+  color: hsl(218 85% 42%);
+}
+.kpi-badge-violet {
+  background: hsl(265 70% 50% / 0.1);
+  color: hsl(265 70% 44%);
+}
+.kpi-badge-emerald {
+  background: var(--up-soft);
+  color: var(--up-dim);
+}
+.kpi-badge-amber {
+  background: var(--warn-soft);
+  color: var(--warn-dim);
+}
+.kpi-badge-rose {
+  background: var(--down-soft);
+  color: var(--down-dim);
+}
+.kpi-badge-muted {
+  background: var(--panel-2);
+  color: var(--ink-faint);
+}
+
+/* Sparkline — sits under a KPI value, fixed height, full container width. */
+.sparkline {
+  display: block;
+  margin-top: 6px;
+  overflow: visible;
+}
+
+/* Donut layout on AccountsOverview — donut on the left, legend right.
+   Collapses to stacked on narrow screens via the global card grid. */
+.accounts-overview-donut {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 16px 0;
+  margin-top: 8px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+/* Donut + legend — used on the AccountsOverview "Equity by account" panel. */
+.donut-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.donut {
+  display: block;
+}
+.donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  line-height: 1.1;
+}
+.donut-center-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.donut-center-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.donut-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+}
+.donut-legend-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.donut-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.donut-legend-label {
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.donut-legend-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  text-align: right;
+}
+
+/* Money / Stat tone utilities — used by <Money> and <Stat> primitives.
+   Apply on the value span (not the row) so labels stay neutral. */
+.money {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.money-up {
+  color: var(--up-dim);
+}
+.money-down {
+  color: var(--down-dim);
+}
+.money-warn {
+  color: var(--warn-dim);
+  font-weight: 600;
+}
+.money-danger {
+  color: var(--down);
+  font-weight: 600;
+}
+.money-muted {
+  color: var(--ink-faint);
+}
+.money-pair {
+  color: var(--ink-faint);
+  font-size: 0.92em;
+  margin-left: 4px;
+}
+
 @media (max-width: 1180px) {
   .account-header {
     grid-template-columns: 1fr;
@@ -5680,6 +5853,12 @@ select.config-strategy-input {
 }
 
 @media (max-width: 720px) {
+  .account-platform-card {
+    width: 100%;
+  }
+  .account-platform-card-grid {
+    grid-template-columns: auto 1fr;
+  }
   .account-kpis {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

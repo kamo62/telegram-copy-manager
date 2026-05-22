@@ -51,14 +51,18 @@
   --warn-soft: hsl(35 88% 46% / 0.14);
 
   /* ── Typography ───────────────────────────────────────────────────── */
+  /* Variable font names come from @fontsource-variable/* packages imported
+     in main.tsx. The legacy non-variable names sit behind them as a courtesy
+     for any environment that still has them installed locally. */
   --font-display:
-    "Fraunces", "Iowan Old Style", "Apple Garamond", Georgia, "Times New Roman", serif;
+    "Geist Variable", "Geist", "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
   --font-ui:
-    "Geist", "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
-    sans-serif;
+    "Geist Variable", "Geist", "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", sans-serif;
   --font-mono:
-    "JetBrains Mono", "Geist Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-    monospace;
+    "JetBrains Mono Variable", "JetBrains Mono", "Geist Mono", ui-monospace, SFMono-Regular,
+    "SF Mono", Menlo, Consolas, monospace;
 
   /* Type scale (ratio ~1.2) */
   --fs-1: 11px;

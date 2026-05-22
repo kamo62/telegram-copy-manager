@@ -76,18 +76,26 @@ export function StatusBar({
       <div className="chips">
         <span className="chip">
           <span className={`chip-dot ${database === "connected" ? "ok" : "warn"}`} />
-          DB {database}
+          <span className="sync-label">DB</span>
+          <span className="sync-value">{database}</span>
         </span>
         <span className="chip">
           <span className={`chip-dot ${telegramAdapterStatus}`} />
-          TG {telegramAdapter}
+          <span className="sync-label">TG</span>
+          <span className="sync-value">{telegramAdapter}</span>
         </span>
-        <span className="chip">Queue {queuePending}</span>
-        <span className="chip">{now} UTC</span>
+        <span className="chip">
+          <span className="sync-label">Queue</span>
+          <span className="sync-value">{queuePending}</span>
+        </span>
+        <span className="chip">
+          <span className="sync-value">{now}</span>
+          <span className="sync-label">UTC</span>
+        </span>
         {lastPollError ? (
           <span aria-live="polite" className="chip" role="status">
             <span className="chip-dot error" />
-            Poll failed
+            <span className="sync-label">Poll failed</span>
           </span>
         ) : null}
       </div>

@@ -84,10 +84,24 @@ export function EquityGuardianPage({
               </div>
               <div className="guardian-numbers">
                 <span>
-                  Current <strong>{formatPercent(guardian.currentDrawdown, { locale })}</strong>
+                  Current{" "}
+                  <strong
+                    className={
+                      tone === "breach"
+                        ? "money money-danger"
+                        : tone === "warn"
+                          ? "money money-warn"
+                          : "money"
+                    }
+                  >
+                    {formatPercent(guardian.currentDrawdown, { locale })}
+                  </strong>
                 </span>
                 <span>
-                  Threshold <strong>{formatPercent(guardian.threshold, { locale })}</strong>
+                  Threshold{" "}
+                  <strong className="money money-muted">
+                    {formatPercent(guardian.threshold, { locale })}
+                  </strong>
                 </span>
               </div>
               <div className="guardian-actions">

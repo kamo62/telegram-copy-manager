@@ -2602,6 +2602,8 @@ describe("Telegram TC API", () => {
         pollingIntervalSeconds: number;
         allowedOrderTypes: string[];
         dedupWindowSeconds: number;
+        drawdownWarnPct: number;
+        drawdownDangerPct: number;
       };
     }>(await app.request("/api/settings"));
     expect(defaults.settings).toEqual({
@@ -2615,6 +2617,8 @@ describe("Telegram TC API", () => {
       dedupWindowSeconds: 300,
       pollingIntervalSeconds: 2,
       allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
+      drawdownWarnPct: 10,
+      drawdownDangerPct: 20,
     });
 
     const updated = await json<{
@@ -6209,7 +6213,12 @@ describe("Telegram TC API", () => {
         profitReturn: { totalPnl: number };
         winLoss: { wins: number; losses: number; winRate: number };
         quality: { profitFactor: number; expectancy: number };
-        riskDrawdown: { maxDrawdown: number };
+        riskDrawdown: {
+          maxDrawdown: number;
+          maxDrawdownPct: number;
+          currentDrawdownPct: number;
+          averageActiveDrawdownPct: number;
+        };
       }>(await app.request("/api/accounts/mt5-100200300/stats?range=30d&scope=account"));
 
       expect(stats.scope).toBe("account");
@@ -6218,8 +6227,234 @@ describe("Telegram TC API", () => {
       expect(stats.winLoss).toMatchObject({ wins: 1, losses: 1, winRate: 0.5 });
       expect(stats.quality).toMatchObject({ profitFactor: 2.5, expectancy: 7.5 });
       expect(stats.riskDrawdown.maxDrawdown).toBe(10);
+      // The new percentage fields are part of the contract; even when zero
+      // they must be numbers, not undefined.
+      expect(typeof stats.riskDrawdown.maxDrawdownPct).toBe("number");
+      expect(typeof stats.riskDrawdown.currentDrawdownPct).toBe("number");
+      expect(typeof stats.riskDrawdown.averageActiveDrawdownPct).toBe("number");
     } finally {
       Date.now = originalDateNow;
+    }
+  });
+
+  test("account stats accepts range=today and echoes it back", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    const stats = await json<{ range: string }>(
+      await app.request("/api/accounts/mt5-100200300/stats?range=today&scope=account"),
+    );
+
+    expect(stats.range).toBe("today");
+  });
+
+  test("risk thresholds default to global app settings", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    const stats = await json<{
+      riskThresholds: { warnPct: number; dangerPct: number };
+    }>(await app.request("/api/accounts/mt5-100200300/stats?range=30d&scope=account"));
+
+    expect(stats.riskThresholds).toMatchObject({ warnPct: 10, dangerPct: 20 });
+  });
+
+  test("global drawdown thresholds can be updated through app settings", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    await app.request("/api/settings", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ drawdownWarnPct: 5, drawdownDangerPct: 15 }),
+    });
+
+    const stats = await json<{
+      riskThresholds: { warnPct: number; dangerPct: number };
+    }>(await app.request("/api/accounts/mt5-100200300/stats?range=30d&scope=account"));
+
+    expect(stats.riskThresholds).toMatchObject({ warnPct: 5, dangerPct: 15 });
+  });
+
+  test("global drawdown thresholds keep danger at or above warn", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    const updated = await json<{
+      settings: { drawdownWarnPct: number; drawdownDangerPct: number };
+    }>(
+      await app.request("/api/settings", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ drawdownWarnPct: 25, drawdownDangerPct: 10 }),
+      }),
+    );
+
+    expect(updated.settings).toMatchObject({ drawdownWarnPct: 25, drawdownDangerPct: 25 });
+  });
+
+  test("PATCH /api/accounts/:id/risk-thresholds overrides globals for that account only", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    const patched = await json<{
+      warnPct: number;
+      dangerPct: number;
+      accountWarnPct: number | null;
+      accountDangerPct: number | null;
+    }>(
+      await app.request("/api/accounts/mt5-100200300/risk-thresholds", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ warnPct: 3, dangerPct: 9 }),
+      }),
+    );
+
+    expect(patched).toMatchObject({
+      warnPct: 3,
+      dangerPct: 9,
+      accountWarnPct: 3,
+      accountDangerPct: 9,
+    });
+
+    const stats = await json<{
+      riskThresholds: { warnPct: number; dangerPct: number };
+    }>(await app.request("/api/accounts/mt5-100200300/stats?range=30d&scope=account"));
+
+    expect(stats.riskThresholds).toMatchObject({ warnPct: 3, dangerPct: 9 });
+
+    // Clearing the override returns to the global default.
+    const cleared = await json<{
+      warnPct: number;
+      dangerPct: number;
+      accountWarnPct: number | null;
+      accountDangerPct: number | null;
+    }>(
+      await app.request("/api/accounts/mt5-100200300/risk-thresholds", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ warnPct: null, dangerPct: null }),
+      }),
+    );
+
+    expect(cleared).toMatchObject({
+      warnPct: 10,
+      dangerPct: 20,
+      accountWarnPct: null,
+      accountDangerPct: null,
+    });
+  });
+
+  test("PATCH /api/accounts/:id/risk-thresholds preserves omitted overrides", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    await app.request("/api/accounts/mt5-100200300/risk-thresholds", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ warnPct: 3, dangerPct: 9 }),
+    });
+
+    const patched = await json<{
+      warnPct: number;
+      dangerPct: number;
+      accountWarnPct: number | null;
+      accountDangerPct: number | null;
+    }>(
+      await app.request("/api/accounts/mt5-100200300/risk-thresholds", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ warnPct: 5 }),
+      }),
+    );
+
+    expect(patched).toMatchObject({
+      warnPct: 5,
+      dangerPct: 9,
+      accountWarnPct: 5,
+      accountDangerPct: 9,
+    });
+  });
+
+  test("PATCH /api/accounts/:id/risk-thresholds keeps danger at or above warn", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    const patched = await json<{
+      warnPct: number;
+      dangerPct: number;
+      accountWarnPct: number | null;
+      accountDangerPct: number | null;
+    }>(
+      await app.request("/api/accounts/mt5-100200300/risk-thresholds", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ warnPct: 12, dangerPct: 6 }),
+      }),
+    );
+
+    expect(patched).toMatchObject({
+      warnPct: 12,
+      dangerPct: 12,
+      accountWarnPct: 12,
+      accountDangerPct: 12,
+    });
+  });
+
+  test("PATCH /api/accounts/:id/risk-thresholds 404s when account is unknown", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    const response = await app.request("/api/accounts/unknown-account/risk-thresholds", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ warnPct: 5, dangerPct: 10 }),
+    });
+
+    expect(response.status).toBe(404);
+  });
+
+  test("provider performance keeps legacy gain and adds gainPct as percent of initial balance", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    const performance = await json<{ providers: Array<{ gain: number; gainPct: number }> }>(
+      await app.request("/api/providers/performance"),
+    );
+
+    expect(Array.isArray(performance.providers)).toBe(true);
+    for (const provider of performance.providers) {
+      expect(typeof provider.gain).toBe("number");
+      expect(typeof provider.gainPct).toBe("number");
+      expect(Number.isFinite(provider.gain)).toBe(true);
+      expect(Number.isFinite(provider.gainPct)).toBe(true);
     }
   });
 
@@ -6239,7 +6474,7 @@ describe("Telegram TC API", () => {
     expect(response.headers.get("content-type")).toContain("text/csv");
     expect(response.headers.get("content-disposition")).toContain("provider-performance-");
     expect(csv.split("\n")[0]).toBe(
-      "title,enabled,linked_accounts,lots,pips,win_rate,avg_drawdown,p_l,profit,gain,trade_count,copied_drawdown",
+      "title,enabled,linked_accounts,lots,pips,win_rate,avg_drawdown,p_l,profit,gain,trade_count,copied_drawdown,gain_pct",
     );
     expect(csv).toContain("Alpha FX Signals");
   });

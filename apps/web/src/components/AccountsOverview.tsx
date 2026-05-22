@@ -1,6 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import { useLocale } from "../contexts/LocaleContext";
-import { formatNumber } from "../lib/format";
+import { formatMoney, formatNumber } from "../lib/format";
+import { Donut, DonutLegend, type DonutSlice } from "./Donut";
 
 interface AccountsOverviewProps {
   accounts: Array<{
@@ -11,15 +12,42 @@ interface AccountsOverviewProps {
     heartbeatStatus: string;
     openPositionCount?: number;
     pendingOrderCount?: number;
+    equity?: number;
+    currency?: string;
   }>;
   onSelectAccount: (id: string) => void;
 }
+
+// Rotating slice colours — line up with the KPI badge palette so the donut
+// shares the same accents the AccountHeader cards use.
+const SLICE_COLORS = [
+  "hsl(218 85% 42%)",
+  "hsl(265 70% 50%)",
+  "var(--up-dim)",
+  "var(--warn-dim)",
+  "var(--down-dim)",
+  "var(--ink-dim)",
+];
 
 export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverviewProps) {
   const { locale } = useLocale();
   const onlineCount = accounts.filter((a) => a.heartbeatStatus === "online").length;
   const totalPositions = accounts.reduce((acc, a) => acc + (a.openPositionCount ?? 0), 0);
   const totalPending = accounts.reduce((acc, a) => acc + (a.pendingOrderCount ?? 0), 0);
+
+  const equitySlices: DonutSlice[] = accounts
+    .filter((account) => (account.equity ?? 0) > 0)
+    .map((account, index) => ({
+      id: account.id,
+      label: account.accountNumber || account.id,
+      value: account.equity ?? 0,
+      color: SLICE_COLORS[index % SLICE_COLORS.length] ?? "var(--ink-dim)",
+    }));
+  const totalEquity = equitySlices.reduce((sum, slice) => sum + slice.value, 0);
+  // Single-account donuts read as a flat ring with no information; only
+  // surface the panel when there's actually a split to show.
+  const showEquityDonut = equitySlices.length >= 2;
+  const donutCurrency = accounts.find((account) => account.currency)?.currency ?? "USD";
 
   return (
     <section className="accounts-overview" aria-label="All accounts overview">
@@ -67,6 +95,24 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
           </div>
         </div>
       </header>
+
+      {showEquityDonut ? (
+        <figure className="accounts-overview-donut">
+          <figcaption className="sr-only">Equity by account</figcaption>
+          <Donut
+            ariaLabel="Equity by account"
+            centerLabel="Total"
+            centerValue={formatMoney(totalEquity, donutCurrency, locale)}
+            size={120}
+            slices={equitySlices}
+            thickness={16}
+          />
+          <DonutLegend
+            renderValue={(slice) => formatMoney(slice.value, donutCurrency, locale)}
+            slices={equitySlices}
+          />
+        </figure>
+      ) : null}
 
       <ul className="accounts-overview-list">
         {accounts.map((account) => {
