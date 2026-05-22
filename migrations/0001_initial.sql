@@ -65,6 +65,9 @@ CREATE TABLE IF NOT EXISTS logical_trades (
   created_at TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_logical_trades_account_provider_created
+  ON logical_trades(account_id, provider_id, status, created_at);
+
 CREATE TABLE IF NOT EXISTS queue_items (
   id TEXT PRIMARY KEY,
   parsed_signal_id TEXT NOT NULL,
@@ -163,6 +166,63 @@ CREATE TABLE IF NOT EXISTS mt5_snapshots (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS equity_curve_points (
+  scope TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL DEFAULT '',
+  bucket_start TEXT NOT NULL,
+  open_value REAL NOT NULL,
+  high_value REAL NOT NULL,
+  low_value REAL NOT NULL,
+  close_value REAL NOT NULL,
+  balance REAL,
+  broker_profit REAL,
+  external_floating_pnl REAL,
+  realized_pnl REAL,
+  floating_pnl REAL,
+  net_pnl REAL,
+  drawdown_amount REAL NOT NULL DEFAULT 0,
+  drawdown_pct REAL NOT NULL DEFAULT 0,
+  sample_count INTEGER NOT NULL DEFAULT 1,
+  open_trade_ids_json TEXT NOT NULL DEFAULT '[]',
+  position_tickets_json TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (scope, account_id, provider_id, bucket_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_equity_curve_points_scope_account_time
+  ON equity_curve_points(scope, account_id, provider_id, bucket_start DESC);
+
+CREATE TABLE IF NOT EXISTS equity_curve_state (
+  scope TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL DEFAULT '',
+  peak_value REAL NOT NULL,
+  latest_value REAL NOT NULL,
+  max_drawdown_amount REAL NOT NULL,
+  max_drawdown_pct REAL NOT NULL,
+  max_drawdown_at TEXT,
+  contributor_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (scope, account_id, provider_id)
+);
+
+CREATE TABLE IF NOT EXISTS drawdown_events (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL DEFAULT '',
+  sampled_at TEXT NOT NULL,
+  value REAL NOT NULL,
+  peak_value REAL NOT NULL,
+  drawdown_amount REAL NOT NULL,
+  drawdown_pct REAL NOT NULL,
+  contributor_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_drawdown_events_scope_account_time
+  ON drawdown_events(scope, account_id, provider_id, sampled_at DESC);
+
 CREATE TABLE IF NOT EXISTS execution_reports (
   id TEXT PRIMARY KEY,
   queue_item_id TEXT NOT NULL,
@@ -202,6 +262,34 @@ CREATE TABLE IF NOT EXISTS broker_orders (
   pnl_pips REAL,
   source TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_broker_orders_deal_ticket ON broker_orders(deal_ticket);
+CREATE INDEX IF NOT EXISTS idx_broker_orders_account_created ON broker_orders(account_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_broker_orders_trade_created ON broker_orders(logical_trade_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_broker_orders_position_created ON broker_orders(position_ticket, created_at);
+CREATE INDEX IF NOT EXISTS idx_broker_orders_order_created ON broker_orders(order_ticket, created_at);
+
+CREATE TABLE IF NOT EXISTS external_closes (
+  account_id TEXT NOT NULL,
+  position_ticket TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  volume REAL,
+  open_price REAL,
+  open_at TEXT,
+  open_deal_ticket TEXT,
+  close_price REAL,
+  close_at TEXT,
+  close_deal_ticket TEXT,
+  pnl_currency REAL,
+  pnl_pips REAL,
+  source TEXT,
+  magic INTEGER NOT NULL DEFAULT 0,
+  comment TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (account_id, position_ticket)
 );
 
 CREATE TABLE IF NOT EXISTS parser_fixtures (

@@ -9,6 +9,7 @@ interface ClosedPositionsAccount {
   id: string;
   accountNumber: string;
   closedTrades?: ClosedTradeRow[];
+  externalCloses?: ClosedTradeRow[];
 }
 
 interface ClosedPositionsTableProps {
@@ -40,10 +41,16 @@ function legSourceTone(source: string, pnl: number): "up" | "down" | "muted" {
 }
 
 function resultTone(result: string): "up" | "down" | "muted" | "warn" {
-  if (result === "TP hit" || result === "Closed by EA") return "up";
-  if (result === "SL hit" || result === "Stop-out") return "down";
-  if (result === "Mixed") return "warn";
+  if (result === "WIN") return "up";
+  if (result === "LOSS") return "down";
+  if (result === "BE") return "muted";
   return "muted";
+}
+
+function netResultLabel(result: string): string {
+  if (result === "WIN") return "Win";
+  if (result === "LOSS") return "Loss";
+  return "BE";
 }
 
 function formatClosedAt(iso: string, locale: string): string {
@@ -82,7 +89,7 @@ export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPosit
   const scoped = aggregate ? accounts : accounts.filter((a) => a.id === focusedAccountId);
 
   const rows: FlatRow[] = scoped.flatMap((account) =>
-    (account.closedTrades ?? []).map((trade) => ({
+    [...(account.closedTrades ?? []), ...(account.externalCloses ?? [])].map((trade) => ({
       ...trade,
       accountNumber: account.accountNumber,
     })),
@@ -164,6 +171,10 @@ export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPosit
             {rows.map((row) => {
               const isOpen = expanded.has(row.tradeId);
               const pnlTone = row.realizedPnl > 0 ? "up" : row.realizedPnl < 0 ? "down" : "muted";
+              const closeReason = row.closeReason ?? row.result;
+              const netResult =
+                row.netResult ??
+                (row.realizedPnl > 0 ? "WIN" : row.realizedPnl < 0 ? "LOSS" : "BE");
               return (
                 <Fragment key={row.tradeId}>
                   <tr className={`closed-positions-row closed-positions-row-${row.origin}`}>
@@ -224,7 +235,7 @@ export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPosit
                         legs={row.tpLegs}
                         hitCount={row.tpHitCount}
                         total={row.tpTotal}
-                        slFired={row.result === "SL hit" || row.result === "Mixed"}
+                        slFired={closeReason === "SL hit" || closeReason === "Mixed"}
                       />
                     </td>
                     <td className={`num-cell closed-positions-pnl ${pnlTone}`}>
@@ -232,8 +243,11 @@ export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPosit
                       {formatNumber(row.realizedPnl, { locale })}
                     </td>
                     <td>
-                      <span className={`closed-positions-result ${resultTone(row.result)}`}>
-                        {row.result}
+                      <span
+                        className={`closed-positions-result ${resultTone(netResult)}`}
+                        title={`Close reason: ${closeReason}`}
+                      >
+                        {netResultLabel(netResult)}
                       </span>
                     </td>
                     <td className="closed-positions-time">
@@ -303,6 +317,9 @@ function ClosedTradeDetail({ row, locale }: { row: FlatRow; locale: string }) {
         <span className="closed-positions-detail-meta">
           {row.symbol} {row.direction} {formatLot(row.volume)} · entry @{" "}
           {formatNumber(row.openPrice, { locale, maximumFractionDigits: 5 })}
+        </span>
+        <span className="closed-positions-detail-meta">
+          Close reason: {row.closeReason ?? row.result}
         </span>
         <span className={`closed-positions-detail-pnl ${row.realizedPnl >= 0 ? "up" : "down"}`}>
           net {row.realizedPnl >= 0 ? "+" : ""}

@@ -1,6 +1,7 @@
 import "./test-setup";
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import packageJson from "../../../package.json";
 import { App, type DashboardSnapshot } from "./App";
 
 afterEach(() => cleanup());
@@ -153,6 +154,72 @@ describe("App dashboard", () => {
     expect(view.getByRole("tab", { name: "Logs" })).toBeTruthy();
   });
 
+  test("account header renders MT5 balance and equity before trading P/L windows", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          accountPerformance: {
+            currency: "USD",
+            initialBalance: 60.64,
+            currentBalance: 12345.67,
+            currentEquity: 15432.1,
+            totalProfit: -137.5,
+            realizedPnl: 61.79,
+            floatingPnl: 38.82,
+            netDeposits: 0,
+            today: 9.04,
+            thisWeek: 9.04,
+            thisMonth: 9.04,
+            equityCurve: [],
+          },
+        }}
+      />,
+    );
+
+    expect(view.getByText("Balance")).toBeTruthy();
+    expect(view.getByText("Equity")).toBeTruthy();
+    expect(view.queryByText("Initial Balance")).toBeNull();
+    expect(view.getByText(/12,345\.67/)).toBeTruthy();
+    expect(view.getByText(/15,432\.10/)).toBeTruthy();
+    expect(view.getByText(/-137\.50/)).toBeTruthy();
+  });
+
+  test("account header does not present stale MT5 telemetry as live PnL", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          mt5Accounts: [{ ...snapshot.mt5Accounts[0]!, heartbeatStatus: "offline" }],
+          accountPerformance: {
+            accountId: "mt5-demo-1",
+            currency: "USD",
+            heartbeatStatus: "offline",
+            lastHeartbeatAt: "2026-05-20T15:11:38.444Z",
+            initialBalance: 60.64,
+            currentBalance: 12345.67,
+            currentEquity: 15432.1,
+            totalProfit: -57.89,
+            realizedPnl: -57.89,
+            floatingPnl: 0,
+            netDeposits: 0,
+            today: -57.89,
+            thisWeek: -57.89,
+            thisMonth: -57.89,
+            equityCurve: [],
+          },
+        }}
+      />,
+    );
+
+    expect(view.getByText("EA OFFLINE")).toBeTruthy();
+    expect(view.queryByText(/12,345\.67/)).toBeNull();
+    expect(view.queryByText("Balance")).toBeTruthy();
+    expect(view.queryByText("Equity")).toBeTruthy();
+    expect(view.queryByText("Trading P/L")).toBeTruthy();
+    expect(view.getAllByText("-57.89").length).toBeGreaterThanOrEqual(3);
+  });
+
   test("shows an empty-state CTA on Live when no account is connected", () => {
     const view = render(
       <App initialSnapshot={{ ...snapshot, mt5Accounts: [], accountSlots: [] }} />,
@@ -271,6 +338,33 @@ describe("App dashboard", () => {
     expect(toggleCall?.init?.method).toBe("PATCH");
     expect(JSON.parse(String(toggleCall?.init?.body))).toEqual({ enabled: true });
     expect(calls.some((call) => call.url === "/api/dashboard")).toBe(true);
+  });
+
+  test("lets the operator export provider performance from the Providers panel", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url).startsWith("/api/providers/performance/export.csv")) {
+        return new Response("title,enabled\nAlpha FX Signals,false\n", {
+          headers: { "content-type": "text/csv" },
+        });
+      }
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+    clickTab(view, "Providers");
+    fireEvent.click(view.getByRole("button", { name: "Export provider performance" }));
+
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) =>
+            call.url === "/api/providers/performance/export.csv?accountId=mt5-demo-1" &&
+            call.init?.method === "GET",
+        ),
+      ).toBe(true),
+    );
   });
 
   test("lets the operator update provider parser mode and channel lot size from the modal", async () => {
@@ -648,6 +742,8 @@ describe("App dashboard", () => {
                   closePrice: 3388.0,
                   realizedPnl: 14,
                   result: "Mixed",
+                  closeReason: "Mixed",
+                  netResult: "WIN",
                   closedAt: "2026-05-18T11:14:28.000Z",
                   tpLegs: [
                     { leg: 1, targetPrice: 3392, hit: true },
@@ -715,11 +811,12 @@ describe("App dashboard", () => {
     clickTab(view, "History");
     clickTab(view, "Closed");
 
-    // Parent row: counts, ticket, symbol, side, result.
+    // Parent row: counts, ticket, symbol, side, compact net result.
     expect(view.getByText(/1 closed trade/)).toBeTruthy();
     expect(view.getByText("#247552341")).toBeTruthy();
     expect(view.getByText("XAUUSD")).toBeTruthy();
-    expect(view.getByText("Mixed")).toBeTruthy();
+    expect(view.getByText("Win")).toBeTruthy();
+    expect(view.queryByText("Mixed")).toBeNull();
     expect(view.getByText("2/4 SL")).toBeTruthy();
 
     // Detail row hidden until expand.
@@ -727,10 +824,73 @@ describe("App dashboard", () => {
 
     fireEvent.click(view.getByRole("button", { name: "Expand trade detail" }));
     expect(view.getByText("trade_a3kZ9X")).toBeTruthy();
+    expect(view.getByText("Close reason: Mixed")).toBeTruthy();
     // Each close event should surface its own source label.
     expect(view.getAllByText("TP1 hit").length).toBeGreaterThan(0);
     expect(view.getAllByText("TP2 hit").length).toBeGreaterThan(0);
     expect(view.getAllByText("SL hit").length).toBeGreaterThan(0);
+  });
+
+  test("History › Closed shows manual closed trades from external MT5 history", () => {
+    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
+      Response.json(snapshot)) as typeof fetch;
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          mt5Accounts: [
+            {
+              ...snapshot.mt5Accounts[0]!,
+              closedTrades: [],
+              externalCloses: [
+                {
+                  tradeId: "external-mt5-demo-1-manual-position-1",
+                  shortId: "manual-position-1",
+                  ticket: "manual-position-1",
+                  symbol: "XAUUSD",
+                  direction: "SELL",
+                  origin: "manual",
+                  volume: 0.01,
+                  openPrice: 4502.17,
+                  closePrice: 4483.63,
+                  realizedPnl: 18.54,
+                  result: "Manual",
+                  closeReason: "Manual",
+                  netResult: "WIN",
+                  closedAt: "2026-05-20T12:46:42.000Z",
+                  tpLegs: [],
+                  tpHitCount: 0,
+                  tpTotal: 0,
+                  legs: [
+                    {
+                      id: "manual-close-1",
+                      action: "FULL_CLOSE",
+                      legId: "trade",
+                      volume: 0.01,
+                      price: 4483.63,
+                      pnl: 18.54,
+                      source: "manual-mobile",
+                      closedAt: "2026-05-20T12:46:42.000Z",
+                      orderTicket: "",
+                      positionTicket: "manual-position-1",
+                      dealTicket: "manual-close-1",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }}
+      />,
+    );
+
+    clickTab(view, "History");
+    clickTab(view, "Closed");
+
+    expect(view.getByText("Manual")).toBeTruthy();
+    expect(view.getByText("#manual-position-1")).toBeTruthy();
+    expect(view.getByText("XAUUSD")).toBeTruthy();
+    expect(view.getByText("Win")).toBeTruthy();
   });
 
   test("History › Open is the default sub-tab and shows EA-vs-external positions", () => {
@@ -905,6 +1065,13 @@ describe("App dashboard", () => {
     });
   });
 
+  test("StatusBar shows last sync and app version", () => {
+    const view = render(<App initialSnapshot={snapshot} />);
+    expect(view.getByText("Last sync:")).toBeTruthy();
+    expect(view.getByText("Version:")).toBeTruthy();
+    expect(view.getByText(packageJson.version)).toBeTruthy();
+  });
+
   test("shows GramJS Telegram adapter as healthy when backend health is OK", () => {
     const view = render(
       <App
@@ -952,5 +1119,63 @@ describe("App dashboard", () => {
     expect(view.getByText("External activity")).toBeTruthy();
     expect(view.getByText("XAUUSD")).toBeTruthy();
     expect(view.getByText(/247564387/)).toBeTruthy();
+  });
+
+  test("loads account statistics only when the Performance statistics subview is opened", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url).startsWith("/api/accounts/mt5-demo-1/stats")) {
+        return Response.json({
+          scope: "account",
+          range: "30d",
+          currency: "USD",
+          generatedAt: "2026-05-21T10:00:00.000Z",
+          profitReturn: { totalPnl: 15, roiPercent: 0.15, bestDay: 25, worstDay: -10 },
+          winLoss: {
+            wins: 1,
+            losses: 1,
+            breakEven: 0,
+            winRate: 0.5,
+            averageWin: 25,
+            averageLoss: -10,
+          },
+          riskDrawdown: {
+            maxDrawdown: 10,
+            maxDrawdownPct: 0.1,
+            currentDrawdown: 5,
+            averageActiveDrawdown: 7.5,
+            recoveryFactor: 1.5,
+          },
+          quality: {
+            profitFactor: 2.5,
+            grossProfit: 25,
+            grossLoss: -10,
+            averageTrade: 7.5,
+            expectancy: 7.5,
+          },
+          streaks: { current: "L1", maxWins: 1, maxLosses: 1 },
+          timing: { averageTradeMinutes: 15, bestWeekday: "Thu", worstWeekday: "Fri" },
+        });
+      }
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+
+    expect(calls.some((call) => call.url.includes("/stats"))).toBe(false);
+    fireEvent.click(view.getByRole("tab", { name: "Statistics" }));
+
+    await view.findByText("Profit / Return");
+    expect(view.getByText("Win / Loss")).toBeTruthy();
+    expect(view.getByText("Risk / Drawdown")).toBeTruthy();
+    expect(view.getByText("15")).toBeTruthy();
+    expect(
+      calls.some(
+        (call) =>
+          call.url === "/api/accounts/mt5-demo-1/stats?range=30d&scope=account" &&
+          call.init?.method === "GET",
+      ),
+    ).toBe(true);
   });
 });

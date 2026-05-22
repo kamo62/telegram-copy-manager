@@ -35,6 +35,18 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain('HttpPostRetry("/mt5/history"');
     expect(source).toContain("DEAL_POSITION_ID");
     expect(source).toContain("DEAL_PROFIT");
+    expect(source).toContain("DEAL_COMMISSION");
+    expect(source).toContain("DEAL_SWAP");
+    expect(source).toContain("DEAL_FEE");
+    expect(source).toContain("DEAL_TIME_MSC");
+    expect(source).toContain('\\"timeMsc\\":%I64d');
+  });
+
+  test("heartbeats account profit alongside balance and equity for diagnostics", () => {
+    expect(source).toContain("ACCOUNT_BALANCE");
+    expect(source).toContain("ACCOUNT_EQUITY");
+    expect(source).toContain("ACCOUNT_PROFIT");
+    expect(source).toContain('\\"profit\\":%.2f');
   });
 
   test("reports external manual history deals so account PnL can realize after close", () => {

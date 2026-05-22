@@ -42,6 +42,7 @@ export function GrowthChart({ data, loading = false }: { data: GrowthSeries; loa
 
       const series = view === "growth" ? data.growth : data.drawdown;
       const isGrowth = view === "growth";
+      const isTimeSeries = series[0].some((value) => value > 1_000_000);
       const opts = {
         width: container.clientWidth || 600,
         height: 320,
@@ -65,7 +66,7 @@ export function GrowthChart({ data, loading = false }: { data: GrowthSeries; loa
               ),
           },
         ],
-        scales: { x: { time: false } },
+        scales: { x: { time: isTimeSeries } },
         legend: { show: false },
         series: [
           { label: "Trades" },
@@ -143,7 +144,9 @@ export function GrowthChart({ data, loading = false }: { data: GrowthSeries; loa
         </div>
       </header>
       {loading ? <SkeletonChart /> : <div className="chart-canvas-wrap" ref={containerRef} />}
-      <footer className="chart-card-foot">Number of trades</footer>
+      <footer className="chart-card-foot">
+        {data.growth[0].some((value) => value > 1_000_000) ? "Time" : "Number of trades"}
+      </footer>
     </section>
   );
 }

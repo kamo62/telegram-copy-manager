@@ -10,6 +10,7 @@ import {
   type OrderType,
   type ParsedSignal,
   parseSignalText,
+  parseSignalTexts,
   type QueueStatus,
   shouldRequireManualReview,
   type TakeProfitStrategy,
@@ -65,9 +66,12 @@ const defaultGlobalAliases = {
 
 const defaultProviderAliases: Record<string, Record<string, string>> = {};
 const CLOSE_VOLUME_EPSILON = 0.000001;
+const EQUITY_CURVE_RETENTION_DAYS = 90;
 
 type SymbolAliasScope = "global" | "provider";
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
+type EquityCurveScope = "account" | "provider";
+type StatsRange = "7d" | "30d" | "90d" | "all";
 
 interface AppSettings {
   defaultLotSize: number;
@@ -507,6 +511,23 @@ export function createApi(options: ApiOptions = {}) {
   );
 
   app.get("/api/account/performance", (c) => c.json(store.accountPerformance()));
+  app.get("/api/accounts/:accountId/stats", (c) =>
+    c.json(
+      store.accountStats(c.req.param("accountId"), {
+        range: c.req.query("range"),
+        scope: c.req.query("scope"),
+        providerId: c.req.query("providerId"),
+      }),
+    ),
+  );
+  app.get("/api/providers/performance/export.csv", (c) => {
+    const csv = store.providerPerformanceCsv(c.req.query("accountId"));
+    const filename = `provider-performance-${new Date(Date.now()).toISOString().slice(0, 10)}.csv`;
+    return c.text(csv, 200, {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="${filename}"`,
+    });
+  });
   app.get("/api/providers/performance", (c) => c.json({ providers: store.providerPerformance() }));
 
   app.post("/api/mt5/register", async (c) => {
@@ -517,6 +538,7 @@ export function createApi(options: ApiOptions = {}) {
       currency: string;
       balance: number;
       equity: number;
+      profit?: number;
       marginMode: "HEDGING" | "NETTING";
       availableSymbols?: string[];
       linkCode?: string;
@@ -533,6 +555,7 @@ export function createApi(options: ApiOptions = {}) {
       accountId: string;
       balance: number;
       equity: number;
+      profit?: number;
       availableSymbols?: string[];
       linkCode?: string;
     }>(c.req.raw);
@@ -717,14 +740,17 @@ interface Mt5HistoryDealInput {
   type?: string;
   /** MT5 ENUM_DEAL_REASON: 0=CLIENT, 1=MOBILE, 2=WEB, 3=EXPERT, 4=SL, 5=TP, 6=SO, 7=ROLLOVER, 8=VMARGIN, 9=SPLIT */
   reason?: number;
+  magic?: number;
   symbol?: string;
   price?: number;
   volume?: number;
   profit?: number;
   commission?: number;
   swap?: number;
+  fee?: number;
   comment?: string;
   time?: string;
+  timeMsc?: number;
 }
 
 interface OperatorStateTableSnapshot {
@@ -799,7 +825,7 @@ class AppStore {
   startTelegramSession(input: { apiId: string; apiHash: string; phone: string }) {
     const profileId = `profile_${nanoid(10)}`;
     const sessionId = `tg_${nanoid(10)}`;
-    const now = new Date().toISOString();
+    const now = nowIso();
     this.db
       .query("INSERT INTO profiles (id, display_name, created_at) VALUES (?, ?, ?)")
       .run(profileId, `Telegram ${maskPhone(input.phone)}`, now);
@@ -816,7 +842,7 @@ class AppStore {
   }
 
   updateTelegramSession(sessionId: string, status: TelegramSessionStatus) {
-    const now = new Date().toISOString();
+    const now = nowIso();
     this.db
       .query("UPDATE telegram_sessions SET status = ?, updated_at = ? WHERE id = ?")
       .run(status, now, sessionId);
@@ -925,7 +951,7 @@ class AppStore {
       input.dialogId === "dialog-alpha"
         ? demoProviderId
         : `provider_${hashHint(input.dialogId).replace(/^api_/, "")}`;
-    const now = new Date().toISOString();
+    const now = nowIso();
     this.db
       .query(
         "INSERT OR IGNORE INTO providers (id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, last_message_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1336,10 +1362,9 @@ class AppStore {
     const before = this.rawMessageCount(providerId);
     for (const message of messages) {
       const parserText = telegramParserText(message);
-      const parsed = parseSignalText(
-        parserText,
-        this.parserContext(providerId, this.defaultParserAccountId()),
-      );
+      const context = this.parserContext(providerId, this.defaultParserAccountId());
+      const parsed = parseSignalText(parserText, context);
+      const parsedSignals = parseSignalTexts(parserText, context);
       this.db
         .query(
           `INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification)
@@ -1353,7 +1378,9 @@ class AppStore {
           message.messageDate,
           parserText,
           parsed.fingerprint,
-          classifyParsedCommand(parsed.commandType),
+          parsedSignals.some((signal) => signal.commandType === "OPEN_TRADE")
+            ? "entry"
+            : classifyParsedCommand(parsed.commandType),
         );
     }
     const after = this.rawMessageCount(providerId);
@@ -1547,9 +1574,10 @@ class AppStore {
     accountId = this.defaultParserAccountId(),
   ) {
     const rawMessageId = `raw_${nanoid(10)}`;
-    const parsedSignalId = `parse_${nanoid(10)}`;
     const now = new Date().toISOString();
-    const result = parseSignalText(rawText, this.parserContext(providerId, accountId));
+    const context = this.parserContext(providerId, accountId);
+    const firstResult = parseSignalText(rawText, context);
+    const results = parseSignalTexts(rawText, context);
     this.db
       .query(
         "INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1560,27 +1588,22 @@ class AppStore {
         `manual-${Date.now()}`,
         now,
         rawText,
-        result.fingerprint,
+        firstResult.fingerprint,
         "unknown",
       );
-    this.db
-      .query(
-        "INSERT INTO parsed_signals (id, provider_id, raw_message_id, result_json, review_required, fingerprint, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-      .run(
-        parsedSignalId,
-        providerId,
-        rawMessageId,
-        JSON.stringify(result),
-        Number(shouldRequireManualReview(result)),
-        result.fingerprint,
-        "PARSED",
-        now,
-      );
+    const parsedSignals = this.insertParsedSignalRows({
+      providerId,
+      rawMessageId,
+      results,
+      createdAt: now,
+    });
+    const first = parsedSignals[0]!;
     return {
-      parsedSignalId,
-      reviewRequired: shouldRequireManualReview(result),
-      result,
+      parsedSignalId: first.parsedSignalId,
+      parsedSignalIds: parsedSignals.map((signal) => signal.parsedSignalId),
+      reviewRequired: first.reviewRequired,
+      result: first.result,
+      results: parsedSignals.map((signal) => signal.result),
     };
   }
 
@@ -2005,6 +2028,7 @@ class AppStore {
     currency: string;
     balance: number;
     equity: number;
+    profit?: number;
     marginMode: "HEDGING" | "NETTING";
     availableSymbols?: string[];
     linkCode?: string;
@@ -2014,18 +2038,19 @@ class AppStore {
       return { statusCode: 404, error: "Account slot link code was not found" };
     }
     const accountId = `mt5-${input.accountNumber}`;
-    const now = new Date().toISOString();
+    const now = nowIso();
     this.db
       .query(
         `INSERT INTO mt5_accounts
-          (id, account_number, server, company, currency, balance, equity, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, account_number, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
           server = excluded.server,
           company = excluded.company,
           currency = excluded.currency,
           balance = excluded.balance,
           equity = excluded.equity,
+          profit = excluded.profit,
           margin_mode = excluded.margin_mode,
           heartbeat_status = excluded.heartbeat_status,
           available_symbols_json = excluded.available_symbols_json,
@@ -2039,6 +2064,7 @@ class AppStore {
         input.currency,
         input.balance,
         input.equity,
+        input.profit ?? null,
         input.balance,
         input.marginMode,
         "online",
@@ -2065,6 +2091,7 @@ class AppStore {
     accountId: string;
     balance: number;
     equity: number;
+    profit?: number;
     availableSymbols?: string[];
     linkCode?: string;
   }) {
@@ -2082,14 +2109,15 @@ class AppStore {
         };
       }
     }
-    const now = new Date().toISOString();
+    const now = nowIso();
     this.db
       .query(
-        "UPDATE mt5_accounts SET balance = ?, equity = ?, heartbeat_status = ?, available_symbols_json = ?, last_heartbeat_at = ? WHERE id = ?",
+        "UPDATE mt5_accounts SET balance = ?, equity = ?, profit = ?, heartbeat_status = ?, available_symbols_json = ?, last_heartbeat_at = ? WHERE id = ?",
       )
       .run(
         input.balance,
         input.equity,
+        input.profit ?? null,
         "online",
         JSON.stringify(input.availableSymbols ?? []),
         now,
@@ -2114,6 +2142,7 @@ class AppStore {
           .run(input.accountId, input.balance, input.equity, now, now, "linked", slot.id);
       }
     }
+    this.recordEquityCurveSamples(input, now);
     return { accountId: input.accountId, heartbeatStatus: "online", at: now };
   }
 
@@ -2412,23 +2441,37 @@ class AppStore {
 
   saveBrokerHistory(input: { accountId: string; deals: Mt5HistoryDealInput[] }) {
     let recorded = 0;
-    for (const deal of input.deals) {
+    let updated = 0;
+    let repairedPnlDelta = 0;
+    const deals = this.relevantHistoryDeals(input.accountId, input.deals);
+    const existingByDealTicket = this.brokerOrdersByDealTicket(
+      deals.map((deal) => deal.dealTicket).filter((ticket): ticket is string => Boolean(ticket)),
+    );
+    for (const deal of deals) {
       if (!deal.dealTicket) continue;
-      const exists = this.db
-        .query("SELECT id FROM broker_orders WHERE deal_ticket = ? LIMIT 1")
-        .get(deal.dealTicket) as Row | null;
-      if (exists) continue;
-      const tradeId =
-        this.logicalTradeIdForHistoryDeal(deal) ?? externalHistoryTradeId(input.accountId, deal);
+      const exists = existingByDealTicket.get(deal.dealTicket) ?? null;
+      const source = brokerOrderSourceForDealReason(deal.reason);
+      const pnlCurrency = historyDealCurrencyPnl(deal);
+      const createdAt = historyDealTimestamp(deal);
+      const matchedTradeId = this.logicalTradeIdForHistoryDeal(deal);
+      const tradeId = matchedTradeId ?? externalHistoryTradeId(input.accountId, deal);
       if (!tradeId || !deal.symbol || !deal.volume) continue;
       const open = this.openBrokerOrderForDeal(tradeId, deal);
       const positionTicket = String(deal.positionTicket || open?.position_ticket || "");
       const positionStillOpen = this.positionStillOpen(input.accountId, positionTicket);
-      const action = this.logicalTrade(tradeId)
-        ? this.historyDealActionForTrade(tradeId, deal, positionTicket, positionStillOpen)
-        : historyDealAction(deal, positionStillOpen);
-      const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
       const trade = this.logicalTrade(tradeId);
+      const inferredAction = trade
+        ? this.historyDealActionForTrade(
+            tradeId,
+            deal,
+            positionTicket,
+            positionStillOpen,
+            createdAt,
+            exists ? String(exists.id) : undefined,
+          )
+        : historyDealAction(deal, positionStillOpen);
+      const action = brokerHistoryAction(String(exists?.action ?? ""), inferredAction);
+      const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
       const signedPips =
         trade && openPrice && deal.price
           ? trade?.direction === "SELL"
@@ -2439,7 +2482,88 @@ class AppStore {
         signedPips !== null
           ? Number((signedPips / brokerPipSize(deal.symbol ?? "")).toFixed(1))
           : null;
-      const source = brokerOrderSourceForDealReason(deal.reason);
+      if (exists) {
+        const next = {
+          legId: historyDealLegId(deal),
+          action,
+          orderTicket: deal.orderTicket ?? String(exists.order_ticket ?? ""),
+          positionTicket: deal.positionTicket ?? String(exists.position_ticket ?? ""),
+          filledVolume: deal.volume ?? nullableNumber(exists.filled_volume) ?? null,
+          filledPrice: deal.price ?? nullableNumber(exists.filled_price) ?? null,
+          brokerComment: deal.comment ?? String(exists.broker_comment ?? "MT5 history deal"),
+          pnlCurrency,
+          pnlPips,
+          source,
+          createdAt,
+        };
+        if (brokerHistoryRowMatches(exists, next)) {
+          continue;
+        }
+        const oldPnl = nullableNumber(exists.pnl_currency);
+        const delta = roundCurrency(pnlCurrency - (oldPnl ?? 0));
+        const oldPips = nullableNumber(exists.pnl_pips);
+        const pipsDelta = pnlPips === null ? 0 : Number((pnlPips - (oldPips ?? 0)).toFixed(1));
+        this.db
+          .query(
+            `UPDATE broker_orders
+             SET leg_id = ?,
+                 action = ?,
+                 order_ticket = ?,
+                 position_ticket = ?,
+                 filled_volume = ?,
+                 filled_price = ?,
+                 broker_comment = ?,
+                 pnl_currency = ?,
+                 pnl_pips = ?,
+                 source = ?,
+                 created_at = ?
+             WHERE id = ?`,
+          )
+          .run(
+            next.legId,
+            next.action,
+            next.orderTicket,
+            next.positionTicket,
+            next.filledVolume,
+            next.filledPrice,
+            next.brokerComment,
+            next.pnlCurrency,
+            next.pnlPips,
+            next.source,
+            next.createdAt,
+            String(exists.id),
+          );
+        updated += 1;
+        repairedPnlDelta = roundCurrency(repairedPnlDelta + delta);
+        existingByDealTicket.set(deal.dealTicket, {
+          ...exists,
+          leg_id: next.legId,
+          action: next.action,
+          order_ticket: next.orderTicket,
+          position_ticket: next.positionTicket,
+          filled_volume: next.filledVolume,
+          filled_price: next.filledPrice,
+          broker_comment: next.brokerComment,
+          pnl_currency: next.pnlCurrency,
+          pnl_pips: next.pnlPips,
+          source: next.source,
+          created_at: next.createdAt,
+        });
+        if (trade) {
+          this.reconcileHistoryDeal(tradeId, deal, action, source, positionTicket);
+        } else {
+          this.recordExternalHistoryDeal(
+            input.accountId,
+            deal,
+            action,
+            source,
+            delta,
+            pipsDelta,
+            createdAt,
+          );
+        }
+        continue;
+      }
       // If a snapshot-diff synthetic 'manual' close was written first (it
       // races the broker's history sweep by a few seconds), delete it before
       // recording the real close — otherwise the trade would show two close
@@ -2484,17 +2608,161 @@ class AppStore {
           0,
           0,
           deal.comment ?? "MT5 history deal",
-          Number(((deal.profit ?? 0) + (deal.commission ?? 0) + (deal.swap ?? 0)).toFixed(2)),
+          pnlCurrency,
           pnlPips,
           source,
-          deal.time ?? new Date().toISOString(),
+          createdAt,
         );
+      if (!trade) {
+        this.recordExternalHistoryDeal(
+          input.accountId,
+          deal,
+          action,
+          source,
+          pnlCurrency,
+          pnlPips,
+          createdAt,
+        );
+      }
       if (trade) {
         this.reconcileHistoryDeal(tradeId, deal, action, source, positionTicket);
       }
       recorded += 1;
     }
-    return { accountId: input.accountId, received: input.deals.length, recorded };
+    if (updated > 0) {
+      this.audit("mt5.history.repair", "info", "MT5 history repaired existing broker P/L rows", {
+        accountId: input.accountId,
+        repairedRows: updated,
+        totalPnlDelta: repairedPnlDelta,
+      });
+    }
+    return {
+      accountId: input.accountId,
+      received: input.deals.length,
+      recorded,
+      updated,
+      repairedPnlDelta,
+    };
+  }
+
+  private relevantHistoryDeals(accountId: string, deals: Mt5HistoryDealInput[]) {
+    if (deals.length < 1000) return deals;
+    const latest = this.db
+      .query("SELECT MAX(created_at) AS latest FROM broker_orders WHERE account_id = ?")
+      .get(accountId) as Row | null;
+    const latestTime = Date.parse(normalizedDateInput(String(latest?.latest ?? "")));
+    if (!Number.isFinite(latestTime)) return deals;
+    const cutoffTime = latestTime - 3 * 60 * 60 * 1000;
+    return deals.filter((deal) => {
+      const dealTime = Date.parse(normalizedDateInput(historyDealTimestamp(deal)));
+      return !Number.isFinite(dealTime) || dealTime >= cutoffTime;
+    });
+  }
+
+  private brokerOrdersByDealTicket(dealTickets: string[]) {
+    const rows = new Map<string, Row>();
+    const uniqueTickets = [...new Set(dealTickets)];
+    const chunkSize = 500;
+    for (let index = 0; index < uniqueTickets.length; index += chunkSize) {
+      const chunk = uniqueTickets.slice(index, index + chunkSize);
+      if (chunk.length === 0) continue;
+      const placeholders = chunk.map(() => "?").join(", ");
+      for (const row of this.db
+        .query(`SELECT * FROM broker_orders WHERE deal_ticket IN (${placeholders})`)
+        .all(...chunk) as Row[]) {
+        rows.set(String(row.deal_ticket), row);
+      }
+    }
+    return rows;
+  }
+
+  private recordExternalHistoryDeal(
+    accountId: string,
+    deal: Mt5HistoryDealInput,
+    action: string,
+    source: string,
+    pnlCurrency: number,
+    pnlPips: number | null,
+    createdAt: string,
+  ) {
+    const positionTicket = String(deal.positionTicket || deal.orderTicket || deal.dealTicket || "");
+    if (!positionTicket || !deal.symbol) return;
+    const existing = this.db
+      .query("SELECT * FROM external_closes WHERE account_id = ? AND position_ticket = ?")
+      .get(accountId, positionTicket) as Row | null;
+    const now = new Date().toISOString();
+    const direction =
+      action === "OPEN"
+        ? directionFromOpenDealType(deal.type)
+        : String(existing?.direction ?? "") || directionFromCloseDealType(deal.type);
+    this.db
+      .query(
+        `INSERT INTO external_closes
+          (account_id, position_ticket, symbol, direction, volume, pnl_currency, pnl_pips, source, magic, comment, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(account_id, position_ticket) DO UPDATE SET
+          symbol = excluded.symbol,
+          direction = CASE WHEN external_closes.direction = '' THEN excluded.direction ELSE external_closes.direction END,
+          volume = COALESCE(external_closes.volume, excluded.volume),
+          pnl_currency = COALESCE(external_closes.pnl_currency, 0) + COALESCE(excluded.pnl_currency, 0),
+          pnl_pips = COALESCE(external_closes.pnl_pips, 0) + COALESCE(excluded.pnl_pips, 0),
+          source = excluded.source,
+          magic = excluded.magic,
+          comment = excluded.comment,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        accountId,
+        positionTicket,
+        deal.symbol,
+        direction,
+        deal.volume ?? null,
+        action === "OPEN" ? 0 : pnlCurrency,
+        action === "OPEN" ? 0 : (pnlPips ?? 0),
+        source,
+        Number(deal.magic ?? 0),
+        deal.comment ?? "",
+        now,
+        now,
+      );
+
+    if (action === "OPEN") {
+      this.db
+        .query(
+          `UPDATE external_closes
+           SET direction = ?,
+               volume = ?,
+               open_price = ?,
+               open_at = ?,
+               open_deal_ticket = ?,
+               updated_at = ?
+           WHERE account_id = ? AND position_ticket = ?`,
+        )
+        .run(
+          directionFromOpenDealType(deal.type),
+          deal.volume ?? null,
+          deal.price ?? null,
+          createdAt,
+          deal.dealTicket,
+          now,
+          accountId,
+          positionTicket,
+        );
+      return;
+    }
+
+    if (action === "FULL_CLOSE") {
+      this.db
+        .query(
+          `UPDATE external_closes
+           SET close_price = ?,
+               close_at = ?,
+               close_deal_ticket = ?,
+               updated_at = ?
+           WHERE account_id = ? AND position_ticket = ?`,
+        )
+        .run(deal.price ?? null, createdAt, deal.dealTicket, now, accountId, positionTicket);
+    }
   }
 
   private originalOpenQueue(tradeId: string) {
@@ -2821,16 +3089,22 @@ class AppStore {
     return volume && volume > 0 ? volume : undefined;
   }
 
-  private closeVolumeForTrade(tradeId: string, positionTicket?: string) {
+  private closeVolumeBeforeDeal(
+    tradeId: string,
+    positionTicket: string | undefined,
+    createdAt: string,
+    currentDealTicket?: string,
+    existingBrokerOrderId?: string,
+  ) {
     const params = [tradeId];
     let ticketFilter = "";
     if (truthyBrokerTicket(positionTicket)) {
       ticketFilter = "AND position_ticket = ?";
       params.push(positionTicket);
     }
-    const row = this.db
+    const rows = this.db
       .query(
-        `SELECT COALESCE(SUM(filled_volume), 0) AS volume
+        `SELECT id, deal_ticket, filled_volume, created_at
          FROM broker_orders
          WHERE logical_trade_id = ?
            ${ticketFilter}
@@ -2838,20 +3112,50 @@ class AppStore {
            AND filled_volume IS NOT NULL
            AND filled_volume > 0`,
       )
-      .get(...params) as Row | null;
-    return nullableNumber(row?.volume) ?? 0;
+      .all(...params) as Row[];
+    const currentTime = Date.parse(normalizedDateInput(createdAt));
+    const currentDealNumber = numericTicket(currentDealTicket);
+    return rows.reduce((sum, row) => {
+      if (existingBrokerOrderId && String(row.id) === existingBrokerOrderId) return sum;
+      const rowDealNumber = numericTicket(String(row.deal_ticket ?? ""));
+      if (
+        currentDealNumber !== null &&
+        rowDealNumber !== null &&
+        rowDealNumber < currentDealNumber
+      ) {
+        return sum + (nullableNumber(row.filled_volume) ?? 0);
+      }
+      const rowCreatedAt = String(row.created_at ?? "");
+      const rowTime = Date.parse(normalizedDateInput(rowCreatedAt));
+      if (Number.isFinite(currentTime)) {
+        if (!Number.isFinite(rowTime) || rowTime >= currentTime) return sum;
+      } else if (rowCreatedAt >= createdAt) {
+        return sum;
+      }
+      return sum + (nullableNumber(row.filled_volume) ?? 0);
+    }, 0);
   }
 
   private closeVolumeCoversOpen(
     tradeId: string,
     positionTicket: string | undefined,
     nextCloseVolume: number | undefined,
+    createdAt: string,
+    currentDealTicket?: string,
+    existingBrokerOrderId?: string,
   ) {
     const openVolume = this.openVolumeForTrade(tradeId, positionTicket);
     const volume = nullableNumber(nextCloseVolume);
     if (!openVolume || !volume || volume <= 0) return false;
     return (
-      this.closeVolumeForTrade(tradeId, positionTicket) + volume >=
+      this.closeVolumeBeforeDeal(
+        tradeId,
+        positionTicket,
+        createdAt,
+        currentDealTicket,
+        existingBrokerOrderId,
+      ) +
+        volume >=
       openVolume - CLOSE_VOLUME_EPSILON
     );
   }
@@ -2861,10 +3165,21 @@ class AppStore {
     deal: Mt5HistoryDealInput,
     positionTicket: string,
     positionStillOpen: boolean,
+    createdAt: string,
+    existingBrokerOrderId?: string,
   ) {
     const action = historyDealAction(deal, positionStillOpen);
-    if (action !== "PARTIAL_CLOSE") return action;
-    return this.closeVolumeCoversOpen(tradeId, positionTicket, deal.volume) ? "FULL_CLOSE" : action;
+    if (action === "OPEN") return action;
+    return this.closeVolumeCoversOpen(
+      tradeId,
+      positionTicket,
+      deal.volume,
+      createdAt,
+      deal.dealTicket,
+      existingBrokerOrderId,
+    )
+      ? "FULL_CLOSE"
+      : "PARTIAL_CLOSE";
   }
 
   private reconcileHistoryDeal(
@@ -2882,6 +3197,7 @@ class AppStore {
     let updated: LogicalTrade = trade;
     let closedLeg: number | undefined;
     if (action === "OPEN") {
+      if (trade.status === "CLOSED" || this.hasRecordedRealFullClose(tradeId)) return;
       updated = {
         ...trade,
         status: "OPEN",
@@ -2941,7 +3257,7 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, account_number, server, company, currency, balance, equity, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at FROM mt5_accounts ORDER BY account_number",
+          "SELECT id, account_number, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at FROM mt5_accounts ORDER BY account_number",
         )
         .all() as Row[]
     ).map((row) => {
@@ -2971,6 +3287,7 @@ class AppStore {
         currency: String(row.currency),
         balance: Number(row.balance),
         equity: Number(row.equity),
+        profit: nullableNumber(row.profit),
         initialBalance: Number(row.initial_balance ?? row.balance),
         marginMode: String(row.margin_mode),
         heartbeatStatus: heartbeatFreshness(String(row.last_heartbeat_at)),
@@ -2991,6 +3308,7 @@ class AppStore {
         // `closedTradesForAccount` for the shape; broker-level leg detail is
         // nested under each trade for the expand-row UX.
         closedTrades: this.closedTradesForAccount(accountId),
+        externalCloses: this.externalClosesForAccount(accountId),
         lastSnapshotAt: snap?.updatedAt,
       };
     });
@@ -3296,7 +3614,11 @@ class AppStore {
            FROM broker_orders WHERE logical_trade_id = ? ORDER BY created_at ASC`,
         )
         .all(logicalTradeId) as Row[]
-    ).map((row) => ({
+    ).map((row) => this.brokerOrderFromRow(row));
+  }
+
+  private brokerOrderFromRow(row: Row) {
+    return {
       id: String(row.id),
       logicalTradeId: String(row.logical_trade_id),
       legId: String(row.leg_id),
@@ -3317,7 +3639,7 @@ class AppStore {
       pnlPips: nullableNumber(row.pnl_pips),
       source: String(row.source),
       createdAt: String(row.created_at),
-    }));
+    };
   }
 
   accountPerformance() {
@@ -3326,8 +3648,16 @@ class AppStore {
     if (!primary) {
       return {
         currency: "$",
+        heartbeatStatus: "offline",
+        lastHeartbeatAt: null,
         initialBalance: null,
+        currentBalance: null,
+        currentEquity: null,
+        currentProfit: null,
         totalProfit: null,
+        realizedPnl: null,
+        floatingPnl: null,
+        netDeposits: null,
         today: null,
         thisWeek: null,
         thisMonth: null,
@@ -3338,37 +3668,57 @@ class AppStore {
     const initial = primary.initialBalance || primary.balance;
     const accountOrders = this.brokerOrdersForAccount(primary.id);
     const realizedPnl = sumPnl(accountOrders);
-    const floatingPnl = floatingPnlFromPositions(
-      this.mt5SnapshotsByAccount()[primary.id]?.positions ?? [],
-    );
-    const totalProfit = roundCurrency(realizedPnl + floatingPnl);
-    const netDeposits = roundCurrency(primary.equity - initial - totalProfit);
+    const isOnline = primary.heartbeatStatus === "online";
+    const brokerFloatingPnl = isOnline ? nullableNumber(primary.profit) : null;
+    const floatingPnl = isOnline
+      ? (brokerFloatingPnl ??
+        roundCurrency(
+          Number.isFinite(primary.equity) && Number.isFinite(primary.balance)
+            ? primary.equity - primary.balance
+            : floatingPnlFromPositions(this.mt5SnapshotsByAccount()[primary.id]?.positions ?? []),
+        ))
+      : null;
+    const totalProfit = floatingPnl === null ? null : roundCurrency(realizedPnl + floatingPnl);
+    const netDeposits =
+      isOnline && totalProfit !== null
+        ? roundCurrency(primary.equity - initial - totalProfit)
+        : null;
+    const today = sumPnl(accountOrders.filter((order) => withinCurrentDay(order.createdAt)));
+    const thisWeek = sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 7)));
+    const thisMonth = sumPnl(accountOrders.filter((order) => withinCurrentMonth(order.createdAt)));
     return {
       accountId: primary.id,
       currency: primary.currency,
+      heartbeatStatus: primary.heartbeatStatus,
+      lastHeartbeatAt: primary.lastHeartbeatAt,
       initialBalance: initial,
-      currentBalance: primary.balance,
-      currentEquity: primary.equity,
+      currentBalance: isOnline ? primary.balance : null,
+      currentEquity: isOnline ? primary.equity : null,
+      currentProfit: floatingPnl,
       totalProfit,
       realizedPnl,
       floatingPnl,
       netDeposits,
-      today: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 1))),
-      thisWeek: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 7))),
-      thisMonth: sumPnl(accountOrders.filter((order) => withinCurrentMonth(order.createdAt))),
+      today,
+      thisWeek,
+      thisMonth,
       equityCurve: this.equityCurve(primary.id, initial, accountOrders),
-      monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders, floatingPnl),
+      monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders, floatingPnl ?? 0),
     };
   }
 
-  providerPerformance() {
+  providerPerformance(accountId?: string) {
     return this.providers().map((provider) => {
-      const trades = this.logicalTrades().filter((trade) => trade.providerId === provider.id);
+      const trades = this.logicalTrades().filter(
+        (trade) =>
+          trade.providerId === provider.id && (!accountId || trade.accountId === accountId),
+      );
       const orders = trades.flatMap((trade) => this.brokerOrders(trade.id));
       const pnl = orders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0);
       const pips = orders.reduce((sum, order) => sum + (order.pnlPips ?? 0), 0);
       const pnlByTrade = trades.map((trade) => sumPnl(this.brokerOrders(trade.id)));
       const closed = pnlByTrade.filter((value) => value !== 0);
+      const copiedDrawdown = this.maxCurveDrawdown("provider", accountId, provider.id);
       return {
         id: provider.id,
         title: provider.title,
@@ -3390,9 +3740,579 @@ class AppStore {
           ).toFixed(2),
         ),
         winRate: closed.length ? closed.filter((value) => value > 0).length / closed.length : 0,
-        averageDrawdown: 0,
+        averageDrawdown: this.averageCurveDrawdown("provider", accountId, provider.id),
+        copiedDrawdown,
       };
     });
+  }
+
+  providerPerformanceCsv(accountId?: string) {
+    const accounts = this.mt5Accounts();
+    const links = this.accountProviderLinks();
+    const rows = this.providerPerformance(accountId);
+    const header = [
+      "title",
+      "enabled",
+      "linked_accounts",
+      "lots",
+      "pips",
+      "win_rate",
+      "avg_drawdown",
+      "p_l",
+      "profit",
+      "gain",
+      "trade_count",
+      "copied_drawdown",
+    ];
+    const lines = rows.map((row) => {
+      const provider = this.providers().find((item) => item.id === row.id);
+      const linked = links
+        .filter(
+          (link) =>
+            link.providerId === row.id &&
+            link.enabled &&
+            (!accountId || link.accountId === accountId),
+        )
+        .map(
+          (link) =>
+            accounts.find((account) => account.id === link.accountId)?.accountNumber ??
+            link.accountId,
+        );
+      return [
+        row.title,
+        provider?.enabled ? "true" : "false",
+        linked.join("; "),
+        row.lots,
+        roundCurrency(row.pips),
+        Number((row.winRate * 100).toFixed(2)),
+        row.averageDrawdown,
+        roundCurrency(row.pnl),
+        roundCurrency(row.profit),
+        row.gain,
+        row.tradeCount,
+        row.copiedDrawdown,
+      ]
+        .map(csvCell)
+        .join(",");
+    });
+    return `${header.join(",")}\n${lines.join("\n")}${lines.length ? "\n" : ""}`;
+  }
+
+  accountStats(
+    accountId: string,
+    input: { range?: string; scope?: string; providerId?: string } = {},
+  ) {
+    const range = normalizeStatsRange(input.range);
+    const providerId = input.providerId?.trim() || "";
+    const scope: EquityCurveScope =
+      input.scope === "provider" && providerId ? "provider" : "account";
+    const from = statsRangeStart(range);
+    const account = this.mt5Accounts().find((item) => item.id === accountId);
+    const trades = this.closedTradeStats(accountId, { from, providerId, scope });
+    const totalPnl = roundCurrency(trades.reduce((sum, trade) => sum + trade.pnl, 0));
+    const wins = trades.filter((trade) => trade.pnl > 0);
+    const losses = trades.filter((trade) => trade.pnl < 0);
+    const breakEven = trades.filter((trade) => trade.pnl === 0);
+    const grossProfit = roundCurrency(wins.reduce((sum, trade) => sum + trade.pnl, 0));
+    const grossLoss = roundCurrency(losses.reduce((sum, trade) => sum + trade.pnl, 0));
+    const averageWin = wins.length ? roundCurrency(grossProfit / wins.length) : 0;
+    const averageLoss = losses.length ? roundCurrency(grossLoss / losses.length) : 0;
+    const expectancy = trades.length ? roundCurrency(totalPnl / trades.length) : 0;
+    const byDay = pnlByCalendarDay(trades);
+    const byWeekday = pnlByWeekday(trades);
+    const risk = this.curveRiskStats(scope, accountId, scope === "provider" ? providerId : "");
+    risk.recoveryFactor =
+      risk.maxDrawdown > 0 ? Number((totalPnl / risk.maxDrawdown).toFixed(2)) : 0;
+    const initial = account?.initialBalance || account?.balance || 0;
+    const durations = trades
+      .map((trade) => trade.durationMinutes)
+      .filter((value): value is number => value !== undefined && Number.isFinite(value));
+    return {
+      accountId,
+      providerId: scope === "provider" ? providerId : undefined,
+      scope,
+      range,
+      currency: account?.currency ?? "$",
+      generatedAt: nowIso(),
+      profitReturn: {
+        totalPnl,
+        roiPercent: initial > 0 ? Number(((totalPnl / initial) * 100).toFixed(2)) : 0,
+        bestDay: bestMapValue(byDay),
+        worstDay: worstMapValue(byDay),
+      },
+      winLoss: {
+        wins: wins.length,
+        losses: losses.length,
+        breakEven: breakEven.length,
+        winRate: trades.length ? Number((wins.length / trades.length).toFixed(4)) : 0,
+        averageWin,
+        averageLoss,
+      },
+      riskDrawdown: risk,
+      quality: {
+        profitFactor:
+          grossLoss < 0
+            ? Number((grossProfit / Math.abs(grossLoss)).toFixed(2))
+            : grossProfit > 0
+              ? 999
+              : 0,
+        grossProfit,
+        grossLoss,
+        averageTrade: expectancy,
+        expectancy,
+      },
+      streaks: streakStats(trades),
+      timing: {
+        averageTradeMinutes: durations.length
+          ? Number((durations.reduce((sum, value) => sum + value, 0) / durations.length).toFixed(1))
+          : 0,
+        bestWeekday: bestMapKey(byWeekday),
+        worstWeekday: worstMapKey(byWeekday),
+      },
+    };
+  }
+
+  private recordEquityCurveSamples(
+    input: {
+      accountId: string;
+      balance: number;
+      equity: number;
+      profit?: number;
+    },
+    sampledAt: string,
+  ) {
+    const accountContributor = {
+      brokerProfit: input.profit ?? null,
+      externalFloatingPnl: this.externalFloatingPnl(input.accountId),
+    };
+    const accountState = this.updateEquityCurveState({
+      scope: "account",
+      accountId: input.accountId,
+      providerId: "",
+      value: input.equity,
+      initialPeak: input.balance,
+      sampledAt,
+      contributor: accountContributor,
+    });
+    this.upsertEquityCurvePoint({
+      scope: "account",
+      accountId: input.accountId,
+      providerId: "",
+      bucketStart: minuteBucket(sampledAt),
+      value: input.equity,
+      balance: input.balance,
+      brokerProfit: input.profit ?? null,
+      externalFloatingPnl: accountContributor.externalFloatingPnl,
+      realizedPnl: null,
+      floatingPnl: input.profit ?? null,
+      netPnl: input.equity,
+      drawdownAmount: accountState.drawdownAmount,
+      drawdownPct: accountState.drawdownPct,
+      openTradeIds: [],
+      positionTickets: [],
+      updatedAt: sampledAt,
+    });
+
+    for (const sample of this.providerEquitySamples(input.accountId)) {
+      const providerState = this.updateEquityCurveState({
+        scope: "provider",
+        accountId: input.accountId,
+        providerId: sample.providerId,
+        value: sample.netPnl,
+        initialPeak: 0,
+        sampledAt,
+        contributor: {
+          openTradeIds: sample.openTradeIds,
+          positionTickets: sample.positionTickets,
+          floatingPnl: sample.floatingPnl,
+          realizedPnl: sample.realizedPnl,
+        },
+      });
+      this.upsertEquityCurvePoint({
+        scope: "provider",
+        accountId: input.accountId,
+        providerId: sample.providerId,
+        bucketStart: minuteBucket(sampledAt),
+        value: sample.netPnl,
+        balance: null,
+        brokerProfit: null,
+        externalFloatingPnl: 0,
+        realizedPnl: sample.realizedPnl,
+        floatingPnl: sample.floatingPnl,
+        netPnl: sample.netPnl,
+        drawdownAmount: providerState.drawdownAmount,
+        drawdownPct: providerState.drawdownPct,
+        openTradeIds: sample.openTradeIds,
+        positionTickets: sample.positionTickets,
+        updatedAt: sampledAt,
+      });
+    }
+    this.pruneEquityCurvePoints(sampledAt);
+  }
+
+  private providerEquitySamples(accountId: string) {
+    const snapshot = this.mt5SnapshotsByAccount()[accountId];
+    const positions = snapshot?.positions ?? [];
+    const trades = this.logicalTrades().filter(
+      (trade) => trade.accountId === accountId && trade.providerId,
+    );
+    const grouped = new Map<
+      string,
+      {
+        providerId: string;
+        realizedPnl: number;
+        floatingPnl: number;
+        netPnl: number;
+        openTradeIds: string[];
+        positionTickets: string[];
+      }
+    >();
+    for (const trade of trades) {
+      if (!trade.providerId) continue;
+      const current = grouped.get(trade.providerId) ?? {
+        providerId: trade.providerId,
+        realizedPnl: 0,
+        floatingPnl: 0,
+        netPnl: 0,
+        openTradeIds: [],
+        positionTickets: [],
+      };
+      current.realizedPnl = roundCurrency(
+        current.realizedPnl + sumPnl(this.brokerOrders(trade.id)),
+      );
+      const match = matchedBrokerRecordForTrade(
+        positions,
+        trade,
+        this.brokerOrderTicketsForTrade(trade.id),
+      );
+      if (match) {
+        current.openTradeIds.push(trade.id);
+        const ticket = brokerTicketFromSnapshot(match);
+        if (ticket) current.positionTickets.push(ticket);
+        current.floatingPnl = roundCurrency(
+          current.floatingPnl + (nullableNumber((match as Record<string, unknown>).profit) ?? 0),
+        );
+      }
+      current.netPnl = roundCurrency(current.realizedPnl + current.floatingPnl);
+      grouped.set(trade.providerId, current);
+    }
+    return [...grouped.values()];
+  }
+
+  private externalFloatingPnl(accountId: string) {
+    const positions = this.mt5SnapshotsByAccount()[accountId]?.positions ?? [];
+    return floatingPnlFromPositions(positions.filter(isExternalSnapshotRecord));
+  }
+
+  private updateEquityCurveState(input: {
+    scope: EquityCurveScope;
+    accountId: string;
+    providerId: string;
+    value: number;
+    initialPeak: number;
+    sampledAt: string;
+    contributor: unknown;
+  }) {
+    const existing = this.db
+      .query(
+        `SELECT peak_value, max_drawdown_amount, max_drawdown_pct
+         FROM equity_curve_state
+         WHERE scope = ? AND account_id = ? AND provider_id = ?`,
+      )
+      .get(input.scope, input.accountId, input.providerId) as Row | null;
+    const fallbackPeak =
+      input.scope === "provider"
+        ? Math.max(0, input.value)
+        : Math.max(input.initialPeak, input.value);
+    const peakValue = Math.max(nullableNumber(existing?.peak_value) ?? fallbackPeak, input.value);
+    const drawdownAmount = roundCurrency(Math.max(0, peakValue - input.value));
+    const drawdownPct = peakValue > 0 ? Number(((drawdownAmount / peakValue) * 100).toFixed(2)) : 0;
+    const previousMax = nullableNumber(existing?.max_drawdown_amount) ?? 0;
+    const maxDrawdownAmount = Math.max(previousMax, drawdownAmount);
+    const maxDrawdownPct =
+      drawdownAmount >= previousMax
+        ? drawdownPct
+        : (nullableNumber(existing?.max_drawdown_pct) ?? 0);
+    const contributorJson = JSON.stringify(input.contributor ?? {});
+    this.db
+      .query(
+        `INSERT INTO equity_curve_state
+          (scope, account_id, provider_id, peak_value, latest_value, max_drawdown_amount, max_drawdown_pct, max_drawdown_at, contributor_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(scope, account_id, provider_id) DO UPDATE SET
+          peak_value = excluded.peak_value,
+          latest_value = excluded.latest_value,
+          max_drawdown_amount = excluded.max_drawdown_amount,
+          max_drawdown_pct = excluded.max_drawdown_pct,
+          max_drawdown_at = CASE
+            WHEN excluded.max_drawdown_amount >= equity_curve_state.max_drawdown_amount
+            THEN excluded.max_drawdown_at
+            ELSE equity_curve_state.max_drawdown_at
+          END,
+          contributor_json = CASE
+            WHEN excluded.max_drawdown_amount >= equity_curve_state.max_drawdown_amount
+            THEN excluded.contributor_json
+            ELSE equity_curve_state.contributor_json
+          END,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.scope,
+        input.accountId,
+        input.providerId,
+        peakValue,
+        input.value,
+        maxDrawdownAmount,
+        maxDrawdownPct,
+        drawdownAmount >= previousMax ? input.sampledAt : null,
+        contributorJson,
+        input.sampledAt,
+      );
+    if (drawdownAmount > previousMax) {
+      this.db
+        .query(
+          `INSERT INTO drawdown_events
+            (id, scope, account_id, provider_id, sampled_at, value, peak_value, drawdown_amount, drawdown_pct, contributor_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `dd_${nanoid(10)}`,
+          input.scope,
+          input.accountId,
+          input.providerId,
+          input.sampledAt,
+          input.value,
+          peakValue,
+          drawdownAmount,
+          drawdownPct,
+          contributorJson,
+        );
+    }
+    return { drawdownAmount, drawdownPct };
+  }
+
+  private upsertEquityCurvePoint(input: {
+    scope: EquityCurveScope;
+    accountId: string;
+    providerId: string;
+    bucketStart: string;
+    value: number;
+    balance: number | null;
+    brokerProfit: number | null;
+    externalFloatingPnl: number | null;
+    realizedPnl: number | null;
+    floatingPnl: number | null;
+    netPnl: number | null;
+    drawdownAmount: number;
+    drawdownPct: number;
+    openTradeIds: string[];
+    positionTickets: string[];
+    updatedAt: string;
+  }) {
+    this.db
+      .query(
+        `INSERT INTO equity_curve_points
+          (scope, account_id, provider_id, bucket_start, open_value, high_value, low_value, close_value,
+           balance, broker_profit, external_floating_pnl, realized_pnl, floating_pnl, net_pnl,
+           drawdown_amount, drawdown_pct, sample_count, open_trade_ids_json, position_tickets_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+         ON CONFLICT(scope, account_id, provider_id, bucket_start) DO UPDATE SET
+          high_value = MAX(equity_curve_points.high_value, excluded.close_value),
+          low_value = MIN(equity_curve_points.low_value, excluded.close_value),
+          close_value = excluded.close_value,
+          balance = excluded.balance,
+          broker_profit = excluded.broker_profit,
+          external_floating_pnl = excluded.external_floating_pnl,
+          realized_pnl = excluded.realized_pnl,
+          floating_pnl = excluded.floating_pnl,
+          net_pnl = excluded.net_pnl,
+          drawdown_amount = excluded.drawdown_amount,
+          drawdown_pct = excluded.drawdown_pct,
+          sample_count = equity_curve_points.sample_count + 1,
+          open_trade_ids_json = excluded.open_trade_ids_json,
+          position_tickets_json = excluded.position_tickets_json,
+          updated_at = excluded.updated_at`,
+      )
+      .run(
+        input.scope,
+        input.accountId,
+        input.providerId,
+        input.bucketStart,
+        input.value,
+        input.value,
+        input.value,
+        input.value,
+        input.balance,
+        input.brokerProfit,
+        input.externalFloatingPnl,
+        input.realizedPnl,
+        input.floatingPnl,
+        input.netPnl,
+        input.drawdownAmount,
+        input.drawdownPct,
+        JSON.stringify(input.openTradeIds),
+        JSON.stringify(input.positionTickets),
+        input.updatedAt,
+      );
+  }
+
+  private pruneEquityCurvePoints(sampledAt: string) {
+    const cutoff = new Date(
+      Date.parse(sampledAt) - EQUITY_CURVE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    this.db.query("DELETE FROM equity_curve_points WHERE bucket_start < ?").run(cutoff);
+  }
+
+  private sampledEquityCurve(accountId: string) {
+    const rows = this.db
+      .query(
+        `SELECT bucket_start, close_value, drawdown_pct
+         FROM equity_curve_points
+         WHERE scope = 'account' AND account_id = ? AND provider_id = ''
+         ORDER BY bucket_start ASC`,
+      )
+      .all(accountId) as Row[];
+    return rows.map((row) => ({
+      x: Math.floor(Date.parse(String(row.bucket_start)) / 1000),
+      equity: roundCurrency(Number(row.close_value ?? 0)),
+      drawdown: Number(Number(row.drawdown_pct ?? 0).toFixed(2)),
+    }));
+  }
+
+  private averageCurveDrawdown(
+    scope: EquityCurveScope,
+    accountId: string | undefined,
+    providerId: string,
+  ) {
+    const params: string[] = [scope, providerId];
+    const accountFilter = accountId ? "AND account_id = ?" : "";
+    if (accountId) params.push(accountId);
+    const row = this.db
+      .query(
+        `SELECT AVG(drawdown_amount) AS average_drawdown
+         FROM equity_curve_points
+         WHERE scope = ? AND provider_id = ? ${accountFilter}
+           AND open_trade_ids_json != '[]'`,
+      )
+      .get(...params) as Row | null;
+    return roundCurrency(nullableNumber(row?.average_drawdown) ?? 0);
+  }
+
+  private maxCurveDrawdown(
+    scope: EquityCurveScope,
+    accountId: string | undefined,
+    providerId: string,
+  ) {
+    const params: string[] = [scope, providerId];
+    const accountFilter = accountId ? "AND account_id = ?" : "";
+    if (accountId) params.push(accountId);
+    const row = this.db
+      .query(
+        `SELECT MAX(max_drawdown_amount) AS max_drawdown
+         FROM equity_curve_state
+         WHERE scope = ? AND provider_id = ? ${accountFilter}`,
+      )
+      .get(...params) as Row | null;
+    return roundCurrency(nullableNumber(row?.max_drawdown) ?? 0);
+  }
+
+  private curveRiskStats(scope: EquityCurveScope, accountId: string, providerId: string) {
+    const state = this.db
+      .query(
+        `SELECT max_drawdown_amount, max_drawdown_pct
+         FROM equity_curve_state
+         WHERE scope = ? AND account_id = ? AND provider_id = ?`,
+      )
+      .get(scope, accountId, providerId) as Row | null;
+    const latest = this.db
+      .query(
+        `SELECT drawdown_amount, drawdown_pct
+         FROM equity_curve_points
+         WHERE scope = ? AND account_id = ? AND provider_id = ?
+         ORDER BY bucket_start DESC
+         LIMIT 1`,
+      )
+      .get(scope, accountId, providerId) as Row | null;
+    const average = this.db
+      .query(
+        `SELECT AVG(drawdown_amount) AS average_drawdown
+         FROM equity_curve_points
+         WHERE scope = ? AND account_id = ? AND provider_id = ?
+           AND drawdown_amount > 0`,
+      )
+      .get(scope, accountId, providerId) as Row | null;
+    const maxDrawdown = roundCurrency(nullableNumber(state?.max_drawdown_amount) ?? 0);
+    return {
+      maxDrawdown,
+      maxDrawdownPct: nullableNumber(state?.max_drawdown_pct) ?? 0,
+      currentDrawdown: roundCurrency(nullableNumber(latest?.drawdown_amount) ?? 0),
+      currentDrawdownPct: nullableNumber(latest?.drawdown_pct) ?? 0,
+      averageActiveDrawdown: roundCurrency(nullableNumber(average?.average_drawdown) ?? 0),
+      recoveryFactor: maxDrawdown > 0 ? 0 : 0,
+    };
+  }
+
+  private closedTradeStats(
+    accountId: string,
+    input: { from?: string; scope: EquityCurveScope; providerId?: string },
+  ) {
+    const providerTradeIds =
+      input.scope === "provider" && input.providerId
+        ? new Set(
+            this.logicalTrades()
+              .filter(
+                (trade) => trade.accountId === accountId && trade.providerId === input.providerId,
+              )
+              .map((trade) => trade.id),
+          )
+        : null;
+    const grouped = new Map<
+      string,
+      {
+        tradeId: string;
+        pnl: number;
+        closeAt: string;
+        openAt?: string;
+        durationMinutes?: number;
+      }
+    >();
+    const allOrders = this.brokerOrdersForAccount(accountId);
+    const openTimes = new Map<string, string>();
+    for (const order of allOrders) {
+      if (providerTradeIds && !providerTradeIds.has(order.logicalTradeId)) continue;
+      if (order.action === "OPEN") {
+        const current = openTimes.get(order.logicalTradeId);
+        if (!current || order.createdAt < current)
+          openTimes.set(order.logicalTradeId, order.createdAt);
+      }
+    }
+    for (const order of allOrders) {
+      if (providerTradeIds && !providerTradeIds.has(order.logicalTradeId)) continue;
+      if (order.action !== "FULL_CLOSE" && order.action !== "PARTIAL_CLOSE") continue;
+      if (input.from && normalizedDateInput(order.createdAt) < input.from) continue;
+      const current = grouped.get(order.logicalTradeId) ?? {
+        tradeId: order.logicalTradeId,
+        pnl: 0,
+        closeAt: order.createdAt,
+        openAt: openTimes.get(order.logicalTradeId),
+      };
+      current.pnl = roundCurrency(current.pnl + (order.pnlCurrency ?? 0));
+      if (order.createdAt > current.closeAt) current.closeAt = order.createdAt;
+      grouped.set(order.logicalTradeId, current);
+    }
+    return [...grouped.values()]
+      .map((trade) => {
+        const openTime = trade.openAt ? Date.parse(normalizedDateInput(trade.openAt)) : NaN;
+        const closeTime = Date.parse(normalizedDateInput(trade.closeAt));
+        return {
+          ...trade,
+          durationMinutes:
+            Number.isFinite(openTime) && Number.isFinite(closeTime)
+              ? Number(((closeTime - openTime) / 60000).toFixed(1))
+              : undefined,
+        };
+      })
+      .sort((a, b) => normalizedDateInput(a.closeAt).localeCompare(normalizedDateInput(b.closeAt)));
   }
 
   private equityCurve(
@@ -3402,6 +4322,8 @@ class AppStore {
   ) {
     const account = this.mt5Accounts().find((item) => item.id === accountId);
     if (!account) return [];
+    const sampled = this.sampledEquityCurve(accountId);
+    if (sampled.length > 0) return sampled;
     const initial = initialBalance ?? account.initialBalance ?? account.balance;
     let equity = initial;
     let peak = initial;
@@ -3474,10 +4396,12 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT logical_trade_id FROM broker_orders WHERE account_id = ? GROUP BY logical_trade_id",
+          `SELECT id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
+            requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment, pnl_currency, pnl_pips, source, created_at
+           FROM broker_orders WHERE account_id = ? ORDER BY created_at ASC`,
         )
         .all(accountId) as Row[]
-    ).flatMap((row) => this.brokerOrders(String(row.logical_trade_id)));
+    ).map((row) => this.brokerOrderFromRow(row));
   }
 
   /**
@@ -3526,6 +4450,7 @@ class AppStore {
           .sort()
           .reverse()[0]!;
         const result = deriveCloseResult(closeEvents.map((o) => o.source));
+        const netResult = netResultForPnl(realizedPnl);
         const origin = closeEvents.some((o) => o.source.startsWith("manual")) ? "manual" : "ea";
         const tpLegs = trade.legs
           .filter((leg) => leg.targetPrice !== undefined || leg.defaultDistance !== undefined)
@@ -3567,6 +4492,8 @@ class AppStore {
           closePrice: weightedClosePrice,
           realizedPnl: roundCurrency(realizedPnl),
           result,
+          closeReason: result,
+          netResult,
           closedAt,
           tpLegs,
           tpHitCount: tpHits,
@@ -3576,6 +4503,121 @@ class AppStore {
       })
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
       .sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1));
+  }
+
+  externalClosesForAccount(accountId: string) {
+    const closeEventsByPosition = this.externalCloseEventsByPosition(accountId);
+    return (
+      this.db.query("SELECT * FROM external_closes WHERE account_id = ?").all(accountId) as Row[]
+    )
+      .map((row) => {
+        const positionTicket = String(row.position_ticket);
+        const closeEvents = closeEventsByPosition.get(positionTicket) ?? [];
+        const hasFinalClose = Boolean(row.close_at);
+        if (!hasFinalClose && closeEvents.length === 0) return null;
+        const latestCloseEvent = closeEvents[closeEvents.length - 1];
+        const sources =
+          closeEvents.length > 0
+            ? closeEvents.map((event) => event.source)
+            : [String(row.source ?? "history")];
+        const realizedPnl =
+          closeEvents.length > 0
+            ? sumPnl(closeEvents)
+            : roundCurrency(Number(row.pnl_currency ?? 0));
+        const closeReason = deriveCloseResult(sources);
+        const closeAt = hasFinalClose ? String(row.close_at) : latestCloseEvent?.createdAt;
+        if (!closeAt) return null;
+        const closeVolume = closeEvents.reduce((sum, event) => sum + (event.filledVolume ?? 0), 0);
+        const volume = hasFinalClose ? (nullableNumber(row.volume) ?? closeVolume) : closeVolume;
+        const weightedClosePrice =
+          closeVolume > 0
+            ? closeEvents.reduce(
+                (sum, event) => sum + (event.filledPrice ?? 0) * (event.filledVolume ?? 0),
+                0,
+              ) / closeVolume
+            : (nullableNumber(row.close_price) ?? latestCloseEvent?.filledPrice ?? 0);
+        const tradeIdSuffix = hasFinalClose
+          ? positionTicket
+          : `${positionTicket}-${latestCloseEvent?.dealTicket ?? "partial"}`;
+        const fallbackSource = String(row.source ?? "history");
+        const legs =
+          closeEvents.length > 0
+            ? closeEvents.map((event) => ({
+                id: event.id,
+                action: event.action === "PARTIAL_CLOSE" ? "PARTIAL_CLOSE" : "FULL_CLOSE",
+                legId: event.legId,
+                legIndex: parseLegIndex(event.legId),
+                volume: roundLot(event.filledVolume ?? 0),
+                price: event.filledPrice ?? 0,
+                pnl: event.pnlCurrency ?? 0,
+                source: event.source,
+                closedAt: event.createdAt,
+                orderTicket: event.orderTicket,
+                positionTicket: event.positionTicket,
+                dealTicket: event.dealTicket,
+              }))
+            : [
+                {
+                  id: String(row.close_deal_ticket ?? `external-${positionTicket}`),
+                  action: "FULL_CLOSE",
+                  legId: "trade",
+                  volume: roundLot(volume),
+                  price: weightedClosePrice,
+                  pnl: realizedPnl,
+                  source: fallbackSource,
+                  closedAt: closeAt,
+                  orderTicket: "",
+                  positionTicket,
+                  dealTicket: String(row.close_deal_ticket ?? ""),
+                },
+              ];
+        return {
+          tradeId: `external-${String(row.account_id)}-${tradeIdSuffix}`,
+          shortId: positionTicket,
+          ticket: positionTicket,
+          symbol: String(row.symbol),
+          direction: String(row.direction) === "SELL" ? "SELL" : "BUY",
+          origin: "manual",
+          volume: roundLot(volume),
+          openPrice: nullableNumber(row.open_price) ?? 0,
+          closePrice: weightedClosePrice,
+          realizedPnl,
+          result: closeReason,
+          closeReason,
+          netResult: netResultForPnl(realizedPnl),
+          closedAt: closeAt,
+          tpLegs: [],
+          tpHitCount: 0,
+          tpTotal: 0,
+          legs,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      .sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1));
+  }
+
+  private externalCloseEventsByPosition(accountId: string) {
+    const rows = this.db
+      .query(
+        `SELECT id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
+          requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment, pnl_currency, pnl_pips, source, created_at
+         FROM broker_orders
+         WHERE account_id = ?
+           AND logical_trade_id GLOB 'external_*'
+           AND action IN ('FULL_CLOSE','PARTIAL_CLOSE')
+           AND pnl_currency IS NOT NULL
+         ORDER BY created_at ASC`,
+      )
+      .all(accountId) as Row[];
+    const byPosition = new Map<string, ReturnType<AppStore["brokerOrderFromRow"]>[]>();
+    for (const row of rows) {
+      const order = this.brokerOrderFromRow(row);
+      if (!truthyBrokerTicket(order.positionTicket)) continue;
+      const events = byPosition.get(order.positionTicket) ?? [];
+      events.push(order);
+      byPosition.set(order.positionTicket, events);
+    }
+    return byPosition;
   }
 
   mt5AccountLogs(accountId: string) {
@@ -3925,6 +4967,8 @@ class AppStore {
         externalOrders: account.externalOrders,
         symbols: account.symbols,
         closedTrades: account.closedTrades,
+        externalCloses: account.externalCloses,
+        lastHeartbeatAt: account.lastHeartbeatAt,
         lastSnapshotAt: account.lastSnapshotAt,
       })),
       parserResults: parsed.slice(0, 8).map((signal) => ({
@@ -4105,6 +5149,9 @@ class AppStore {
         created_at TEXT NOT NULL
       );
     `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_logical_trades_account_provider_created ON logical_trades(account_id, provider_id, status, created_at)",
+    );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS queue_items (
         id TEXT PRIMARY KEY,
@@ -4129,6 +5176,7 @@ class AppStore {
         currency TEXT NOT NULL,
         balance REAL NOT NULL,
         equity REAL NOT NULL,
+        profit REAL,
         initial_balance REAL NOT NULL DEFAULT 0,
         margin_mode TEXT NOT NULL,
         heartbeat_status TEXT NOT NULL,
@@ -4137,6 +5185,7 @@ class AppStore {
         created_at TEXT NOT NULL
       );
     `);
+    this.ensureColumn("mt5_accounts", "profit", "REAL");
     this.ensureColumn("mt5_accounts", "initial_balance", "REAL NOT NULL DEFAULT 0");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS account_slots (
@@ -4209,6 +5258,66 @@ class AppStore {
       );
     `);
     this.db.run(`
+      CREATE TABLE IF NOT EXISTS equity_curve_points (
+        scope TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL DEFAULT '',
+        bucket_start TEXT NOT NULL,
+        open_value REAL NOT NULL,
+        high_value REAL NOT NULL,
+        low_value REAL NOT NULL,
+        close_value REAL NOT NULL,
+        balance REAL,
+        broker_profit REAL,
+        external_floating_pnl REAL,
+        realized_pnl REAL,
+        floating_pnl REAL,
+        net_pnl REAL,
+        drawdown_amount REAL NOT NULL DEFAULT 0,
+        drawdown_pct REAL NOT NULL DEFAULT 0,
+        sample_count INTEGER NOT NULL DEFAULT 1,
+        open_trade_ids_json TEXT NOT NULL DEFAULT '[]',
+        position_tickets_json TEXT NOT NULL DEFAULT '[]',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (scope, account_id, provider_id, bucket_start)
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_equity_curve_points_scope_account_time ON equity_curve_points(scope, account_id, provider_id, bucket_start DESC)",
+    );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS equity_curve_state (
+        scope TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL DEFAULT '',
+        peak_value REAL NOT NULL,
+        latest_value REAL NOT NULL,
+        max_drawdown_amount REAL NOT NULL,
+        max_drawdown_pct REAL NOT NULL,
+        max_drawdown_at TEXT,
+        contributor_json TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (scope, account_id, provider_id)
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS drawdown_events (
+        id TEXT PRIMARY KEY,
+        scope TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL DEFAULT '',
+        sampled_at TEXT NOT NULL,
+        value REAL NOT NULL,
+        peak_value REAL NOT NULL,
+        drawdown_amount REAL NOT NULL,
+        drawdown_pct REAL NOT NULL,
+        contributor_json TEXT NOT NULL
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_drawdown_events_scope_account_time ON drawdown_events(scope, account_id, provider_id, sampled_at DESC)",
+    );
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS execution_reports (
         id TEXT PRIMARY KEY,
         queue_item_id TEXT NOT NULL,
@@ -4253,6 +5362,44 @@ class AppStore {
     `);
     this.ensureColumn("broker_orders", "pnl_currency", "REAL");
     this.ensureColumn("broker_orders", "pnl_pips", "REAL");
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_broker_orders_deal_ticket ON broker_orders(deal_ticket)",
+    );
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_broker_orders_account_created ON broker_orders(account_id, created_at)",
+    );
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_broker_orders_trade_created ON broker_orders(logical_trade_id, created_at)",
+    );
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_broker_orders_position_created ON broker_orders(position_ticket, created_at)",
+    );
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_broker_orders_order_created ON broker_orders(order_ticket, created_at)",
+    );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS external_closes (
+        account_id TEXT NOT NULL,
+        position_ticket TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        volume REAL,
+        open_price REAL,
+        open_at TEXT,
+        open_deal_ticket TEXT,
+        close_price REAL,
+        close_at TEXT,
+        close_deal_ticket TEXT,
+        pnl_currency REAL,
+        pnl_pips REAL,
+        source TEXT,
+        magic INTEGER NOT NULL DEFAULT 0,
+        comment TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, position_ticket)
+      );
+    `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS parser_fixtures (
         id TEXT PRIMARY KEY,
@@ -4379,12 +5526,15 @@ class AppStore {
    */
   private backfillStuckOutOfSyncTrades() {
     const stuck = this.db
-      .query(`SELECT id, data_json FROM logical_trades WHERE status = 'OUT_OF_SYNC'`)
+      .query(
+        `SELECT id, status, data_json FROM logical_trades WHERE status IN ('OUT_OF_SYNC','OPEN')`,
+      )
       .all() as Row[];
     if (stuck.length === 0) return;
     let healed = 0;
     for (const row of stuck) {
       const tradeId = String(row.id);
+      const currentStatus = String(row.status ?? "");
       const fullClose = this.db
         .query(
           `SELECT id, action, position_ticket, source, broker_comment, pnl_currency, created_at
@@ -4397,6 +5547,7 @@ class AppStore {
         .get(tradeId) as Row | null;
       const realClose = fullClose ?? this.coveringCloseForTrade(tradeId);
       if (!realClose) {
+        if (currentStatus !== "OUT_OF_SYNC") continue;
         const recoverableOpen = this.db
           .query(
             `SELECT action, order_ticket, position_ticket, broker_comment, created_at
@@ -4498,7 +5649,7 @@ class AppStore {
       this.audit(
         "logical-trade.backfill",
         "info",
-        `Reconciled ${healed} stuck OUT_OF_SYNC trade${healed === 1 ? "" : "s"} with recorded close events`,
+        `Reconciled ${healed} stuck trade${healed === 1 ? "" : "s"} with recorded close events`,
         { healed, scanned: stuck.length },
       );
     }
@@ -4706,8 +5857,8 @@ class AppStore {
          LIMIT ?`,
       )
       .all(providerId, limit) as Row[];
-    return rows.map((row) =>
-      this.insertParsedSignal({
+    return rows.flatMap((row) =>
+      this.insertParsedSignals({
         providerId,
         rawMessageId: String(row.id),
         rawText: String(row.raw_text),
@@ -4716,37 +5867,53 @@ class AppStore {
     );
   }
 
-  private insertParsedSignal(input: {
+  private insertParsedSignals(input: {
     providerId: string;
     rawMessageId: string;
     rawText: string;
     accountId: string;
   }) {
-    const parsedSignalId = `parse_${nanoid(10)}`;
-    const result = parseSignalText(
+    const results = parseSignalTexts(
       input.rawText,
       this.parserContext(input.providerId, input.accountId),
     );
-    const reviewRequired = shouldRequireManualReview(result);
-    this.db
-      .query(
-        "INSERT INTO parsed_signals (id, provider_id, raw_message_id, result_json, review_required, fingerprint, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      )
-      .run(
+    return this.insertParsedSignalRows({
+      providerId: input.providerId,
+      rawMessageId: input.rawMessageId,
+      results,
+      createdAt: new Date().toISOString(),
+    });
+  }
+
+  private insertParsedSignalRows(input: {
+    providerId: string;
+    rawMessageId: string;
+    results: ParsedSignal[];
+    createdAt: string;
+  }) {
+    return input.results.map((result) => {
+      const parsedSignalId = `parse_${nanoid(10)}`;
+      const reviewRequired = shouldRequireManualReview(result);
+      this.db
+        .query(
+          "INSERT INTO parsed_signals (id, provider_id, raw_message_id, result_json, review_required, fingerprint, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          parsedSignalId,
+          input.providerId,
+          input.rawMessageId,
+          JSON.stringify(result),
+          Number(reviewRequired),
+          result.fingerprint,
+          "PARSED",
+          input.createdAt,
+        );
+      return {
         parsedSignalId,
-        input.providerId,
-        input.rawMessageId,
-        JSON.stringify(result),
-        Number(reviewRequired),
-        result.fingerprint,
-        "PARSED",
-        new Date().toISOString(),
-      );
-    return {
-      parsedSignalId,
-      reviewRequired,
-      result,
-    };
+        reviewRequired,
+        result,
+      };
+    });
   }
 
   private rawMessageCount(providerId: string) {
@@ -5434,7 +6601,7 @@ class AppStore {
       payload.direction === "BUY" ? input.filledPrice - openPrice : openPrice - input.filledPrice;
     const pipSize = brokerPipSize(payload.brokerSymbol ?? payload.canonicalSymbol ?? "");
     return {
-      pnlCurrency: Number((signed * input.volume).toFixed(4)),
+      pnlCurrency: null,
       pnlPips: pipSize > 0 ? Number((signed / pipSize).toFixed(1)) : null,
     };
   }
@@ -5476,6 +6643,46 @@ function nullableNumber(value: unknown) {
   return value === null || value === undefined || value === "" ? undefined : Number(value);
 }
 
+function sameOptionalNumber(left: unknown, right: number | null | undefined) {
+  const normalizedLeft = nullableNumber(left);
+  const normalizedRight = right === null || right === undefined ? undefined : Number(right);
+  if (normalizedLeft === undefined || normalizedRight === undefined) {
+    return normalizedLeft === normalizedRight;
+  }
+  return Math.abs(normalizedLeft - normalizedRight) < 0.0000001;
+}
+
+function brokerHistoryRowMatches(
+  row: Row,
+  next: {
+    legId: string;
+    action: string;
+    orderTicket: string;
+    positionTicket: string;
+    filledVolume: number | null;
+    filledPrice: number | null;
+    brokerComment: string;
+    pnlCurrency: number;
+    pnlPips: number | null;
+    source: string;
+    createdAt: string;
+  },
+) {
+  return (
+    String(row.leg_id ?? "") === next.legId &&
+    String(row.action ?? "") === next.action &&
+    String(row.order_ticket ?? "") === next.orderTicket &&
+    String(row.position_ticket ?? "") === next.positionTicket &&
+    sameOptionalNumber(row.filled_volume, next.filledVolume) &&
+    sameOptionalNumber(row.filled_price, next.filledPrice) &&
+    String(row.broker_comment ?? "") === next.brokerComment &&
+    sameOptionalNumber(row.pnl_currency, next.pnlCurrency) &&
+    sameOptionalNumber(row.pnl_pips, next.pnlPips) &&
+    String(row.source ?? "") === next.source &&
+    String(row.created_at ?? "") === next.createdAt
+  );
+}
+
 function brokerAction(commandType: string) {
   if (commandType === "OPEN_TRADE") return "OPEN";
   if (commandType === "CLOSE_PARTIAL") return "PARTIAL_CLOSE";
@@ -5502,6 +6709,15 @@ function isPendingOrderAcceptance(
 
 function truthyBrokerTicket(value: string | undefined): value is string {
   return Boolean(value && value !== "0");
+}
+
+function numericTicket(value: string | undefined) {
+  if (!value || !/^\d+$/.test(value)) return null;
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
 }
 
 function brokerActionForReport(
@@ -5740,9 +6956,49 @@ function historyDealAction(deal: Mt5HistoryDealInput, positionStillOpen: boolean
   return positionStillOpen ? "PARTIAL_CLOSE" : "FULL_CLOSE";
 }
 
+function brokerHistoryAction(existingAction: string, inferredAction: string) {
+  if (!existingAction) return inferredAction;
+  if (existingAction === "FULL_CLOSE") return "FULL_CLOSE";
+  if (existingAction === "PARTIAL_CLOSE" && inferredAction === "FULL_CLOSE") return "FULL_CLOSE";
+  return existingAction;
+}
+
 function historyDealLegId(deal: Mt5HistoryDealInput) {
   const match = String(deal.comment ?? "").match(/:tp(\d+)/i);
   return match?.[1] ? `tp${match[1]}` : "trade";
+}
+
+function historyDealCurrencyPnl(deal: Mt5HistoryDealInput) {
+  return roundCurrency(
+    (deal.profit ?? 0) + (deal.commission ?? 0) + (deal.swap ?? 0) + (deal.fee ?? 0),
+  );
+}
+
+function historyDealTimestamp(deal: Mt5HistoryDealInput) {
+  const timeMsc = Number(deal.timeMsc);
+  if (Number.isFinite(timeMsc) && timeMsc > 0) {
+    return new Date(timeMsc).toISOString();
+  }
+  return parseBrokerTimestamp(deal.time) ?? new Date().toISOString();
+}
+
+function parseBrokerTimestamp(value: string | undefined) {
+  if (!value?.trim()) return undefined;
+  const normalized = normalizedDateInput(value.trim());
+  const timestamp = Date.parse(hasTimezoneSuffix(normalized) ? normalized : `${normalized}Z`);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
+
+function hasTimezoneSuffix(value: string) {
+  return /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+}
+
+function directionFromOpenDealType(type: string | undefined) {
+  return Number(type) === 1 ? "SELL" : "BUY";
+}
+
+function directionFromCloseDealType(type: string | undefined) {
+  return Number(type) === 0 ? "SELL" : "BUY";
 }
 
 function drawdownPercent(balance: number, equity: number) {
@@ -5756,6 +7012,12 @@ function roundCurrency(value: number) {
 
 function roundLot(value: number) {
   return Number((Number.isFinite(value) ? value : 0).toFixed(2));
+}
+
+function netResultForPnl(value: number): "WIN" | "LOSS" | "BE" {
+  if (value > 0) return "WIN";
+  if (value < 0) return "LOSS";
+  return "BE";
 }
 
 function parseLegIndex(legId: string): number | undefined {
@@ -5823,13 +7085,119 @@ function normalizedDateInput(value: string) {
   return value.replace(/^(\d{4})\.(\d{2})\.(\d{2})(\s+)/, "$1-$2-$3T");
 }
 
+function nowIso() {
+  return new Date(Date.now()).toISOString();
+}
+
+function minuteBucket(iso: string) {
+  const time = Date.parse(normalizedDateInput(iso));
+  const date = new Date(Number.isFinite(time) ? time : Date.now());
+  date.setUTCSeconds(0, 0);
+  return date.toISOString();
+}
+
+function normalizeStatsRange(value: string | undefined): StatsRange {
+  return value === "7d" || value === "90d" || value === "all" ? value : "30d";
+}
+
+function statsRangeStart(range: StatsRange) {
+  if (range === "all") return undefined;
+  const days = range === "7d" ? 7 : range === "90d" ? 90 : 30;
+  return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function pnlByCalendarDay(trades: Array<{ closeAt: string; pnl: number }>) {
+  const byDay = new Map<string, number>();
+  for (const trade of trades) {
+    const day = normalizedDateInput(trade.closeAt).slice(0, 10);
+    byDay.set(day, roundCurrency((byDay.get(day) ?? 0) + trade.pnl));
+  }
+  return byDay;
+}
+
+function pnlByWeekday(trades: Array<{ closeAt: string; pnl: number }>) {
+  const names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const byWeekday = new Map<string, number>();
+  for (const trade of trades) {
+    const time = Date.parse(normalizedDateInput(trade.closeAt));
+    const weekday = names[Number.isFinite(time) ? new Date(time).getUTCDay() : 0] ?? "Sun";
+    byWeekday.set(weekday, roundCurrency((byWeekday.get(weekday) ?? 0) + trade.pnl));
+  }
+  return byWeekday;
+}
+
+function bestMapValue(values: Map<string, number>) {
+  return values.size ? Math.max(...values.values()) : 0;
+}
+
+function worstMapValue(values: Map<string, number>) {
+  return values.size ? Math.min(...values.values()) : 0;
+}
+
+function bestMapKey(values: Map<string, number>) {
+  if (values.size === 0) return "—";
+  return [...values.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "—";
+}
+
+function worstMapKey(values: Map<string, number>) {
+  if (values.size === 0) return "—";
+  return [...values.entries()].sort((a, b) => a[1] - b[1])[0]?.[0] ?? "—";
+}
+
+function streakStats(trades: Array<{ pnl: number }>) {
+  let currentType: "W" | "L" | "BE" = "BE";
+  let currentCount = 0;
+  let maxWins = 0;
+  let maxLosses = 0;
+  for (const trade of trades) {
+    const type = trade.pnl > 0 ? "W" : trade.pnl < 0 ? "L" : "BE";
+    if (type === currentType) currentCount += 1;
+    else {
+      currentType = type;
+      currentCount = 1;
+    }
+    if (type === "W") maxWins = Math.max(maxWins, currentCount);
+    if (type === "L") maxLosses = Math.max(maxLosses, currentCount);
+  }
+  return {
+    current: trades.length ? `${currentType}${currentCount}` : "—",
+    maxWins,
+    maxLosses,
+  };
+}
+
+function csvCell(value: unknown) {
+  const text = value === undefined || value === null ? "" : String(value);
+  return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function isExternalSnapshotRecord(record: unknown) {
+  if (!record || typeof record !== "object") return false;
+  const item = record as Record<string, unknown>;
+  if (item.isExternal === true) return true;
+  const magic = nullableNumber(item.magic) ?? 0;
+  return magic === 0;
+}
+
 function withinDays(iso: string, days: number) {
   const time = Date.parse(normalizedDateInput(iso));
   return Number.isFinite(time) && Date.now() - time <= days * 24 * 60 * 60 * 1000;
 }
 
+function withinCurrentDay(iso: string) {
+  return dayKey(iso) === new Date(Date.now()).toISOString().slice(0, 10);
+}
+
 function withinCurrentMonth(iso: string) {
   return monthKey(iso) === new Date().toISOString().slice(0, 7);
+}
+
+function dayKey(iso: string) {
+  const normalized = normalizedDateInput(iso);
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match
+    ? `${match[1]}-${match[2]}-${match[3]}`
+    : new Date(Date.now()).toISOString().slice(0, 10);
 }
 
 function monthKey(iso: string) {

@@ -1,5 +1,6 @@
 import { Server } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import packageJson from "../../../package.json";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountsOverview } from "./components/AccountsOverview";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
@@ -53,10 +54,14 @@ export interface DashboardSnapshot {
     dedupWindowSeconds: number;
   };
   accountPerformance?: {
+    accountId?: string;
     currency: string;
+    heartbeatStatus?: string;
+    lastHeartbeatAt?: string | null;
     initialBalance: number | null;
     currentBalance?: number | null;
     currentEquity?: number | null;
+    currentProfit?: number | null;
     totalProfit: number | null;
     realizedPnl?: number | null;
     floatingPnl?: number | null;
@@ -74,6 +79,7 @@ export interface DashboardSnapshot {
     gain: number;
     winRate: number;
     averageDrawdown: number;
+    copiedDrawdown?: number;
   }>;
   accountSlots?: Array<{
     id: string;
@@ -114,6 +120,8 @@ export interface DashboardSnapshot {
       ask?: number;
     }>;
     closedTrades?: ClosedTradeRow[];
+    externalCloses?: ClosedTradeRow[];
+    lastHeartbeatAt?: string;
     lastSnapshotAt?: string;
   }>;
   parserResults: Array<{
@@ -221,6 +229,8 @@ export interface ClosedTradeRow {
   closePrice: number;
   realizedPnl: number;
   result: string;
+  closeReason?: string;
+  netResult?: "WIN" | "LOSS" | "BE";
   closedAt: string;
   tpLegs: Array<{ leg: number; targetPrice?: number; hit: boolean }>;
   tpHitCount: number;
@@ -319,6 +329,9 @@ export function App({
   const [initialLoading, setInitialLoading] = useState(!initialSnapshot);
   const [refreshing, setRefreshing] = useState(false);
   const [lastPollError, setLastPollError] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<string | null>(
+    initialSnapshot ? new Date().toISOString() : null,
+  );
   const [activeView, setActiveView] = useState("dashboard");
   const [activeTab, setActiveTab] = useState<TabId>("performance");
   const [configProvider, setConfigProvider] = useState<ProviderRowData | null>(null);
@@ -380,6 +393,7 @@ export function App({
         if (active) {
           setSnapshot(data);
           setLastPollError(false);
+          setLastSyncAt(new Date().toISOString());
         }
       } catch {
         if (active) setLastPollError(true);
@@ -453,6 +467,12 @@ export function App({
     const perf = snapshot.accountPerformance;
     const accounts = snapshot.mt5Accounts;
     const onlineCount = accounts.filter((a) => a.heartbeatStatus === "online").length;
+    const performanceAccount =
+      (perf?.accountId ? accounts.find((account) => account.id === perf.accountId) : undefined) ??
+      focusedAccount ??
+      accounts[0];
+    const performanceIsLive =
+      !performanceAccount || performanceAccount.heartbeatStatus === "online";
 
     let platform = "—";
     let broker = "—";
@@ -486,11 +506,21 @@ export function App({
         eaActive,
       },
       kpis: {
-        initialBalance: perf?.initialBalance ?? null,
-        totalProfit: { amount: perf?.totalProfit ?? null, deltaPercent: null },
-        thisMonth: { amount: perf?.thisMonth ?? null, deltaPercent: null },
-        thisWeek: { amount: perf?.thisWeek ?? null, deltaPercent: null },
+        balance: performanceIsLive ? (perf?.currentBalance ?? null) : null,
+        equity: performanceIsLive ? (perf?.currentEquity ?? null) : null,
+        totalProfit: {
+          amount: performanceIsLive ? (perf?.totalProfit ?? null) : null,
+          deltaPercent: null,
+        },
         today: { amount: perf?.today ?? null, deltaPercent: null },
+        thisWeek: {
+          amount: perf?.thisWeek ?? null,
+          deltaPercent: null,
+        },
+        thisMonth: {
+          amount: perf?.thisMonth ?? null,
+          deltaPercent: null,
+        },
       },
       currency: perf?.currency ?? "$",
     };
@@ -608,11 +638,29 @@ export function App({
       const data = await apiGet<DashboardSnapshot>("/api/dashboard");
       setSnapshot(data);
       setLastPollError(false);
+      setLastSyncAt(new Date().toISOString());
     } catch {
       setLastPollError(true);
     } finally {
       setRefreshing(false);
     }
+  }
+
+  async function exportProviderPerformance() {
+    const accountId = focusedAccount?.id ?? snapshot.mt5Accounts[0]?.id;
+    const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
+    const csv = await apiFetch<string>(`/api/providers/performance/export.csv${query}`, {
+      method: "GET",
+      headers: { Accept: "text/csv" },
+    });
+    const filename = `provider-performance-${new Date().toISOString().slice(0, 10)}.csv`;
+    const link = document.createElement("a");
+    link.href = `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`;
+    link.download = filename;
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   }
 
   async function startTelegramConnection(event: React.FormEvent<HTMLFormElement>) {
@@ -1092,8 +1140,10 @@ export function App({
       <LiveRegion />
       <KeyboardShortcutsOverlay onClose={() => setShortcutsOpen(false)} open={shortcutsOpen} />
       <StatusBar
+        appVersion={packageJson.version}
         database={snapshot.health.database}
         lastPollError={lastPollError}
+        lastSyncAt={lastSyncAt}
         onCommandPalette={() => setCommandPaletteOpen(true)}
         onRefresh={refreshDashboard}
         queuePending={queuePending}
@@ -1167,6 +1217,10 @@ export function App({
               accounts={focusedAccount ? [focusedAccount] : snapshot.mt5Accounts}
               data={growthData}
               loading={initialLoading}
+              providers={snapshot.providers.map((provider) => ({
+                id: provider.id,
+                title: provider.title,
+              }))}
             />
           ) : null}
 
@@ -1211,6 +1265,7 @@ export function App({
                 loading={initialLoading}
                 onConfigure={(provider) => setConfigProvider(provider)}
                 onDelete={(provider) => void deleteProvider(provider)}
+                onExport={() => void exportProviderPerformance()}
                 onToggle={(provider) => void toggleProvider(provider)}
                 onToggleAccountLink={(accountId, providerId, enabled) =>
                   void toggleAccountProviderLink(accountId, providerId, enabled)

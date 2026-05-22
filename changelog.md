@@ -1,5 +1,123 @@
 # Changelog
 
+## 1.9.3 - 2026-05-21 (Patch)
+
+Release impact: Patch because this removes an unused status-bar placeholder without changing
+backend contracts or EA command behaviour.
+
+- Removed the routing placeholder from the status bar because routing is not used by this
+  application.
+
+## 1.9.2 - 2026-05-21 (Patch)
+
+Release impact: Patch because this adds status-bar visibility for dashboard sync and app version
+metadata without changing backend contracts or EA command behaviour.
+
+- Added a status-bar sync strip with last successful dashboard sync time, routing placeholder, and
+  app version.
+
+## 1.9.1 - 2026-05-21 (Patch)
+
+Release impact: Patch because this fixes MT5 history reconciliation and schema bootstrap
+correctness without changing public API or EA command contracts.
+
+- Normalized MT5 broker-history `time` strings to ISO timestamps before persisting broker-order rows.
+- Compared large MT5 deal tickets in exact integer space when ordering close-volume history.
+- Kept external manual close summaries in sync when repeated history syncs repair existing deal rows.
+- Added the `external_closes` table to the canonical SQL migration.
+
+## 1.9.0 - 2026-05-21 (Minor)
+
+Release impact: Minor because this adds backward-compatible dashboard/API statistics, persisted
+equity curve rows, provider copied-drawdown fields, and provider performance CSV export without
+changing the EA protocol.
+
+- Added heartbeat-sampled minute equity curve storage with account/provider state tables and sparse
+  drawdown events so the Performance chart and statistics can reflect floating equity drift.
+- Added account/provider statistics for Profit/Return, Win/Loss, Risk/Drawdown, Quality, Streaks,
+  and Timing, fetched only when the Performance > Statistics subview is opened.
+- Calculated Provider tab average drawdown from active copied-provider exposure while excluding
+  manual/external MT5 activity from provider attribution.
+- Added provider performance CSV export from the Providers panel, including linked accounts, win
+  rate, P/L, average drawdown, and copied drawdown.
+
+## 1.8.1 - 2026-05-21 (Patch)
+
+Release impact: Patch because this keeps the default parser expansion intact while fixing a
+backward-compatible broker-history reconciliation issue.
+
+- Upgraded existing app-recorded partial close rows to `FULL_CLOSE` when MT5 broker history confirms
+  that cumulative closed volume covers the original broker open volume, so app-managed trades appear
+  in History > Closed like MT5's Positions ledger.
+- Kept replayed older MT5 open-history deals from reopening logical trades after a real full close has
+  already been recorded.
+- Added startup repair for already-open logical trades whose recorded close rows fully cover the
+  broker open volume, allowing deployed databases to heal stale ledger rows after restart.
+
+## 1.8.0 - 2026-05-21 (Minor)
+
+Release impact: Minor because this adds backward-compatible default parser behaviour and additive
+parser API response fields for multi-entry posts.
+
+- Added default directional zone parsing so messages such as `4512 / 4500 / 4580 / Buy zones`
+  produce one pending limit signal per standalone price line, using the provider default symbol plus
+  the app default SL and TP distances.
+- Kept quoted reply chatter around those zone posts non-queueable unless the comment explicitly
+  reinstates the quoted signal.
+- Added default support for broker-copier `NEW ORDER - XAUUSD Buy Stop` blocks, including entry,
+  SL, TP, order type, symbol, and lot extraction without mistaking ticket numbers for entries.
+- Extended parser insertion so one raw Telegram message can create multiple parsed signals while
+  preserving the existing single-result response for current UI/API callers.
+
+## 2026-05-20 (External partial-close history visibility)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.7.2` and kept the
+  MT5 EA `#property version` aligned at `1.7.2` because this is a backward-compatible dashboard
+  history bugfix.
+- Included external/manual partial-close MT5 broker deal rows with realized P/L in History > Closed
+  when the position is still open or the final close timestamp has not been recorded yet.
+- Built external closed-history rows from broker close deal events when available, so expanded detail
+  preserves the actual partial/full close legs and broker deal tickets instead of relying only on the
+  aggregate `external_closes.close_at` row.
+
+## 2026-05-20 (Broker history idempotency and API responsiveness)
+
+- Release impact: Patch. Bumped the canonical app version in `package.json` to `1.7.1` and kept the
+  MT5 EA `#property version` aligned at `1.7.1` because this is a backward-compatible API
+  responsiveness fix.
+- Made repeated MT5 history syncs idempotent for unchanged existing deal tickets, so the EA can keep
+  sending its lookback window without rewriting thousands of broker rows or logging no-op
+  `mt5.history.repair` entries every minute.
+- Limited large periodic MT5 history backfills to a recent overlap once an account already has broker
+  history, while keeping small one-deal `OnTradeTransaction` syncs and first imports complete.
+- Added broker-order indexes for deal-ticket dedupe, account performance, trade history, and
+  ticket-based reconciliation lookups.
+- Reworked account performance history loading to fetch an account's broker rows in one indexed query
+  instead of one query per logical trade.
+
+## 2026-05-20 (MT5 broker P/L truth and manual closed history)
+
+- Release impact: Minor. Bumped the canonical app version in `package.json` to `1.7.0` and kept the
+  MT5 EA `#property version` aligned at `1.7.0` because this adds backward-compatible EA/backend
+  history and heartbeat payload fields plus dashboard behaviour.
+- Made MT5 broker history the source of truth for realized currency P/L. Existing broker-order rows
+  with the same deal ticket are now repaired from `DEAL_PROFIT + DEAL_COMMISSION + DEAL_SWAP +
+  DEAL_FEE` instead of skipped, and app execution reports keep close P/L currency unset until broker
+  history arrives.
+- Added `DEAL_FEE`, `DEAL_TIME_MSC`, deal magic, and `ACCOUNT_PROFIT` to the EA payloads so backend
+  ordering, daily P/L, and floating P/L diagnostics use broker-reported values.
+- Surfaced closed external/manual MT5 history in History > Closed and account-level P/L while keeping
+  provider P/L scoped to provider-owned logical trades.
+- Reworked the live account header to show current MT5 Balance and Equity before Trading P/L, Today,
+  This Week, and This Month.
+- Stopped stale MT5 heartbeat/snapshot values from being presented as live Balance, Equity, Floating,
+  or Trading P/L while still showing realized broker-history windows such as Today, This Week, and
+  This Month.
+- Tightened the six-card KPI layout so large Balance/Equity/P&L values reflow without clipping, with
+  the account currency moved out of the monospaced amount text.
+- Changed closed-history Result to a compact net chip (`Win`, `Loss`, `BE`) while keeping close reason
+  such as `Mixed`, `SL hit`, `Manual`, or `TP hit` in the expanded detail and tooltip.
+
 ## 1.6.11 - 2026-05-21 (Patch)
 
 Release impact: Patch because this tightens provider-config PATCH persistence and startup
