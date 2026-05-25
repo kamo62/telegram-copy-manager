@@ -5401,6 +5401,41 @@ select.config-strategy-input {
   max-width: 360px;
 }
 
+.signin-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--tg-blue);
+  background: rgba(42, 171, 238, 0.08);
+  border: 1px solid rgba(42, 171, 238, 0.18);
+  border-radius: var(--radius-sm);
+}
+
+.signin-loading-dot {
+  width: 8px;
+  height: 8px;
+  background: currentColor;
+  border-radius: 999px;
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
 .signin-cta {
   display: flex;
   align-items: center;

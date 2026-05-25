@@ -1,7 +1,7 @@
 import { Info, RefreshCw, ShieldCheck } from "lucide-react";
 import { DialogPicker, type TelegramDialogSummary } from "../components/DialogPicker";
 import { Panel } from "../components/Panel";
-import { SetupFlow, type SetupFormState } from "../components/SetupFlow";
+import { SetupFlow, type SetupFormState, type SetupStep } from "../components/SetupFlow";
 import { Tag } from "../components/Tag";
 
 export function TelegramSetupPage({
@@ -28,7 +28,7 @@ export function TelegramSetupPage({
   form: SetupFormState;
   busy: boolean;
   error: string;
-  setupStep: "credentials" | "code" | "password" | "connected";
+  setupStep: SetupStep;
   setForm: React.Dispatch<React.SetStateAction<SetupFormState>>;
   startTelegramConnection: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
   submitCode: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;

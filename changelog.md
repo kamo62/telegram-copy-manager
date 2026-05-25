@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.12.2 - 2026-05-25 (Patch)
+
+Release impact: Patch because this fixes Telegram bootstrap state and slow GramJS dialog refresh
+handling without changing API or EA command contracts.
+
+- Added a lightweight Telegram status endpoint so the web app can confirm saved server sessions
+  before the full dashboard snapshot finishes loading.
+- Kept the first screen in a checking state instead of showing the phone login while a connected
+  Telegram session is already stored on the server.
+- Increased the Telegram dialog refresh timeout for slow GramJS `getDialogs` calls.
+
 ## 1.12.1 - 2026-05-25 (Patch)
 
 Release impact: Patch because this reduces dashboard execution-log query cost and adds supporting

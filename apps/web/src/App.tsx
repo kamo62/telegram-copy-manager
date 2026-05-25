@@ -18,7 +18,7 @@ import {
   type ProviderConfigTestResult,
 } from "./components/ProviderConfigModal";
 import type { ProviderRowData } from "./components/ProvidersTable";
-import type { SetupFormState } from "./components/SetupFlow";
+import type { SetupFormState, SetupStep } from "./components/SetupFlow";
 import { navItems, Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { SmallViewportNotice } from "./components/SmallViewportNotice";
@@ -213,6 +213,13 @@ export interface DashboardSnapshot {
     status: string;
     timestamp?: string;
   }>;
+}
+
+interface TelegramStatusSnapshot {
+  activeProfileId?: string;
+  connected: boolean;
+  telegramAdapter: string;
+  telegramSessions: DashboardSnapshot["telegramSessions"];
 }
 
 /**
@@ -421,14 +428,20 @@ export function App({
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [setupBusy, setSetupBusy] = useState(false);
   const [setupError, setSetupError] = useState("");
-  const [setupStep, setSetupStep] = useState<"credentials" | "code" | "password" | "connected">(
+  const initialPendingAuth = useMemo(() => readPendingAuth(), []);
+  const [setupStep, setSetupStep] = useState<SetupStep>(
     initialSnapshot?.telegramSessions.some((session) => session.status === "CONNECTED")
       ? "connected"
-      : readPendingAuth().sessionId
+      : initialPendingAuth.sessionId
         ? "code"
-        : "credentials",
+        : initialSnapshot
+          ? "credentials"
+          : "checking",
   );
-  const [form, setForm] = useState<SetupFormState>({ ...emptySetupForm(), ...readPendingAuth() });
+  const [form, setForm] = useState<SetupFormState>({
+    ...emptySetupForm(),
+    ...initialPendingAuth,
+  });
   const [mappingModalOpen, setMappingModalOpen] = useState(false);
   const [fixtureClassifications, setFixtureClassifications] = useState<
     Record<string, "entry" | "management" | "noise" | "unknown">
@@ -533,6 +546,62 @@ export function App({
       active = false;
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [initialSnapshot]);
+
+  useEffect(() => {
+    if (initialSnapshot) return;
+    let active = true;
+    async function loadTelegramStatus() {
+      try {
+        const data = await apiGet<TelegramStatusSnapshot>("/api/telegram/status", {
+          timeoutMs: 5_000,
+        });
+        if (!active) return;
+        setSnapshot((current) => ({
+          ...current,
+          health: {
+            ...current.health,
+            telegramAdapter: data.telegramAdapter || current.health.telegramAdapter,
+          },
+          telegramSessions: data.telegramSessions,
+        }));
+        if (
+          data.connected ||
+          data.telegramSessions.some((session) => session.status === "CONNECTED")
+        ) {
+          setSetupStep("connected");
+          clearPendingAuth();
+          return;
+        }
+        const storedPending = readPendingAuth();
+        const pending = storedPending.sessionId
+          ? data.telegramSessions.find(
+              (session) =>
+                session.id === storedPending.sessionId &&
+                (session.status === "CODE_REQUIRED" || session.status === "PASSWORD_REQUIRED"),
+            )
+          : undefined;
+        if (pending) {
+          setForm((current) => ({
+            ...current,
+            phone: storedPending.phone ?? pending.phone,
+            sessionId: pending.id,
+            profileId: pending.profileId ?? "",
+          }));
+          setSetupStep(pending.status === "PASSWORD_REQUIRED" ? "password" : "code");
+          return;
+        }
+        setSetupStep((current) => (current === "checking" ? "credentials" : current));
+      } catch {
+        if (active) {
+          setSetupStep((current) => (current === "checking" ? "credentials" : current));
+        }
+      }
+    }
+    void loadTelegramStatus();
+    return () => {
+      active = false;
     };
   }, [initialSnapshot]);
 
@@ -955,6 +1024,7 @@ export function App({
     if (!profileId) return;
     const data = await apiGet<{ dialogs: TelegramDialogSummary[] }>(
       `/api/telegram/dialogs?profileId=${profileId}`,
+      { timeoutMs: 30_000 },
     );
     setAvailableDialogs(data.dialogs);
   }
@@ -1334,7 +1404,10 @@ export function App({
     );
   }
 
-  if (setupStep !== "connected") {
+  const displayedSetupStep: SetupStep =
+    setupStep === "connected" && initialLoading && !initialSnapshot ? "checking" : setupStep;
+
+  if (displayedSetupStep !== "connected") {
     return (
       <SignIn
         form={form}
@@ -1342,7 +1415,7 @@ export function App({
         error={setupError}
         onReset={resetTelegramConnection}
         setForm={setForm}
-        setupStep={setupStep}
+        setupStep={displayedSetupStep}
         startTelegramConnection={startTelegramConnection}
         submitCode={submitCode}
         submitPassword={submitPassword}

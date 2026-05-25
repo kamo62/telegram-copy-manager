@@ -171,6 +171,7 @@ export function createApi(options: ApiOptions = {}) {
   app.get("/api/health", (c) => c.json(healthPayload()));
   app.get("/health", (c) => c.json(healthPayload()));
 
+  app.get("/api/telegram/status", (c) => c.json(store.telegramStatus(telegram.name)));
   app.get("/api/dashboard", (c) => c.json(store.dashboard(telegram.name)));
   app.get("/api/settings", (c) => c.json({ settings: store.appSettings() }));
   app.patch("/api/settings", async (c) => {
@@ -5106,6 +5107,32 @@ class AppStore {
     return row ? String(row.value) : "";
   }
 
+  telegramSessionSummaries() {
+    return (
+      this.db
+        .query(
+          "SELECT id, profile_id, phone, status FROM telegram_sessions ORDER BY updated_at DESC",
+        )
+        .all() as Row[]
+    ).map((row) => ({
+      id: String(row.id),
+      profileId: String(row.profile_id),
+      phone: maskPhone(String(row.phone)),
+      status: String(row.status),
+    }));
+  }
+
+  telegramStatus(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock") {
+    const telegramSessions = this.telegramSessionSummaries();
+    const connected = telegramSessions.find((session) => session.status === "CONNECTED");
+    return {
+      telegramAdapter,
+      connected: Boolean(connected),
+      activeProfileId: connected?.profileId,
+      telegramSessions,
+    };
+  }
+
   dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock") {
     const providers = this.providers();
     const parsed = this.parsedSignals();
@@ -5126,18 +5153,7 @@ class AppStore {
       accountSlots: this.accountSlots(),
       accountProviderLinks: this.accountProviderLinks(),
       equityGuardians: this.equityGuardians(),
-      telegramSessions: (
-        this.db
-          .query(
-            "SELECT id, profile_id, phone, status FROM telegram_sessions ORDER BY created_at DESC",
-          )
-          .all() as Row[]
-      ).map((row) => ({
-        id: String(row.id),
-        profileId: String(row.profile_id),
-        phone: maskPhone(String(row.phone)),
-        status: String(row.status),
-      })),
+      telegramSessions: this.telegramSessionSummaries(),
       providers: providers.map((provider) => ({
         id: provider.id,
         dialogId: provider.dialogId,

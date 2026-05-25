@@ -518,6 +518,48 @@ describe("Telegram TC API", () => {
     expect((await json<{ dialogs: unknown[] }>(dialogs)).dialogs.length).toBeGreaterThan(0);
   });
 
+  test("reports Telegram connection status without loading the full dashboard", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+
+    const disconnected = await json<{
+      connected: boolean;
+      telegramSessions: Array<{ status: string }>;
+    }>(await app.request("/api/telegram/status"));
+    expect(disconnected.connected).toBe(false);
+    expect(disconnected.telegramSessions).toEqual([]);
+
+    const started = await json<{ profileId: string; sessionId: string }>(
+      await app.request("/api/telegram/start", {
+        method: "POST",
+        body: JSON.stringify({ apiId: "12345", apiHash: "hash", phone: "+27821234567" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request("/api/telegram/verify-code", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: started.sessionId, code: "11111" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const connected = await json<{
+      activeProfileId?: string;
+      connected: boolean;
+      telegramAdapter: string;
+      telegramSessions: Array<{ id: string; phone: string; profileId: string; status: string }>;
+    }>(await app.request("/api/telegram/status"));
+    expect(connected).toMatchObject({
+      activeProfileId: started.profileId,
+      connected: true,
+      telegramAdapter: "mock",
+    });
+    expect(connected.telegramSessions[0]).toMatchObject({
+      id: started.sessionId,
+      phone: "+27******567",
+      profileId: started.profileId,
+      status: "CONNECTED",
+    });
+  });
+
   test("selects providers, parses recent messages, approves one signal, and prevents duplicates", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
 

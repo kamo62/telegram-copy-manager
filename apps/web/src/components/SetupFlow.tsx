@@ -10,6 +10,8 @@ export interface SetupFormState {
   profileId: string;
 }
 
+export type SetupStep = "checking" | "credentials" | "code" | "password" | "connected";
+
 export function SetupFlow({
   form,
   busy = false,
@@ -25,12 +27,26 @@ export function SetupFlow({
   busy?: boolean;
   error?: string;
   onReset?: () => Promise<void> | void;
-  setupStep: "credentials" | "code" | "password" | "connected";
+  setupStep: SetupStep;
   setForm: React.Dispatch<React.SetStateAction<SetupFormState>>;
   startTelegramConnection: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
   submitCode: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
   submitPassword: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
 }) {
+  if (setupStep === "checking") {
+    return (
+      <div className="connected-state" role="status">
+        <span className="connected-state-glyph" aria-hidden="true">
+          <ShieldCheck size={18} />
+        </span>
+        <div className="connected-state-body">
+          <strong>Checking Telegram session</strong>
+          <span>Loading the current server session.</span>
+        </div>
+      </div>
+    );
+  }
+
   if (setupStep === "connected") {
     return (
       <div className="connected-state" role="status">

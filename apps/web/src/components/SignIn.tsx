@@ -1,5 +1,5 @@
 import { Send } from "lucide-react";
-import type { SetupFormState } from "./SetupFlow";
+import type { SetupFormState, SetupStep } from "./SetupFlow";
 
 export function SignIn({
   form,
@@ -16,13 +16,17 @@ export function SignIn({
   busy?: boolean;
   error?: string;
   onReset?: () => Promise<void> | void;
-  setupStep: "credentials" | "code" | "password" | "connected";
+  setupStep: SetupStep;
   setForm: React.Dispatch<React.SetStateAction<SetupFormState>>;
   startTelegramConnection: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
   submitCode: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
   submitPassword: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
 }) {
   const stepCopy: Record<typeof setupStep, { title: string; subtitle: string }> = {
+    checking: {
+      title: "Checking Telegram session",
+      subtitle: "Loading the saved server session before showing the dashboard.",
+    },
     credentials: {
       title: "Sign in to Telegram",
       subtitle: "Please confirm your country code\nand enter your phone number.",
@@ -63,6 +67,13 @@ export function SignIn({
           <p className="signin-meta" role="alert">
             {error}
           </p>
+        ) : null}
+
+        {setupStep === "checking" ? (
+          <div className="signin-loading" role="status">
+            <span className="signin-loading-dot" aria-hidden="true" />
+            <span>Checking server session</span>
+          </div>
         ) : null}
 
         {setupStep === "credentials" ? (

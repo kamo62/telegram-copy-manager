@@ -177,6 +177,39 @@ describe("App dashboard", () => {
     expect(view.getByRole("tab", { name: "Logs" })).toBeTruthy();
   });
 
+  test("does not show Telegram login while a saved session is confirmed before the dashboard loads", async () => {
+    let resolveDashboard: (response: Response) => void = () => {};
+    const dashboardResponse = new Promise<Response>((resolve) => {
+      resolveDashboard = resolve;
+    });
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      if (requestUrl === "/api/telegram/status") {
+        return Response.json({
+          activeProfileId: "profile-current",
+          connected: true,
+          telegramAdapter: "gramjs",
+          telegramSessions: snapshot.telegramSessions,
+        });
+      }
+      if (requestUrl === "/api/dashboard") {
+        return dashboardResponse;
+      }
+      return Response.json({});
+    }) as typeof fetch;
+
+    const view = render(<App />);
+
+    expect(view.getByRole("heading", { name: "Checking Telegram session" })).toBeTruthy();
+    expect(view.queryByRole("heading", { name: "Sign in to Telegram" })).toBeNull();
+
+    await waitFor(() =>
+      expect(view.queryByRole("heading", { name: "Sign in to Telegram" })).toBeNull(),
+    );
+    resolveDashboard(Response.json(snapshot));
+    await view.findByRole("heading", { name: "TG-TC · Operations" });
+  });
+
   test("account header renders MT5 balance and equity before trading P/L windows", () => {
     const view = render(
       <App
