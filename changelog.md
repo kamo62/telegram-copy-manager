@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.12.1 - 2026-05-25 (Patch)
+
+Release impact: Patch because this reduces dashboard execution-log query cost and adds supporting
+SQLite indexes without changing API or EA command contracts.
+
+- Limited dashboard execution-log reads to the recent rows the dashboard renders instead of
+  materializing the full execution report history on every refresh.
+- Added optional bounded `limit` support to the execution-log API and avoided full-log loading when
+  reading one execution report's details.
+- Added execution-report recency indexes for fresh and existing SQLite databases.
+
+## 1.12.0 - 2026-05-25 (Minor)
+
+Release impact: Minor because this adds backward-compatible provider TP strategy validation,
+allocation previews, and normalized web payload behaviour without changing API or EA command
+contracts.
+
+- Simplified provider TP strategy controls to Move SL to BE, Move SL to prior TP, and Leave SL
+  unchanged while preserving the existing structured strategy payload shape.
+- Added fixed-lot TP allocation previews that reserve runner lots before distributing the TP close
+  pool across configured TP rows.
+- Added provider-config validation for invalid TP percentages, runner lot sizing, fixed lot sizing,
+  and prior-TP strategy availability before save or test actions can run.
+
+## 1.11.0 - 2026-05-25 (Minor)
+
+Release impact: Minor because this adds backward-compatible account-scoped provider routing,
+per-account provider config persistence, route-driven dashboard navigation, and provider snapshot
+fields without changing the EA command protocol.
+
+- Added account-scoped provider configuration overrides on account-provider links while preserving
+  provider defaults as the inheritance source.
+- Added route-driven Live/account/provider navigation and read-only aggregate Provider overview
+  behavior.
+- Added per-account provider performance rows to the dashboard snapshot and account-scoped Provider
+  table behavior.
+- Fixed disabled provider copy links so they no longer fall back to the default MT5 account.
+- Fixed split-order runner validation to use the target account's resolved provider config.
+- Preserved per-account provider config overrides when duplicate Telegram provider rows are merged.
+- Kept overview Provider CSV export aggregate while account-scoped Provider export still filters to
+  the selected account.
+
 ## 1.10.0 - 2026-05-22 (Minor)
 
 Release impact: Minor because this adds backward-compatible dashboard risk-threshold controls,

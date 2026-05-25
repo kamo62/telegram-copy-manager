@@ -67,6 +67,7 @@ const defaultGlobalAliases = {
 const defaultProviderAliases: Record<string, Record<string, string>> = {};
 const CLOSE_VOLUME_EPSILON = 0.000001;
 const EQUITY_CURVE_RETENTION_DAYS = 90;
+const MAX_EXECUTION_LOG_LIMIT = 500;
 
 type SymbolAliasScope = "global" | "provider";
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
@@ -254,7 +255,7 @@ export function createApi(options: ApiOptions = {}) {
 
   app.get("/api/providers", (c) => c.json({ providers: store.providers() }));
   app.get("/api/providers/:id/config", (c) =>
-    c.json({ config: store.providerConfig(c.req.param("id")) }),
+    c.json({ config: store.providerConfig(c.req.param("id"), c.req.query("accountId")) }),
   );
   app.get("/api/providers/:id/config-history", (c) =>
     c.json({ history: store.providerConfigHistory(c.req.param("id")) }),
@@ -495,14 +496,30 @@ export function createApi(options: ApiOptions = {}) {
 
   app.get("/api/account-provider-links", (c) => c.json({ links: store.accountProviderLinks() }));
   app.put("/api/account-provider-links/:accountId/:providerId", async (c) => {
-    const body = await c.req.json<{ enabled?: boolean }>();
-    return c.json({
-      link: store.updateAccountProviderLink(
-        c.req.param("accountId"),
-        c.req.param("providerId"),
-        body.enabled ?? true,
-      ),
-    });
+    const body = await c.req.json<{
+      enabled?: boolean;
+      config?: {
+        lotSize?: number;
+        riskMode?: "fixed" | "percent";
+        riskAmount?: number;
+        takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
+        runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
+      };
+    }>();
+    const accountId = c.req.param("accountId");
+    const providerId = c.req.param("providerId");
+    // Only touch the copy flag when `enabled` is explicitly provided, so a config-only
+    // save from the modal does not silently enable/disable copying.
+    const link =
+      body.enabled !== undefined
+        ? store.updateAccountProviderLink(accountId, providerId, body.enabled)
+        : store
+            .accountProviderLinks()
+            .find((l) => l.accountId === accountId && l.providerId === providerId);
+    const config = body.config
+      ? store.updateAccountProviderConfig(accountId, providerId, body.config)
+      : undefined;
+    return c.json({ link, config });
   });
 
   app.get("/api/equity-guardian", (c) => c.json({ guardians: store.equityGuardians() }));
@@ -617,7 +634,12 @@ export function createApi(options: ApiOptions = {}) {
   });
 
   app.get("/api/execution-logs", (c) =>
-    c.json({ logs: store.executionLogs(c.req.query("accountId")) }),
+    c.json({
+      logs: store.executionLogs(
+        c.req.query("accountId"),
+        optionalPositiveInteger(c.req.query("limit"), MAX_EXECUTION_LOG_LIMIT),
+      ),
+    }),
   );
   app.get("/api/execution-logs/:id", (c) => c.json(store.executionLogDetails(c.req.param("id"))));
 
@@ -1083,8 +1105,27 @@ class AppStore {
     return { provider: this.providers().find((provider) => provider.id === id) };
   }
 
-  providerConfig(providerId: string): ProviderExecutionConfig {
+  providerConfig(providerId: string, accountId?: string): ProviderExecutionConfig {
     const provider = this.providerDetails(providerId);
+    const fallbackAmount = provider?.lotSize ?? defaultAppSettings.defaultLotSize;
+    // Per-account override takes precedence; NULL config_json (or no link row) inherits
+    // the provider-level default below.
+    if (accountId) {
+      const linkRow = this.db
+        .query(
+          "SELECT config_json FROM account_provider_links WHERE account_id = ? AND provider_id = ?",
+        )
+        .get(accountId, providerId) as Row | null;
+      if (linkRow?.config_json) {
+        const override = parseJson<Partial<ProviderExecutionConfig>>(String(linkRow.config_json));
+        return {
+          riskMode: override.riskMode === "percent" ? "percent" : "fixed",
+          riskAmount: positiveNumber(override.riskAmount, fallbackAmount),
+          takeProfitLevels: normalizeProviderTpLevels(override.takeProfitLevels),
+          runner: override.runner,
+        };
+      }
+    }
     const row = this.db
       .query("SELECT provider_config_json FROM providers WHERE id = ?")
       .get(providerId) as Row | null;
@@ -1093,10 +1134,7 @@ class AppStore {
       : {};
     return {
       riskMode: config.riskMode === "percent" ? "percent" : "fixed",
-      riskAmount: positiveNumber(
-        config.riskAmount,
-        provider?.lotSize ?? defaultAppSettings.defaultLotSize,
-      ),
+      riskAmount: positiveNumber(config.riskAmount, fallbackAmount),
       takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
       runner: config.runner,
     };
@@ -1135,7 +1173,27 @@ class AppStore {
     };
   }
 
-  private saveProviderConfig(providerId: string, config: ProviderExecutionConfig) {
+  private saveProviderConfig(
+    providerId: string,
+    config: ProviderExecutionConfig,
+    accountId?: string,
+  ) {
+    const now = new Date().toISOString();
+    if (accountId) {
+      // Per-account override stored on the link row. Preserves the existing `enabled`
+      // copy flag (a fresh row defaults to disabled — the Copy toggle owns that flag).
+      this.db
+        .query(
+          "INSERT INTO account_provider_links (account_id, provider_id, enabled, updated_at, config_json) VALUES (?, ?, 0, ?, ?) ON CONFLICT(account_id, provider_id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at",
+        )
+        .run(accountId, providerId, now, JSON.stringify(config));
+      this.audit("provider.config.update", "info", "Per-account provider config updated", {
+        providerId,
+        accountId,
+        config,
+      });
+      return;
+    }
     this.db
       .query("UPDATE providers SET provider_config_json = ? WHERE id = ?")
       .run(JSON.stringify(config), providerId);
@@ -1143,16 +1201,44 @@ class AppStore {
       .query(
         "INSERT INTO provider_config_history (id, provider_id, config_json, created_at) VALUES (?, ?, ?, ?)",
       )
-      .run(
-        `provider_config_${nanoid(10)}`,
-        providerId,
-        JSON.stringify(config),
-        new Date().toISOString(),
-      );
+      .run(`provider_config_${nanoid(10)}`, providerId, JSON.stringify(config), now);
     this.audit("provider.config.update", "info", "Provider execution config updated", {
       providerId,
       config,
     });
+  }
+
+  /**
+   * Normalize + persist a per-account provider config override (lot/risk/TP/runner),
+   * inheriting any unspecified field from the currently-resolved config for this account.
+   * Mirrors the config-patch logic in {@link updateProvider} but writes to the link row.
+   */
+  updateAccountProviderConfig(
+    accountId: string,
+    providerId: string,
+    input: {
+      lotSize?: number;
+      riskMode?: "fixed" | "percent";
+      riskAmount?: number;
+      takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
+      runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
+    },
+  ) {
+    const existing = this.providerConfig(providerId, accountId);
+    this.saveProviderConfig(
+      providerId,
+      {
+        riskMode: input.riskMode ?? existing.riskMode,
+        riskAmount: positiveNumber(input.riskAmount ?? input.lotSize, existing.riskAmount),
+        takeProfitLevels:
+          "takeProfitLevels" in input
+            ? normalizeProviderTpLevels(input.takeProfitLevels)
+            : existing.takeProfitLevels,
+        runner: input.runner === undefined ? existing.runner : input.runner,
+      },
+      accountId,
+    );
+    return this.providerConfig(providerId, accountId);
   }
 
   providerDetails(providerId: string) {
@@ -1268,32 +1354,42 @@ class AppStore {
       .run(canonicalProviderId, duplicateProviderId);
 
     const duplicateLinks = this.db
-      .query("SELECT account_id, enabled FROM account_provider_links WHERE provider_id = ?")
+      .query(
+        "SELECT account_id, enabled, config_json FROM account_provider_links WHERE provider_id = ?",
+      )
       .all(duplicateProviderId) as Row[];
     const now = new Date().toISOString();
     for (const link of duplicateLinks) {
       const existing = this.db
         .query(
-          "SELECT enabled FROM account_provider_links WHERE account_id = ? AND provider_id = ?",
+          "SELECT enabled, config_json FROM account_provider_links WHERE account_id = ? AND provider_id = ?",
         )
         .get(String(link.account_id), canonicalProviderId) as Row | null;
+      const duplicateConfig = link.config_json ? String(link.config_json) : null;
       if (existing) {
         this.db
           .query(
-            "UPDATE account_provider_links SET enabled = ?, updated_at = ? WHERE account_id = ? AND provider_id = ?",
+            "UPDATE account_provider_links SET enabled = ?, updated_at = ?, config_json = COALESCE(config_json, ?) WHERE account_id = ? AND provider_id = ?",
           )
           .run(
             Number(Boolean(existing.enabled) || Boolean(link.enabled)),
             now,
+            duplicateConfig,
             String(link.account_id),
             canonicalProviderId,
           );
       } else {
         this.db
           .query(
-            "INSERT INTO account_provider_links (account_id, provider_id, enabled, updated_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO account_provider_links (account_id, provider_id, enabled, updated_at, config_json) VALUES (?, ?, ?, ?, ?)",
           )
-          .run(String(link.account_id), canonicalProviderId, Number(link.enabled), now);
+          .run(
+            String(link.account_id),
+            canonicalProviderId,
+            Number(link.enabled),
+            now,
+            duplicateConfig,
+          );
       }
     }
     this.db
@@ -1709,17 +1805,13 @@ class AppStore {
       providerId,
       signal.accountId ?? this.defaultParserAccountId(),
     );
+    if (targetAccountIds.length === 0) {
+      return { statusCode: 422, error: "Provider is not copied by any MT5 account" };
+    }
     const accountId = targetAccountIds[0] ?? this.defaultParserAccountId();
     const executionMode = options.executionMode ?? "VIRTUAL_TP";
     const settings = this.appSettings();
     const provider = this.providerDetails(providerId);
-    const providerConfig = this.providerConfig(providerId);
-    if (executionMode === "SPLIT_ORDER" && providerConfig.runner?.enabled) {
-      return {
-        statusCode: 422,
-        error: "Runner mode is only supported for VIRTUAL_TP execution today",
-      };
-    }
     // Dedup window: only collapse against APPROVED signals within the configured window
     // so a provider re-issuing the same short-form signal (e.g. "Sell BTCUSD") after the
     // earlier position closes can still queue. Configurable via settings.dedupWindowSeconds.
@@ -1747,18 +1839,17 @@ class AppStore {
     }
 
     const defaultTakeProfit = { value: settings.defaultTakeProfitPips, unit: "PIPS" as const };
-    const signalForQueue = applyProviderExecutionConfig(signal, providerConfig, {
-      defaultTakeProfit,
-    });
     if (signal.commandType === "OPEN_TRADE") {
       const targetSignals = targetAccountIds.map((targetAccountId) => {
+        const targetConfig = this.providerConfig(providerId, targetAccountId);
         const signalForTarget =
           targetAccountId === signal.accountId
             ? signal
             : parseSignalText(signal.originalText, this.parserContext(providerId, targetAccountId));
         return {
           accountId: targetAccountId,
-          signal: applyProviderExecutionConfig(signalForTarget, providerConfig, {
+          config: targetConfig,
+          signal: applyProviderExecutionConfig(signalForTarget, targetConfig, {
             defaultTakeProfit,
           }),
         };
@@ -1776,6 +1867,13 @@ class AppStore {
         const orderType = target.signal.orderType ?? "MARKET";
         if (!settings.allowedOrderTypes.includes(orderType)) {
           return { statusCode: 422, error: `${orderType} orders are not allowed by settings` };
+        }
+        // Runner mode is VIRTUAL_TP-only; enforce per target since config is per-account.
+        if (executionMode === "SPLIT_ORDER" && target.config.runner?.enabled) {
+          return {
+            statusCode: 422,
+            error: "Runner mode is only supported for VIRTUAL_TP execution today",
+          };
         }
       }
       const queueItems: string[] = [];
@@ -1797,14 +1895,14 @@ class AppStore {
           logicalTradeId: targetLogicalTradeId,
           executionMode,
           volume:
-            providerConfig.riskMode === "fixed"
-              ? providerConfig.riskAmount
+            target.config.riskMode === "fixed"
+              ? target.config.riskAmount
               : (provider?.lotSize ?? settings.defaultLotSize),
           riskPercent:
-            providerConfig.riskMode === "percent"
-              ? providerConfig.riskAmount
+            target.config.riskMode === "percent"
+              ? target.config.riskAmount
               : settings.defaultRiskPercent,
-          runner: providerConfig.runner,
+          runner: target.config.runner,
         });
         this.insertQueueItem(item, parsedSignalId);
         queueItems.push(targetQueueId);
@@ -1836,22 +1934,19 @@ class AppStore {
       };
     } else {
       const lifecycleTargets = targetAccountIds.map((targetAccountId) => {
-        const targetSignal =
+        const targetConfig = this.providerConfig(providerId, targetAccountId);
+        const targetSignal = applyProviderExecutionConfig(
           targetAccountId === signal.accountId
-            ? signalForQueue
-            : applyProviderExecutionConfig(
-                parseSignalText(
-                  signal.originalText,
-                  this.parserContext(providerId, targetAccountId),
-                ),
-                providerConfig,
-                { defaultTakeProfit },
-              );
+            ? signal
+            : parseSignalText(signal.originalText, this.parserContext(providerId, targetAccountId)),
+          targetConfig,
+          { defaultTakeProfit },
+        );
         const match = matchLifecycleCommandToTrade(
           targetSignal,
           this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
         );
-        return { accountId: targetAccountId, signal: targetSignal, match };
+        return { accountId: targetAccountId, config: targetConfig, signal: targetSignal, match };
       });
 
       for (const target of lifecycleTargets) {
@@ -1914,12 +2009,12 @@ class AppStore {
           logicalTradeId: trade.id,
           executionMode,
           volume:
-            providerConfig.riskMode === "fixed"
-              ? providerConfig.riskAmount
+            target.config.riskMode === "fixed"
+              ? target.config.riskAmount
               : (provider?.lotSize ?? settings.defaultLotSize),
           riskPercent:
-            providerConfig.riskMode === "percent"
-              ? providerConfig.riskAmount
+            target.config.riskMode === "percent"
+              ? target.config.riskAmount
               : settings.defaultRiskPercent,
         });
         Object.assign(queueItem.payload, this.brokerTargetForCommand(trade.id, queueItem.payload));
@@ -3357,7 +3452,7 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT account_id, provider_id, enabled, updated_at FROM account_provider_links ORDER BY account_id, provider_id",
+          "SELECT account_id, provider_id, enabled, updated_at, config_json FROM account_provider_links ORDER BY account_id, provider_id",
         )
         .all() as Row[]
     ).map((row) => ({
@@ -3365,6 +3460,10 @@ class AppStore {
       providerId: String(row.provider_id),
       enabled: Boolean(row.enabled),
       updatedAt: String(row.updated_at),
+      // Raw per-account config override (undefined = inherits the provider default).
+      config: row.config_json
+        ? parseJson<Partial<ProviderExecutionConfig>>(String(row.config_json))
+        : undefined,
     }));
   }
 
@@ -3388,7 +3487,8 @@ class AppStore {
   private targetAccountIdsForProvider(providerId: string, fallback: string) {
     const links = this.accountProviderLinks().filter((link) => link.providerId === providerId);
     const enabled = links.filter((link) => link.enabled).map((link) => link.accountId);
-    return enabled.length ? [...new Set(enabled)] : [fallback];
+    if (enabled.length) return [...new Set(enabled)];
+    return links.length ? [] : [fallback];
   }
 
   createAccountSlot(name: string) {
@@ -3507,19 +3607,36 @@ class AppStore {
       );
   }
 
-  executionLogs(accountId?: string) {
+  executionLogs(accountId?: string, limit?: number) {
+    const boundedLimit = optionalPositiveInteger(limit, MAX_EXECUTION_LOG_LIMIT);
     const rows = accountId
-      ? (this.db
-          .query(
-            "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports WHERE account_id = ? ORDER BY created_at DESC",
-          )
-          .all(accountId) as Row[])
-      : (this.db
-          .query(
-            "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports ORDER BY created_at DESC",
-          )
-          .all() as Row[]);
-    return rows.map((row) => ({
+      ? boundedLimit
+        ? (this.db
+            .query(
+              "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports WHERE account_id = ? ORDER BY created_at DESC LIMIT ?",
+            )
+            .all(accountId, boundedLimit) as Row[])
+        : (this.db
+            .query(
+              "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports WHERE account_id = ? ORDER BY created_at DESC",
+            )
+            .all(accountId) as Row[])
+      : boundedLimit
+        ? (this.db
+            .query(
+              "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports ORDER BY created_at DESC LIMIT ?",
+            )
+            .all(boundedLimit) as Row[])
+        : (this.db
+            .query(
+              "SELECT id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at FROM execution_reports ORDER BY created_at DESC",
+            )
+            .all() as Row[]);
+    return rows.map((row) => this.executionLogFromRow(row));
+  }
+
+  private executionLogFromRow(row: Row) {
+    return {
       id: String(row.id),
       queueItemId: String(row.queue_item_id),
       accountId: String(row.account_id),
@@ -3535,7 +3652,7 @@ class AppStore {
       volume: row.volume === null ? undefined : Number(row.volume),
       errorText: String(row.error_text),
       createdAt: String(row.created_at),
-    }));
+    };
   }
 
   executionLogDetails(reportId: string) {
@@ -3545,7 +3662,7 @@ class AppStore {
       )
       .get(reportId) as Row | null;
     if (!row) return { error: "Execution log not found" };
-    const log = this.executionLogs().find((item) => item.id === reportId);
+    const log = this.executionLogFromRow(row);
     const queue = this.db
       .query(
         "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE id = ?",
@@ -3656,8 +3773,7 @@ class AppStore {
     };
   }
 
-  accountPerformance() {
-    const accounts = this.mt5Accounts();
+  accountPerformance(accounts = this.mt5Accounts()) {
     const primary = accounts[0];
     if (!primary) {
       return {
@@ -3721,8 +3837,7 @@ class AppStore {
     };
   }
 
-  providerPerformance(accountId?: string) {
-    const accounts = this.mt5Accounts();
+  providerPerformance(accountId?: string, accounts = this.mt5Accounts()) {
     const initialBalanceDenominator = accountId
       ? (accounts.find((account) => account.id === accountId)?.initialBalance ?? 0)
       : accounts.reduce((sum, account) => sum + (account.initialBalance ?? 0), 0);
@@ -5003,8 +5118,11 @@ class AppStore {
         telegramAdapter,
       },
       appSettings: this.appSettings(),
-      accountPerformance: this.accountPerformance(),
-      providerPerformance: this.providerPerformance(),
+      accountPerformance: this.accountPerformance(accounts),
+      providerPerformance: this.providerPerformance(undefined, accounts),
+      providerPerformanceByAccount: Object.fromEntries(
+        accounts.map((account) => [account.id, this.providerPerformance(account.id, accounts)]),
+      ),
       accountSlots: this.accountSlots(),
       accountProviderLinks: this.accountProviderLinks(),
       equityGuardians: this.equityGuardians(),
@@ -5079,16 +5197,14 @@ class AppStore {
       })),
       logicalTrades: this.logicalTradesForDashboard(),
       symbolMappings: this.symbolMappings().preview,
-      executionLogs: this.executionLogs()
-        .slice(0, 10)
-        .map((log) => ({
-          id: log.id,
-          queueItemId: log.queueItemId,
-          retcode: log.retcode,
-          brokerComment: log.brokerComment,
-          status: log.status,
-          timestamp: log.createdAt,
-        })),
+      executionLogs: this.executionLogs(undefined, 10).map((log) => ({
+        id: log.id,
+        queueItemId: log.queueItemId,
+        retcode: log.retcode,
+        brokerComment: log.brokerComment,
+        status: log.status,
+        timestamp: log.createdAt,
+      })),
     };
   }
 
@@ -5297,9 +5413,12 @@ class AppStore {
         provider_id TEXT NOT NULL,
         enabled INTEGER NOT NULL,
         updated_at TEXT NOT NULL,
+        config_json TEXT,
         PRIMARY KEY (account_id, provider_id)
       );
     `);
+    // Per-account provider config override. NULL = inherit the provider-level default.
+    this.ensureColumn("account_provider_links", "config_json", "TEXT");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS equity_guardians (
         account_id TEXT PRIMARY KEY,
@@ -5422,6 +5541,12 @@ class AppStore {
       );
     `);
     this.ensureColumn("execution_reports", "position_ticket", "TEXT");
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_execution_reports_created ON execution_reports(created_at DESC)",
+    );
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_execution_reports_account_created ON execution_reports(account_id, created_at DESC)",
+    );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS broker_orders (
         id TEXT PRIMARY KEY,
@@ -7891,6 +8016,14 @@ function hasOwn(object: object, key: string): boolean {
 function positiveNumber(value: unknown, fallback: number) {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function optionalPositiveInteger(value: unknown, max: number) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const number = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(number)) return undefined;
+  const integer = Math.floor(number);
+  return integer > 0 ? Math.min(integer, max) : undefined;
 }
 
 function hashHint(value: string) {

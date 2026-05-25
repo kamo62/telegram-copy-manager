@@ -9,26 +9,27 @@ import {
 export function ProvidersPage({
   providers,
   onConfigure,
-  onDelete,
-  onToggle,
   onExport,
   loading = false,
   accounts = [],
   providerLinks = [],
   onToggleAccountLink,
   currency,
+  accountId = null,
+  accountLabel,
 }: {
   providers: ProviderRowData[];
   onConfigure: (provider: ProviderRowData) => void;
-  onDelete: (provider: ProviderRowData) => void;
-  onToggle: (provider: ProviderRowData) => void;
   onExport?: () => void;
   loading?: boolean;
   accounts?: ProviderAccountLinkOption[];
   providerLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
   onToggleAccountLink?: (accountId: string, providerId: string, enabled: boolean) => void;
   currency?: string;
+  accountId?: string | null;
+  accountLabel?: string;
 }) {
+  const isAccountMode = Boolean(accountId);
   return (
     <Panel className="wide-panel" title="Providers">
       <div className="provider-panel-toolbar">
@@ -42,19 +43,26 @@ export function ProvidersPage({
           Export
         </button>
       </div>
-      {accounts.length > 0 ? (
+      {isAccountMode ? (
         <p className="panel-intro">
-          Use the <strong>Copied by</strong> chips to choose which MT5 accounts copy each provider.
-          Provider must be Enabled before any account can copy it.
+          Stats, copy status, and configuration shown for{" "}
+          <strong>{accountLabel ?? "this account"}</strong>. Use <strong>Copy</strong> to start or
+          stop copying a provider here, and <strong>Configure</strong> to set this account's lot
+          size, risk, and take-profit. Enable or remove a provider from{" "}
+          <strong>Telegram Setup</strong>.
         </p>
-      ) : null}
+      ) : (
+        <p className="panel-intro">
+          Aggregated performance across all copying accounts. Select an account in the sidebar to
+          see its own stats and to start copying or configuring a provider.
+        </p>
+      )}
       <ProvidersTable
+        accountId={accountId}
         accounts={accounts}
         currency={currency}
         loading={loading}
         onConfigure={onConfigure}
-        onDelete={onDelete}
-        onToggle={onToggle}
         onToggleAccountLink={onToggleAccountLink}
         providerLinks={providerLinks}
         providers={providers}

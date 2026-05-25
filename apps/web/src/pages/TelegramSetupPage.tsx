@@ -2,6 +2,7 @@ import { Info, RefreshCw, ShieldCheck } from "lucide-react";
 import { DialogPicker, type TelegramDialogSummary } from "../components/DialogPicker";
 import { Panel } from "../components/Panel";
 import { SetupFlow, type SetupFormState } from "../components/SetupFlow";
+import { Tag } from "../components/Tag";
 
 export function TelegramSetupPage({
   form,
@@ -19,6 +20,10 @@ export function TelegramSetupPage({
   onSelectDialog,
   onRemoveDialog,
   selectedDialogIds,
+  providers = [],
+  onToggleProvider,
+  onRemoveProvider,
+  onConfigureProvider,
 }: {
   form: SetupFormState;
   busy: boolean;
@@ -35,6 +40,12 @@ export function TelegramSetupPage({
   onSelectDialog: (dialog: TelegramDialogSummary) => Promise<void>;
   onRemoveDialog?: (dialog: TelegramDialogSummary) => Promise<void> | void;
   selectedDialogIds: string[];
+  // Global provider lifecycle lives here (the Providers tab is account-scoped and read-only
+  // in overview), so enabling/pausing/removing a provider happens alongside dialog selection.
+  providers?: Array<{ id: string; title: string; enabled: boolean }>;
+  onToggleProvider?: (provider: { id: string; title: string; enabled: boolean }) => void;
+  onRemoveProvider?: (provider: { id: string; title: string; enabled: boolean }) => void;
+  onConfigureProvider?: (provider: { id: string; title: string; enabled: boolean }) => void;
 }) {
   const isConnected = setupStep === "connected";
   return (
@@ -91,6 +102,52 @@ export function TelegramSetupPage({
             onSelect={onSelectDialog}
             selectedDialogIds={selectedDialogIds}
           />
+
+          {providers.length > 0 ? (
+            <section className="setup-providers">
+              <h3 className="config-section-title">Provider monitoring</h3>
+              <p className="panel-intro">
+                Enable or pause signal collection, set the provider's default lot/risk/TP, or remove
+                it. Per-account copy and config overrides live in the Providers tab.
+              </p>
+              <ul className="setup-provider-list">
+                {providers.map((provider) => (
+                  <li className="setup-provider-row" key={provider.id}>
+                    <span className="setup-provider-name">{provider.title}</span>
+                    <Tag tone={provider.enabled ? "good" : "muted"}>
+                      {provider.enabled ? "Auto-copy enabled" : "Provider paused"}
+                    </Tag>
+                    <span className="setup-provider-actions">
+                      <button
+                        aria-label={`Configure ${provider.title}`}
+                        className="btn btn-ghost btn-small"
+                        onClick={() => onConfigureProvider?.(provider)}
+                        type="button"
+                      >
+                        Configure
+                      </button>
+                      <button
+                        aria-label={`${provider.enabled ? "Pause" : "Enable"} auto-copy for ${provider.title}`}
+                        className="btn btn-ghost btn-small"
+                        onClick={() => onToggleProvider?.(provider)}
+                        type="button"
+                      >
+                        {provider.enabled ? "Pause" : "Enable"}
+                      </button>
+                      <button
+                        aria-label={`Remove provider ${provider.title}`}
+                        className="btn btn-ghost btn-small btn-destructive-subtle"
+                        onClick={() => onRemoveProvider?.(provider)}
+                        type="button"
+                      >
+                        Remove
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
         </>
       ) : null}
     </Panel>

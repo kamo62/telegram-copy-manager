@@ -24,6 +24,12 @@ export interface TpStrategyLevel {
   strategy: TpStrategy;
 }
 
+export interface TpDraftLevel {
+  leg: number;
+  percentage: string;
+  strategy: TpStrategy;
+}
+
 export interface ProviderConfigSubmission {
   parserMode: string;
   lotSize: number;
@@ -37,13 +43,9 @@ export interface ProviderConfigSubmission {
 export function strategyLabel(strategy: TpStrategy): string {
   switch (strategy.kind) {
     case "set-sl-to-entry":
-      return strategy.offsetPips === 0
-        ? "Move SL to entry"
-        : `Move SL to entry + ${strategy.offsetPips} pips`;
+      return "Move SL to BE";
     case "set-sl-to-tp":
-      return strategy.offsetPips === 0
-        ? `Move SL to TP${strategy.tpLeg}`
-        : `Move SL to TP${strategy.tpLeg} + ${strategy.offsetPips} pips`;
+      return `Move SL to TP${strategy.tpLeg}`;
     case "no-change":
       return "Leave SL unchanged";
   }
@@ -53,11 +55,178 @@ function formatPercent(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");
 }
 
-function effectiveTpPercentages(tps: TpStrategyLevel[]): number[] {
-  if (tps.length === 0) return [];
-  const total = tps.reduce((sum, tp) => sum + Math.max(0, tp.percentage), 0);
-  if (total <= 0) return tps.map(() => 100 / tps.length);
-  return tps.map((tp) => (Math.max(0, tp.percentage) / total) * 100);
+function parseDecimal(value: string): number | null {
+  const normalized = value.trim().replace(",", ".");
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatDraftNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)));
+}
+
+function normalizedStrategyForLeg(strategy: TpStrategy, leg: number): TpStrategy {
+  switch (strategy.kind) {
+    case "no-change":
+      return { kind: "no-change" };
+    case "set-sl-to-entry":
+      return { kind: "set-sl-to-entry", offsetPips: 0 };
+    case "set-sl-to-tp":
+      return leg > 1
+        ? { kind: "set-sl-to-tp", tpLeg: leg - 1, offsetPips: 0 }
+        : { kind: "set-sl-to-entry", offsetPips: 0 };
+  }
+}
+
+function toDraftTpLevels(levels: TpStrategyLevel[]): TpDraftLevel[] {
+  return levels.slice(0, MAX_TP_LEVELS).map((level) => ({
+    leg: level.leg,
+    percentage: formatDraftNumber(level.percentage),
+    strategy: normalizedStrategyForLeg(level.strategy, level.leg),
+  }));
+}
+
+function normalizeDraftTpLevels(levels: TpDraftLevel[]): TpDraftLevel[] {
+  return levels.slice(0, MAX_TP_LEVELS).map((level, index) => {
+    const leg = index + 1;
+    return {
+      ...level,
+      leg,
+      strategy: normalizedStrategyForLeg(level.strategy, leg),
+    };
+  });
+}
+
+function toSubmissionTpLevels(levels: TpDraftLevel[]): TpStrategyLevel[] {
+  return normalizeDraftTpLevels(levels).map((level) => ({
+    leg: level.leg,
+    percentage: parseDecimal(level.percentage) ?? 0,
+    strategy: normalizedStrategyForLeg(level.strategy, level.leg),
+  }));
+}
+
+export interface TpAllocationPreviewRow {
+  leg: number;
+  enteredPercent: number;
+  effectivePercent: number;
+  lots: number | null;
+}
+
+export interface TpAllocationPreview {
+  canPreviewLots: boolean;
+  totalEnteredPercent: number;
+  totalOrderLots: number | null;
+  runnerLots: number | null;
+  tpCloseLots: number | null;
+  rows: TpAllocationPreviewRow[];
+}
+
+export interface ProviderConfigDraft {
+  riskMode: RiskMode;
+  riskAmountText: string;
+  tps: TpDraftLevel[];
+  runner: RunnerConfig;
+  runnerLotText?: string;
+}
+
+function runnerLotValue(draft: ProviderConfigDraft): number | null {
+  if (!draft.runner.enabled) return 0;
+  if (draft.runnerLotText !== undefined) return parseDecimal(draft.runnerLotText);
+  return Number.isFinite(draft.runner.lotSize) ? draft.runner.lotSize : null;
+}
+
+export function computeTpAllocationPreview(draft: ProviderConfigDraft): TpAllocationPreview {
+  const parsedPercentages = draft.tps.map((tp) => Math.max(0, parseDecimal(tp.percentage) ?? 0));
+  const totalEnteredPercent = parsedPercentages.reduce((sum, percentage) => sum + percentage, 0);
+  const effectivePercentages =
+    totalEnteredPercent > 0
+      ? parsedPercentages.map((percentage) => (percentage / totalEnteredPercent) * 100)
+      : parsedPercentages.map(() => 0);
+  const totalOrderLots =
+    draft.riskMode === "fixed" ? Math.max(0, parseDecimal(draft.riskAmountText) ?? 0) : null;
+  const parsedRunnerLots = runnerLotValue(draft);
+  const runnerLots =
+    draft.riskMode === "fixed" && draft.runner.enabled
+      ? Math.max(0, parsedRunnerLots ?? 0)
+      : draft.riskMode === "fixed"
+        ? 0
+        : null;
+  const canPreviewLots =
+    draft.riskMode === "fixed" && totalOrderLots !== null && totalOrderLots > 0;
+  const tpCloseLots =
+    canPreviewLots && totalOrderLots !== null && runnerLots !== null
+      ? Math.max(0, totalOrderLots - runnerLots)
+      : null;
+
+  return {
+    canPreviewLots,
+    totalEnteredPercent,
+    totalOrderLots,
+    runnerLots,
+    tpCloseLots,
+    rows: draft.tps.map((tp, index) => ({
+      leg: tp.leg,
+      enteredPercent: parsedPercentages[index] ?? 0,
+      effectivePercent: effectivePercentages[index] ?? 0,
+      lots:
+        canPreviewLots && tpCloseLots !== null
+          ? (tpCloseLots * (effectivePercentages[index] ?? 0)) / 100
+          : null,
+    })),
+  };
+}
+
+export function validateProviderConfigDraft(draft: ProviderConfigDraft): {
+  valid: boolean;
+  errors: string[];
+} {
+  const errors: string[] = [];
+  const riskValue = parseDecimal(draft.riskAmountText);
+  if (riskValue === null || riskValue <= 0) {
+    errors.push(
+      draft.riskMode === "fixed"
+        ? "Enter a positive fixed lot size."
+        : "Enter a positive risk percent.",
+    );
+  }
+
+  let positiveTpPercentages = 0;
+  for (const tp of draft.tps) {
+    const percentage = parseDecimal(tp.percentage);
+    if (percentage === null) {
+      errors.push(`Enter a percentage for TP${tp.leg}.`);
+    } else if (percentage < 0) {
+      errors.push(`TP${tp.leg} percentage cannot be negative.`);
+    } else if (percentage > 0) {
+      positiveTpPercentages += 1;
+    }
+
+    if (tp.strategy.kind === "set-sl-to-tp" && tp.leg <= 1) {
+      errors.push(`TP${tp.leg} cannot move SL to a prior TP.`);
+    }
+  }
+
+  if (draft.tps.length > 0 && positiveTpPercentages === 0) {
+    errors.push("Enter a positive percentage for at least one TP.");
+  }
+
+  const runnerLot = runnerLotValue(draft);
+  if (draft.runner.enabled) {
+    if (runnerLot === null || runnerLot <= 0) {
+      errors.push("Enter a positive runner lot size.");
+    } else if (
+      draft.riskMode === "fixed" &&
+      draft.tps.length > 0 &&
+      riskValue !== null &&
+      riskValue > 0 &&
+      runnerLot >= riskValue
+    ) {
+      errors.push("Runner lot must be less than the fixed lot size.");
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
 }
 
 /** Best-effort migration of legacy freeform strings into the structured shape. */
@@ -101,9 +270,9 @@ export interface RunnerConfig {
 
 const DEFAULT_TPS: TpStrategyLevel[] = [
   { leg: 1, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
-  { leg: 2, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 1 } },
-  { leg: 3, percentage: 25, strategy: { kind: "set-sl-to-tp", tpLeg: 1, offsetPips: 0 } },
-  { leg: 4, percentage: 25, strategy: { kind: "set-sl-to-tp", tpLeg: 2, offsetPips: 0 } },
+  { leg: 2, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+  { leg: 3, percentage: 25, strategy: { kind: "set-sl-to-tp", tpLeg: 2, offsetPips: 0 } },
+  { leg: 4, percentage: 25, strategy: { kind: "set-sl-to-tp", tpLeg: 3, offsetPips: 0 } },
 ];
 
 const MAX_TP_LEVELS = 4;
@@ -127,6 +296,7 @@ export function ProviderConfigModal({
   onClose,
   onSave,
   onTest,
+  accountLabel,
 }: {
   provider: ProviderRowData | null;
   open: boolean;
@@ -137,22 +307,31 @@ export function ProviderConfigModal({
     payload: ProviderConfigSubmission,
     rawText: string,
   ) => Promise<ProviderConfigTestResult>;
+  // When set, the modal edits this account's per-account config override.
+  accountLabel?: string;
 }) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const [riskMode, setRiskMode] = useState<RiskMode>("fixed");
   const [riskAmount, setRiskAmount] = useState("0.10");
-  const [tps, setTps] = useState(DEFAULT_TPS);
+  const [tps, setTps] = useState<TpDraftLevel[]>(() => toDraftTpLevels(DEFAULT_TPS));
   const [runner, setRunner] = useState<RunnerConfig>(DEFAULT_RUNNER);
+  const [runnerLotText, setRunnerLotText] = useState(formatDraftNumber(DEFAULT_RUNNER.lotSize));
   const [testRawText, setTestRawText] = useState(DEFAULT_TEST_MESSAGE);
   const [testResult, setTestResult] = useState<ProviderConfigTestResult | null>(null);
   const [testBusy, setTestBusy] = useState(false);
 
   useEffect(() => {
     if (provider) {
+      const nextRunner = provider.runner ?? DEFAULT_RUNNER;
       setRiskMode(provider.riskMode ?? "fixed");
       setRiskAmount((provider.riskAmount ?? provider.lotSize).toFixed(2));
-      setTps(provider.takeProfitLevels !== undefined ? provider.takeProfitLevels : DEFAULT_TPS);
-      setRunner(provider.runner ?? DEFAULT_RUNNER);
+      setTps(
+        provider.takeProfitLevels !== undefined
+          ? toDraftTpLevels(provider.takeProfitLevels)
+          : toDraftTpLevels(DEFAULT_TPS),
+      );
+      setRunner(nextRunner);
+      setRunnerLotText(formatDraftNumber(nextRunner.lotSize));
       setTestRawText(DEFAULT_TEST_MESSAGE);
       setTestResult(null);
       setTestBusy(false);
@@ -164,21 +343,34 @@ export function ProviderConfigModal({
 
   if (!open || !provider) return null;
 
-  const riskValueNumeric = Number(riskAmount.replace(",", ".")) || 0;
+  const draft: ProviderConfigDraft = {
+    riskMode,
+    riskAmountText: riskAmount,
+    tps,
+    runner,
+    runnerLotText,
+  };
+  const validation = validateProviderConfigDraft(draft);
+  const allocationPreview = computeTpAllocationPreview(draft);
+  const riskValueNumeric = parseDecimal(riskAmount) ?? 0;
+  const runnerLotNumeric = runnerLotValue(draft) ?? runner.lotSize;
 
   function buildPayload() {
     const form = formRef.current;
-    if (!form || !provider) return null;
+    if (!form || !provider || !validation.valid) return null;
     const data = new FormData(form);
-    const lotRaw = String(data.get("lotSize") ?? "0").replace(",", ".");
-    const lotValue = Number(lotRaw) || provider.lotSize;
+    const lotValue = parseDecimal(String(data.get("lotSize") ?? riskAmount)) ?? provider.lotSize;
+    const nextRunner = {
+      ...runner,
+      lotSize: runner.enabled ? runnerLotNumeric : (parseDecimal(runnerLotText) ?? runner.lotSize),
+    };
     return {
       parserMode: String(data.get("parserMode") ?? provider.parserMode),
       lotSize: riskMode === "fixed" ? lotValue : provider.lotSize,
       riskMode,
       riskAmount: lotValue,
-      takeProfitLevels: tps,
-      runner,
+      takeProfitLevels: toSubmissionTpLevels(tps),
+      runner: nextRunner,
     };
   }
 
@@ -212,70 +404,68 @@ export function ProviderConfigModal({
   function distributeEqually() {
     if (tps.length === 0) return;
     const share = Math.round((100 / tps.length) * 10) / 10;
-    setTps(tps.map((tp) => ({ ...tp, percentage: share })));
+    setTps(tps.map((tp) => ({ ...tp, percentage: formatDraftNumber(share) })));
   }
 
-  function updateTp(index: number, patch: Partial<(typeof tps)[number]>) {
+  function updateTp(index: number, patch: Partial<TpDraftLevel>) {
     setTps(tps.map((tp, i) => (i === index ? { ...tp, ...patch } : tp)));
   }
 
   function deleteTp(index: number) {
-    setTps(tps.filter((_tp, i) => i !== index).map((tp, i) => ({ ...tp, leg: i + 1 })));
+    setTps(normalizeDraftTpLevels(tps.filter((_tp, i) => i !== index)));
   }
 
   function addTp() {
     if (tps.length >= MAX_TP_LEVELS) return;
+    const leg = tps.length + 1;
     setTps([
       ...tps,
       {
-        leg: tps.length + 1,
-        percentage: 0,
+        leg,
+        percentage: "0",
         strategy:
-          tps.length === 0
+          leg === 1
             ? { kind: "set-sl-to-entry", offsetPips: 0 }
-            : { kind: "set-sl-to-tp", tpLeg: tps.length, offsetPips: 0 },
+            : { kind: "set-sl-to-tp", tpLeg: leg - 1, offsetPips: 0 },
       },
     ]);
   }
 
-  function updateStrategy(
-    index: number,
-    patch: Partial<TpStrategy> & { kind?: TpStrategy["kind"] },
-  ) {
+  function updateStrategy(index: number, nextKind: TpStrategy["kind"]) {
     setTps(
       tps.map((tp, i) => {
         if (i !== index) return tp;
-        const current = tp.strategy;
-        // Preserve fields where they make sense across kind switches; default the rest.
-        const nextKind: TpStrategy["kind"] = patch.kind ?? current.kind;
         if (nextKind === "no-change") {
           return { ...tp, strategy: { kind: "no-change" } };
         }
-        const baseOffset = current.kind === "no-change" ? 0 : current.offsetPips;
-        const offsetPips =
-          "offsetPips" in patch && patch.offsetPips !== undefined ? patch.offsetPips : baseOffset;
         if (nextKind === "set-sl-to-entry") {
-          return { ...tp, strategy: { kind: "set-sl-to-entry", offsetPips } };
+          return { ...tp, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } };
         }
-        // set-sl-to-tp
-        const currentLeg =
-          current.kind === "set-sl-to-tp" ? current.tpLeg : Math.max(1, tp.leg - 1);
-        const tpLeg = "tpLeg" in patch && patch.tpLeg !== undefined ? patch.tpLeg : currentLeg;
-        return { ...tp, strategy: { kind: "set-sl-to-tp", tpLeg, offsetPips } };
+        return {
+          ...tp,
+          strategy:
+            tp.leg > 1
+              ? { kind: "set-sl-to-tp", tpLeg: tp.leg - 1, offsetPips: 0 }
+              : { kind: "set-sl-to-entry", offsetPips: 0 },
+        };
       }),
     );
   }
 
   // --- Resume math --------------------------------------------------------
-  const totalOrder = riskMode === "fixed" ? riskValueNumeric : riskValueNumeric;
-  const reservedRunner = runner.enabled ? Math.min(runner.lotSize, totalOrder) : 0;
-  const tradedPortion = Math.max(0, totalOrder - reservedRunner);
-  const totalPercent = tps.reduce((acc, tp) => acc + tp.percentage, 0);
-  const effectivePercents = effectiveTpPercentages(tps);
+  const totalOrder = allocationPreview.totalOrderLots ?? riskValueNumeric;
+  const reservedRunner =
+    riskMode === "fixed" ? (allocationPreview.runnerLots ?? 0) : runnerLotNumeric;
+  const tradedPortion = allocationPreview.tpCloseLots ?? 0;
+  const totalPercent = allocationPreview.totalEnteredPercent;
   const lastTpLabel = tps.length ? `TP${tps[tps.length - 1]!.leg}` : "the TP sequence";
   const tpCloseBasis = runner.enabled
-    ? `${numberFmt.format(tradedPortion)} lots assigned to TP closes`
-    : "the full order";
+    ? allocationPreview.canPreviewLots
+      ? `${numberFmt.format(tradedPortion)} lots assigned to TP closes`
+      : "the execution-sized TP pool"
+    : allocationPreview.canPreviewLots
+      ? "the full order"
+      : "the execution-sized order";
 
   return (
     <div className="modal-overlay">
@@ -289,7 +479,9 @@ export function ProviderConfigModal({
         <header className="modal-head">
           <div>
             <h2 id="provider-config-title">{provider.title}</h2>
-            <span className="modal-subtle">Channel configuration</span>
+            <span className="modal-subtle">
+              {accountLabel ? `Configuration for account ${accountLabel}` : "Channel configuration"}
+            </span>
           </div>
           <button
             aria-label="Close configuration"
@@ -328,7 +520,7 @@ export function ProviderConfigModal({
               <button
                 aria-label={`Test provider config for ${provider.title}`}
                 className="btn btn-ghost btn-small"
-                disabled={!onTest || testBusy || !testRawText.trim()}
+                disabled={!onTest || testBusy || !testRawText.trim() || !validation.valid}
                 onClick={performTest}
                 type="button"
               >
@@ -365,7 +557,7 @@ export function ProviderConfigModal({
                   defaultValue={(provider.riskAmount ?? provider.lotSize).toFixed(2)}
                   inputMode="decimal"
                   name="lotSize"
-                  onChange={(event) => setRiskAmount(event.target.value)}
+                  onInput={(event) => setRiskAmount(event.currentTarget.value)}
                   pattern="[0-9]*[.,]?[0-9]*"
                   type="text"
                 />
@@ -405,106 +597,102 @@ export function ProviderConfigModal({
                 <span>TP</span>
                 <span>%</span>
                 <span>Strategy</span>
+                <span>Lots</span>
                 <span aria-hidden="true" />
               </div>
-              {tps.map((tp, index) => (
-                <div className="config-tp-row" key={tp.leg}>
-                  <span className="config-tp-leg">TP{tp.leg}</span>
-                  <div className="config-stepper">
-                    <button
-                      aria-label={`Decrease TP${tp.leg} percentage`}
-                      onClick={() =>
-                        updateTp(index, { percentage: Math.max(0, tp.percentage - 5) })
-                      }
-                      type="button"
-                    >
-                      −
-                    </button>
-                    <input
-                      aria-label={`TP${tp.leg} percentage`}
-                      inputMode="decimal"
-                      onChange={(event) =>
-                        updateTp(index, { percentage: Number(event.target.value) || 0 })
-                      }
-                      type="text"
-                      value={tp.percentage}
-                    />
-                    <button
-                      aria-label={`Increase TP${tp.leg} percentage`}
-                      onClick={() =>
-                        updateTp(index, { percentage: Math.min(100, tp.percentage + 5) })
-                      }
-                      type="button"
-                    >
-                      +
-                    </button>
-                  </div>
-                  <div
-                    className={`config-strategy-controls config-strategy-controls-${tp.strategy.kind}`}
-                  >
-                    <select
-                      aria-label={`TP${tp.leg} strategy action`}
-                      className="config-strategy-input"
-                      onChange={(event) =>
-                        updateStrategy(index, { kind: event.target.value as TpStrategy["kind"] })
-                      }
-                      value={tp.strategy.kind}
-                    >
-                      <option value="set-sl-to-entry">Move SL to entry</option>
-                      <option value="set-sl-to-tp">Move SL to prior TP</option>
-                      <option value="no-change">Leave SL unchanged</option>
-                    </select>
-                    {tp.strategy.kind === "set-sl-to-tp" ? (
-                      <select
-                        aria-label={`TP${tp.leg} strategy reference TP`}
-                        className="config-strategy-input config-strategy-reference"
-                        onChange={(event) =>
-                          updateStrategy(index, { tpLeg: Number(event.target.value) || 1 })
+              {tps.map((tp, index) => {
+                const enteredPercent = parseDecimal(tp.percentage) ?? 0;
+                const rowPreview = allocationPreview.rows[index];
+                const strategyValue =
+                  tp.strategy.kind === "set-sl-to-tp" && tp.leg === 1
+                    ? "set-sl-to-entry"
+                    : tp.strategy.kind;
+                return (
+                  <div className="config-tp-row" key={tp.leg}>
+                    <span className="config-tp-leg">TP{tp.leg}</span>
+                    <div className="config-stepper">
+                      <button
+                        aria-label={`Decrease TP${tp.leg} percentage`}
+                        onClick={() =>
+                          updateTp(index, {
+                            percentage: formatDraftNumber(Math.max(0, enteredPercent - 5)),
+                          })
                         }
-                        value={tp.strategy.tpLeg}
+                        type="button"
                       >
-                        {Array.from({ length: Math.max(1, tp.leg - 1) }, (_value, tpIndex) => (
-                          <option key={tpIndex + 1} value={tpIndex + 1}>
-                            TP{tpIndex + 1}
-                          </option>
-                        ))}
-                      </select>
-                    ) : null}
-                    {tp.strategy.kind !== "no-change" ? (
+                        -
+                      </button>
                       <input
-                        aria-label={`TP${tp.leg} strategy offset pips`}
-                        className="config-strategy-input config-strategy-offset"
+                        aria-label={`TP${tp.leg} percentage`}
                         inputMode="decimal"
-                        onChange={(event) =>
-                          updateStrategy(index, { offsetPips: Number(event.target.value) || 0 })
+                        onInput={(event) =>
+                          updateTp(index, { percentage: event.currentTarget.value })
                         }
                         type="text"
-                        value={tp.strategy.offsetPips}
+                        value={tp.percentage}
                       />
-                    ) : null}
+                      <button
+                        aria-label={`Increase TP${tp.leg} percentage`}
+                        onClick={() =>
+                          updateTp(index, {
+                            percentage: formatDraftNumber(Math.min(100, enteredPercent + 5)),
+                          })
+                        }
+                        type="button"
+                      >
+                        +
+                      </button>
+                    </div>
+                    <div className="config-strategy-controls">
+                      <select
+                        aria-label={`TP${tp.leg} strategy action`}
+                        className="config-strategy-input"
+                        onChange={(event) =>
+                          updateStrategy(index, event.target.value as TpStrategy["kind"])
+                        }
+                        value={strategyValue}
+                      >
+                        <option value="set-sl-to-entry">Move SL to BE</option>
+                        {tp.leg > 1 ? (
+                          <option value="set-sl-to-tp">Move SL to prior TP</option>
+                        ) : null}
+                        <option value="no-change">Leave SL unchanged</option>
+                      </select>
+                    </div>
+                    <span className="config-tp-lots">
+                      <strong>
+                        {rowPreview?.lots !== null && rowPreview?.lots !== undefined
+                          ? numberFmt.format(rowPreview.lots)
+                          : "--"}
+                      </strong>
+                      <small>{allocationPreview.canPreviewLots ? "lots" : "at execution"}</small>
+                    </span>
+                    <button
+                      aria-label={`Delete TP${tp.leg}`}
+                      className="config-row-delete"
+                      onClick={() => deleteTp(index)}
+                      type="button"
+                    >
+                      <Trash2 size={13} aria-hidden="true" />
+                    </button>
                   </div>
-                  <button
-                    aria-label={`Delete TP${tp.leg}`}
-                    className="config-row-delete"
-                    onClick={() => deleteTp(index)}
-                    type="button"
-                  >
-                    <Trash2 size={13} aria-hidden="true" />
-                  </button>
-                </div>
-              ))}
+                );
+              })}
               {tps.length < MAX_TP_LEVELS ? (
                 <button className="config-tp-add" onClick={addTp} type="button">
                   <Plus size={13} aria-hidden="true" />
                   Add a take-profit level
                 </button>
               ) : null}
-              {totalPercent !== 100 && tps.length > 0 ? (
+              {totalPercent !== 100 && totalPercent > 0 && tps.length > 0 ? (
                 <p className="config-hint">
-                  {totalPercent <= 0
-                    ? `TP percentages are all 0%; the app splits ${tpCloseBasis} equally across the configured TPs.`
-                    : `TP percentages total ${formatPercent(totalPercent)}%; the app treats them as weights across ${tpCloseBasis}.`}
-                  {runner.enabled ? " Runner stays separate." : ""}
+                  TP percentages total {formatPercent(totalPercent)}%; the app treats them as
+                  weights across {tpCloseBasis}.{runner.enabled ? " Runner stays separate." : ""}
+                </p>
+              ) : null}
+              {riskMode === "percent" && tps.length > 0 ? (
+                <p className="config-hint config-hint-soft">
+                  Exact TP lots calculate at execution.
                 </p>
               ) : null}
             </div>
@@ -530,14 +718,16 @@ export function ProviderConfigModal({
                   <input
                     aria-label="Runner lot size"
                     inputMode="decimal"
-                    onChange={(event) =>
-                      setRunner({
-                        ...runner,
-                        lotSize: Number(event.target.value.replace(",", ".")) || 0,
-                      })
-                    }
+                    onInput={(event) => {
+                      const nextValue = event.currentTarget.value;
+                      const parsed = parseDecimal(nextValue);
+                      setRunnerLotText(nextValue);
+                      if (parsed !== null) {
+                        setRunner({ ...runner, lotSize: parsed });
+                      }
+                    }}
                     type="text"
-                    value={numberFmt.format(runner.lotSize)}
+                    value={runnerLotText}
                   />
                 </label>
                 <label className="config-field config-field-grow">
@@ -582,17 +772,35 @@ export function ProviderConfigModal({
             )}
           </section>
 
+          {validation.errors.length > 0 ? (
+            <div className="config-validation" role="alert">
+              <ul>
+                {validation.errors.map((error) => (
+                  <li key={error}>{error}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
           <section className="config-resume">
             <h3 className="config-resume-title">Order summary</h3>
             <div className="config-resume-grid">
               <div className="config-resume-stat">
                 <span>Total order</span>
-                <strong>{numberFmt.format(totalOrder)}</strong>
+                <strong>
+                  {allocationPreview.canPreviewLots
+                    ? numberFmt.format(totalOrder)
+                    : formatPercent(riskValueNumeric)}
+                </strong>
                 <small>{riskMode === "fixed" ? "lots" : "% of balance"}</small>
               </div>
               <div className="config-resume-stat">
                 <span>Allocated to TPs</span>
-                <strong>{numberFmt.format(tradedPortion)}</strong>
+                <strong>
+                  {allocationPreview.canPreviewLots
+                    ? numberFmt.format(tradedPortion)
+                    : "At execution"}
+                </strong>
                 <small>
                   {tps.length} levels ·{" "}
                   {totalPercent === 100
@@ -616,12 +824,19 @@ export function ProviderConfigModal({
             </div>
             <ol className="config-resume-list">
               {tps.map((tp, index) => {
-                const effectivePercent = effectivePercents[index] ?? 0;
-                const closed = (tradedPortion * effectivePercent) / 100;
+                const rowPreview = allocationPreview.rows[index];
+                const effectivePercent = rowPreview?.effectivePercent ?? 0;
+                const closed = rowPreview?.lots;
                 return (
                   <li key={tp.leg}>
                     <strong>TP{tp.leg}</strong> hit · close{" "}
-                    <span className="num">{numberFmt.format(closed)}</span> lots{" "}
+                    {closed !== null && closed !== undefined ? (
+                      <>
+                        <span className="num">{numberFmt.format(closed)}</span> lots{" "}
+                      </>
+                    ) : (
+                      <span className="num">at execution</span>
+                    )}
                     <span className="config-resume-percent">
                       ({formatPercent(effectivePercent)}% effective)
                     </span>
@@ -651,6 +866,7 @@ export function ProviderConfigModal({
             <button
               aria-label={`Save provider settings for ${provider.title}`}
               className="btn btn-primary"
+              disabled={!validation.valid}
               onClick={performSave}
               type="button"
             >

@@ -3015,6 +3015,50 @@ h3 {
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
 
+/* Read-only "Copied by" chips on the Providers overview — not interactive. */
+.account-chip.is-readonly {
+  cursor: default;
+}
+
+.account-chip.is-readonly:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Provider monitoring list on Telegram Setup (global enable/pause/remove). */
+.setup-providers {
+  margin-top: 20px;
+}
+
+.setup-provider-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-provider-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-2, 8px);
+  background: var(--surface-1, transparent);
+}
+
+.setup-provider-name {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+
+.setup-provider-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
 .setup-help {
   display: flex;
   align-items: flex-start;
@@ -4320,7 +4364,7 @@ h3 {
 
 .config-tp-head {
   display: grid;
-  grid-template-columns: 60px 130px minmax(0, 1fr) 32px;
+  grid-template-columns: 60px 130px minmax(220px, 1fr) 86px 32px;
   gap: 10px;
   padding: 0 4px 6px;
   font-family: var(--font-ui);
@@ -4334,7 +4378,7 @@ h3 {
 
 .config-tp-row {
   display: grid;
-  grid-template-columns: 60px 130px minmax(0, 1fr) 32px;
+  grid-template-columns: 60px 130px minmax(220px, 1fr) 86px 32px;
   gap: 10px;
   align-items: center;
   padding: 4px;
@@ -4429,31 +4473,31 @@ select.config-strategy-input {
 
 .config-strategy-controls {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 6px;
   align-items: center;
   min-width: 0;
 }
 
-.config-strategy-controls-no-change {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.config-strategy-controls-set-sl-to-entry {
-  grid-template-columns: minmax(0, 1fr) minmax(52px, 74px);
-}
-
-.config-strategy-controls-set-sl-to-tp {
-  grid-template-columns: minmax(0, 1fr) minmax(48px, 64px) minmax(48px, 64px);
-}
-
-.config-strategy-reference {
-  min-width: 0;
-}
-
-.config-strategy-offset {
-  min-width: 0;
+.config-tp-lots {
+  display: grid;
+  justify-items: end;
+  gap: 1px;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+}
+
+.config-tp-lots strong {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink);
+  line-height: 1.15;
+}
+
+.config-tp-lots small {
+  font-family: var(--font-ui);
+  font-size: 9px;
+  color: var(--ink-faint);
 }
 
 .config-row-delete {
@@ -4507,6 +4551,25 @@ select.config-strategy-input {
 
 .config-hint-soft {
   color: var(--ink-faint);
+}
+
+.config-validation {
+  padding: 10px 12px;
+  color: var(--down);
+  background: var(--down-soft);
+  border: 1px solid color-mix(in srgb, var(--down) 28%, transparent);
+  border-radius: var(--radius-sm);
+}
+
+.config-validation ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.config-validation li {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .config-toggle {

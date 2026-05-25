@@ -1,9 +1,14 @@
 import "./test-setup";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render as rtlRender, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import packageJson from "../../../package.json";
 import { App, type DashboardSnapshot } from "./App";
 import { SettingsPage } from "./pages/SettingsPage";
+
+// App now reads its view/tab/account from the URL, so every render needs Router context.
+const render = (ui: Parameters<typeof rtlRender>[0], options?: Parameters<typeof rtlRender>[1]) =>
+  rtlRender(ui, { wrapper: MemoryRouter, ...options });
 
 afterEach(() => cleanup());
 
@@ -348,7 +353,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickTab(view, "Providers");
+    clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Enable auto-copy for Alpha FX Signals" }));
 
     await view.findByText("Provider paused");
@@ -378,11 +383,109 @@ describe("App dashboard", () => {
       expect(
         calls.some(
           (call) =>
-            call.url === "/api/providers/performance/export.csv?accountId=mt5-demo-1" &&
-            call.init?.method === "GET",
+            call.url === "/api/providers/performance/export.csv" && call.init?.method === "GET",
         ),
       ).toBe(true),
     );
+  });
+
+  test("keeps the overview Providers tab read-only (no per-account toggle or configure)", () => {
+    const linkedSnapshot: DashboardSnapshot = {
+      ...snapshot,
+      providers: [{ ...snapshot.providers[0]!, enabled: true }],
+      accountProviderLinks: [
+        { accountId: "mt5-demo-1", providerId: "provider-alpha", enabled: true },
+      ],
+    };
+    const view = render(<App initialSnapshot={linkedSnapshot} />);
+    clickTab(view, "Providers");
+
+    // Overview shows which accounts copy (read-only chip) but no per-account controls.
+    expect(view.getByText(/Aggregated performance across all copying accounts/)).toBeTruthy();
+    expect(view.queryByRole("button", { name: /Configure Alpha FX Signals/ })).toBeNull();
+    expect(
+      view.queryByRole("button", {
+        name: /Copy Alpha FX Signals|Stop copying Alpha FX Signals/,
+      }),
+    ).toBeNull();
+  });
+
+  test("scopes the Providers tab to the selected account with a copy toggle and per-account configure", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const linkedSnapshot: DashboardSnapshot = {
+      ...snapshot,
+      providers: [{ ...snapshot.providers[0]!, enabled: true }],
+      accountProviderLinks: [
+        { accountId: "mt5-demo-1", providerId: "provider-alpha", enabled: true },
+      ],
+    };
+    const view = rtlRender(<App initialSnapshot={linkedSnapshot} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={["/accounts/mt5-demo-1/providers"]}>{children}</MemoryRouter>
+      ),
+    });
+
+    // Per-account mode: single Copy toggle + per-account Configure, no global Pause/Remove.
+    expect(
+      view.getByRole("button", { name: "Configure Alpha FX Signals for this account" }),
+    ).toBeTruthy();
+    const toggle = view.getByRole("button", {
+      name: "Stop copying Alpha FX Signals on this account",
+    });
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      const call = calls.find(
+        (c) => c.url === "/api/account-provider-links/mt5-demo-1/provider-alpha",
+      );
+      expect(call?.init?.method).toBe("PUT");
+      expect(JSON.parse(String(call?.init?.body))).toEqual({ enabled: false });
+    });
+  });
+
+  test("saves a per-account provider config override from the account-scoped modal", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const linkedSnapshot: DashboardSnapshot = {
+      ...snapshot,
+      providers: [{ ...snapshot.providers[0]!, enabled: true }],
+      accountProviderLinks: [
+        { accountId: "mt5-demo-1", providerId: "provider-alpha", enabled: true },
+      ],
+    };
+    const view = rtlRender(<App initialSnapshot={linkedSnapshot} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={["/accounts/mt5-demo-1/providers"]}>{children}</MemoryRouter>
+      ),
+    });
+
+    fireEvent.click(
+      view.getByRole("button", { name: "Configure Alpha FX Signals for this account" }),
+    );
+    fireEvent.change(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
+      target: { value: "0.5" },
+    });
+    fireEvent.click(
+      view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
+    );
+
+    await waitFor(() => {
+      const call = calls.find(
+        (c) => c.url === "/api/account-provider-links/mt5-demo-1/provider-alpha",
+      );
+      expect(call?.init?.method).toBe("PUT");
+      const body = JSON.parse(String(call?.init?.body));
+      expect(body.config).toMatchObject({ riskMode: "fixed", riskAmount: 0.5, lotSize: 0.5 });
+    });
   });
 
   test("lets the operator update provider parser mode and channel lot size from the modal", async () => {
@@ -393,7 +496,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickTab(view, "Providers");
+    clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
       target: { value: "kal-vip" },
@@ -425,6 +528,50 @@ describe("App dashboard", () => {
     });
   });
 
+  test("shows simplified TP strategy options and normalizes prior-TP saves", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+    clickSidebar(view, "Telegram Setup");
+    fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
+
+    const dialog = view.getByRole("dialog");
+    const tp1Action = within(dialog).getByLabelText("TP1 strategy action") as HTMLSelectElement;
+    const tp2Action = within(dialog).getByLabelText("TP2 strategy action") as HTMLSelectElement;
+
+    expect(Array.from(tp1Action.options).map((option) => option.textContent)).toEqual([
+      "Move SL to BE",
+      "Leave SL unchanged",
+    ]);
+    expect(Array.from(tp2Action.options).map((option) => option.textContent)).toEqual([
+      "Move SL to BE",
+      "Move SL to prior TP",
+      "Leave SL unchanged",
+    ]);
+    expect(within(dialog).queryByLabelText("TP2 strategy reference TP")).toBeNull();
+    expect(within(dialog).queryByLabelText("TP2 strategy offset pips")).toBeNull();
+
+    fireEvent.change(tp2Action, { target: { value: "set-sl-to-tp" } });
+    fireEvent.click(
+      view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
+    );
+
+    await waitFor(() => {
+      const settingsCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
+      expect(settingsCall).toBeTruthy();
+      const body = JSON.parse(String(settingsCall?.init?.body));
+      expect(body.takeProfitLevels[1].strategy).toEqual({
+        kind: "set-sl-to-tp",
+        tpLeg: 1,
+        offsetPips: 0,
+      });
+    });
+  });
+
   test("preserves percent-risk amount when provider settings are saved without edits", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -447,7 +594,7 @@ describe("App dashboard", () => {
         }}
       />,
     );
-    clickTab(view, "Providers");
+    clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.click(
       view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
@@ -472,7 +619,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickTab(view, "Providers");
+    clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
 
     for (const leg of [4, 3, 2, 1]) {
@@ -517,18 +664,50 @@ describe("App dashboard", () => {
       />,
     );
 
-    clickTab(view, "Providers");
+    clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
 
     const modalText = view.getByRole("dialog").textContent ?? "";
-    expect(modalText).toContain(
-      "TP percentages total 60%; the app treats them as weights across 0.02 lots assigned to TP closes. Runner stays separate.",
-    );
+    expect(modalText).toContain("TP percentages total 60%");
+    expect(modalText).toContain("0.02 lots assigned to TP closes");
     expect(modalText).toContain("Runner remains open");
     expect(modalText).toContain("after TP3");
     expect(modalText).toContain("50% effective");
     expect(modalText).not.toContain("anything that isn't allocated");
     expect(modalText).not.toContain("final TP");
+  });
+
+  test("blocks provider save and test actions while TP allocation inputs are invalid", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return Response.json(snapshot);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+    clickSidebar(view, "Telegram Setup");
+    fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
+
+    fireEvent.input(view.getByLabelText("TP1 percentage"), { target: { value: "0" } });
+    fireEvent.input(view.getByLabelText("TP2 percentage"), { target: { value: "0" } });
+    fireEvent.input(view.getByLabelText("TP3 percentage"), { target: { value: "0" } });
+    fireEvent.input(view.getByLabelText("TP4 percentage"), { target: { value: "0" } });
+
+    expect(view.getByRole("alert").textContent).toContain(
+      "Enter a positive percentage for at least one TP.",
+    );
+    expect(
+      view
+        .getByRole("button", { name: "Save provider settings for Alpha FX Signals" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+    expect(
+      view
+        .getByRole("button", { name: "Test provider config for Alpha FX Signals" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+
+    expect(calls.some((call) => call.url === "/api/providers/provider-alpha")).toBe(false);
   });
 
   test("lets the operator test the current provider configuration before saving", async () => {
@@ -553,7 +732,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickTab(view, "Providers");
+    clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.input(view.getByLabelText("Provider test message for Alpha FX Signals"), {
       target: { value: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910" },

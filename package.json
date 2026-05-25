@@ -1,6 +1,6 @@
 {
   "name": "telegram-tc",
-  "version": "1.10.0",
+  "version": "1.12.1",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
@@ -37,6 +37,7 @@
     "nanoid": "^5.1.6",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
+    "react-router-dom": "^7.15.1",
     "telegram": "^2.26.22",
     "uplot": "^1.6.32",
     "zod": "^4.2.1"

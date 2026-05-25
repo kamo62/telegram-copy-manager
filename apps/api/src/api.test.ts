@@ -759,6 +759,53 @@ describe("Telegram TC API", () => {
     });
   });
 
+  test("limits execution log reads when callers request a recent slice", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-logs-"));
+    const databasePath = join(tempDir, "telegram-tc.db");
+    const app = createApi({ databasePath, seedDemoData: false });
+    const writer = new Database(databasePath);
+    try {
+      const insert = writer.query(
+        "INSERT INTO execution_reports (id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      );
+      for (let index = 0; index < 15; index += 1) {
+        insert.run(
+          `report-${index}`,
+          `queue-${index}`,
+          index % 2 === 0 ? "mt5-alpha" : "mt5-beta",
+          "EXECUTED",
+          index,
+          0,
+          `Report ${index}`,
+          `${5000 + index}`,
+          `${6000 + index}`,
+          `${7000 + index}`,
+          1,
+          1,
+          0.01,
+          "",
+          new Date(Date.UTC(2026, 4, 25, 12, 0, index)).toISOString(),
+        );
+      }
+
+      const recent = await json<{ logs: Array<{ retcode: number }> }>(
+        await app.request("/api/execution-logs?limit=3"),
+      );
+      expect(recent.logs.map((log) => log.retcode)).toEqual([14, 13, 12]);
+
+      const accountRecent = await json<{ logs: Array<{ accountId: string; retcode: number }> }>(
+        await app.request("/api/execution-logs?accountId=mt5-beta&limit=2"),
+      );
+      expect(accountRecent.logs).toEqual([
+        expect.objectContaining({ accountId: "mt5-beta", retcode: 13 }),
+        expect.objectContaining({ accountId: "mt5-beta", retcode: 11 }),
+      ]);
+    } finally {
+      writer.close();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("links MT5 registration through account slots and blocks new opens when Equity Guardian is paused", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
 
@@ -916,6 +963,232 @@ describe("Telegram TC API", () => {
     ).text();
     expect(firstPoll).toContain("status=WORK");
     expect(secondPoll).toContain("status=WORK");
+  });
+
+  test("sizes each linked account with its own per-account provider config (and inherits the default)", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const selected = await json<{ provider: { id: string } }>(
+      await app.request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          profileId: "profile-real",
+          dialogId: "dialog-gold",
+          title: "Gold Room London",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const providerId = selected.provider.id;
+    for (const accountNumber of ["100200300", "200300400"]) {
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber,
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes Ltd",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["EURUSD.raw"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-${accountNumber}/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Override only the first account; the second inherits the provider default (0.1 lots).
+    await app.request(`/api/account-provider-links/mt5-100200300/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ config: { riskMode: "fixed", riskAmount: 0.5 } }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const overrideConfig = await json<{ config: { riskMode: string; riskAmount: number } }>(
+      await app.request(`/api/providers/${providerId}/config?accountId=mt5-100200300`),
+    );
+    expect(overrideConfig.config).toMatchObject({ riskMode: "fixed", riskAmount: 0.5 });
+
+    const inheritedConfig = await json<{ config: { riskAmount: number } }>(
+      await app.request(`/api/providers/${providerId}/config?accountId=mt5-200300400`),
+    );
+    expect(inheritedConfig.config.riskAmount).toBe(0.1);
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          rawText: "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" });
+
+    const overridePoll = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
+    ).text();
+    const inheritedPoll = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-200300400")
+    ).text();
+    expect(overridePoll).toContain("volume=0.5");
+    expect(inheritedPoll).toContain("volume=0.1");
+  });
+
+  test("a config-only link update does not change the copy flag", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const selected = await json<{ provider: { id: string } }>(
+      await app.request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          profileId: "profile-real",
+          dialogId: "dialog-gold",
+          title: "Gold Room London",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const providerId = selected.provider.id;
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "100200300",
+        server: "MetaQuotes-Demo",
+        company: "MetaQuotes Ltd",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols: ["EURUSD.raw"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    // Saving config for an account that is not copying must not enable copying.
+    await app.request(`/api/account-provider-links/mt5-100200300/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ config: { riskMode: "fixed", riskAmount: 0.3 } }),
+      headers: { "content-type": "application/json" },
+    });
+    const links = await json<{ links: Array<{ accountId: string; enabled: boolean }> }>(
+      await app.request("/api/account-provider-links"),
+    );
+    const link = links.links.find((l) => l.accountId === "mt5-100200300");
+    expect(link?.enabled).toBe(false);
+  });
+
+  test("does not fall back to the default account after the last provider copy link is disabled", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const selected = await json<{ provider: { id: string } }>(
+      await app.request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          profileId: "profile-real",
+          dialogId: "dialog-gold",
+          title: "Gold Room London",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const providerId = selected.provider.id;
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "100200300",
+        server: "MetaQuotes-Demo",
+        company: "MetaQuotes Ltd",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols: ["EURUSD.raw"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request(`/api/account-provider-links/mt5-100200300/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request(`/api/account-provider-links/mt5-100200300/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: false }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-100200300",
+          rawText: "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approval.status).toBe(422);
+    expect((await json<{ error: string }>(approval)).error).toContain("not copied");
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text(),
+    ).toContain("status=NO_WORK");
+  });
+
+  test("uses the target account override when checking split-order runner compatibility", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.1,
+        runner: { enabled: true, lotSize: 0.02, slBehavior: "trail", trailPips: 25 },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        enabled: true,
+        config: {
+          riskMode: "fixed",
+          riskAmount: 0.1,
+          runner: { enabled: false, lotSize: 0.02, slBehavior: "trail", trailPips: 25 },
+        },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900\nTP2 1.0950",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ executionMode: "SPLIT_ORDER" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(approval.status).toBe(200);
+    expect(await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text()).toContain(
+      "executionMode=SPLIT_ORDER",
+    );
   });
 
   test("fans out lifecycle commands across linked MT5 accounts", async () => {
@@ -2458,6 +2731,111 @@ describe("Telegram TC API", () => {
     expect(second.provider.lotSize).toBe(0.24);
     expect(kalProviders).toHaveLength(1);
     expect(kalProviders[0]).toMatchObject({ id: first.provider.id, ingestionStatus: "polling" });
+  });
+
+  test("preserves per-account provider config when duplicate provider rows are merged", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const dbPath = join(tempDir, "telegram-tc.db");
+    try {
+      const app = createApi({
+        databasePath: dbPath,
+        seedDemoData: false,
+        telegram: createDialogTelegramAdapter([
+          { id: "kal-dialog", title: "KAL VIP", type: "channel", unreadCount: 0 },
+        ]),
+      });
+      const session = await json<{ profileId: string; sessionId: string }>(
+        await app.request("/api/telegram/start", {
+          method: "POST",
+          body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27820000000" }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await app.request("/api/telegram/verify-code", {
+        method: "POST",
+        body: JSON.stringify({ sessionId: session.sessionId, code: "12345" }),
+        headers: { "content-type": "application/json" },
+      });
+      const canonical = await json<{ provider: { id: string } }>(
+        await app.request("/api/providers", {
+          method: "POST",
+          body: JSON.stringify({
+            profileId: session.profileId,
+            dialogId: "kal-dialog",
+            title: "KAL VIP",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await app.request(`/api/providers/${canonical.provider.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: true, riskMode: "fixed", riskAmount: 0.2 }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-111/${canonical.provider.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+
+      const now = new Date().toISOString();
+      const duplicateId = "provider_duplicate_kal";
+      const duplicateConfig = {
+        riskMode: "fixed",
+        riskAmount: 0.7,
+        takeProfitLevels: [],
+        runner: { enabled: false, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+      };
+      const db = new Database(dbPath);
+      db.query(
+        "INSERT INTO providers (id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(
+        duplicateId,
+        "profile-stale",
+        "kal-dialog",
+        "KAL VIP stale",
+        "channel",
+        1,
+        "deterministic",
+        "balanced",
+        0.1,
+        "{}",
+        now,
+      );
+      db.query(
+        "INSERT INTO account_provider_links (account_id, provider_id, enabled, updated_at, config_json) VALUES (?, ?, ?, ?, ?)",
+      ).run("mt5-222", duplicateId, 1, now, JSON.stringify(duplicateConfig));
+      db.close();
+
+      await app.request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({
+          profileId: session.profileId,
+          dialogId: "kal-dialog",
+          title: "KAL VIP",
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const links = await json<{
+        links: Array<{
+          accountId: string;
+          providerId: string;
+          enabled: boolean;
+          config?: { riskAmount?: number };
+        }>;
+      }>(await app.request("/api/account-provider-links"));
+
+      expect(links.links).toContainEqual(
+        expect.objectContaining({
+          accountId: "mt5-222",
+          providerId: canonical.provider.id,
+          enabled: true,
+          config: expect.objectContaining({ riskAmount: 0.7 }),
+        }),
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("resyncs stale providers to the current connected Telegram session when their dialogs are visible", async () => {
@@ -4691,8 +5069,37 @@ describe("Telegram TC API", () => {
         .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_closes'")
         .get() as { name: string } | null;
       expect(table?.name).toBe("external_closes");
+      const executionIndexes = (
+        db
+          .query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?")
+          .all("execution_reports") as Array<{ name: string }>
+      ).map((row) => row.name);
+      expect(executionIndexes).toContain("idx_execution_reports_created");
+      expect(executionIndexes).toContain("idx_execution_reports_account_created");
     } finally {
       db.close();
+    }
+  });
+
+  test("database bootstrap creates execution report indexes for existing deployments", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-indexes-"));
+    const databasePath = join(tempDir, "telegram-tc.db");
+    const app = createApi({ databasePath, seedDemoData: false });
+    const response = await app.request("/api/health");
+    expect(response.status).toBe(200);
+
+    const reader = new Database(databasePath, { readonly: true });
+    try {
+      const executionIndexes = (
+        reader
+          .query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?")
+          .all("execution_reports") as Array<{ name: string }>
+      ).map((row) => row.name);
+      expect(executionIndexes).toContain("idx_execution_reports_created");
+      expect(executionIndexes).toContain("idx_execution_reports_account_created");
+    } finally {
+      reader.close();
+      await rm(tempDir, { recursive: true, force: true });
     }
   });
 

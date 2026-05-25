@@ -241,6 +241,12 @@ CREATE TABLE IF NOT EXISTS execution_reports (
   created_at TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_execution_reports_created
+  ON execution_reports(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_execution_reports_account_created
+  ON execution_reports(account_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS broker_orders (
   id TEXT PRIMARY KEY,
   logical_trade_id TEXT NOT NULL,

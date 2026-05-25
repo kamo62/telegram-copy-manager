@@ -1,5 +1,6 @@
 import { Server } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import packageJson from "../../../package.json";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountsOverview } from "./components/AccountsOverview";
@@ -37,6 +38,23 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { SymbolSettingsPage } from "./pages/SymbolSettingsPage";
 import { TelegramSetupPage } from "./pages/TelegramSetupPage";
 
+export interface ProviderPerformanceRow {
+  id: string;
+  pips: number;
+  pnl: number;
+  profit: number;
+  gain: number;
+  gainPct: number;
+  winRate: number;
+  averageDrawdown: number;
+  copiedDrawdown?: number;
+}
+
+// Raw per-account provider config override (subset of provider config fields).
+export type PerAccountProviderConfig = Partial<
+  Pick<ProviderRowData, "riskMode" | "riskAmount" | "takeProfitLevels" | "runner">
+>;
+
 export interface DashboardSnapshot {
   health: {
     status: string;
@@ -73,17 +91,10 @@ export interface DashboardSnapshot {
     thisMonth: number | null;
     equityCurve?: Array<{ x: number; equity: number; drawdown: number }>;
   };
-  providerPerformance?: Array<{
-    id: string;
-    pips: number;
-    pnl: number;
-    profit: number;
-    gain: number;
-    gainPct: number;
-    winRate: number;
-    averageDrawdown: number;
-    copiedDrawdown?: number;
-  }>;
+  providerPerformance?: ProviderPerformanceRow[];
+  // Per-account provider performance keyed by MT5 account id (used by the account-scoped
+  // Providers tab); aggregate `providerPerformance` is used by the overview.
+  providerPerformanceByAccount?: Record<string, ProviderPerformanceRow[]>;
   accountSlots?: Array<{
     id: string;
     name: string;
@@ -92,7 +103,12 @@ export interface DashboardSnapshot {
     accountNumber: string;
     server: string;
   }>;
-  accountProviderLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
+  accountProviderLinks?: Array<{
+    accountId: string;
+    providerId: string;
+    enabled: boolean;
+    config?: PerAccountProviderConfig;
+  }>;
   equityGuardians?: Array<{
     accountId: string;
     accountNumber: string;
@@ -327,6 +343,57 @@ function clearPendingAuth() {
   window.localStorage.removeItem(telegramAuthStorageKey);
 }
 
+// --- URL routing ------------------------------------------------------------
+// The URL is the single source of truth for which view/tab/account is active.
+// Scheme:
+//   /                                  → dashboard overview (no account), Performance tab
+//   /:tab                              → dashboard overview, given tab (providers, history, …)
+//   /accounts/:accountId/:tab          → dashboard scoped to one account, given tab
+//   /telegram | /linked-accounts | /settings → global views
+const TAB_IDS: TabId[] = [
+  "performance",
+  "providers",
+  "history",
+  "equity-guardian",
+  "symbols",
+  "logs",
+];
+
+interface RouteState {
+  view: string;
+  accountId: string | null;
+  tab: TabId;
+}
+
+function parseRoute(pathname: string): RouteState {
+  const seg = pathname.split("/").filter(Boolean);
+  if (seg[0] === "telegram") return { view: "telegram", accountId: null, tab: "performance" };
+  if (seg[0] === "linked-accounts") return { view: "mt5", accountId: null, tab: "performance" };
+  if (seg[0] === "settings") return { view: "settings", accountId: null, tab: "performance" };
+  if (seg[0] === "accounts" && seg[1]) {
+    const tab =
+      seg[2] && (TAB_IDS as string[]).includes(seg[2]) ? (seg[2] as TabId) : "performance";
+    return { view: "dashboard", accountId: seg[1], tab };
+  }
+  if (seg[0] && (TAB_IDS as string[]).includes(seg[0])) {
+    return { view: "dashboard", accountId: null, tab: seg[0] as TabId };
+  }
+  return { view: "dashboard", accountId: null, tab: "performance" };
+}
+
+function pathForView(viewId: string, accountId: string | null, tab: TabId): string {
+  if (viewId === "telegram") return "/telegram";
+  if (viewId === "mt5") return "/linked-accounts";
+  if (viewId === "settings") return "/settings";
+  if (accountId) return `/accounts/${accountId}/${tab}`;
+  return tab === "performance" ? "/" : `/${tab}`;
+}
+
+function pathForTab(accountId: string | null, tab: TabId): string {
+  if (accountId) return `/accounts/${accountId}/${tab}`;
+  return tab === "performance" ? "/" : `/${tab}`;
+}
+
 export function App({
   initialDialogs = [],
   initialSnapshot,
@@ -342,8 +409,12 @@ export function App({
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(
     initialSnapshot ? new Date().toISOString() : null,
   );
-  const [activeView, setActiveView] = useState("dashboard");
-  const [activeTab, setActiveTab] = useState<TabId>("performance");
+  const location = useLocation();
+  const navigate = useNavigate();
+  const route = useMemo(() => parseRoute(location.pathname), [location.pathname]);
+  const activeView = route.view;
+  const activeTab = route.tab;
+  const selectedAccountId = route.accountId;
   const [configProvider, setConfigProvider] = useState<ProviderRowData | null>(null);
   const [parserTab, setParserTab] = useState("Recent Parses");
   const [historyTab, setHistoryTab] = useState<"Open" | "Closed">("Open");
@@ -367,8 +438,40 @@ export function App({
   const [aiReviewStatus, setAiReviewStatus] = useState<Record<string, string>>({});
   const [parserActionStatus, setParserActionStatus] = useState<Record<string, string>>({});
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+  // Pending link-slots are transient pre-account UI state (not represented in the URL);
+  // selecting one clears any focused account and vice versa.
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+
+  // Navigation setters — keep the original names so existing call sites are unchanged, but
+  // route changes now flow through the URL instead of local state.
+  const setActiveView = useCallback(
+    (viewId: string) => {
+      setSelectedSlotId(null);
+      navigate(pathForView(viewId, selectedAccountId, activeTab));
+    },
+    [navigate, selectedAccountId, activeTab],
+  );
+  const setActiveTab = useCallback(
+    (tab: TabId) => {
+      setSelectedSlotId(null);
+      navigate(pathForTab(selectedAccountId, tab));
+    },
+    [navigate, selectedAccountId],
+  );
+  const setSelectedAccountId = useCallback(
+    (id: string | null) => {
+      setSelectedSlotId(null);
+      navigate(pathForTab(id, activeTab));
+    },
+    [navigate, activeTab],
+  );
+  const selectSlot = useCallback(
+    (id: string | null) => {
+      setSelectedSlotId(id);
+      if (id) navigate("/");
+    },
+    [navigate],
+  );
   const announce = useAnnouncer();
   const [viewportTooSmall, setViewportTooSmall] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -461,6 +564,22 @@ export function App({
     }
   }, [form.sessionId, snapshot.telegramSessions]);
 
+  // Guard: a URL pointing at a deleted/unknown account falls back to the overview.
+  useEffect(() => {
+    if (!selectedAccountId || initialLoading) return;
+    if (!snapshot.mt5Accounts.some((account) => account.id === selectedAccountId)) {
+      navigate("/", { replace: true });
+    }
+  }, [selectedAccountId, initialLoading, snapshot.mt5Accounts, navigate]);
+
+  // Canonicalize a bare /accounts/:id to its default tab.
+  useEffect(() => {
+    const seg = location.pathname.split("/").filter(Boolean);
+    if (seg[0] === "accounts" && seg[1] && !seg[2]) {
+      navigate(`/accounts/${seg[1]}/performance`, { replace: true });
+    }
+  }, [location.pathname, navigate]);
+
   const focusedAccount = useMemo(() => {
     if (selectedAccountId) {
       return snapshot.mt5Accounts.find((account) => account.id === selectedAccountId) ?? null;
@@ -472,6 +591,36 @@ export function App({
     if (!selectedSlotId) return null;
     return (snapshot.accountSlots ?? []).find((slot) => slot.id === selectedSlotId) ?? null;
   }, [selectedSlotId, snapshot.accountSlots]);
+
+  // Provider rows for the Providers tab. In account mode each row carries that account's
+  // performance plus any per-account config override; in overview mode the aggregate.
+  const providerRows = useMemo<ProviderRowData[]>(() => {
+    const perf = selectedAccountId
+      ? (snapshot.providerPerformanceByAccount?.[selectedAccountId] ?? [])
+      : (snapshot.providerPerformance ?? []);
+    return snapshot.providers.map((provider) => {
+      const base = { ...provider, ...perf.find((row) => row.id === provider.id) };
+      if (!selectedAccountId) return base;
+      const override = (snapshot.accountProviderLinks ?? []).find(
+        (link) => link.accountId === selectedAccountId && link.providerId === provider.id,
+      )?.config;
+      if (!override) return base;
+      return {
+        ...base,
+        ...override,
+        lotSize:
+          override.riskMode === "fixed" && override.riskAmount != null
+            ? override.riskAmount
+            : base.lotSize,
+      };
+    });
+  }, [
+    selectedAccountId,
+    snapshot.providers,
+    snapshot.providerPerformance,
+    snapshot.providerPerformanceByAccount,
+    snapshot.accountProviderLinks,
+  ]);
 
   const accountHeaderData = useMemo<AccountHeaderData>(() => {
     const perf = snapshot.accountPerformance;
@@ -682,7 +831,7 @@ export function App({
   }
 
   async function exportProviderPerformance() {
-    const accountId = focusedAccount?.id ?? snapshot.mt5Accounts[0]?.id;
+    const accountId = focusedAccount?.id;
     const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
     const csv = await apiFetch<string>(`/api/providers/performance/export.csv${query}`, {
       method: "GET",
@@ -860,6 +1009,26 @@ export function App({
     provider: ProviderRowData,
     payload: ProviderConfigSubmission,
   ) {
+    // The Configure action is only available in account-scoped mode, so a focused account
+    // means we persist a per-account override; otherwise fall back to the provider default.
+    if (selectedAccountId) {
+      await apiFetch(`/api/account-provider-links/${selectedAccountId}/${provider.id}`, {
+        method: "PUT",
+        body: {
+          config: {
+            lotSize: payload.lotSize,
+            riskMode: payload.riskMode,
+            riskAmount: payload.riskAmount,
+            takeProfitLevels: payload.takeProfitLevels,
+            runner: payload.runner,
+          },
+        },
+      });
+      setConfigProvider(null);
+      announce(`Saved configuration for ${provider.title} on this account`);
+      await refreshDashboard();
+      return;
+    }
     await apiPatch(`/api/providers/${provider.id}`, {
       parserMode: payload.parserMode,
       lotSize: payload.lotSize,
@@ -1145,8 +1314,8 @@ export function App({
 
   function navigateSidebar(viewId: string) {
     if (viewId === "dashboard") {
-      setActiveView("dashboard");
-      setActiveTab("performance");
+      setSelectedSlotId(null);
+      navigate(selectedAccountId ? `/accounts/${selectedAccountId}/performance` : "/");
       return;
     }
     setActiveView(viewId);
@@ -1206,7 +1375,7 @@ export function App({
         onAddAccount={() => setActiveView("mt5")}
         onNavigate={navigateSidebar}
         onSelectAccount={(id) => setSelectedAccountId(id)}
-        onSelectSlot={(id) => setSelectedSlotId(id)}
+        onSelectSlot={(id) => selectSlot(id)}
         pendingSlots={sidebarPendingSlots}
         selectedAccountId={selectedAccountId}
         selectedSlotId={selectedSlotId}
@@ -1302,11 +1471,32 @@ export function App({
                 }}
                 onSelectDialog={selectDialog}
                 selectedDialogIds={snapshot.providers.map((provider) => provider.dialogId)}
+                providers={snapshot.providers.map((provider) => ({
+                  id: provider.id,
+                  title: provider.title,
+                  enabled: provider.enabled,
+                }))}
+                onToggleProvider={(provider) => {
+                  const full = snapshot.providers.find((p) => p.id === provider.id);
+                  if (full) void toggleProvider(full);
+                }}
+                onRemoveProvider={(provider) => {
+                  const full = snapshot.providers.find((p) => p.id === provider.id);
+                  if (full) void deleteProvider(full);
+                }}
+                onConfigureProvider={(provider) => {
+                  const full = snapshot.providers.find((p) => p.id === provider.id);
+                  if (full) setConfigProvider(full);
+                }}
               />
             ) : null}
 
             {showProviders ? (
               <ProvidersPage
+                accountId={selectedAccountId}
+                accountLabel={
+                  focusedAccount ? focusedAccount.accountNumber || focusedAccount.id : undefined
+                }
                 accounts={snapshot.mt5Accounts.map((account) => ({
                   id: account.id,
                   label: account.accountNumber || account.id,
@@ -1317,17 +1507,12 @@ export function App({
                 }
                 loading={initialLoading}
                 onConfigure={(provider) => setConfigProvider(provider)}
-                onDelete={(provider) => void deleteProvider(provider)}
                 onExport={() => void exportProviderPerformance()}
-                onToggle={(provider) => void toggleProvider(provider)}
                 onToggleAccountLink={(accountId, providerId, enabled) =>
                   void toggleAccountProviderLink(accountId, providerId, enabled)
                 }
                 providerLinks={snapshot.accountProviderLinks ?? []}
-                providers={snapshot.providers.map((provider) => ({
-                  ...provider,
-                  ...snapshot.providerPerformance?.find((row) => row.id === provider.id),
-                }))}
+                providers={providerRows}
               />
             ) : null}
 
@@ -1419,6 +1604,11 @@ export function App({
       </ErrorBoundary>
 
       <ProviderConfigModal
+        accountLabel={
+          selectedAccountId && focusedAccount
+            ? focusedAccount.accountNumber || focusedAccount.id
+            : undefined
+        }
         onClose={() => setConfigProvider(null)}
         onSave={saveProviderSettings}
         onTest={testProviderSettings}

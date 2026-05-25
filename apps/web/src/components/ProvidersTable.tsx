@@ -51,25 +51,33 @@ export interface ProviderAccountLinkOption {
 export function ProvidersTable({
   providers,
   onConfigure,
-  onDelete,
-  onToggle,
   loading = false,
   accounts = [],
   providerLinks = [],
   onToggleAccountLink,
   currency,
+  accountId = null,
 }: {
   providers: ProviderRowData[];
   onConfigure: (provider: ProviderRowData) => void;
-  onDelete: (provider: ProviderRowData) => void;
-  onToggle: (provider: ProviderRowData) => void;
   loading?: boolean;
   accounts?: ProviderAccountLinkOption[];
   providerLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
   onToggleAccountLink?: (accountId: string, providerId: string, enabled: boolean) => void;
   currency?: string;
+  // When set, the table is scoped to one account: a single Copy toggle + per-account
+  // Configure replace the global chip matrix and Pause/Remove actions.
+  accountId?: string | null;
 }) {
   const { locale } = useLocale();
+  const isAccountMode = Boolean(accountId);
+  const showCopyColumn = accounts.length > 0;
+  // base stat columns (11) + optional Copy column + optional Actions column
+  const columnCount = 11 + (showCopyColumn ? 1 : 0) + (isAccountMode ? 1 : 0);
+  const isCopiedBy = (provider: ProviderRowData, id: string) =>
+    providerLinks.some(
+      (link) => link.accountId === id && link.providerId === provider.id && link.enabled,
+    );
   const { sortedRows, toggle, sortAria } = useSortableTable<ProviderRowData, keyof ProviderRowData>(
     providers,
     "title",
@@ -116,22 +124,19 @@ export function ProvidersTable({
               Gain
             </th>
             <th scope="col">Status</th>
-            {accounts.length > 0 ? <th scope="col">Copied by</th> : null}
-            <th aria-label="Actions" scope="col" />
+            {showCopyColumn ? <th scope="col">{isAccountMode ? "Copy" : "Copied by"}</th> : null}
+            {isAccountMode ? <th aria-label="Actions" scope="col" /> : null}
           </tr>
         </thead>
         <tbody>
           {loading && providers.length === 0
             ? Array.from({ length: 6 }, (_, index) => (
-                <SkeletonRow
-                  columns={accounts.length > 0 ? 13 : 12}
-                  key={`provider-skeleton-${index}`}
-                />
+                <SkeletonRow columns={columnCount} key={`provider-skeleton-${index}`} />
               ))
             : null}
           {!loading && providers.length === 0 ? (
             <tr className="data-table-empty">
-              <td colSpan={accounts.length > 0 ? 13 : 12}>
+              <td colSpan={columnCount}>
                 No providers configured yet. Add one from Telegram Setup.
               </td>
             </tr>
@@ -182,66 +187,63 @@ export function ProvidersTable({
                   </Tag>
                 ) : null}
               </td>
-              {accounts.length > 0 ? (
+              {showCopyColumn ? (
                 <td className="provider-account-cell">
-                  <div className="provider-account-chips">
-                    {accounts.map((account) => {
-                      const linked = providerLinks.some(
-                        (link) =>
-                          link.accountId === account.id &&
-                          link.providerId === provider.id &&
-                          link.enabled,
-                      );
+                  {isAccountMode && accountId ? (
+                    (() => {
+                      const linked = isCopiedBy(provider, accountId);
                       const disabled = !provider.enabled || !onToggleAccountLink;
                       return (
                         <button
-                          aria-label={`${linked ? "Disable" : "Enable"} ${provider.title} for ${account.label}`}
+                          aria-label={`${linked ? "Stop copying" : "Copy"} ${provider.title} on this account`}
                           aria-pressed={linked}
                           className={`account-chip ${linked ? "is-on" : "is-off"}`}
                           disabled={disabled}
-                          key={account.id}
-                          onClick={() => onToggleAccountLink?.(account.id, provider.id, !linked)}
+                          onClick={() => onToggleAccountLink?.(accountId, provider.id, !linked)}
                           title={
                             disabled
-                              ? "Enable the provider before linking accounts"
-                              : `${linked ? "Disable" : "Enable"} for ${account.label}`
+                              ? "Enable the provider before copying"
+                              : linked
+                                ? "Copying — click to stop"
+                                : "Not copying — click to copy"
                           }
                           type="button"
                         >
-                          {account.label}
+                          {linked ? "Copying" : "Copy"}
                         </button>
                       );
-                    })}
-                  </div>
+                    })()
+                  ) : (
+                    <div className="provider-account-chips">
+                      {accounts.filter((account) => isCopiedBy(provider, account.id)).length ===
+                      0 ? (
+                        <span className="data-table-subtle">No accounts</span>
+                      ) : (
+                        accounts
+                          .filter((account) => isCopiedBy(provider, account.id))
+                          .map((account) => (
+                            <span className="account-chip is-on is-readonly" key={account.id}>
+                              {account.label}
+                            </span>
+                          ))
+                      )}
+                    </div>
+                  )}
                 </td>
               ) : null}
-              <td className="data-table-actions">
-                <button
-                  aria-label={`Configure ${provider.title}`}
-                  className="icon-btn"
-                  onClick={() => onConfigure(provider)}
-                  title={`Configure ${provider.title}`}
-                  type="button"
-                >
-                  <SettingsIcon size={14} aria-hidden="true" />
-                </button>
-                <button
-                  aria-label={`${provider.enabled ? "Pause" : "Enable"} auto-copy for ${provider.title}`}
-                  className="btn btn-ghost btn-small"
-                  onClick={() => onToggle(provider)}
-                  type="button"
-                >
-                  {provider.enabled ? "Pause" : "Enable"}
-                </button>
-                <button
-                  aria-label={`Remove provider ${provider.title}`}
-                  className="btn btn-ghost btn-small btn-destructive-subtle"
-                  onClick={() => onDelete(provider)}
-                  type="button"
-                >
-                  Remove
-                </button>
-              </td>
+              {isAccountMode ? (
+                <td className="data-table-actions">
+                  <button
+                    aria-label={`Configure ${provider.title} for this account`}
+                    className="icon-btn"
+                    onClick={() => onConfigure(provider)}
+                    title={`Configure ${provider.title} for this account`}
+                    type="button"
+                  >
+                    <SettingsIcon size={14} aria-hidden="true" />
+                  </button>
+                </td>
+              ) : null}
             </tr>
           ))}
         </tbody>

@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { LocaleProvider } from "./contexts/LocaleContext";
@@ -22,7 +23,9 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary fallbackLabel="The console hit an unexpected error">
       <LocaleProvider>
-        <App />
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
       </LocaleProvider>
     </ErrorBoundary>
   </StrictMode>,
