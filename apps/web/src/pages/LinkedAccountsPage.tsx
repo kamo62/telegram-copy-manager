@@ -2,6 +2,7 @@ import { ArrowRight, Hand, Plug, Plus, Server } from "lucide-react";
 import type { ExternalBrokerPosition } from "../App";
 import { AccountRow } from "../components/AccountRow";
 import { EmptyState } from "../components/EmptyState";
+import { Money } from "../components/Money";
 import { Panel } from "../components/Panel";
 import { useLocale } from "../contexts/LocaleContext";
 import { formatLot, formatNumber } from "../lib/format";
@@ -11,6 +12,7 @@ type LinkedAccount = Parameters<typeof AccountRow>[0]["account"] & {
   externalOrders?: ExternalBrokerPosition[];
   externalPositionCount?: number;
   externalOrderCount?: number;
+  currency?: string;
 };
 
 export function LinkedAccountsPage({
@@ -170,10 +172,7 @@ function ExternalPositionsBlock({ account, locale }: { account: LinkedAccount; l
         <span className="external-positions-meta">
           {positions.length} position{positions.length === 1 ? "" : "s"} · {orders.length} pending ·
           floating P/L{" "}
-          <strong className={totalProfit >= 0 ? "up" : "down"}>
-            {totalProfit >= 0 ? "+" : ""}
-            {formatNumber(totalProfit, { locale })}
-          </strong>
+          <Money value={totalProfit} currency={account.currency} locale={locale} signTone />
         </span>
       </header>
       <p className="external-positions-hint">
@@ -205,12 +204,13 @@ function ExternalPositionsBlock({ account, locale }: { account: LinkedAccount; l
                 </span>
               ) : null}
               {position.profit !== undefined ? (
-                <span
-                  className={`external-position-profit ${position.profit >= 0 ? "up" : "down"}`}
-                >
-                  {position.profit >= 0 ? "+" : ""}
-                  {formatNumber(position.profit, { locale })}
-                </span>
+                <Money
+                  value={position.profit}
+                  currency={account.currency}
+                  locale={locale}
+                  signTone
+                  className="external-position-profit"
+                />
               ) : null}
               <small className="external-position-source">
                 #{position.ticket} · magic {position.magic}

@@ -52,6 +52,8 @@ export interface DashboardSnapshot {
     allowedOrderTypes: string[];
     azureOpenAIKeyConfigured: boolean;
     dedupWindowSeconds: number;
+    drawdownWarnPct: number;
+    drawdownDangerPct: number;
   };
   accountPerformance?: {
     accountId?: string;
@@ -77,6 +79,7 @@ export interface DashboardSnapshot {
     pnl: number;
     profit: number;
     gain: number;
+    gainPct: number;
     winRate: number;
     averageDrawdown: number;
     copiedDrawdown?: number;
@@ -106,6 +109,9 @@ export interface DashboardSnapshot {
     server: string;
     heartbeatStatus: string;
     marginMode: string;
+    currency?: string;
+    balance?: number;
+    equity?: number;
     openPositionCount?: number;
     pendingOrderCount?: number;
     externalPositionCount?: number;
@@ -123,6 +129,8 @@ export interface DashboardSnapshot {
     externalCloses?: ClosedTradeRow[];
     lastHeartbeatAt?: string;
     lastSnapshotAt?: string;
+    drawdownWarnPctOverride?: number | null;
+    drawdownDangerPctOverride?: number | null;
   }>;
   parserResults: Array<{
     id: string;
@@ -267,6 +275,8 @@ const emptySnapshot: DashboardSnapshot = {
     allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
     azureOpenAIKeyConfigured: false,
     dedupWindowSeconds: 300,
+    drawdownWarnPct: 10,
+    drawdownDangerPct: 20,
   },
   accountPerformance: undefined,
   providerPerformance: [],
@@ -497,6 +507,30 @@ export function App({
         onlineCount === accounts.length ? "All active" : onlineCount === 0 ? "Idle" : "Mixed";
     }
 
+    // Derive sparkline series from the equity curve so each KPI card shows
+    // a representative trend. Balance/Equity track equity itself; the P/L
+    // cards track cumulative profit (equity − initialBalance) over the
+    // relevant window. Today/Week/Month slice the last N points as a cheap
+    // approximation — exact per-window aggregation would need a separate
+    // backend roll-up and isn't worth the round-trip for a 28px chart.
+    const equityPoints = perf?.equityCurve ?? [];
+    const equitySeries = equityPoints.map((point) => point.equity);
+    const initialBalance = perf?.initialBalance ?? null;
+    const profitSeries =
+      initialBalance !== null && equitySeries.length > 0
+        ? equitySeries.map((value) => value - initialBalance)
+        : [];
+    const tail = (arr: number[], count: number) =>
+      arr.length > count ? arr.slice(arr.length - count) : arr;
+    const series: AccountHeaderData["series"] = {
+      balance: equitySeries,
+      equity: equitySeries,
+      totalProfit: profitSeries,
+      today: tail(profitSeries, 12),
+      thisWeek: tail(profitSeries, 24),
+      thisMonth: tail(profitSeries, 48),
+    };
+
     return {
       connectedPlatform: {
         platform,
@@ -522,6 +556,7 @@ export function App({
           deltaPercent: null,
         },
       },
+      series,
       currency: perf?.currency ?? "$",
     };
   }, [focusedAccount, snapshot.accountPerformance, snapshot.mt5Accounts]);
@@ -878,6 +913,18 @@ export function App({
     await saveExecutionSettingsForm(event.currentTarget);
   }
 
+  async function saveAccountRiskThresholds(
+    accountId: string,
+    warnPct: number | null,
+    dangerPct: number | null,
+  ) {
+    await apiPatch(`/api/accounts/${accountId}/risk-thresholds`, {
+      warnPct,
+      dangerPct,
+    });
+    await refreshDashboard();
+  }
+
   async function saveExecutionSettingsForm(formElement: HTMLFormElement) {
     const formData = new FormData(formElement);
     await apiPatch("/api/settings", {
@@ -889,6 +936,8 @@ export function App({
       pollingIntervalSeconds: Number(formData.get("pollingIntervalSeconds")),
       dedupWindowSeconds: Number(formData.get("dedupWindowSeconds")),
       allowedOrderTypes: formData.getAll("allowedOrderTypes").map(String),
+      drawdownWarnPct: Number(formData.get("drawdownWarnPct")),
+      drawdownDangerPct: Number(formData.get("drawdownDangerPct")),
     });
     await refreshDashboard();
   }
@@ -1262,6 +1311,10 @@ export function App({
                   id: account.id,
                   label: account.accountNumber || account.id,
                 }))}
+                currency={
+                  (focusedAccount as { currency?: string } | undefined)?.currency ??
+                  (snapshot.mt5Accounts[0] as { currency?: string } | undefined)?.currency
+                }
                 loading={initialLoading}
                 onConfigure={(provider) => setConfigProvider(provider)}
                 onDelete={(provider) => void deleteProvider(provider)}
@@ -1312,6 +1365,10 @@ export function App({
               <HistoryPage
                 accounts={snapshot.mt5Accounts}
                 activeTab={historyTab}
+                currency={
+                  (focusedAccount as { currency?: string } | undefined)?.currency ??
+                  (snapshot.mt5Accounts[0] as { currency?: string } | undefined)?.currency
+                }
                 focusedAccountId={selectedAccountId}
                 onTabChange={setHistoryTab}
               />
@@ -1342,9 +1399,19 @@ export function App({
 
             {showSettings ? (
               <SettingsPage
-                settings={snapshot.appSettings}
+                accounts={snapshot.mt5Accounts.map((account) => ({
+                  id: account.id,
+                  accountNumber: account.accountNumber,
+                  currency: account.currency ?? "USD",
+                  drawdownWarnPctOverride: account.drawdownWarnPctOverride ?? null,
+                  drawdownDangerPctOverride: account.drawdownDangerPctOverride ?? null,
+                }))}
+                onAccountRiskThresholdsSave={(accountId, warnPct, dangerPct) =>
+                  void saveAccountRiskThresholds(accountId, warnPct, dangerPct)
+                }
                 onSubmit={saveExecutionSettings}
                 onSaveForm={(formElement) => void saveExecutionSettingsForm(formElement)}
+                settings={snapshot.appSettings}
               />
             ) : null}
           </section>

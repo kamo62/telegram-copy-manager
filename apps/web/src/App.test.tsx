@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import packageJson from "../../../package.json";
 import { App, type DashboardSnapshot } from "./App";
+import { SettingsPage } from "./pages/SettingsPage";
 
 afterEach(() => cleanup());
 
@@ -17,6 +18,8 @@ const snapshot: DashboardSnapshot = {
     allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
     azureOpenAIKeyConfigured: false,
     dedupWindowSeconds: 300,
+    drawdownWarnPct: 10,
+    drawdownDangerPct: 20,
   },
   telegramSessions: [
     { id: "session-1", phone: "+27821234567", status: "CONNECTED", profileId: "profile-current" },
@@ -101,6 +104,15 @@ function clickTab(view: ReturnType<typeof render>, label: string) {
   fireEvent.click(view.getByRole("tab", { name: label }));
 }
 
+async function clickTabAsync(view: ReturnType<typeof render>, label: string) {
+  fireEvent.click(view.getByRole("tab", { name: label }));
+  // Some tab changes trigger async data loads. Wait for the tab selection
+  // state before asserting on the rendered panel.
+  await waitFor(() =>
+    expect(view.getByRole("tab", { name: label }).getAttribute("aria-selected")).toBe("true"),
+  );
+}
+
 function clickSidebar(view: ReturnType<typeof render>, label: string) {
   const buttons = view.getAllByRole("button", { name: label });
   // Sidebar buttons are full-width; pick the first one (sidebar comes before tabs).
@@ -110,6 +122,12 @@ function clickSidebar(view: ReturnType<typeof render>, label: string) {
 }
 
 describe("App dashboard", () => {
+  test("keeps workspace pages in the initial app module to avoid stale dev-server lazy import failures", async () => {
+    const source = await Bun.file(new URL("./App.tsx", import.meta.url)).text();
+
+    expect(source).not.toContain('import("./pages/');
+  });
+
   test("lets the operator restart Telegram login after entering the wrong phone number", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -182,7 +200,7 @@ describe("App dashboard", () => {
     expect(view.queryByText("Initial Balance")).toBeNull();
     expect(view.getByText(/12,345\.67/)).toBeTruthy();
     expect(view.getByText(/15,432\.10/)).toBeTruthy();
-    expect(view.getByText(/-137\.50/)).toBeTruthy();
+    expect(view.getByText(/137\.50/)).toBeTruthy();
   });
 
   test("account header does not present stale MT5 telemetry as live PnL", () => {
@@ -217,7 +235,7 @@ describe("App dashboard", () => {
     expect(view.queryByText("Balance")).toBeTruthy();
     expect(view.queryByText("Equity")).toBeTruthy();
     expect(view.queryByText("Trading P/L")).toBeTruthy();
-    expect(view.getAllByText("-57.89").length).toBeGreaterThanOrEqual(3);
+    expect(view.getAllByText(/57\.89/).length).toBeGreaterThanOrEqual(3);
   });
 
   test("shows an empty-state CTA on Live when no account is connected", () => {
@@ -229,7 +247,7 @@ describe("App dashboard", () => {
     expect(view.getByRole("button", { name: "Open Linked Accounts" })).toBeTruthy();
   });
 
-  test("scopes provider, parser, history, and symbol panels behind their tabs", () => {
+  test("scopes provider, parser, history, and symbol panels behind their tabs", async () => {
     const view = render(
       <App
         initialSnapshot={{
@@ -239,28 +257,28 @@ describe("App dashboard", () => {
       />,
     );
 
-    clickTab(view, "Providers");
-    expect(view.getByText("Provider paused")).toBeTruthy();
+    await clickTabAsync(view, "Providers");
+    expect(await view.findByText("Provider paused")).toBeTruthy();
 
-    clickTab(view, "Logs");
-    const parserLab = view.getByTestId("parser-lab-panel");
+    await clickTabAsync(view, "Logs");
+    const parserLab = await view.findByTestId("parser-lab-panel");
     expect(within(parserLab).getByText("Alpha FX Signals")).toBeTruthy();
     expect(within(parserLab).getByText("94%")).toBeTruthy();
     expect(within(parserLab).getByText("EURUSD.raw")).toBeTruthy();
     expect(within(parserLab).getByRole("button", { name: "Save fixture" })).toBeTruthy();
     expect(within(parserLab).getByLabelText("Classification for Alpha FX Signals")).toBeTruthy();
 
-    clickTab(view, "History");
-    clickTab(view, "Closed");
+    await clickTabAsync(view, "History");
+    fireEvent.click(await view.findByRole("tab", { name: "Closed" }));
     // No closed trades in the seed snapshot — the Closed sub-tab should land
     // on the empty state, which proves the sub-tab swap worked.
-    expect(view.getByText("No closed trades yet")).toBeTruthy();
+    expect(await view.findByText("No closed trades yet")).toBeTruthy();
 
-    clickTab(view, "Symbol Settings");
-    expect(view.getByText("XAUUSD.r")).toBeTruthy();
+    await clickTabAsync(view, "Symbol Settings");
+    expect(await view.findByText("XAUUSD.r")).toBeTruthy();
 
     clickSidebar(view, "Linked Accounts");
-    expect(view.getAllByText("positions").length).toBeGreaterThan(0);
+    expect((await view.findAllByText("positions")).length).toBeGreaterThan(0);
   });
 
   test("does not persist Telegram API hash, OTP code, or 2FA password in browser storage", () => {
@@ -274,7 +292,7 @@ describe("App dashboard", () => {
     expect(JSON.stringify(sessionStorage)).not.toContain("22222");
   });
 
-  test("renders Telegram dialogs for provider selection when they are supplied", () => {
+  test("renders Telegram dialogs for provider selection when they are supplied", async () => {
     const view = render(
       <App
         initialDialogs={[
@@ -285,7 +303,7 @@ describe("App dashboard", () => {
     );
 
     clickSidebar(view, "Telegram Setup");
-    expect(view.getByText("Available dialogs")).toBeTruthy();
+    expect(await view.findByText("Available dialogs")).toBeTruthy();
     expect(view.getByText("Real FX Channel")).toBeTruthy();
     expect(view.getByRole("button", { name: "Add Real FX Channel as a provider" })).toBeTruthy();
   });
@@ -567,7 +585,9 @@ describe("App dashboard", () => {
 
     const view = render(<App initialSnapshot={snapshot} />);
     clickSidebar(view, "Settings");
-    fireEvent.change(view.getByLabelText("Default lot size"), { target: { value: "0.25" } });
+    fireEvent.change(await view.findByLabelText("Default lot size"), {
+      target: { value: "0.25" },
+    });
     fireEvent.change(view.getByLabelText("Default risk percent"), { target: { value: "0.75" } });
     fireEvent.change(view.getByLabelText("Polling interval (seconds)"), {
       target: { value: "5" },
@@ -588,7 +608,56 @@ describe("App dashboard", () => {
       pollingIntervalSeconds: 5,
       dedupWindowSeconds: 300,
       allowedOrderTypes: ["MARKET"],
+      drawdownWarnPct: 10,
+      drawdownDangerPct: 20,
     });
+  });
+
+  test("per-account risk override fields resync after backend normalization", () => {
+    const normalizedAccount = {
+      id: "mt5-demo-1",
+      accountNumber: "100200300",
+      currency: "USD",
+      drawdownWarnPctOverride: 5,
+      drawdownDangerPctOverride: 10,
+    };
+    const view = render(
+      <SettingsPage
+        accounts={[normalizedAccount]}
+        onAccountRiskThresholdsSave={() => undefined}
+        onSaveForm={() => undefined}
+        onSubmit={(event) => event.preventDefault()}
+        settings={snapshot.appSettings}
+      />,
+    );
+
+    fireEvent.change(view.getByLabelText("Warn % override for 100200300"), {
+      target: { value: "20" },
+    });
+    fireEvent.change(view.getByLabelText("Danger % override for 100200300"), {
+      target: { value: "10" },
+    });
+
+    view.rerender(
+      <SettingsPage
+        accounts={[
+          {
+            ...normalizedAccount,
+            drawdownWarnPctOverride: 20,
+            drawdownDangerPctOverride: 20,
+          },
+        ]}
+        onAccountRiskThresholdsSave={() => undefined}
+        onSaveForm={() => undefined}
+        onSubmit={(event) => event.preventDefault()}
+        settings={snapshot.appSettings}
+      />,
+    );
+
+    expect((view.getByLabelText("Danger % override for 100200300") as HTMLInputElement).value).toBe(
+      "20",
+    );
+    expect(view.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
   });
 
   test("lets the operator save global aliases and account symbol mappings", async () => {
@@ -599,9 +668,9 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickTab(view, "Symbol Settings");
+    await clickTabAsync(view, "Symbol Settings");
 
-    fireEvent.click(view.getByRole("button", { name: "Add mapping" }));
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
     fireEvent.change(view.getByLabelText("Alias raw symbol"), { target: { value: "SILVER" } });
     fireEvent.change(view.getByLabelText("Alias canonical symbol"), {
       target: { value: "XAGUSD" },
@@ -660,8 +729,8 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickTab(view, "Logs");
-    fireEvent.change(view.getByLabelText("Redacted fixture text for Alpha FX Signals"), {
+    await clickTabAsync(view, "Logs");
+    fireEvent.change(await view.findByLabelText("Redacted fixture text for Alpha FX Signals"), {
       target: { value: "BUY EURUSD @ [redacted]" },
     });
     fireEvent.click(view.getByRole("button", { name: "Save fixture" }));
@@ -710,13 +779,13 @@ describe("App dashboard", () => {
     expect(view.getByText("ticket 70001")).toBeTruthy();
   });
 
-  test("shows the History empty state when there are no closed trades", () => {
+  test("shows the History empty state when there are no closed trades", async () => {
     globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
       Response.json(snapshot)) as typeof fetch;
     const view = render(<App initialSnapshot={{ ...snapshot, logicalTrades: [] }} />);
-    clickTab(view, "History");
+    await clickTabAsync(view, "History");
     clickTab(view, "Closed");
-    expect(view.getByText("No closed trades yet")).toBeTruthy();
+    expect(await view.findByText("No closed trades yet")).toBeTruthy();
   });
 
   test("History › Closed groups partial closes under a parent row and reveals per-leg detail on expand", () => {
@@ -1082,7 +1151,10 @@ describe("App dashboard", () => {
       />,
     );
 
-    const telegramChip = view.getByText("TG gramjs").closest(".chip");
+    const telegramChip = view
+      .getAllByText("gramjs")
+      .find((el) => el.closest(".chip"))
+      ?.closest(".chip");
     expect(telegramChip?.querySelector(".chip-dot")?.className).toContain("ok");
   });
 
@@ -1169,7 +1241,7 @@ describe("App dashboard", () => {
     await view.findByText("Profit / Return");
     expect(view.getByText("Win / Loss")).toBeTruthy();
     expect(view.getByText("Risk / Drawdown")).toBeTruthy();
-    expect(view.getByText("15")).toBeTruthy();
+    expect(view.getAllByText(/15\.00/).length).toBeGreaterThanOrEqual(1);
     expect(
       calls.some(
         (call) =>

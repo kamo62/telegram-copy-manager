@@ -3,6 +3,7 @@ import type { ExternalBrokerPosition } from "../App";
 import { useLocale } from "../contexts/LocaleContext";
 import { formatLot, formatNumber } from "../lib/format";
 import { EmptyState } from "./EmptyState";
+import { Money } from "./Money";
 
 interface OpenPositionsAccount {
   id: string;
@@ -18,6 +19,7 @@ interface OpenPositionsTableProps {
   accounts: OpenPositionsAccount[];
   /** When set, only this account's positions are shown. When null, all accounts aggregate. */
   focusedAccountId: string | null;
+  currency?: string;
 }
 
 type Origin = "ea" | "external";
@@ -65,7 +67,11 @@ function externalLabel(magic: number): string {
  * Origin is conveyed by a left-edge stripe (cobalt = EA, amber = external).
  * Pending orders render in a slim secondary block.
  */
-export function OpenPositionsTable({ accounts, focusedAccountId }: OpenPositionsTableProps) {
+export function OpenPositionsTable({
+  accounts,
+  focusedAccountId,
+  currency,
+}: OpenPositionsTableProps) {
   const { locale } = useLocale();
   const aggregate = focusedAccountId === null;
   const scoped = aggregate ? accounts : accounts.filter((a) => a.id === focusedAccountId);
@@ -122,7 +128,6 @@ export function OpenPositionsTable({ accounts, focusedAccountId }: OpenPositions
   const totalFloating = positions.reduce((sum, p) => sum + (p.profit ?? 0), 0);
   const eaCount = positions.filter((p) => p.origin === "ea").length;
   const externalCount = positions.filter((p) => p.origin === "external").length;
-  const tone = totalFloating > 0 ? "up" : totalFloating < 0 ? "down" : "muted";
 
   return (
     <div className="open-positions">
@@ -145,10 +150,13 @@ export function OpenPositionsTable({ accounts, focusedAccountId }: OpenPositions
         </div>
         <div className="open-positions-head-pnl">
           <span className="open-positions-head-pnl-label">Floating P/L</span>
-          <strong className={`open-positions-head-pnl-value ${tone}`}>
-            {totalFloating >= 0 ? "+" : ""}
-            {formatNumber(totalFloating, { locale })}
-          </strong>
+          <Money
+            value={totalFloating}
+            currency={currency}
+            locale={locale}
+            signTone
+            className="open-positions-head-pnl-value"
+          />
         </div>
       </header>
 
@@ -188,6 +196,7 @@ export function OpenPositionsTable({ accounts, focusedAccountId }: OpenPositions
                 position={p}
                 aggregate={aggregate}
                 locale={locale}
+                currency={currency}
               />
             ))}
           </tbody>
@@ -242,13 +251,14 @@ function PositionRowComponent({
   position,
   aggregate,
   locale,
+  currency,
 }: {
   position: PositionRow;
   aggregate: boolean;
   locale: string;
+  currency?: string;
 }) {
   const pnl = position.profit;
-  const tone = pnl === undefined ? "muted" : pnl > 0 ? "up" : pnl < 0 ? "down" : "muted";
   const side = positionSide(position.type);
   return (
     <tr className={`open-positions-row open-positions-row-${position.origin}`}>
@@ -291,8 +301,12 @@ function PositionRowComponent({
       <td className={position.tp > 0 ? "num-cell" : "num-cell muted"}>
         {position.tp > 0 ? formatNumber(position.tp, { locale, maximumFractionDigits: 5 }) : "—"}
       </td>
-      <td className={`num-cell open-positions-pnl ${tone}`}>
-        {pnl !== undefined ? `${pnl >= 0 ? "+" : ""}${formatNumber(pnl, { locale })}` : "—"}
+      <td className="num-cell open-positions-pnl">
+        {pnl !== undefined ? (
+          <Money value={pnl} currency={currency} locale={locale} signTone />
+        ) : (
+          "—"
+        )}
       </td>
       <td>
         <code className="open-positions-ticket">#{position.ticket}</code>

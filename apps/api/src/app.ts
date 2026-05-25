@@ -71,7 +71,7 @@ const EQUITY_CURVE_RETENTION_DAYS = 90;
 type SymbolAliasScope = "global" | "provider";
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
 type EquityCurveScope = "account" | "provider";
-type StatsRange = "7d" | "30d" | "90d" | "all";
+type StatsRange = "today" | "7d" | "30d" | "90d" | "all";
 
 interface AppSettings {
   defaultLotSize: number;
@@ -84,6 +84,8 @@ interface AppSettings {
   leaseTimeoutSeconds: number;
   maxLeaseAttempts: number;
   dedupWindowSeconds: number;
+  drawdownWarnPct: number;
+  drawdownDangerPct: number;
 }
 
 interface AccountSlotInput {
@@ -123,6 +125,8 @@ const defaultAppSettings: AppSettings = {
   leaseTimeoutSeconds: 15,
   maxLeaseAttempts: 3,
   dedupWindowSeconds: 300,
+  drawdownWarnPct: 10,
+  drawdownDangerPct: 20,
 };
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
@@ -520,6 +524,14 @@ export function createApi(options: ApiOptions = {}) {
       }),
     ),
   );
+  app.patch("/api/accounts/:accountId/risk-thresholds", async (c) => {
+    const body = await c.req.json<{ warnPct?: number | null; dangerPct?: number | null }>();
+    const result = store.updateAccountRiskThresholds(c.req.param("accountId"), body);
+    if (!result) {
+      return c.json({ error: "Account not found" }, 404);
+    }
+    return c.json(result);
+  });
   app.get("/api/providers/performance/export.csv", (c) => {
     const csv = store.providerPerformanceCsv(c.req.query("accountId"));
     const filename = `provider-performance-${new Date(Date.now()).toISOString().slice(0, 10)}.csv`;
@@ -3257,7 +3269,7 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, account_number, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at FROM mt5_accounts ORDER BY account_number",
+          "SELECT id, account_number, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at, drawdown_warn_pct, drawdown_danger_pct FROM mt5_accounts ORDER BY account_number",
         )
         .all() as Row[]
     ).map((row) => {
@@ -3310,6 +3322,8 @@ class AppStore {
         closedTrades: this.closedTradesForAccount(accountId),
         externalCloses: this.externalClosesForAccount(accountId),
         lastSnapshotAt: snap?.updatedAt,
+        drawdownWarnPctOverride: nullableNumber(row.drawdown_warn_pct) ?? null,
+        drawdownDangerPctOverride: nullableNumber(row.drawdown_danger_pct) ?? null,
       };
     });
   }
@@ -3708,6 +3722,10 @@ class AppStore {
   }
 
   providerPerformance(accountId?: string) {
+    const accounts = this.mt5Accounts();
+    const initialBalanceDenominator = accountId
+      ? (accounts.find((account) => account.id === accountId)?.initialBalance ?? 0)
+      : accounts.reduce((sum, account) => sum + (account.initialBalance ?? 0), 0);
     return this.providers().map((provider) => {
       const trades = this.logicalTrades().filter(
         (trade) =>
@@ -3719,6 +3737,15 @@ class AppStore {
       const pnlByTrade = trades.map((trade) => sumPnl(this.brokerOrders(trade.id)));
       const closed = pnlByTrade.filter((value) => value !== 0);
       const copiedDrawdown = this.maxCurveDrawdown("provider", accountId, provider.id);
+      const totalVolume = orders.reduce(
+        (sum, order) => sum + (order.requestedVolume ?? order.filledVolume ?? 0),
+        0,
+      );
+      const gain = Number((pnl / Math.max(1, totalVolume)).toFixed(2));
+      const gainPct =
+        initialBalanceDenominator > 0
+          ? Number(((pnl / initialBalanceDenominator) * 100).toFixed(2))
+          : 0;
       return {
         id: provider.id,
         title: provider.title,
@@ -3727,18 +3754,8 @@ class AppStore {
         pips,
         pnl,
         profit: pnl,
-        gain: Number(
-          (
-            pnl /
-            Math.max(
-              1,
-              orders.reduce(
-                (sum, order) => sum + (order.requestedVolume ?? order.filledVolume ?? 0),
-                0,
-              ),
-            )
-          ).toFixed(2),
-        ),
+        gain,
+        gainPct,
         winRate: closed.length ? closed.filter((value) => value > 0).length / closed.length : 0,
         averageDrawdown: this.averageCurveDrawdown("provider", accountId, provider.id),
         copiedDrawdown,
@@ -3763,6 +3780,7 @@ class AppStore {
       "gain",
       "trade_count",
       "copied_drawdown",
+      "gain_pct",
     ];
     const lines = rows.map((row) => {
       const provider = this.providers().find((item) => item.id === row.id);
@@ -3791,6 +3809,7 @@ class AppStore {
         row.gain,
         row.tradeCount,
         row.copiedDrawdown,
+        row.gainPct,
       ]
         .map(csvCell)
         .join(",");
@@ -3869,7 +3888,66 @@ class AppStore {
         bestWeekday: bestMapKey(byWeekday),
         worstWeekday: worstMapKey(byWeekday),
       },
+      riskThresholds: this.resolveRiskThresholds(accountId),
     };
+  }
+
+  private resolveRiskThresholds(accountId: string): {
+    warnPct: number;
+    dangerPct: number;
+    accountWarnPct: number | null;
+    accountDangerPct: number | null;
+  } {
+    const globals = this.appSettings();
+    const row = this.db
+      .query(`SELECT drawdown_warn_pct, drawdown_danger_pct FROM mt5_accounts WHERE id = ?`)
+      .get(accountId) as Row | null;
+    const accountWarn = nullableNumber(row?.drawdown_warn_pct);
+    const accountDanger = nullableNumber(row?.drawdown_danger_pct);
+    const warnPct = accountWarn ?? globals.drawdownWarnPct;
+    const dangerPct = Math.max(accountDanger ?? globals.drawdownDangerPct, warnPct);
+    return {
+      warnPct,
+      dangerPct,
+      accountWarnPct: accountWarn ?? null,
+      accountDangerPct: accountDanger ?? null,
+    };
+  }
+
+  updateAccountRiskThresholds(
+    accountId: string,
+    input: { warnPct?: number | null; dangerPct?: number | null },
+  ) {
+    const row = this.db
+      .query(`SELECT id, drawdown_warn_pct, drawdown_danger_pct FROM mt5_accounts WHERE id = ?`)
+      .get(accountId) as Row | null;
+    if (!row) return null;
+    const hasWarn = hasOwn(input, "warnPct");
+    const hasDanger = hasOwn(input, "dangerPct");
+    const currentWarn = nullableNumber(row.drawdown_warn_pct) ?? null;
+    const currentDanger = nullableNumber(row.drawdown_danger_pct) ?? null;
+    const warn = hasWarn
+      ? input.warnPct === null
+        ? null
+        : clampPercent(input.warnPct, 0)
+      : currentWarn;
+    let danger = hasDanger
+      ? input.dangerPct === null
+        ? null
+        : clampPercent(input.dangerPct, 0)
+      : currentDanger;
+    if (warn !== null && danger !== null && danger < warn) {
+      danger = warn;
+    }
+    this.db
+      .query(`UPDATE mt5_accounts SET drawdown_warn_pct = ?, drawdown_danger_pct = ? WHERE id = ?`)
+      .run(warn, danger, accountId);
+    this.audit("accounts.risk-thresholds.update", "info", `Risk thresholds updated`, {
+      accountId,
+      warnPct: warn,
+      dangerPct: danger,
+    });
+    return this.resolveRiskThresholds(accountId);
   }
 
   private recordEquityCurveSamples(
@@ -4235,19 +4313,25 @@ class AppStore {
       .get(scope, accountId, providerId) as Row | null;
     const average = this.db
       .query(
-        `SELECT AVG(drawdown_amount) AS average_drawdown
+        `SELECT AVG(drawdown_amount) AS average_drawdown,
+                AVG(drawdown_pct)    AS average_drawdown_pct
          FROM equity_curve_points
          WHERE scope = ? AND account_id = ? AND provider_id = ?
            AND drawdown_amount > 0`,
       )
       .get(scope, accountId, providerId) as Row | null;
     const maxDrawdown = roundCurrency(nullableNumber(state?.max_drawdown_amount) ?? 0);
+    const averageActiveDrawdownPctRaw = nullableNumber(average?.average_drawdown_pct);
     return {
       maxDrawdown,
       maxDrawdownPct: nullableNumber(state?.max_drawdown_pct) ?? 0,
       currentDrawdown: roundCurrency(nullableNumber(latest?.drawdown_amount) ?? 0),
       currentDrawdownPct: nullableNumber(latest?.drawdown_pct) ?? 0,
       averageActiveDrawdown: roundCurrency(nullableNumber(average?.average_drawdown) ?? 0),
+      averageActiveDrawdownPct:
+        averageActiveDrawdownPctRaw !== undefined
+          ? Number(averageActiveDrawdownPctRaw.toFixed(2))
+          : 0,
       recoveryFactor: maxDrawdown > 0 ? 0 : 0,
     };
   }
@@ -5187,6 +5271,8 @@ class AppStore {
     `);
     this.ensureColumn("mt5_accounts", "profit", "REAL");
     this.ensureColumn("mt5_accounts", "initial_balance", "REAL NOT NULL DEFAULT 0");
+    this.ensureColumn("mt5_accounts", "drawdown_warn_pct", "REAL");
+    this.ensureColumn("mt5_accounts", "drawdown_danger_pct", "REAL");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS account_slots (
         id TEXT PRIMARY KEY,
@@ -7097,11 +7183,16 @@ function minuteBucket(iso: string) {
 }
 
 function normalizeStatsRange(value: string | undefined): StatsRange {
-  return value === "7d" || value === "90d" || value === "all" ? value : "30d";
+  return value === "today" || value === "7d" || value === "90d" || value === "all" ? value : "30d";
 }
 
 function statsRangeStart(range: StatsRange) {
   if (range === "all") return undefined;
+  if (range === "today") {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return start.toISOString();
+  }
   const days = range === "7d" ? 7 : range === "90d" ? 90 : 30;
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
@@ -7740,6 +7831,11 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     input.allowedOrderTypes?.filter((orderType): orderType is AppOrderType =>
       appOrderTypes.has(orderType as AppOrderType),
     ) ?? defaultAppSettings.allowedOrderTypes;
+  const drawdownWarnPct = clampPercent(input.drawdownWarnPct, defaultAppSettings.drawdownWarnPct);
+  const drawdownDangerPct = Math.max(
+    clampPercent(input.drawdownDangerPct, defaultAppSettings.drawdownDangerPct),
+    drawdownWarnPct,
+  );
   return {
     defaultLotSize: positiveNumber(input.defaultLotSize, defaultAppSettings.defaultLotSize),
     defaultRiskPercent: positiveNumber(
@@ -7777,7 +7873,19 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
         Math.round(positiveNumber(input.dedupWindowSeconds, defaultAppSettings.dedupWindowSeconds)),
       ),
     ),
+    drawdownWarnPct,
+    drawdownDangerPct,
   };
+}
+
+function clampPercent(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.min(100, n);
+}
+
+function hasOwn(object: object, key: string): boolean {
+  return Object.hasOwn(object, key);
 }
 
 function positiveNumber(value: unknown, fallback: number) {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Money } from "./Money";
 import { SkeletonChart } from "./Skeleton";
 
 export type GrowthSeries = {
@@ -11,7 +12,15 @@ export type GrowthSeries = {
   numberOfTrades: number;
 };
 
-export function GrowthChart({ data, loading = false }: { data: GrowthSeries; loading?: boolean }) {
+export function GrowthChart({
+  data,
+  loading = false,
+  currency,
+}: {
+  data: GrowthSeries;
+  loading?: boolean;
+  currency?: string;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const plotRef = useRef<{
     destroy: () => void;
@@ -113,13 +122,20 @@ export function GrowthChart({ data, loading = false }: { data: GrowthSeries; loa
         <div>
           <h3 className="chart-card-title">Account growth</h3>
           <span className="chart-card-meta">
-            {data.numberOfTrades} trades · trading P/L ${data.totalProfit.toLocaleString()}
-            {data.netDeposits !== undefined
-              ? ` · net cashflow ${data.netDeposits.toLocaleString()}`
-              : ""}
-            {data.floatingPnl !== undefined
-              ? ` · floating ${data.floatingPnl.toLocaleString()}`
-              : ""}
+            {data.numberOfTrades} trades · trading P/L{" "}
+            <Money value={data.totalProfit} currency={currency} signTone />
+            {data.netDeposits !== undefined ? (
+              <>
+                {" "}
+                · net cashflow <Money value={data.netDeposits} currency={currency} />
+              </>
+            ) : null}
+            {data.floatingPnl !== undefined ? (
+              <>
+                {" "}
+                · floating <Money value={data.floatingPnl} currency={currency} signTone />
+              </>
+            ) : null}
           </span>
         </div>
         <div className="chart-toggle" role="tablist" aria-label="Chart view">

@@ -16,6 +16,7 @@ export function ProvidersPage({
   accounts = [],
   providerLinks = [],
   onToggleAccountLink,
+  currency,
 }: {
   providers: ProviderRowData[];
   onConfigure: (provider: ProviderRowData) => void;
@@ -26,6 +27,7 @@ export function ProvidersPage({
   accounts?: ProviderAccountLinkOption[];
   providerLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
   onToggleAccountLink?: (accountId: string, providerId: string, enabled: boolean) => void;
+  currency?: string;
 }) {
   return (
     <Panel className="wide-panel" title="Providers">
@@ -48,6 +50,7 @@ export function ProvidersPage({
       ) : null}
       <ProvidersTable
         accounts={accounts}
+        currency={currency}
         loading={loading}
         onConfigure={onConfigure}
         onDelete={onDelete}

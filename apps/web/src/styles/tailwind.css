@@ -1,0 +1,69 @@
+/* Tailwind 4 entry — CSS-first config.
+ *
+ * The semantic class system (`.kpi-amount`, `.statistics-card`, etc.) in
+ * base.css continues to own the existing dashboard surfaces. Utilities here
+ * are opt-in for new code and components migrated opportunistically.
+ *
+ * Preflight is deliberately omitted: the existing dashboard styles assume
+ * default browser behaviour for headings, buttons, lists, etc., and the
+ * v4 Preflight reset would clobber those rules. We pull in only theme
+ * tokens (--color-*, --font-*, --text-*) and utilities.
+ */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+@theme {
+  /* Colour tokens — map Tailwind's `text-ink`, `bg-up`, etc. onto the
+     existing HSL variables in tokens.css. Tailwind 4 reads --color-* under
+     @theme to generate the utility palette. */
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-dim: var(--ink-dim);
+  --color-ink-3: var(--ink-3);
+  --color-ink-faint: var(--ink-faint);
+
+  --color-bg: var(--bg);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-panel-hover: var(--panel-hover);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-line-subtle: var(--line-subtle);
+
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+
+  --color-up: var(--up);
+  --color-up-dim: var(--up-dim);
+  --color-down: var(--down);
+  --color-down-dim: var(--down-dim);
+  --color-warn: var(--warn);
+  --color-warn-dim: var(--warn-dim);
+
+  /* Fonts — point Tailwind's `font-sans`/`font-mono`/`font-display` at the
+     same variable-font stacks tokens.css already declares. */
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
+
+  /* Custom type scale — Tailwind 4 reads --text-* under @theme to expose
+     `text-fs-1`..`text-fs-9` utilities. Falls back to Tailwind defaults
+     for utilities like `text-sm`/`text-base`. */
+  --text-fs-1: 11px;
+  --text-fs-2: 12px;
+  --text-fs-3: 13px;
+  --text-fs-4: 14px;
+  --text-fs-5: 16px;
+  --text-fs-6: 19px;
+  --text-fs-7: 24px;
+  --text-fs-8: 32px;
+  --text-fs-9: 44px;
+
+  /* Radius scale — `rounded-r1`..`rounded-r3` plus the pill. */
+  --radius-r1: 4px;
+  --radius-r2: 8px;
+  --radius-r3: 12px;
+  --radius-pill: 999px;
+}

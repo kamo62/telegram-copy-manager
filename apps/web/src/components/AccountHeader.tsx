@@ -1,7 +1,19 @@
-import { CheckCircle2, Server } from "lucide-react";
+import {
+  CalendarDays,
+  CalendarRange,
+  CheckCircle2,
+  type LucideIcon,
+  PiggyBank,
+  Server,
+  Sun,
+  TrendingUp,
+  Wallet,
+} from "lucide-react";
 import { useLocale } from "../contexts/LocaleContext";
-import { formatNumber, formatPercent } from "../lib/format";
+import { formatPercent } from "../lib/format";
+import { Money } from "./Money";
 import { SkeletonStat } from "./Skeleton";
+import { Sparkline } from "./Sparkline";
 
 export interface AccountHeaderData {
   connectedPlatform: {
@@ -19,7 +31,37 @@ export interface AccountHeaderData {
     thisWeek: { amount: number | null; deltaPercent: number | null };
     thisMonth: { amount: number | null; deltaPercent: number | null };
   };
+  /** Optional per-KPI history series for the sparkline strip. Each array is
+   * a thin slice of recent equity / P-L values; falsy or short series skip
+   * rendering so cards never show a degenerate single-point line. */
+  series?: {
+    balance?: number[];
+    equity?: number[];
+    totalProfit?: number[];
+    today?: number[];
+    thisWeek?: number[];
+    thisMonth?: number[];
+  };
   currency: string;
+}
+
+type Accent = "blue" | "violet" | "emerald" | "amber" | "rose" | "muted";
+
+function accentColor(accent: Accent): string {
+  switch (accent) {
+    case "blue":
+      return "hsl(218 85% 42%)";
+    case "violet":
+      return "hsl(265 70% 50%)";
+    case "emerald":
+      return "var(--up-dim)";
+    case "amber":
+      return "var(--warn-dim)";
+    case "rose":
+      return "var(--down-dim)";
+    default:
+      return "var(--ink-faint)";
+  }
 }
 
 function formatDelta(
@@ -43,33 +85,68 @@ export function AccountHeader({
   data: AccountHeaderData;
   loading?: boolean;
 }) {
-  const { connectedPlatform, kpis, currency } = data;
+  const { connectedPlatform, kpis, series, currency } = data;
   const { locale } = useLocale();
 
+  // Each card carries its own icon + accent so the badge palette stays
+  // distinct even when several values move in the same direction.
   const kpiList: Array<{
+    key: keyof NonNullable<AccountHeaderData["series"]>;
     label: string;
     amount: number | null;
     delta: number | null;
+    icon: LucideIcon;
+    accent: Accent;
     primary?: boolean;
   }> = [
-    { label: "Balance", amount: kpis.balance, delta: null, primary: false },
-    { label: "Equity", amount: kpis.equity, delta: null, primary: false },
     {
+      key: "balance",
+      label: "Balance",
+      amount: kpis.balance,
+      delta: null,
+      icon: Wallet,
+      accent: "blue",
+    },
+    {
+      key: "equity",
+      label: "Equity",
+      amount: kpis.equity,
+      delta: null,
+      icon: PiggyBank,
+      accent: "violet",
+    },
+    {
+      key: "totalProfit",
       label: "Trading P/L",
       amount: kpis.totalProfit.amount,
       delta: kpis.totalProfit.deltaPercent,
+      icon: TrendingUp,
+      accent: "emerald",
       primary: true,
     },
-    { label: "Today", amount: kpis.today.amount, delta: kpis.today.deltaPercent },
     {
+      key: "today",
+      label: "Today",
+      amount: kpis.today.amount,
+      delta: kpis.today.deltaPercent,
+      icon: Sun,
+      accent: "amber",
+    },
+    {
+      key: "thisWeek",
       label: "This Week",
       amount: kpis.thisWeek.amount,
       delta: kpis.thisWeek.deltaPercent,
+      icon: CalendarRange,
+      accent: "blue",
     },
     {
+      key: "thisMonth",
       label: "This Month",
       amount: kpis.thisMonth.amount,
       delta: kpis.thisMonth.deltaPercent,
+      icon: CalendarDays,
+      accent: "violet",
     },
   ];
 
@@ -114,14 +191,45 @@ export function AccountHeader({
         {!(loading && kpis.balance === null) &&
           kpiList.map((kpi) => {
             const delta = formatDelta(kpi.delta, locale);
+            const Icon = kpi.icon;
+            const sparkData = series?.[kpi.key];
+            // Sparkline tone tracks P/L sign for the windowed cards;
+            // Balance/Equity stay on their fixed accent.
+            const sparkColor =
+              kpi.delta !== null && kpi.delta < 0
+                ? "var(--down-dim)"
+                : kpi.delta !== null && kpi.delta > 0
+                  ? "var(--up-dim)"
+                  : accentColor(kpi.accent);
             return (
               <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
-                <span className="kpi-label">
-                  <span>{kpi.label}</span>
-                  {currency ? <span className="kpi-label-currency">· {currency}</span> : null}
-                </span>
-                <strong className="kpi-amount">{formatNumber(kpi.amount, { locale })}</strong>
+                <div className="kpi-head">
+                  <span className="kpi-label">
+                    <span>{kpi.label}</span>
+                    {currency ? <span className="kpi-label-currency">· {currency}</span> : null}
+                  </span>
+                  <span className={`kpi-badge kpi-badge-${kpi.accent}`} aria-hidden="true">
+                    <Icon size={13} />
+                  </span>
+                </div>
+                <Money
+                  value={kpi.amount}
+                  currency={currency}
+                  locale={locale}
+                  signTone={kpi.delta !== null}
+                  className="kpi-amount"
+                />
                 <span className={`kpi-delta kpi-delta-${delta.tone}`}>{delta.text}</span>
+                {sparkData &&
+                sparkData.length >= 2 &&
+                Math.min(...sparkData) !== Math.max(...sparkData) ? (
+                  <Sparkline ariaLabel={`${kpi.label} trend`} color={sparkColor} data={sparkData} />
+                ) : (
+                  // Reserve the sparkline strip even when no series is
+                  // available (or the series is flat) so layout doesn't
+                  // shift once real data lands.
+                  <div aria-hidden="true" className="kpi-spark-placeholder" />
+                )}
               </div>
             );
           })}

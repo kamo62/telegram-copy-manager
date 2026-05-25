@@ -4,6 +4,7 @@ import type { ClosedTradeRow } from "../App";
 import { useLocale } from "../contexts/LocaleContext";
 import { formatLot, formatNumber } from "../lib/format";
 import { EmptyState } from "./EmptyState";
+import { Money } from "./Money";
 
 interface ClosedPositionsAccount {
   id: string;
@@ -16,6 +17,7 @@ interface ClosedPositionsTableProps {
   accounts: ClosedPositionsAccount[];
   /** When set, only this account's closed trades are shown. When null, all accounts aggregate. */
   focusedAccountId: string | null;
+  currency?: string;
 }
 
 type FlatRow = ClosedTradeRow & { accountNumber: string };
@@ -82,7 +84,11 @@ function formatClosedAtTimeOnly(iso: string, locale: string): string {
  * per-leg close events (TP1 hit, TP2 hit, SL hit, etc) plus the original
  * `trade_***` identifier and entry context.
  */
-export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPositionsTableProps) {
+export function ClosedPositionsTable({
+  accounts,
+  focusedAccountId,
+  currency,
+}: ClosedPositionsTableProps) {
   const { locale } = useLocale();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const aggregate = focusedAccountId === null;
@@ -109,7 +115,6 @@ export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPosit
   const totalRealized = rows.reduce((sum, r) => sum + r.realizedPnl, 0);
   const wins = rows.filter((r) => r.realizedPnl > 0).length;
   const losses = rows.filter((r) => r.realizedPnl < 0).length;
-  const totalTone = totalRealized > 0 ? "up" : totalRealized < 0 ? "down" : "muted";
 
   function toggle(tradeId: string) {
     setExpanded((prev) => {
@@ -136,10 +141,13 @@ export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPosit
         </div>
         <div className="closed-positions-head-pnl">
           <span className="closed-positions-head-pnl-label">Realized P/L</span>
-          <strong className={`closed-positions-head-pnl-value ${totalTone}`}>
-            {totalRealized >= 0 ? "+" : ""}
-            {formatNumber(totalRealized, { locale })}
-          </strong>
+          <Money
+            value={totalRealized}
+            currency={currency}
+            locale={locale}
+            signTone
+            className="closed-positions-head-pnl-value"
+          />
         </div>
       </header>
 
@@ -170,7 +178,6 @@ export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPosit
           <tbody>
             {rows.map((row) => {
               const isOpen = expanded.has(row.tradeId);
-              const pnlTone = row.realizedPnl > 0 ? "up" : row.realizedPnl < 0 ? "down" : "muted";
               const closeReason = row.closeReason ?? row.result;
               const netResult =
                 row.netResult ??
@@ -238,9 +245,8 @@ export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPosit
                         slFired={closeReason === "SL hit" || closeReason === "Mixed"}
                       />
                     </td>
-                    <td className={`num-cell closed-positions-pnl ${pnlTone}`}>
-                      {row.realizedPnl >= 0 ? "+" : ""}
-                      {formatNumber(row.realizedPnl, { locale })}
+                    <td className="num-cell closed-positions-pnl">
+                      <Money value={row.realizedPnl} currency={currency} locale={locale} signTone />
                     </td>
                     <td>
                       <span
@@ -257,7 +263,7 @@ export function ClosedPositionsTable({ accounts, focusedAccountId }: ClosedPosit
                   {isOpen ? (
                     <tr className="closed-positions-detail-row">
                       <td colSpan={columnCount + 1}>
-                        <ClosedTradeDetail row={row} locale={locale} />
+                        <ClosedTradeDetail row={row} locale={locale} currency={currency} />
                       </td>
                     </tr>
                   ) : null}
@@ -309,7 +315,15 @@ function TpPills({
   );
 }
 
-function ClosedTradeDetail({ row, locale }: { row: FlatRow; locale: string }) {
+function ClosedTradeDetail({
+  row,
+  locale,
+  currency,
+}: {
+  row: FlatRow;
+  locale: string;
+  currency?: string;
+}) {
   return (
     <div className="closed-positions-detail">
       <header className="closed-positions-detail-head">
@@ -321,9 +335,8 @@ function ClosedTradeDetail({ row, locale }: { row: FlatRow; locale: string }) {
         <span className="closed-positions-detail-meta">
           Close reason: {row.closeReason ?? row.result}
         </span>
-        <span className={`closed-positions-detail-pnl ${row.realizedPnl >= 0 ? "up" : "down"}`}>
-          net {row.realizedPnl >= 0 ? "+" : ""}
-          {formatNumber(row.realizedPnl, { locale })}
+        <span className="closed-positions-detail-pnl">
+          net <Money value={row.realizedPnl} currency={currency} locale={locale} signTone />
         </span>
       </header>
       <ul className="closed-positions-detail-legs">
@@ -345,8 +358,7 @@ function ClosedTradeDetail({ row, locale }: { row: FlatRow; locale: string }) {
                 {formatNumber(leg.price, { locale, maximumFractionDigits: 5 })}
               </span>
               <span className={`closed-positions-detail-leg-pnl ${tone}`}>
-                {leg.pnl >= 0 ? "+" : ""}
-                {formatNumber(leg.pnl, { locale })}
+                <Money value={leg.pnl} currency={currency} locale={locale} signTone />
               </span>
               <span className={`closed-positions-detail-leg-tag ${tone}`}>{label}</span>
               <span className="closed-positions-detail-leg-time">

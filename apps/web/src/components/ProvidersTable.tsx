@@ -1,14 +1,11 @@
 import { Settings as SettingsIcon } from "lucide-react";
 import { useLocale } from "../contexts/LocaleContext";
 import { useSortableTable } from "../hooks/useSortableTable";
-import {
-  formatLot,
-  formatNumber,
-  formatPercent,
-  formatPips,
-  formatRelativeTime,
-} from "../lib/format";
+import { formatLot, formatPips, formatRelativeTime } from "../lib/format";
+import { winRateTone } from "../lib/thresholds";
+import { Money } from "./Money";
 import { SkeletonRow } from "./Skeleton";
+import { Stat } from "./Stat";
 import { Tag } from "./Tag";
 
 export interface ProviderRowData {
@@ -43,6 +40,7 @@ export interface ProviderRowData {
   pnl?: number;
   profit?: number;
   gain?: number;
+  gainPct?: number;
 }
 
 export interface ProviderAccountLinkOption {
@@ -59,6 +57,7 @@ export function ProvidersTable({
   accounts = [],
   providerLinks = [],
   onToggleAccountLink,
+  currency,
 }: {
   providers: ProviderRowData[];
   onConfigure: (provider: ProviderRowData) => void;
@@ -68,6 +67,7 @@ export function ProvidersTable({
   accounts?: ProviderAccountLinkOption[];
   providerLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
   onToggleAccountLink?: (accountId: string, providerId: string, enabled: boolean) => void;
+  currency?: string;
 }) {
   const { locale } = useLocale();
   const { sortedRows, toggle, sortAria } = useSortableTable<ProviderRowData, keyof ProviderRowData>(
@@ -149,14 +149,29 @@ export function ProvidersTable({
               <td className="num-cell muted">—</td>
               <td className="num-cell">{formatPips(provider.pips, locale)}</td>
               <td className="num-cell">
-                {provider.winRate === undefined
-                  ? "—"
-                  : formatPercent(provider.winRate * 100, { locale })}
+                {provider.winRate === undefined ? (
+                  "—"
+                ) : (
+                  <Stat
+                    value={provider.winRate * 100}
+                    unit="percent"
+                    locale={locale}
+                    tone={winRateTone(provider.winRate) ?? "neutral"}
+                  />
+                )}
               </td>
-              <td className="num-cell">{formatNumber(provider.averageDrawdown, { locale })}</td>
-              <td className="num-cell">{formatNumber(provider.pnl, { locale })}</td>
-              <td className="num-cell">{formatNumber(provider.profit, { locale })}</td>
-              <td className="num-cell">{formatNumber(provider.gain, { locale })}</td>
+              <td className="num-cell">
+                <Money value={provider.averageDrawdown} currency={currency} locale={locale} />
+              </td>
+              <td className="num-cell">
+                <Money value={provider.pnl} currency={currency} locale={locale} signTone />
+              </td>
+              <td className="num-cell">
+                <Money value={provider.profit} currency={currency} locale={locale} signTone />
+              </td>
+              <td className="num-cell">
+                <Stat value={provider.gainPct} unit="percent" locale={locale} signTone />
+              </td>
               <td>
                 <Tag tone={provider.enabled ? "good" : "muted"}>
                   {provider.enabled ? "Auto-copy enabled" : "Provider paused"}

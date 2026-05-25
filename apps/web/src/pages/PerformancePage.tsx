@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { GrowthChart, type GrowthSeries } from "../components/GrowthChart";
+import { Money } from "../components/Money";
+import { Stat } from "../components/Stat";
 import { useLocale } from "../contexts/LocaleContext";
 import { apiGet } from "../lib/api";
 import { formatLot, formatNumber, formatPercent } from "../lib/format";
 
 type PerformanceView = "overview" | "statistics";
-type StatsRange = "7d" | "30d" | "90d" | "all";
+type StatsRange = "today" | "7d" | "30d" | "all";
 type StatsScope = "account" | "provider";
 
 export interface AccountStatsData {
@@ -26,7 +28,9 @@ export interface AccountStatsData {
     maxDrawdown: number;
     maxDrawdownPct: number;
     currentDrawdown: number;
+    currentDrawdownPct: number;
     averageActiveDrawdown: number;
+    averageActiveDrawdownPct: number;
     recoveryFactor: number;
   };
   quality: {
@@ -38,6 +42,7 @@ export interface AccountStatsData {
   };
   streaks: { current: string; maxWins: number; maxLosses: number };
   timing: { averageTradeMinutes: number; bestWeekday: string; worstWeekday: string };
+  riskThresholds: { warnPct: number; dangerPct: number };
 }
 
 export function PerformancePage({
@@ -130,7 +135,11 @@ export function PerformancePage({
       </div>
       {view === "overview" ? (
         <>
-          <GrowthChart data={data} loading={loading} />
+          <GrowthChart
+            data={data}
+            loading={loading}
+            currency={(account as { currency?: string } | undefined)?.currency}
+          />
           <ExternalActivityPanel accounts={accounts} />
         </>
       ) : (
@@ -175,77 +184,198 @@ function StatisticsView({
   stats: AccountStatsData | null;
 }) {
   const { locale } = useLocale();
-  const cards = useMemo(
-    () =>
-      stats
-        ? [
-            {
-              title: "Profit / Return",
-              metrics: [
-                [
-                  "Total P/L",
-                  formatNumber(stats.profitReturn.totalPnl, { locale, minimumFractionDigits: 0 }),
-                ],
-                ["ROI", formatPercent(stats.profitReturn.roiPercent, { locale })],
-                ["Best day", formatNumber(stats.profitReturn.bestDay, { locale })],
-                ["Worst day", formatNumber(stats.profitReturn.worstDay, { locale })],
-              ],
-            },
-            {
-              title: "Win / Loss",
-              metrics: [
-                ["Win rate", formatPercent(stats.winLoss.winRate * 100, { locale })],
-                ["Wins", String(stats.winLoss.wins)],
-                ["Losses", String(stats.winLoss.losses)],
-                ["Avg win", formatNumber(stats.winLoss.averageWin, { locale })],
-                ["Avg loss", formatNumber(stats.winLoss.averageLoss, { locale })],
-              ],
-            },
-            {
-              title: "Risk / Drawdown",
-              metrics: [
-                ["Max DD", formatNumber(stats.riskDrawdown.maxDrawdown, { locale })],
-                ["Max DD %", formatPercent(stats.riskDrawdown.maxDrawdownPct, { locale })],
-                ["Current DD", formatNumber(stats.riskDrawdown.currentDrawdown, { locale })],
-                [
-                  "Avg active DD",
-                  formatNumber(stats.riskDrawdown.averageActiveDrawdown, { locale }),
-                ],
-                ["Recovery", formatNumber(stats.riskDrawdown.recoveryFactor, { locale })],
-              ],
-            },
-            {
-              title: "Quality",
-              metrics: [
-                ["Profit factor", formatNumber(stats.quality.profitFactor, { locale })],
-                ["Gross profit", formatNumber(stats.quality.grossProfit, { locale })],
-                ["Gross loss", formatNumber(stats.quality.grossLoss, { locale })],
-                ["Expectancy", formatNumber(stats.quality.expectancy, { locale })],
-              ],
-            },
-            {
-              title: "Streaks",
-              metrics: [
-                ["Current", stats.streaks.current],
-                ["Max wins", String(stats.streaks.maxWins)],
-                ["Max losses", String(stats.streaks.maxLosses)],
-              ],
-            },
-            {
-              title: "Timing",
-              metrics: [
-                [
-                  "Avg duration",
-                  `${formatNumber(stats.timing.averageTradeMinutes, { locale })} min`,
-                ],
-                ["Best weekday", stats.timing.bestWeekday],
-                ["Worst weekday", stats.timing.worstWeekday],
-              ],
-            },
-          ]
-        : [],
-    [locale, stats],
-  );
+  const cards = useMemo<Array<{ title: string; metrics: Array<[string, ReactNode]> }>>(() => {
+    if (!stats) return [];
+    const currency = stats.currency;
+    const warnPct = stats.riskThresholds?.warnPct ?? 10;
+    const dangerPct = stats.riskThresholds?.dangerPct ?? 20;
+    const winRateTone: "up" | "down" | null =
+      stats.winLoss.winRate > 0.5 ? "up" : stats.winLoss.winRate < 0.5 ? "down" : null;
+    return [
+      {
+        title: "Profit / Return",
+        metrics: [
+          [
+            "Total P/L",
+            <Money
+              key="totalPnl"
+              value={stats.profitReturn.totalPnl}
+              currency={currency}
+              locale={locale}
+              signTone
+            />,
+          ],
+          ["ROI", formatPercent(stats.profitReturn.roiPercent, { locale })],
+          [
+            "Best day",
+            <Money
+              key="bestDay"
+              value={stats.profitReturn.bestDay}
+              currency={currency}
+              locale={locale}
+              signTone
+            />,
+          ],
+          [
+            "Worst day",
+            <Money
+              key="worstDay"
+              value={stats.profitReturn.worstDay}
+              currency={currency}
+              locale={locale}
+              signTone
+            />,
+          ],
+        ],
+      },
+      {
+        title: "Win / Loss",
+        metrics: [
+          [
+            "Win rate",
+            <Stat
+              key="winRate"
+              value={stats.winLoss.winRate * 100}
+              unit="percent"
+              locale={locale}
+              tone={winRateTone ?? "neutral"}
+            />,
+          ],
+          ["Wins", String(stats.winLoss.wins)],
+          ["Losses", String(stats.winLoss.losses)],
+          [
+            "Avg win",
+            <Money
+              key="avgWin"
+              value={stats.winLoss.averageWin}
+              currency={currency}
+              locale={locale}
+              signTone
+            />,
+          ],
+          [
+            "Avg loss",
+            <Money
+              key="avgLoss"
+              value={stats.winLoss.averageLoss}
+              currency={currency}
+              locale={locale}
+              signTone
+            />,
+          ],
+        ],
+      },
+      {
+        title: "Risk / Drawdown",
+        metrics: [
+          [
+            "Max DD",
+            <Stat
+              key="maxDd"
+              value={stats.riskDrawdown.maxDrawdown}
+              unit="money"
+              currency={currency}
+              locale={locale}
+              pair={{ value: stats.riskDrawdown.maxDrawdownPct, unit: "percent" }}
+              warnAbove={warnPct}
+              dangerAbove={dangerPct}
+            />,
+          ],
+          [
+            "Current DD",
+            <Stat
+              key="currentDd"
+              value={stats.riskDrawdown.currentDrawdown}
+              unit="money"
+              currency={currency}
+              locale={locale}
+              pair={{ value: stats.riskDrawdown.currentDrawdownPct, unit: "percent" }}
+              warnAbove={warnPct}
+              dangerAbove={dangerPct}
+            />,
+          ],
+          [
+            "Avg active DD",
+            <Stat
+              key="avgDd"
+              value={stats.riskDrawdown.averageActiveDrawdown}
+              unit="money"
+              currency={currency}
+              locale={locale}
+              pair={{ value: stats.riskDrawdown.averageActiveDrawdownPct, unit: "percent" }}
+              warnAbove={warnPct}
+              dangerAbove={dangerPct}
+            />,
+          ],
+          [
+            "Recovery",
+            <Stat
+              key="recovery"
+              value={stats.riskDrawdown.recoveryFactor}
+              unit="ratio"
+              locale={locale}
+              upWhenAtLeast={1}
+            />,
+          ],
+        ],
+      },
+      {
+        title: "Quality",
+        metrics: [
+          ["Profit factor", formatNumber(stats.quality.profitFactor, { locale })],
+          [
+            "Gross profit",
+            <Money
+              key="grossProfit"
+              value={stats.quality.grossProfit}
+              currency={currency}
+              locale={locale}
+              signTone
+            />,
+          ],
+          [
+            "Gross loss",
+            <Money
+              key="grossLoss"
+              value={stats.quality.grossLoss}
+              currency={currency}
+              locale={locale}
+              signTone
+            />,
+          ],
+          [
+            "Expectancy",
+            <Money
+              key="expectancy"
+              value={stats.quality.expectancy}
+              currency={currency}
+              locale={locale}
+              signTone
+            />,
+          ],
+        ],
+      },
+      {
+        title: "Streaks",
+        metrics: [
+          ["Current", stats.streaks.current],
+          ["Max wins", <Stat key="maxWins" value={stats.streaks.maxWins} unit="count" tone="up" />],
+          [
+            "Max losses",
+            <Stat key="maxLosses" value={stats.streaks.maxLosses} unit="count" tone="down" />,
+          ],
+        ],
+      },
+      {
+        title: "Timing",
+        metrics: [
+          ["Avg duration", `${formatNumber(stats.timing.averageTradeMinutes, { locale })} min`],
+          ["Best weekday", stats.timing.bestWeekday],
+          ["Worst weekday", stats.timing.worstWeekday],
+        ],
+      },
+    ];
+  }, [locale, stats]);
   return (
     <section className="statistics-panel" aria-label="Account statistics">
       <header className="statistics-toolbar">
@@ -255,9 +385,9 @@ function StatisticsView({
             value={range}
             onChange={(event) => setRange(event.target.value as StatsRange)}
           >
+            <option value="today">Today</option>
             <option value="7d">7d</option>
             <option value="30d">30d</option>
-            <option value="90d">90d</option>
             <option value="all">All</option>
           </select>
           <select
@@ -316,21 +446,20 @@ function ExternalActivityPanel({
     (account.externalPositions ?? []).map((position) => ({
       ...position,
       accountNumber: account.accountNumber,
+      currency: (account as { currency?: string }).currency,
     })),
   );
   const pending = accounts.reduce((sum, account) => sum + (account.externalOrders?.length ?? 0), 0);
   if (rows.length === 0 && pending === 0) return null;
   const floatingPnl = rows.reduce((sum, position) => sum + (position.profit ?? 0), 0);
+  const headerCurrency = rows[0]?.currency;
   return (
     <section className="external-performance-panel" aria-label="External broker activity">
       <header className="external-positions-head">
         <span className="external-positions-label">External activity</span>
         <span className="external-positions-meta">
           {rows.length} position{rows.length === 1 ? "" : "s"} · {pending} pending · floating P/L{" "}
-          <strong className={floatingPnl >= 0 ? "up" : "down"}>
-            {floatingPnl >= 0 ? "+" : ""}
-            {formatNumber(floatingPnl, { locale })}
-          </strong>
+          <Money value={floatingPnl} currency={headerCurrency} locale={locale} signTone />
         </span>
       </header>
       {rows.length > 0 ? (
@@ -349,12 +478,13 @@ function ExternalActivityPanel({
                 @ {formatNumber(position.openPrice, { locale, maximumFractionDigits: 5 })}
               </span>
               {position.profit !== undefined ? (
-                <span
-                  className={`external-position-profit ${position.profit >= 0 ? "up" : "down"}`}
-                >
-                  {position.profit >= 0 ? "+" : ""}
-                  {formatNumber(position.profit, { locale })}
-                </span>
+                <Money
+                  value={position.profit}
+                  currency={position.currency}
+                  locale={locale}
+                  signTone
+                  className="external-position-profit"
+                />
               ) : null}
               <small className="external-position-source">
                 {position.accountNumber} · #{position.ticket}
