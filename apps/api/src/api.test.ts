@@ -331,6 +331,96 @@ describe("Telegram TC API", () => {
     expect(dashboard.signalQueue[0]?.symbol).toBe("BTCUSD");
   });
 
+  test("uses the freshest online linked account for provider parsing and mixed dashboard money", async () => {
+    const telegram = createQueuedTelegramAdapter([
+      {
+        telegramMessageId: "gold-live-1",
+        messageDate: "2026-05-26T05:30:00.000Z",
+        rawText: "Gold sell limit\n\n4560-4561\n\nSl 4566\n\nTp 4555\nTp 4548\nTp 4540\nTp 4522",
+      },
+    ]);
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram,
+      telegramPollingEnabled: false,
+    });
+
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "54870107",
+        server: "HFMarketsSA",
+        company: "HF Markets SA (Pty) Ltd",
+        currency: "ZAR",
+        balance: 0,
+        equity: 0,
+        marginMode: "HEDGING",
+        availableSymbols: ["EURUSD"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    for (const accountId of ["mt5-54870107", "mt5-63442826"]) {
+      await app.request(`/api/account-provider-links/${accountId}/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    const parsedRecent = await json<{
+      parsed: Array<{
+        reviewRequired: boolean;
+        result: {
+          accountId?: string;
+          brokerSymbol?: string;
+          mappingStatus: string;
+          confidence: number;
+        };
+      }>;
+    }>(
+      await app.request(`/api/providers/${providerId}/parse-recent?limit=1`, {
+        method: "POST",
+      }),
+    );
+    const dashboard = await json<{
+      accountPerformance: {
+        accountId: string;
+        currency: string;
+        currentBalance: number | null;
+        currentEquity: number | null;
+      };
+      mt5Accounts: Array<{
+        id: string;
+        currency?: string;
+        balance?: number;
+        equity?: number;
+      }>;
+    }>(await app.request("/api/dashboard"));
+
+    expect(parsedRecent.parsed[0]).toMatchObject({
+      reviewRequired: false,
+      result: {
+        accountId: "mt5-63442826",
+        brokerSymbol: "XAUUSD",
+        mappingStatus: "mapped",
+      },
+    });
+    expect(parsedRecent.parsed[0]?.result.confidence).toBeGreaterThanOrEqual(0.95);
+    expect(dashboard.accountPerformance).toMatchObject({
+      accountId: "aggregate",
+      currency: "USD",
+      currentBalance: 10000,
+      currentEquity: 10000,
+    });
+    expect(dashboard.mt5Accounts.find((account) => account.id === "mt5-63442826")).toMatchObject({
+      currency: "USD",
+      balance: 10000,
+      equity: 10000,
+    });
+  });
+
   test("approved logical trades keep their source Telegram message lineage", async () => {
     const telegram = createQueuedTelegramAdapter([
       {
@@ -3024,6 +3114,8 @@ describe("Telegram TC API", () => {
         dedupWindowSeconds: number;
         drawdownWarnPct: number;
         drawdownDangerPct: number;
+        reportingCurrency: string;
+        usdZarRate: number;
       };
     }>(await app.request("/api/settings"));
     expect(defaults.settings).toEqual({
@@ -3039,6 +3131,8 @@ describe("Telegram TC API", () => {
       allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
       drawdownWarnPct: 10,
       drawdownDangerPct: 20,
+      reportingCurrency: "USD",
+      usdZarRate: 16,
     });
 
     const updated = await json<{
@@ -3087,6 +3181,112 @@ describe("Telegram TC API", () => {
     });
     expect(approve.status).toBe(422);
     expect((await json<{ error: string }>(approve)).error).toContain("not allowed");
+  });
+
+  test("reports mixed USD and ZAR account performance in the configured reporting currency", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    const app = createApi({ databasePath, seedDemoData: false });
+
+    try {
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "100200300",
+          server: "OctaFX-Live",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 100,
+          equity: 110,
+          profit: 10,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "54870107",
+          server: "HF-Live",
+          company: "HF",
+          currency: "ZAR",
+          balance: 1600,
+          equity: 1760,
+          profit: 160,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+
+      const defaults = await json<{
+        accountPerformance: {
+          accountId: string;
+          currency: string;
+          heartbeatStatus: string;
+          currentBalance: number | null;
+          currentEquity: number | null;
+          currentProfit: number | null;
+        };
+      }>(await app.request("/api/dashboard"));
+
+      expect(defaults.accountPerformance).toMatchObject({
+        accountId: "aggregate",
+        currency: "USD",
+        heartbeatStatus: "online",
+        currentBalance: 200,
+        currentEquity: 220,
+        currentProfit: 20,
+      });
+
+      const db = new Database(databasePath);
+      db.query("UPDATE mt5_accounts SET last_heartbeat_at = ? WHERE id = ?").run(
+        "2026-05-20T09:00:00.000Z",
+        "mt5-54870107",
+      );
+      db.close();
+
+      const partialLive = await json<{
+        accountPerformance: {
+          heartbeatStatus: string;
+          currentBalance: number | null;
+          currentEquity: number | null;
+          currentProfit: number | null;
+        };
+      }>(await app.request("/api/dashboard"));
+      expect(partialLive.accountPerformance).toMatchObject({
+        heartbeatStatus: "online",
+        currentBalance: 100,
+        currentEquity: 110,
+        currentProfit: 10,
+      });
+
+      await app.request("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ reportingCurrency: "ZAR", usdZarRate: 20 }),
+        headers: { "content-type": "application/json" },
+      });
+      const updated = await json<{
+        accountPerformance: {
+          accountId: string;
+          currency: string;
+          currentBalance: number | null;
+          currentEquity: number | null;
+          currentProfit: number | null;
+        };
+      }>(await app.request("/api/dashboard"));
+
+      expect(updated.accountPerformance).toMatchObject({
+        accountId: "aggregate",
+        currency: "ZAR",
+        currentBalance: 2000,
+        currentEquity: 2200,
+        currentProfit: 200,
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("passes configured channel lot size through to the MT5 line payload", async () => {
@@ -3631,6 +3831,118 @@ describe("Telegram TC API", () => {
     }>(await app.request("/api/symbol-mappings"));
     expect(mappings.globalAliases.SILVER).toBe("XAGUSD");
     expect(mappings.accountMappings[0]?.canonicalOverrides.XAGUSD).toBe("XAGUSD.pro");
+  });
+
+  test("merges account symbol mapping edits with EA-reported symbols", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "54870107",
+        server: "HFMarketsSA-Live2",
+        company: "HF Markets SA (Pty) Ltd",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols: ["XAUUSDr", "EURUSDr"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    await app.request("/api/symbol-mappings/account/mt5-54870107", {
+      method: "PUT",
+      body: JSON.stringify({
+        accountId: "mt5-54870107",
+        canonicalOverrides: { XAUUSD: "XAUUSDr" },
+        prefix: "",
+        suffix: "r",
+        includeSymbols: ["XAUUSDr"],
+        excludeSymbols: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    await app.request("/api/symbol-mappings/account/mt5-54870107", {
+      method: "PUT",
+      body: JSON.stringify({
+        accountId: "mt5-54870107",
+        canonicalOverrides: { EURUSD: "EURUSDr" },
+        prefix: "",
+        suffix: "r",
+        includeSymbols: ["XAUUSDr", "EURUSDr"],
+        excludeSymbols: ["BTCUSDr"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const mappings = await json<{
+      accountMappings: Array<{
+        accountId: string;
+        canonicalOverrides: Record<string, string>;
+        prefix: string;
+        suffix: string;
+        includeSymbols: string[];
+        excludeSymbols: string[];
+        availableBrokerSymbols: string[];
+      }>;
+    }>(await app.request("/api/symbol-mappings"));
+    const hfMapping = mappings.accountMappings.find(
+      (mapping) => mapping.accountId === "mt5-54870107",
+    );
+    expect(hfMapping).toMatchObject({
+      canonicalOverrides: {
+        XAUUSD: "XAUUSDr",
+        EURUSD: "EURUSDr",
+      },
+      prefix: "",
+      suffix: "r",
+      includeSymbols: ["XAUUSDr", "EURUSDr"],
+      excludeSymbols: ["BTCUSDr"],
+      availableBrokerSymbols: ["XAUUSDr", "EURUSDr"],
+    });
+
+    const parsed = await json<{ result: { brokerSymbol: string; mappingStatus: string } }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          accountId: "mt5-54870107",
+          rawText: "Gold buy limit\n\n4487-86\n\nSL 4481\n\nTP 4492",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(parsed.result.brokerSymbol).toBe("XAUUSDr");
+    expect(parsed.result.mappingStatus).toBe("mapped");
+  });
+
+  test("names the target account and symbol when approval is blocked by mapping review", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["EURUSD"] });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "Gold buy limit\n\n4487-86\n\nSL 4481\n\nTP 4492",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    const body = await json<{ error: string }>(approval);
+
+    expect(approval.status).toBe(422);
+    expect(body.error).toContain("mt5-63442826");
+    expect(body.error).toContain("XAUUSD");
+    expect(body.error).toContain("mapping-unavailable");
   });
 
   test("matches lifecycle commands to an existing logical trade and rejects duplicate management messages", async () => {

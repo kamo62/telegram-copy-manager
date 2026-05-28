@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.13.2 - 2026-05-27 (Patch)
+
+Release impact: Patch because this fixes account-level broker symbol resolution and diagnostics
+without changing API or EA command contracts.
+
+- Added HF-style `XAUUSDr` as a recognized `XAUUSD` broker variant when the EA reports that symbol.
+- Preserved EA-reported account symbol inventories and existing overrides when saving account-level
+  mapping edits from the symbol settings UI.
+- Added account-level mapping prefix support to the symbol mapping modal.
+- Included the target account and symbol mapping reason when approval is blocked for operator
+  confirmation.
+
+## 1.13.1 - 2026-05-26 (Patch)
+
+Release impact: Patch because this corrects account-scoped dashboard currency rendering without
+changing API, database, or EA command contracts.
+
+- Fixed account-scoped Live routes to use the selected MT5 account currency instead of the overview
+  reporting currency.
+- Prevented aggregate reporting-currency performance data from being relabeled as account-local
+  currency on account-specific pages.
+- Added regression coverage for the ZAR account Logs route.
+
+## 1.13.0 - 2026-05-26 (Minor)
+
+Release impact: Minor because this adds configurable mixed-currency reporting settings and new
+dashboard summary behavior without breaking existing API, database, or EA command contracts.
+
+- Added reporting currency and USD/ZAR rate settings, defaulting mixed-currency account summaries to
+  USD at 1 USD = R16.
+- Added mixed-currency account performance aggregation so ZAR and USD account balances, equity, and
+  P/L windows are normalized before dashboard display.
+- Fixed overview KPI liveness checks for aggregate account performance so mixed-currency summaries
+  are not hidden because the first account row is offline.
+- Added regression coverage for mixed-currency conversion, settings persistence, settings UI payloads,
+  and aggregate KPI rendering.
+
+## 1.12.3 - 2026-05-26 (Patch)
+
+Release impact: Patch because this fixes account selection for parsing and dashboard summaries
+without changing API or EA command contracts.
+
+- Fixed provider parsing to prefer the freshest online linked MT5 account, so old linked accounts
+  no longer force clean Gold signals into GPT/operator review because their symbol list is stale.
+- Fixed the Live dashboard money summary to prefer the active/funded account instead of the lowest
+  account number.
+- Fixed the Performance growth chart to use the active performance currency instead of the first
+  account row's currency.
+- Included account currency, balance, equity, profit, and initial balance in the dashboard account
+  rows for reliable account-scoped rendering.
+
 ## 1.12.2 - 2026-05-25 (Patch)
 
 Release impact: Patch because this fixes Telegram bootstrap state and slow GramJS dialog refresh

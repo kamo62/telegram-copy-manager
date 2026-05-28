@@ -25,6 +25,8 @@ const snapshot: DashboardSnapshot = {
     dedupWindowSeconds: 300,
     drawdownWarnPct: 10,
     drawdownDangerPct: 20,
+    reportingCurrency: "USD",
+    usdZarRate: 16,
   },
   telegramSessions: [
     { id: "session-1", phone: "+27821234567", status: "CONNECTED", profileId: "profile-current" },
@@ -239,6 +241,154 @@ describe("App dashboard", () => {
     expect(view.getByText(/12,345\.67/)).toBeTruthy();
     expect(view.getByText(/15,432\.10/)).toBeTruthy();
     expect(view.getByText(/137\.50/)).toBeTruthy();
+  });
+
+  test("performance growth chart uses the active performance currency over the first account row", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          accountPerformance: {
+            currency: "USD",
+            initialBalance: 60,
+            currentBalance: 180.86,
+            currentEquity: 244.87,
+            totalProfit: 12.34,
+            realizedPnl: 12.34,
+            floatingPnl: 0,
+            netDeposits: 0,
+            today: 0,
+            thisWeek: 12.34,
+            thisMonth: 12.34,
+            equityCurve: [
+              { x: 1, equity: 180.86, drawdown: 0 },
+              { x: 2, equity: 244.87, drawdown: 0 },
+            ],
+          },
+          mt5Accounts: [
+            {
+              ...snapshot.mt5Accounts[0]!,
+              id: "mt5-zar-old",
+              accountNumber: "54870107",
+              currency: "ZAR",
+            },
+            {
+              ...snapshot.mt5Accounts[0]!,
+              id: "mt5-usd-octa",
+              accountNumber: "63442826",
+              server: "OctaFX-Real",
+              currency: "USD",
+            },
+          ],
+        }}
+      />,
+    );
+
+    const chart = within(view.getByLabelText("Account growth chart"));
+    expect(chart.getByText(/\$12\.34/)).toBeTruthy();
+    expect(chart.queryByText(/R\s*12\.34/)).toBeNull();
+  });
+
+  test("account header uses aggregate performance liveness for mixed-currency reporting", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          accountPerformance: {
+            accountId: "aggregate",
+            currency: "USD",
+            heartbeatStatus: "online",
+            initialBalance: 200,
+            currentBalance: 200,
+            currentEquity: 220,
+            totalProfit: 20,
+            realizedPnl: 0,
+            floatingPnl: 20,
+            netDeposits: 0,
+            today: 0,
+            thisWeek: 20,
+            thisMonth: 20,
+            equityCurve: [],
+          },
+          mt5Accounts: [
+            {
+              ...snapshot.mt5Accounts[0]!,
+              id: "mt5-zar-old",
+              accountNumber: "54870107",
+              currency: "ZAR",
+              heartbeatStatus: "offline",
+            },
+            {
+              ...snapshot.mt5Accounts[0]!,
+              id: "mt5-usd-octa",
+              accountNumber: "63442826",
+              server: "OctaFX-Real",
+              currency: "USD",
+              heartbeatStatus: "online",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(view.getByText(/200\.00/)).toBeTruthy();
+    expect(view.getByText(/220\.00/)).toBeTruthy();
+    expect(view.getByText("EA WORKING")).toBeTruthy();
+  });
+
+  test("account scoped pages use the selected account currency instead of reporting currency", () => {
+    const routeSnapshot: DashboardSnapshot = {
+      ...snapshot,
+      accountPerformance: {
+        accountId: "aggregate",
+        currency: "USD",
+        heartbeatStatus: "offline",
+        initialBalance: 60,
+        currentBalance: null,
+        currentEquity: null,
+        totalProfit: null,
+        realizedPnl: -168.64,
+        floatingPnl: null,
+        netDeposits: null,
+        today: 0,
+        thisWeek: 9.65,
+        thisMonth: -168.64,
+        equityCurve: [],
+      },
+      mt5Accounts: [
+        {
+          ...snapshot.mt5Accounts[0]!,
+          id: "mt5-54870107",
+          accountNumber: "54870107",
+          server: "HFMarketsSA-Live",
+          currency: "ZAR",
+          heartbeatStatus: "offline",
+          balance: 0,
+          equity: 0,
+          profit: 0,
+        },
+        {
+          ...snapshot.mt5Accounts[0]!,
+          id: "mt5-63442826",
+          accountNumber: "63442826",
+          server: "OctaFX-Real",
+          currency: "USD",
+          heartbeatStatus: "offline",
+          balance: 180.86,
+          equity: 244.87,
+          profit: 22.37,
+        },
+      ],
+    };
+    const view = rtlRender(<App initialSnapshot={routeSnapshot} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={["/accounts/mt5-54870107/logs"]}>{children}</MemoryRouter>
+      ),
+    });
+
+    expect(view.getAllByText("· ZAR").length).toBeGreaterThan(0);
+    expect(view.queryByText("· USD")).toBeNull();
+    expect(view.queryByText(/\$168\.64/)).toBeNull();
   });
 
   test("account header does not present stale MT5 telemetry as live PnL", () => {
@@ -804,6 +954,8 @@ describe("App dashboard", () => {
     fireEvent.change(view.getByLabelText("Polling interval (seconds)"), {
       target: { value: "5" },
     });
+    fireEvent.change(view.getByLabelText("Reporting currency"), { target: { value: "ZAR" } });
+    fireEvent.change(view.getByLabelText("USD/ZAR rate"), { target: { value: "18.5" } });
     fireEvent.click(view.getByLabelText("Allow limit orders"));
     fireEvent.click(view.getByLabelText("Allow stop orders"));
     fireEvent.click(view.getByRole("button", { name: "Save execution settings" }));
@@ -822,6 +974,8 @@ describe("App dashboard", () => {
       allowedOrderTypes: ["MARKET"],
       drawdownWarnPct: 10,
       drawdownDangerPct: 20,
+      reportingCurrency: "ZAR",
+      usdZarRate: 18.5,
     });
   });
 
@@ -900,6 +1054,7 @@ describe("App dashboard", () => {
     fireEvent.change(view.getByLabelText("Mapping broker symbol"), {
       target: { value: "XAGUSD.pro" },
     });
+    fireEvent.change(view.getByLabelText("Mapping prefix"), { target: { value: "m." } });
     fireEvent.change(view.getByLabelText("Mapping suffix"), { target: { value: ".raw" } });
     fireEvent.change(view.getByLabelText("Mapping include symbols"), {
       target: { value: "XAGUSD.pro,EURUSD.raw" },
@@ -927,6 +1082,7 @@ describe("App dashboard", () => {
       canonicalOverrides: {
         XAGUSD: "XAGUSD.pro",
       },
+      prefix: "m.",
       suffix: ".raw",
       includeSymbols: ["XAGUSD.pro", "EURUSD.raw"],
       excludeSymbols: ["US30.raw"],

@@ -548,6 +548,28 @@ describe("symbol resolver", () => {
     expect(unavailable.mappingStatus).toBe("unavailable");
   });
 
+  test("maps HF-style XAUUSDr gold symbols from the EA inventory", () => {
+    const hfContext: ParserContext = {
+      accountId: "mt5-hf",
+      accountMappings: {
+        "mt5-hf": {
+          accountId: "mt5-hf",
+          availableBrokerSymbols: ["XAUUSDr", "EURUSDr"],
+        },
+      },
+    };
+
+    expect(resolveSymbol("GOLD", hfContext)).toMatchObject({
+      canonicalSymbol: "XAUUSD",
+      brokerSymbol: "XAUUSDr",
+      mappingStatus: "mapped",
+    });
+
+    const signal = parseSignalText("Gold buy limit\n\n4487-86\n\nSL 4481\n\nTP 4492", hfContext);
+    expect(signal.brokerSymbol).toBe("XAUUSDr");
+    expect(shouldRequireManualReview(signal)).toBe(false);
+  });
+
   test("uses configured prefix and suffix after exact and known-variant matching", () => {
     const suffixContext: ParserContext = {
       accountId: "mt5-suffix",

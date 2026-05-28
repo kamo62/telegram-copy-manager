@@ -251,6 +251,7 @@ const BROKER_SYMBOL_VARIANTS: Record<string, string[]> = {
     "XAUUSD",
     "XAUUSD#",
     "XAUUSDm",
+    "XAUUSDr",
     "XAUUSD.raw",
     "XAUUSD.r",
     "XAUUSD.pro",

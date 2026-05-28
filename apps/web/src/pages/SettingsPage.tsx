@@ -1,4 +1,4 @@
-import { ShieldAlert, Sliders, Sparkles, Timer, TrendingUp } from "lucide-react";
+import { DollarSign, ShieldAlert, Sliders, Sparkles, Timer, TrendingUp } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { DashboardSnapshot } from "../App";
 import { Panel } from "../components/Panel";
@@ -184,6 +184,45 @@ export function SettingsPage({
                 min="0"
                 name="drawdownDangerPct"
                 step="0.5"
+                type="number"
+              />
+            </Field>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection
+          description="Used for overview money summaries when linked MT5 accounts report different currencies."
+          icon={<DollarSign aria-hidden="true" size={18} />}
+          title="Reporting currency"
+        >
+          <div className="settings-grid">
+            <Field
+              hint="Mixed-currency account summaries are normalized into this currency."
+              htmlFor="reportingCurrency"
+              label="Reporting currency"
+            >
+              <select
+                className="settings-input mono"
+                defaultValue={settings.reportingCurrency}
+                id="reportingCurrency"
+                name="reportingCurrency"
+              >
+                <option value="USD">USD</option>
+                <option value="ZAR">ZAR</option>
+              </select>
+            </Field>
+            <Field
+              hint="Conversion base for ZAR and USD account summaries."
+              htmlFor="usdZarRate"
+              label="USD/ZAR rate"
+            >
+              <input
+                className="settings-input mono"
+                defaultValue={settings.usdZarRate}
+                id="usdZarRate"
+                min="0.01"
+                name="usdZarRate"
+                step="0.01"
                 type="number"
               />
             </Field>

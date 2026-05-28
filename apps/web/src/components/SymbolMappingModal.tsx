@@ -12,6 +12,7 @@ export interface AccountMappingPayload {
   accountId: string;
   canonicalSymbol: string;
   brokerSymbol: string;
+  prefix: string;
   suffix: string;
   includeSymbols: string[];
   excludeSymbols: string[];
@@ -68,6 +69,7 @@ export function SymbolMappingModal({
         accountId: String(data.get("accountId") ?? "").trim(),
         canonicalSymbol: String(data.get("accountCanonical") ?? "").trim(),
         brokerSymbol: String(data.get("accountBroker") ?? "").trim(),
+        prefix: String(data.get("accountPrefix") ?? "").trim(),
         suffix: String(data.get("accountSuffix") ?? "").trim(),
         includeSymbols: commaList(String(data.get("accountInclude") ?? "")),
         excludeSymbols: commaList(String(data.get("accountExclude") ?? "")),
@@ -224,12 +226,22 @@ export function SymbolMappingModal({
                     />
                   </label>
                   <label className="config-field config-field-narrow">
+                    <span className="config-label">Mapping prefix</span>
+                    <input
+                      aria-label="Mapping prefix"
+                      defaultValue=""
+                      name="accountPrefix"
+                      placeholder="m."
+                      type="text"
+                    />
+                  </label>
+                  <label className="config-field config-field-narrow">
                     <span className="config-label">Mapping suffix</span>
                     <input
                       aria-label="Mapping suffix"
                       defaultValue=""
                       name="accountSuffix"
-                      placeholder=".raw"
+                      placeholder=".raw or r"
                       type="text"
                     />
                   </label>

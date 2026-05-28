@@ -73,6 +73,7 @@ type SymbolAliasScope = "global" | "provider";
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
 type EquityCurveScope = "account" | "provider";
 type StatsRange = "today" | "7d" | "30d" | "90d" | "all";
+type ReportingCurrency = "USD" | "ZAR";
 
 interface AppSettings {
   defaultLotSize: number;
@@ -87,6 +88,8 @@ interface AppSettings {
   dedupWindowSeconds: number;
   drawdownWarnPct: number;
   drawdownDangerPct: number;
+  reportingCurrency: ReportingCurrency;
+  usdZarRate: number;
 }
 
 interface AccountSlotInput {
@@ -128,6 +131,8 @@ const defaultAppSettings: AppSettings = {
   dedupWindowSeconds: 300,
   drawdownWarnPct: 10,
   drawdownDangerPct: 20,
+  reportingCurrency: "USD",
+  usdZarRate: 16,
 };
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
@@ -1160,7 +1165,7 @@ class AppStore {
     providerId: string,
     input: { rawText: string; accountId?: string; config?: ProviderExecutionConfig },
   ) {
-    const accountId = input.accountId ?? this.defaultParserAccountId();
+    const accountId = input.accountId ?? this.defaultParserAccountId(providerId);
     const parsed = parseSignalText(input.rawText, this.parserContext(providerId, accountId));
     const config = input.config ?? this.providerConfig(providerId);
     const settings = this.appSettings();
@@ -1471,7 +1476,7 @@ class AppStore {
     const before = this.rawMessageCount(providerId);
     for (const message of messages) {
       const parserText = telegramParserText(message);
-      const context = this.parserContext(providerId, this.defaultParserAccountId());
+      const context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
       const parsed = parseSignalText(parserText, context);
       const parsedSignals = parseSignalTexts(parserText, context);
       this.db
@@ -1548,7 +1553,7 @@ class AppStore {
         const parsed = this.parseUnparsedProviderMessages(
           provider.id,
           Math.max(limit, captured.length),
-          this.defaultParserAccountId(),
+          this.defaultParserAccountId(provider.id),
         );
         result.parsed += parsed.length;
         for (const item of parsed) {
@@ -1583,7 +1588,7 @@ class AppStore {
     providerId: string,
     input: { accountId?: string; dateFrom?: string; dateTo?: string } = {},
   ) {
-    const accountId = input.accountId ?? this.defaultParserAccountId();
+    const accountId = input.accountId ?? this.defaultParserAccountId(providerId);
     const rows = this.rawMessagesForBacktest(providerId, input);
     const commandCounts: Record<string, number> = {};
     const mappingStatusCounts: Record<string, number> = {};
@@ -1677,14 +1682,11 @@ class AppStore {
     };
   }
 
-  parseProviderMessage(
-    providerId: string,
-    rawText: string,
-    accountId = this.defaultParserAccountId(),
-  ) {
+  parseProviderMessage(providerId: string, rawText: string, accountId?: string) {
+    const targetAccountId = accountId ?? this.defaultParserAccountId(providerId);
     const rawMessageId = `raw_${nanoid(10)}`;
     const now = new Date().toISOString();
-    const context = this.parserContext(providerId, accountId);
+    const context = this.parserContext(providerId, targetAccountId);
     const firstResult = parseSignalText(rawText, context);
     const results = parseSignalTexts(rawText, context);
     this.db
@@ -1716,13 +1718,13 @@ class AppStore {
     };
   }
 
-  parseRecentProviderMessages(
-    providerId: string,
-    limit: number,
-    accountId = this.defaultParserAccountId(),
-  ) {
+  parseRecentProviderMessages(providerId: string, limit: number, accountId?: string) {
     this.recentMessages(providerId, limit);
-    return this.parseUnparsedProviderMessages(providerId, limit, accountId);
+    return this.parseUnparsedProviderMessages(
+      providerId,
+      limit,
+      accountId ?? this.defaultParserAccountId(providerId),
+    );
   }
 
   parsedSignals() {
@@ -1804,12 +1806,12 @@ class AppStore {
     const providerId = String(row.provider_id);
     const targetAccountIds = this.targetAccountIdsForProvider(
       providerId,
-      signal.accountId ?? this.defaultParserAccountId(),
+      signal.accountId ?? this.defaultParserAccountId(providerId),
     );
     if (targetAccountIds.length === 0) {
       return { statusCode: 422, error: "Provider is not copied by any MT5 account" };
     }
-    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId();
+    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
     const executionMode = options.executionMode ?? "VIRTUAL_TP";
     const settings = this.appSettings();
     const provider = this.providerDetails(providerId);
@@ -1862,7 +1864,7 @@ class AppStore {
         ) {
           return {
             statusCode: 422,
-            error: "Signal needs GPT extraction or operator confirmation before queueing",
+            error: signalApprovalReviewError(target.accountId, target.signal),
           };
         }
         const orderType = target.signal.orderType ?? "MARKET";
@@ -2054,7 +2056,7 @@ class AppStore {
 
   ignoreSignal(parsedSignalId: string) {
     const row = this.db
-      .query("SELECT result_json FROM parsed_signals WHERE id = ?")
+      .query("SELECT provider_id, result_json FROM parsed_signals WHERE id = ?")
       .get(parsedSignalId) as Row | null;
     if (row) {
       const existing = this.db
@@ -2062,8 +2064,9 @@ class AppStore {
         .get(parsedSignalId) as Row | null;
       if (!existing) {
         const signal = parseJson<ParsedSignal>(String(row.result_json));
+        const providerId = String(row.provider_id);
         this.insertNonLeasedQueueItem(parsedSignalId, signal, "IGNORED", {
-          accountId: signal.accountId ?? this.defaultParserAccountId(),
+          accountId: signal.accountId ?? this.defaultParserAccountId(providerId),
           executionMode: "VIRTUAL_TP",
           settings: this.appSettings(),
         });
@@ -3775,10 +3778,14 @@ class AppStore {
   }
 
   accountPerformance(accounts = this.mt5Accounts()) {
-    const primary = accounts[0];
+    const settings = this.appSettings();
+    if (usesMixedCurrencies(accounts)) {
+      return this.aggregateAccountPerformance(accounts, settings);
+    }
+    const primary = this.primaryAccount(accounts);
     if (!primary) {
       return {
-        currency: "$",
+        currency: settings.reportingCurrency,
         heartbeatStatus: "offline",
         lastHeartbeatAt: null,
         initialBalance: null,
@@ -3835,6 +3842,92 @@ class AppStore {
       thisMonth,
       equityCurve: this.equityCurve(primary.id, initial, accountOrders),
       monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders, floatingPnl ?? 0),
+    };
+  }
+
+  private aggregateAccountPerformance(
+    accounts: ReturnType<AppStore["mt5Accounts"]>,
+    settings: AppSettings,
+  ) {
+    const currency = settings.reportingCurrency;
+    const convert = (value: number | null | undefined, fromCurrency: string) =>
+      convertMoney(value, fromCurrency, currency, settings.usdZarRate);
+    const accountOrders = accounts.flatMap((account) =>
+      this.brokerOrdersForAccount(account.id).map((order) => ({
+        ...order,
+        pnlCurrency: convert(order.pnlCurrency, account.currency),
+      })),
+    );
+    const initial = roundCurrency(
+      accounts.reduce(
+        (sum, account) =>
+          sum + convert(account.initialBalance || account.balance, account.currency),
+        0,
+      ),
+    );
+    const liveAccounts = accounts.filter((account) => account.heartbeatStatus === "online");
+    const allOnline = accounts.length > 0 && liveAccounts.length === accounts.length;
+    const hasLiveAccounts = liveAccounts.length > 0;
+    const heartbeatStatus = aggregateHeartbeatStatus(
+      accounts.map((account) => account.heartbeatStatus),
+    );
+    const lastHeartbeatAt =
+      accounts
+        .map((account) => account.lastHeartbeatAt)
+        .sort()
+        .reverse()[0] ?? null;
+    const realizedPnl = sumPnl(accountOrders);
+    const floatingPnl = hasLiveAccounts
+      ? roundCurrency(
+          liveAccounts.reduce((sum, account) => {
+            const brokerFloatingPnl = nullableNumber(account.profit);
+            const fallbackFloatingPnl = roundCurrency(
+              Number.isFinite(account.equity) && Number.isFinite(account.balance)
+                ? account.equity - account.balance
+                : floatingPnlFromPositions(
+                    this.mt5SnapshotsByAccount()[account.id]?.positions ?? [],
+                  ),
+            );
+            return sum + convert(brokerFloatingPnl ?? fallbackFloatingPnl, account.currency);
+          }, 0),
+        )
+      : null;
+    const totalProfit = floatingPnl === null ? null : roundCurrency(realizedPnl + floatingPnl);
+    const currentBalance = hasLiveAccounts
+      ? roundCurrency(
+          liveAccounts.reduce(
+            (sum, account) => sum + convert(account.balance, account.currency),
+            0,
+          ),
+        )
+      : null;
+    const currentEquity = hasLiveAccounts
+      ? roundCurrency(
+          liveAccounts.reduce((sum, account) => sum + convert(account.equity, account.currency), 0),
+        )
+      : null;
+    const netDeposits =
+      allOnline && currentEquity !== null && totalProfit !== null
+        ? roundCurrency(currentEquity - initial - totalProfit)
+        : null;
+    return {
+      accountId: "aggregate",
+      currency,
+      heartbeatStatus,
+      lastHeartbeatAt,
+      initialBalance: initial,
+      currentBalance,
+      currentEquity,
+      currentProfit: floatingPnl,
+      totalProfit,
+      realizedPnl,
+      floatingPnl,
+      netDeposits,
+      today: sumPnl(accountOrders.filter((order) => withinCurrentDay(order.createdAt))),
+      thisWeek: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 7))),
+      thisMonth: sumPnl(accountOrders.filter((order) => withinCurrentMonth(order.createdAt))),
+      equityCurve: aggregateEquityCurve(initial, accountOrders, floatingPnl ?? 0),
+      monthlyReturns: aggregateMonthlyReturns(initial, accountOrders, floatingPnl ?? 0),
     };
   }
 
@@ -4936,12 +5029,27 @@ class AppStore {
   }
 
   saveAccountMapping(accountId: string, mapping: AccountSymbolMapping) {
+    const existing = this.storedAccountMapping(accountId) ?? defaultAccountMapping(accountId);
+    const incomingOverrides = normalizeCanonicalOverrides(mapping.canonicalOverrides);
+    const merged: AccountSymbolMapping = {
+      accountId,
+      canonicalOverrides: {
+        ...(existing.canonicalOverrides ?? {}),
+        ...incomingOverrides,
+      },
+      prefix: mapping.prefix ?? existing.prefix ?? "",
+      suffix: mapping.suffix ?? existing.suffix ?? "",
+      includeSymbols: mapping.includeSymbols ?? existing.includeSymbols ?? [],
+      excludeSymbols: mapping.excludeSymbols ?? existing.excludeSymbols ?? [],
+      availableBrokerSymbols:
+        mapping.availableBrokerSymbols ?? existing.availableBrokerSymbols ?? [],
+    };
     this.db
       .query(
         "INSERT INTO account_symbol_mappings (account_id, mapping_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET mapping_json = excluded.mapping_json, updated_at = excluded.updated_at",
       )
-      .run(accountId, JSON.stringify({ ...mapping, accountId }), new Date().toISOString());
-    return { accountId, mapping: { ...mapping, accountId } };
+      .run(accountId, JSON.stringify(merged), new Date().toISOString());
+    return { accountId, mapping: merged };
   }
 
   saveFixture(input: {
@@ -5004,7 +5112,7 @@ class AppStore {
     const rawText = input.redactedRawText?.trim() || message.rawText;
     const parsed = parseSignalText(
       rawText,
-      this.parserContext(message.providerId, this.defaultParserAccountId()),
+      this.parserContext(message.providerId, this.defaultParserAccountId(message.providerId)),
     );
     const expected = fixtureExpected(parsed);
     const expectedCommandType = input.expectedCommandType ?? parsed.commandType;
@@ -5173,6 +5281,11 @@ class AppStore {
         id: account.id,
         accountNumber: account.accountNumber,
         server: account.server,
+        currency: account.currency,
+        balance: account.balance,
+        equity: account.equity,
+        profit: account.profit,
+        initialBalance: account.initialBalance,
         heartbeatStatus: account.heartbeatStatus,
         marginMode: account.marginMode,
         openPositionCount: account.openPositionCount,
@@ -5276,8 +5389,34 @@ class AppStore {
     if (this.allowDemoData) this.ensureMockProvider(profileId);
   }
 
-  private defaultParserAccountId() {
-    return this.mt5Accounts()[0]?.id ?? fallbackAccountId;
+  private primaryAccount(accounts = this.mt5Accounts()) {
+    return [...accounts].sort((a, b) => {
+      const statusDelta =
+        accountFreshnessScore(b.heartbeatStatus) - accountFreshnessScore(a.heartbeatStatus);
+      if (statusDelta !== 0) return statusDelta;
+      const fundedDelta = accountFundedScore(b) - accountFundedScore(a);
+      if (fundedDelta !== 0) return fundedDelta;
+      const heartbeatDelta = Date.parse(b.lastHeartbeatAt) - Date.parse(a.lastHeartbeatAt);
+      if (Number.isFinite(heartbeatDelta) && heartbeatDelta !== 0) return heartbeatDelta;
+      return a.accountNumber.localeCompare(b.accountNumber);
+    })[0];
+  }
+
+  private defaultParserAccountId(providerId?: string) {
+    const accounts = this.mt5Accounts();
+    const linkedAccountIds = providerId
+      ? new Set(
+          this.accountProviderLinks()
+            .filter((link) => link.providerId === providerId && link.enabled)
+            .map((link) => link.accountId),
+        )
+      : undefined;
+    const candidates = linkedAccountIds?.size
+      ? accounts.filter((account) => linkedAccountIds.has(account.id))
+      : accounts;
+    return (
+      this.primaryAccount(candidates)?.id ?? this.primaryAccount(accounts)?.id ?? fallbackAccountId
+    );
   }
 
   private migrate() {
@@ -5958,7 +6097,7 @@ class AppStore {
     demoMessages().forEach((message, index) => {
       const parsed = parseSignalText(
         message.rawText,
-        this.parserContext(providerId, this.defaultParserAccountId()),
+        this.parserContext(providerId, this.defaultParserAccountId(providerId)),
       );
       this.db
         .query(
@@ -7446,6 +7585,16 @@ function heartbeatFreshness(iso: string) {
   return "offline";
 }
 
+function accountFreshnessScore(status: string) {
+  if (status === "online") return 3;
+  if (status === "stale") return 2;
+  return 1;
+}
+
+function accountFundedScore(account: { balance?: number; equity?: number }) {
+  return (account.balance ?? 0) > 0 || (account.equity ?? 0) > 0 ? 1 : 0;
+}
+
 function normalizeProviderTpLevels(
   levels?: ProviderTakeProfitLevelInput[] | null,
 ): ProviderTakeProfitLevel[] {
@@ -7819,6 +7968,16 @@ function reviewReasons(signal: ParsedSignal) {
   return reasons.length ? reasons : ["operator-confirmation-rule"];
 }
 
+function signalApprovalReviewError(accountId: string, signal: ParsedSignal) {
+  const symbolPath = [signal.rawSymbol, signal.canonicalSymbol, signal.brokerSymbol]
+    .filter(Boolean)
+    .join(" -> ");
+  const reasons = reviewReasons(signal).join(", ");
+  return `Signal needs GPT extraction or operator confirmation before queueing for ${accountId}: ${
+    symbolPath || "symbol unavailable"
+  } (${reasons})`;
+}
+
 async function reviewSignalWithAzureOpenAI(input: {
   signal: ParsedSignal;
   providerTitle: string;
@@ -7967,6 +8126,18 @@ function listMatches(left: string[] | undefined, right: string[]) {
   return normalized.every((item, index) => item === expected[index]);
 }
 
+function normalizeCanonicalOverrides(overrides: Record<string, string> | undefined) {
+  if (!overrides) return {};
+  return Object.fromEntries(
+    Object.entries(overrides)
+      .map(([canonicalSymbol, brokerSymbol]) => [
+        canonicalSymbol.trim().toUpperCase().replace("/", ""),
+        brokerSymbol.trim(),
+      ])
+      .filter(([canonicalSymbol, brokerSymbol]) => canonicalSymbol && brokerSymbol),
+  );
+}
+
 function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
   const allowedOrderTypes =
     input.allowedOrderTypes?.filter((orderType): orderType is AppOrderType =>
@@ -7977,6 +8148,10 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     clampPercent(input.drawdownDangerPct, defaultAppSettings.drawdownDangerPct),
     drawdownWarnPct,
   );
+  const reportingCurrency =
+    input.reportingCurrency === "ZAR" || input.reportingCurrency === "USD"
+      ? input.reportingCurrency
+      : defaultAppSettings.reportingCurrency;
   return {
     defaultLotSize: positiveNumber(input.defaultLotSize, defaultAppSettings.defaultLotSize),
     defaultRiskPercent: positiveNumber(
@@ -8016,7 +8191,101 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     ),
     drawdownWarnPct,
     drawdownDangerPct,
+    reportingCurrency,
+    usdZarRate: positiveNumber(input.usdZarRate, defaultAppSettings.usdZarRate),
   };
+}
+
+function usesMixedCurrencies(accounts: Array<{ currency: string }>) {
+  const currencies = new Set(accounts.map((account) => normalizedMoneyCurrency(account.currency)));
+  return currencies.size > 1;
+}
+
+function normalizedMoneyCurrency(currency: string): ReportingCurrency | string {
+  const normalized = currency.trim().toUpperCase();
+  if (normalized === "$") return "USD";
+  if (normalized === "R") return "ZAR";
+  return normalized;
+}
+
+function convertMoney(
+  value: number | null | undefined,
+  fromCurrency: string,
+  toCurrency: ReportingCurrency,
+  usdZarRate: number,
+) {
+  if (value === null || value === undefined) return 0;
+  const from = normalizedMoneyCurrency(fromCurrency);
+  if (from === toCurrency) return roundCurrency(value);
+  if (from === "USD" && toCurrency === "ZAR") return roundCurrency(value * usdZarRate);
+  if (from === "ZAR" && toCurrency === "USD") return roundCurrency(value / usdZarRate);
+  return roundCurrency(value);
+}
+
+function aggregateHeartbeatStatus(statuses: string[]) {
+  if (statuses.length === 0) return "offline";
+  if (statuses.some((status) => status === "online")) return "online";
+  if (statuses.some((status) => status === "stale")) return "stale";
+  return "offline";
+}
+
+function aggregateEquityCurve(
+  initialBalance: number,
+  orders: Array<{ pnlCurrency?: number; createdAt: string }>,
+  floatingPnl: number,
+) {
+  let equity = initialBalance;
+  let peak = initialBalance;
+  const points = [{ x: 0, equity, drawdown: 0 }];
+  orders
+    .filter((order) => order.pnlCurrency !== undefined && order.pnlCurrency !== null)
+    .sort(
+      (a, b) =>
+        Date.parse(normalizedDateInput(a.createdAt)) - Date.parse(normalizedDateInput(b.createdAt)),
+    )
+    .forEach((order, index) => {
+      equity += order.pnlCurrency ?? 0;
+      peak = Math.max(peak, equity);
+      points.push({
+        x: index + 1,
+        equity: roundCurrency(equity),
+        drawdown: drawdownPercent(peak, equity),
+      });
+    });
+  const currentTradingEquity = roundCurrency(initialBalance + sumPnl(orders) + floatingPnl);
+  if (points.length === 1 || points[points.length - 1]?.equity !== currentTradingEquity) {
+    peak = Math.max(peak, currentTradingEquity);
+    points.push({
+      x: points.length,
+      equity: currentTradingEquity,
+      drawdown: drawdownPercent(peak, currentTradingEquity),
+    });
+  }
+  return points;
+}
+
+function aggregateMonthlyReturns(
+  initialBalance: number,
+  orders: Array<{ pnlCurrency?: number; createdAt: string }>,
+  floatingPnl: number,
+) {
+  if (initialBalance <= 0) return [];
+  const byMonth = new Map<string, number>();
+  for (const order of orders) {
+    const month = monthKey(order.createdAt);
+    byMonth.set(month, (byMonth.get(month) ?? 0) + (order.pnlCurrency ?? 0));
+  }
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  if (floatingPnl !== 0) {
+    byMonth.set(currentMonth, (byMonth.get(currentMonth) ?? 0) + floatingPnl);
+  }
+  if (byMonth.size === 0) {
+    return [{ month: currentMonth, returnPercent: 0 }];
+  }
+  return [...byMonth.entries()].map(([month, pnl]) => ({
+    month,
+    returnPercent: Number(((pnl / initialBalance) * 100).toFixed(2)),
+  }));
 }
 
 function clampPercent(value: unknown, fallback: number): number {
