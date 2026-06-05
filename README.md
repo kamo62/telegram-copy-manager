@@ -21,11 +21,15 @@ enabled for the backend URL.
   suffix/prefix rules, and EA-reported broker symbol inventories.
 - Builds logical trades and queue items for the EA while keeping parser intent separate from broker
   execution results.
+- Deduplicates captured Telegram messages and can expire stale open-trade replays so refetching the
+  recent Telegram history after a relaunch does not queue duplicate trades.
 - Supports app-managed virtual TP handling, TP1-TP4 allocation, runner lots, break-even/last-TP/trail
   runner behaviour, split-order execution mode, and app-owned default SL/TP distances.
 - Reconciles MT5 reports, snapshots, and broker history into open/closed trade history, execution
-  logs, out-of-sync diagnostics, account performance, provider performance, and external/manual
-  broker activity.
+  logs, missing pending-order cancellation, out-of-sync diagnostics, account performance, provider
+  performance, and external/manual broker activity.
+- Normalizes USD/ZAR mixed-account performance into a configured reporting currency and leaves
+  unsupported mixed-currency aggregates blank instead of relabeling unknown conversions.
 - Pauses new open trades per account through Equity Guardian when drawdown breaches the configured
   threshold, while allowing lifecycle management commands to continue.
 
@@ -36,22 +40,26 @@ The web app is an operator dashboard, not a landing page. The main navigation is
 - `Live`: account overview, account-specific live workspace, pending EA link slots, and the active
   workspace tabs.
 - `Telegram Setup`: Telegram login, OTP/2FA flow, dialog refresh, provider selection, and provider
-  resync.
+  resync for the global provider-monitoring lifecycle.
 - `Linked Accounts`: MT5 link-slot creation, link-code workflow, connected account cards, provider
   assignment summary, and read-only external broker activity.
-- `Settings`: execution defaults, allowed order types, polling/dedup settings, and optional Azure
-  OpenAI parser extraction key storage.
+- `Settings`: execution defaults, allowed order types, polling/dedup settings, stale open-trade
+  expiry, risk display thresholds, reporting currency/USD-ZAR rate, and optional Azure OpenAI parser
+  extraction key storage.
 
 Inside the Live workspace:
 
-- `Performance`: growth/drawdown chart plus external manual broker activity that affects equity.
-- `Providers`: provider enablement, per-account copy chips, provider config, lot/risk sizing, TP
-  allocation, runner config, and provider config dry-run tests.
+- `Performance`: overview chart, statistics view, account/provider range metrics, and external
+  manual broker activity that affects equity.
+- `Providers`: aggregate provider overview, account-scoped copy chips, provider config, lot/risk
+  sizing, TP allocation, runner config, provider config dry-run tests, parse-recent action, and CSV
+  performance export.
 - `History`: open positions/orders, external positions/orders, closed trade rollups, and per-leg
   close detail.
 - `Equity Guardian`: account drawdown thresholds and manual unpause controls.
 - `Symbol Settings`: global/provider aliases and per-account broker symbol mappings.
-- `Logs`: Parser Lab, saved fixtures, signal queue, and EA execution reports.
+- `Logs`: Parser Lab, recent-message parsing, AI review, approve/ignore actions, fixture
+  classification/redaction, saved fixtures, signal queue, and EA execution reports.
 
 ## Repository Structure
 
@@ -175,18 +183,22 @@ Important EA inputs:
 
 The API is intentionally simple HTTP/JSON plus a line-oriented MT5 polling endpoint:
 
-- Health and dashboard: `GET /health`, `GET /api/health`, `GET /api/dashboard`.
+- Health and dashboard: `GET /health`, `GET /api/health`, `GET /api/dashboard`,
+  `GET /api/telegram/status`.
 - Telegram: `/api/telegram/start`, `/api/telegram/verify-code`, `/api/telegram/submit-password`,
   `/api/telegram/dialogs`, `/api/telegram/disconnect`.
 - Providers and parser lab: `/api/providers`, `/api/providers/:id/*`, `/api/parser/*`,
+  `/api/providers/performance`, `/api/providers/performance/export.csv`,
   `/api/signals/:id/approve`, `/api/signals/:id/ignore`, `/api/signals/:id/ai-review`.
 - Symbols and settings: `/api/settings`, `/api/symbol-mappings/*`.
 - MT5 account linking and protection: `/api/account-slots`, `/api/account-provider-links`,
-  `/api/equity-guardian`.
+  `/api/equity-guardian`, `/api/accounts/:accountId/stats`,
+  `/api/accounts/:accountId/risk-thresholds`.
 - MT5 execution contract: `/api/mt5/register`, `/api/mt5/heartbeat`, `/api/mt5/poll-line`,
-  `/api/mt5/report`, `/api/mt5/snapshot`, `/api/mt5/history`, `/api/mt5/active-plans`.
+  legacy `/api/mt5/poll`, `/api/mt5/report`, `/api/mt5/snapshot`, `/api/mt5/history`,
+  `/api/mt5/active-plans`.
 - Logs and reconciliation: `/api/execution-logs`, `/api/mt5/accounts/:accountId/logs`,
-  `/api/trades/:id/broker-orders`, `/api/account/performance`, `/api/providers/performance`.
+  `/api/execution-logs/:id`, `/api/trades/:id/broker-orders`, `/api/account/performance`.
 
 ## Docker
 
@@ -246,7 +258,7 @@ The root `package.json` `version` field is the canonical application version. Th
 `mt5/TelegramTC_EA.mq5` must stay aligned with it:
 
 ```mql5
-#property version   "1.5.0"
+#property version   "1.14.1"
 ```
 
 Classify every change with SemVer before final verification:

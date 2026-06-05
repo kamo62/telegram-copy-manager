@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.14.1 - 2026-06-05 (Patch)
+
+Release impact: Patch because this tightens dashboard accounting, queue reconciliation, and README
+coverage without changing public API or EA command contracts.
+
+- Fixed mixed-currency aggregate performance so unsupported currencies and partially offline account
+  sets do not publish misleading current totals.
+- Added a freshness guard before cancelling accepted pending orders that disappear from MT5
+  snapshots.
+- Expired parsed-signal state together with stale open-trade queue work so deduplication no longer
+  blocks a reissued signal after the executable queue item has expired.
+- Used per-account performance rollups for focused account Trading P/L instead of heartbeat-only
+  floating profit.
+- Updated the README to cover the current operator surfaces, API endpoints, replay guard, reporting
+  currency settings, provider export, and EA version snippet.
+- Added regression coverage for the PR review fixes.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.14.1`.
+
 ## 1.14.0 - 2026-06-05 (Minor)
 
 Release impact: Minor because this adds a backward-compatible stale Telegram replay safety setting

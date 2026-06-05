@@ -55,6 +55,25 @@ export type PerAccountProviderConfig = Partial<
   Pick<ProviderRowData, "riskMode" | "riskAmount" | "takeProfitLevels" | "runner">
 >;
 
+export interface AccountPerformanceSnapshot {
+  accountId?: string;
+  currency: string;
+  heartbeatStatus?: string;
+  lastHeartbeatAt?: string | null;
+  initialBalance: number | null;
+  currentBalance?: number | null;
+  currentEquity?: number | null;
+  currentProfit?: number | null;
+  totalProfit: number | null;
+  realizedPnl?: number | null;
+  floatingPnl?: number | null;
+  netDeposits?: number | null;
+  today: number | null;
+  thisWeek: number | null;
+  thisMonth: number | null;
+  equityCurve?: Array<{ x: number; equity: number; drawdown: number }>;
+}
+
 export interface DashboardSnapshot {
   health: {
     status: string;
@@ -76,24 +95,8 @@ export interface DashboardSnapshot {
     reportingCurrency: "USD" | "ZAR";
     usdZarRate: number;
   };
-  accountPerformance?: {
-    accountId?: string;
-    currency: string;
-    heartbeatStatus?: string;
-    lastHeartbeatAt?: string | null;
-    initialBalance: number | null;
-    currentBalance?: number | null;
-    currentEquity?: number | null;
-    currentProfit?: number | null;
-    totalProfit: number | null;
-    realizedPnl?: number | null;
-    floatingPnl?: number | null;
-    netDeposits?: number | null;
-    today: number | null;
-    thisWeek: number | null;
-    thisMonth: number | null;
-    equityCurve?: Array<{ x: number; equity: number; drawdown: number }>;
-  };
+  accountPerformance?: AccountPerformanceSnapshot;
+  accountPerformanceByAccount?: Record<string, AccountPerformanceSnapshot>;
   providerPerformance?: ProviderPerformanceRow[];
   // Per-account provider performance keyed by MT5 account id (used by the account-scoped
   // Providers tab); aggregate `providerPerformance` is used by the overview.
@@ -700,8 +703,11 @@ export function App({
   ]);
 
   const accountHeaderData = useMemo<AccountHeaderData>(() => {
-    const perf = snapshot.accountPerformance;
     const accounts = snapshot.mt5Accounts;
+    const focusedPerf = focusedAccount
+      ? snapshot.accountPerformanceByAccount?.[focusedAccount.id]
+      : undefined;
+    const perf = focusedPerf ?? snapshot.accountPerformance;
     const onlineCount = accounts.filter((a) => a.heartbeatStatus === "online").length;
     const performanceAccount =
       (perf?.accountId ? accounts.find((account) => account.id === perf.accountId) : undefined) ??
@@ -790,11 +796,9 @@ export function App({
             : null,
         totalProfit: {
           amount: focusedAccount
-            ? focusedPerformanceMatches
+            ? usePerformanceSeries
               ? (perf?.totalProfit ?? null)
-              : performanceIsLive
-                ? (focusedAccount.profit ?? null)
-                : null
+              : null
             : performanceIsLive
               ? (perf?.totalProfit ?? null)
               : null,
@@ -813,7 +817,12 @@ export function App({
       series,
       currency: headerCurrency,
     };
-  }, [focusedAccount, snapshot.accountPerformance, snapshot.mt5Accounts]);
+  }, [
+    focusedAccount,
+    snapshot.accountPerformance,
+    snapshot.accountPerformanceByAccount,
+    snapshot.mt5Accounts,
+  ]);
 
   const sidebarAccounts = useMemo(
     () =>

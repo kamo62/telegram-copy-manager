@@ -136,6 +136,7 @@ const defaultAppSettings: AppSettings = {
   reportingCurrency: "USD",
   usdZarRate: 16,
 };
+const pendingOpenMissingGraceSeconds = 10;
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
 
@@ -435,9 +436,10 @@ export function createApi(options: ApiOptions = {}) {
 
   app.get("/api/parser/fixtures", (c) => c.json({ fixtures: store.fixtures() }));
 
-  app.get("/api/signals", (c) =>
-    c.json({ signals: store.parsedSignals(), queue: store.queueItems() }),
-  );
+  app.get("/api/signals", (c) => {
+    const queue = store.queueItems();
+    return c.json({ signals: store.parsedSignals(), queue });
+  });
 
   app.post("/api/signals/:id/approve", async (c) => {
     const body = await optionalJson<{ executionMode?: ExecutionMode }>(c.req.raw);
@@ -2343,7 +2345,7 @@ class AppStore {
     const rows = accountId
       ? (this.db
           .query(
-            `SELECT queue_items.id, queue_items.logical_trade_id, queue_items.payload_json, queue_items.created_at, logical_trades.data_json
+            `SELECT queue_items.id, queue_items.parsed_signal_id, queue_items.logical_trade_id, queue_items.payload_json, queue_items.created_at, logical_trades.data_json
              FROM queue_items
              LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
              WHERE queue_items.status = 'PENDING' AND queue_items.account_id = ?`,
@@ -2351,7 +2353,7 @@ class AppStore {
           .all(accountId) as Row[])
       : (this.db
           .query(
-            `SELECT queue_items.id, queue_items.logical_trade_id, queue_items.payload_json, queue_items.created_at, logical_trades.data_json
+            `SELECT queue_items.id, queue_items.parsed_signal_id, queue_items.logical_trade_id, queue_items.payload_json, queue_items.created_at, logical_trades.data_json
              FROM queue_items
              LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
              WHERE queue_items.status = 'PENDING'`,
@@ -2367,6 +2369,13 @@ class AppStore {
       this.db
         .query("UPDATE queue_items SET status = ?, leased_at = NULL, updated_at = ? WHERE id = ?")
         .run("EXPIRED", now, String(row.id));
+      if (row.parsed_signal_id) {
+        this.db
+          .query(
+            "UPDATE parsed_signals SET status = ? WHERE id = ? AND status NOT IN ('IGNORED','EXPIRED')",
+          )
+          .run("EXPIRED", String(row.parsed_signal_id));
+      }
       if (trade && trade.status !== "CLOSED" && trade.status !== "CANCELLED") {
         const updated = cancelLogicalTrade(trade, {
           evidence: "Open trade queue expired before MT5 execution",
@@ -3918,6 +3927,38 @@ class AppStore {
     settings: AppSettings,
   ) {
     const currency = settings.reportingCurrency;
+    const heartbeatStatus = aggregateHeartbeatStatus(
+      accounts.map((account) => account.heartbeatStatus),
+    );
+    const lastHeartbeatAt =
+      accounts
+        .map((account) => account.lastHeartbeatAt)
+        .sort()
+        .reverse()[0] ?? null;
+    const unsupportedCurrencies = accounts
+      .map((account) => normalizedMoneyCurrency(account.currency))
+      .filter((accountCurrency) => !canConvertMoneyCurrency(accountCurrency));
+    if (unsupportedCurrencies.length > 0) {
+      return {
+        accountId: "aggregate",
+        currency,
+        heartbeatStatus,
+        lastHeartbeatAt,
+        initialBalance: null,
+        currentBalance: null,
+        currentEquity: null,
+        currentProfit: null,
+        totalProfit: null,
+        realizedPnl: null,
+        floatingPnl: null,
+        netDeposits: null,
+        today: null,
+        thisWeek: null,
+        thisMonth: null,
+        equityCurve: [],
+        monthlyReturns: [],
+      };
+    }
     const convert = (value: number | null | undefined, fromCurrency: string) =>
       convertMoney(value, fromCurrency, currency, settings.usdZarRate);
     const accountOrders = accounts.flatMap((account) =>
@@ -3935,19 +3976,10 @@ class AppStore {
     );
     const liveAccounts = accounts.filter((account) => account.heartbeatStatus === "online");
     const allOnline = accounts.length > 0 && liveAccounts.length === accounts.length;
-    const hasLiveAccounts = liveAccounts.length > 0;
-    const heartbeatStatus = aggregateHeartbeatStatus(
-      accounts.map((account) => account.heartbeatStatus),
-    );
-    const lastHeartbeatAt =
-      accounts
-        .map((account) => account.lastHeartbeatAt)
-        .sort()
-        .reverse()[0] ?? null;
     const realizedPnl = sumPnl(accountOrders);
-    const floatingPnl = hasLiveAccounts
+    const floatingPnl = allOnline
       ? roundCurrency(
-          liveAccounts.reduce((sum, account) => {
+          accounts.reduce((sum, account) => {
             const brokerFloatingPnl = nullableNumber(account.profit);
             const fallbackFloatingPnl = roundCurrency(
               Number.isFinite(account.equity) && Number.isFinite(account.balance)
@@ -3961,17 +3993,14 @@ class AppStore {
         )
       : null;
     const totalProfit = floatingPnl === null ? null : roundCurrency(realizedPnl + floatingPnl);
-    const currentBalance = hasLiveAccounts
+    const currentBalance = allOnline
       ? roundCurrency(
-          liveAccounts.reduce(
-            (sum, account) => sum + convert(account.balance, account.currency),
-            0,
-          ),
+          accounts.reduce((sum, account) => sum + convert(account.balance, account.currency), 0),
         )
       : null;
-    const currentEquity = hasLiveAccounts
+    const currentEquity = allOnline
       ? roundCurrency(
-          liveAccounts.reduce((sum, account) => sum + convert(account.equity, account.currency), 0),
+          accounts.reduce((sum, account) => sum + convert(account.equity, account.currency), 0),
         )
       : null;
     const netDeposits =
@@ -5311,9 +5340,9 @@ class AppStore {
 
   dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock") {
     const providers = this.providers();
+    const queue = this.queueItems();
     const parsed = this.parsedSignals();
     const accounts = this.mt5Accounts();
-    const queue = this.queueItems();
     return {
       health: {
         status: "ok",
@@ -5322,6 +5351,9 @@ class AppStore {
       },
       appSettings: this.appSettings(),
       accountPerformance: this.accountPerformance(accounts),
+      accountPerformanceByAccount: Object.fromEntries(
+        accounts.map((account) => [account.id, this.accountPerformance([account])]),
+      ),
       providerPerformance: this.providerPerformance(undefined, accounts),
       providerPerformanceByAccount: Object.fromEntries(
         accounts.map((account) => [account.id, this.providerPerformance(account.id, accounts)]),
@@ -6560,13 +6592,18 @@ class AppStore {
          ORDER BY created_at DESC LIMIT 1`,
       )
       .get(tradeId) as Row | null;
-    return row
-      ? {
-          orderTicket: String(row.order_ticket ?? ""),
-          brokerComment: String(row.broker_comment ?? ""),
-          createdAt: String(row.created_at ?? ""),
-        }
-      : null;
+    if (!row) return null;
+    const createdAt = String(row.created_at ?? "");
+    const created = Date.parse(normalizedDateInput(createdAt));
+    const graceMs =
+      Math.max(pendingOpenMissingGraceSeconds, this.appSettings().pollingIntervalSeconds * 2) *
+      1000;
+    if (Number.isFinite(created) && Date.now() - created < graceMs) return null;
+    return {
+      orderTicket: String(row.order_ticket ?? ""),
+      brokerComment: String(row.broker_comment ?? ""),
+      createdAt,
+    };
   }
 
   /**
@@ -8368,6 +8405,10 @@ function normalizedMoneyCurrency(currency: string): ReportingCurrency | string {
   if (normalized === "$") return "USD";
   if (normalized === "R") return "ZAR";
   return normalized;
+}
+
+function canConvertMoneyCurrency(currency: string) {
+  return currency === "USD" || currency === "ZAR";
 }
 
 function convertMoney(

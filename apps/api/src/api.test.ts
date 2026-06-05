@@ -2605,6 +2605,7 @@ describe("Telegram TC API", () => {
   test("cancels accepted pending orders that disappear from broker snapshots", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const approved = await approveGoldBuyLimit(app);
+    const originalDateNow = Date.now;
     await app.request("/api/mt5/report", {
       method: "POST",
       body: JSON.stringify({
@@ -2625,33 +2626,56 @@ describe("Telegram TC API", () => {
       headers: { "content-type": "application/json" },
     });
 
-    await app.request("/api/mt5/snapshot", {
-      method: "POST",
-      body: JSON.stringify({
-        accountId: "mt5-63442826",
-        positions: [],
-        orders: [],
-        symbols: [],
-      }),
-      headers: { "content-type": "application/json" },
-    });
+    try {
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          positions: [],
+          orders: [],
+          symbols: [],
+        }),
+        headers: { "content-type": "application/json" },
+      });
 
-    const dashboard = await json<{
-      logicalTrades: Array<{
-        id: string;
-        status: string;
-        outOfSyncReason?: string;
-        livePositionExists?: boolean;
-        legs: Array<{ status: string }>;
-      }>;
-    }>(await app.request("/api/dashboard"));
-    const trade = dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId);
-    expect(trade).toMatchObject({
-      status: "CANCELLED",
-      livePositionExists: false,
-    });
-    expect(trade?.outOfSyncReason).toBeUndefined();
-    expect(trade?.legs.every((leg) => leg.status === "SKIPPED")).toBe(true);
+      const immediate = await json<{
+        logicalTrades: Array<{ id: string; status: string; legs: Array<{ status: string }> }>;
+      }>(await app.request("/api/dashboard"));
+      expect(
+        immediate.logicalTrades.find((item) => item.id === approved.logicalTradeId)?.status,
+      ).not.toBe("CANCELLED");
+
+      Date.now = () => originalDateNow() + 60_000;
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          positions: [],
+          orders: [],
+          symbols: [],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+
+      const dashboard = await json<{
+        logicalTrades: Array<{
+          id: string;
+          status: string;
+          outOfSyncReason?: string;
+          livePositionExists?: boolean;
+          legs: Array<{ status: string }>;
+        }>;
+      }>(await app.request("/api/dashboard"));
+      const trade = dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId);
+      expect(trade).toMatchObject({
+        status: "CANCELLED",
+        livePositionExists: false,
+      });
+      expect(trade?.outOfSyncReason).toBeUndefined();
+      expect(trade?.legs.every((leg) => leg.status === "SKIPPED")).toBe(true);
+    } finally {
+      Date.now = originalDateNow;
+    }
   });
 
   test("expires stale open-trade Telegram replays instead of queueing them", async () => {
@@ -2688,6 +2712,56 @@ describe("Telegram TC API", () => {
     );
     expect(dashboard.signalQueue.filter((item) => item.status === "PENDING")).toHaveLength(0);
     expect(dashboard.logicalTrades).toHaveLength(0);
+  });
+
+  test("expires parsed signal state when stale open-trade queue work expires", async () => {
+    const oldMessageDate = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const telegram = createQueuedTelegramAdapter([
+      {
+        telegramMessageId: "old-gold-queued",
+        messageDate: oldMessageDate,
+        rawText: "Gold buy limit\n\n4541-40\n\nSL 4535\n\nTP 4546\nTP 4553",
+      },
+    ]);
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram,
+      telegramPollingEnabled: false,
+    });
+    await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+
+    const result = await app.runTelegramIngestionOnce();
+    expect(result.queued).toBe(1);
+
+    const beforeExpiry = await json<{
+      signals: Array<{ id: string; status: string; result: { commandType: string } }>;
+    }>(await app.request("/api/signals"));
+    const parsedSignalId = beforeExpiry.signals.find(
+      (signal) => signal.result.commandType === "OPEN_TRADE",
+    )?.id;
+    expect(parsedSignalId).toBeTruthy();
+
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ maxOpenTradeAgeSeconds: 30 * 60 }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const signals = await json<{
+      signals: Array<{ id: string; status: string }>;
+      queue: Array<{ status: string; payload: { commandType: string } }>;
+    }>(await app.request("/api/signals"));
+
+    expect(signals.signals).toContainEqual(
+      expect.objectContaining({ id: parsedSignalId, status: "EXPIRED" }),
+    );
+    expect(signals.queue).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({ commandType: "OPEN_TRADE" }),
+        status: "EXPIRED",
+      }),
+    );
   });
 
   test("exposes a line-oriented MT5 poll payload for the MQL5 expert advisor", async () => {
@@ -3347,9 +3421,9 @@ describe("Telegram TC API", () => {
       }>(await app.request("/api/dashboard"));
       expect(partialLive.accountPerformance).toMatchObject({
         heartbeatStatus: "online",
-        currentBalance: 100,
-        currentEquity: 110,
-        currentProfit: 10,
+        currentBalance: null,
+        currentEquity: null,
+        currentProfit: null,
       });
 
       await app.request("/api/settings", {
@@ -3370,13 +3444,66 @@ describe("Telegram TC API", () => {
       expect(updated.accountPerformance).toMatchObject({
         accountId: "aggregate",
         currency: "ZAR",
-        currentBalance: 2000,
-        currentEquity: 2200,
-        currentProfit: 200,
+        currentBalance: null,
+        currentEquity: null,
+        currentProfit: null,
       });
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test("mixed-currency performance blanks unsupported currency aggregates", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "100200300",
+        server: "OctaFX-Live",
+        company: "OctaFX",
+        currency: "USD",
+        balance: 100,
+        equity: 110,
+        profit: 10,
+        marginMode: "HEDGING",
+        availableSymbols: ["XAUUSD"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "200300400",
+        server: "Broker-EUR",
+        company: "Broker",
+        currency: "EUR",
+        balance: 100,
+        equity: 120,
+        profit: 20,
+        marginMode: "HEDGING",
+        availableSymbols: ["XAUUSD"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const dashboard = await json<{
+      accountPerformance: {
+        accountId: string;
+        currency: string;
+        currentBalance: number | null;
+        currentEquity: number | null;
+        totalProfit: number | null;
+      };
+    }>(await app.request("/api/dashboard"));
+
+    expect(dashboard.accountPerformance).toMatchObject({
+      accountId: "aggregate",
+      currency: "USD",
+      currentBalance: null,
+      currentEquity: null,
+      totalProfit: null,
+    });
   });
 
   test("passes configured channel lot size through to the MT5 line payload", async () => {

@@ -392,6 +392,70 @@ describe("App dashboard", () => {
     expect(view.queryByText(/\$168\.64/)).toBeNull();
   });
 
+  test("account header uses focused account performance instead of heartbeat-only PnL", () => {
+    const routeSnapshot: DashboardSnapshot = {
+      ...snapshot,
+      accountPerformance: {
+        accountId: "aggregate",
+        currency: "USD",
+        heartbeatStatus: "online",
+        initialBalance: 300,
+        currentBalance: 300,
+        currentEquity: 345.5,
+        totalProfit: 45.5,
+        realizedPnl: 45.5,
+        floatingPnl: 0,
+        netDeposits: 0,
+        today: 45.5,
+        thisWeek: 45.5,
+        thisMonth: 45.5,
+        equityCurve: [],
+      },
+      accountPerformanceByAccount: {
+        "mt5-secondary": {
+          accountId: "mt5-secondary",
+          currency: "USD",
+          heartbeatStatus: "online",
+          initialBalance: 100,
+          currentBalance: 100,
+          currentEquity: 145.5,
+          totalProfit: 45.5,
+          realizedPnl: 45.5,
+          floatingPnl: 0,
+          netDeposits: 0,
+          today: 45.5,
+          thisWeek: 45.5,
+          thisMonth: 45.5,
+          equityCurve: [],
+        },
+      },
+      mt5Accounts: [
+        {
+          ...snapshot.mt5Accounts[0]!,
+          id: "mt5-primary",
+          accountNumber: "100200300",
+          profit: 99,
+        },
+        {
+          ...snapshot.mt5Accounts[0]!,
+          id: "mt5-secondary",
+          accountNumber: "200300400",
+          profit: 0,
+        },
+      ],
+    };
+    const view = rtlRender(<App initialSnapshot={routeSnapshot} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={["/accounts/mt5-secondary/performance"]}>
+          {children}
+        </MemoryRouter>
+      ),
+    });
+
+    const header = within(view.getByLabelText("Account performance"));
+    expect(header.getAllByText(/\$45\.50/).length).toBeGreaterThanOrEqual(1);
+  });
+
   test("account header does not present stale MT5 telemetry as live PnL", () => {
     const view = render(
       <App
