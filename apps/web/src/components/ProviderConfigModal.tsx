@@ -32,6 +32,7 @@ export interface TpDraftLevel {
 
 export interface ProviderConfigSubmission {
   parserMode: string;
+  lockedSymbol?: string;
   lotSize: number;
   riskMode: "fixed" | "percent";
   riskAmount: number;
@@ -64,6 +65,14 @@ function parseDecimal(value: string): number | null {
 
 function formatDraftNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(4)));
+}
+
+function normalizeSymbolLock(value: FormDataEntryValue | null): string | undefined {
+  const normalized = String(value ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+  return normalized || undefined;
 }
 
 function normalizedStrategyForLeg(strategy: TpStrategy, leg: number): TpStrategy {
@@ -366,6 +375,7 @@ export function ProviderConfigModal({
     };
     return {
       parserMode: String(data.get("parserMode") ?? provider.parserMode),
+      lockedSymbol: accountLabel ? undefined : normalizeSymbolLock(data.get("lockedSymbol")),
       lotSize: riskMode === "fixed" ? lotValue : provider.lotSize,
       riskMode,
       riskAmount: lotValue,
@@ -494,7 +504,7 @@ export function ProviderConfigModal({
         </header>
 
         <form
-          className="modal-form modal-form-clean"
+          className="modal-form"
           key={provider.id}
           noValidate
           onSubmit={(event) => {
@@ -515,6 +525,7 @@ export function ProviderConfigModal({
                 >
                   <option value="deterministic">Automatic</option>
                   <option value="kal-vip">KAL VIP tuned</option>
+                  <option value="kal-vip-extended">KAL VIP extended</option>
                 </select>
               </label>
               <button
@@ -528,6 +539,17 @@ export function ProviderConfigModal({
                 Test message
               </button>
             </div>
+            {!accountLabel ? (
+              <label className="config-field">
+                <span className="config-label">Locked symbol</span>
+                <input
+                  aria-label={`Locked symbol for ${provider.title}`}
+                  defaultValue={provider.lockedSymbol ?? ""}
+                  name="lockedSymbol"
+                  placeholder="XAUUSD"
+                />
+              </label>
+            ) : null}
             <label className="config-field">
               <span className="config-label">Test message</span>
               <textarea

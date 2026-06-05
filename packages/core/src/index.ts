@@ -1,5 +1,6 @@
 export type Direction = "BUY" | "SELL";
 export type OrderType = "MARKET" | "LIMIT" | "STOP";
+export type ParserMode = "deterministic" | "kal-vip" | "kal-vip-extended";
 export type CommandType =
   | "NO_SIGNAL"
   | "OPEN_TRADE"
@@ -36,9 +37,11 @@ export interface AccountSymbolMapping {
 export interface ParserContext {
   providerId?: string;
   accountId?: string;
+  parserMode?: ParserMode | string;
   globalAliases?: Record<string, string>;
   providerAliases?: Record<string, Record<string, string>>;
   providerDefaultSymbols?: Record<string, string>;
+  referencePrices?: Record<string, number>;
   accountMappings?: Record<string, AccountSymbolMapping>;
   defaultStopLoss?: DistanceInstruction;
   defaultTakeProfit?: DistanceInstruction;
@@ -251,6 +254,7 @@ const BROKER_SYMBOL_VARIANTS: Record<string, string[]> = {
     "XAUUSD",
     "XAUUSD#",
     "XAUUSDm",
+    "XAUUSDr",
     "XAUUSD.raw",
     "XAUUSD.r",
     "XAUUSD.pro",
@@ -556,8 +560,13 @@ export function parseSignalTexts(
   originalText: string,
   context: ParserContext = {},
 ): ParsedSignal[] {
-  const base = parseSignalText(originalText, context);
   const candidate = extractSignalCandidate(originalText.replace(/\r\n/g, "\n").trim());
+  if (context.parserMode === "kal-vip-extended") {
+    const extendedSignals = parseKalVipExtendedLevelSignals(originalText, candidate.text, context);
+    if (extendedSignals.length > 0) return extendedSignals;
+  }
+
+  const base = parseSignalText(originalText, context);
   const prices = extractDirectionalZonePrices(candidate.text);
   if (base.commandType !== "OPEN_TRADE" || prices.length <= 1) return [base];
 
@@ -1112,6 +1121,106 @@ function extractDirectionalZonePrices(text: string): number[] {
     .map((line) => line.trim())
     .filter((line) => /^\d+(?:\.\d+)?$/.test(line))
     .map(Number);
+}
+
+function parseKalVipExtendedLevelSignals(
+  originalText: string,
+  text: string,
+  context: ParserContext,
+): ParsedSignal[] {
+  const rawSymbol =
+    (context.providerId ? context.providerDefaultSymbols?.[context.providerId] : undefined) ??
+    extractRawSymbol(text, context, "OPEN_TRADE");
+  if (!rawSymbol) return [];
+
+  const referencePrice = referencePriceForSymbol(rawSymbol, context);
+  if (referencePrice === undefined) return [];
+
+  const levels = extractKalVipExtendedLevels(text, referencePrice);
+  if (levels.length === 0) return [];
+
+  const original = originalText.replace(/\r\n/g, "\n").trim();
+  return levels.map((level, index) => {
+    const signal = parseSignalText(`${rawSymbol} ${level.direction} LIMIT ${level.price}`, context);
+    return {
+      ...signal,
+      originalText: original,
+      matchedPatternIds: [...new Set([...signal.matchedPatternIds, "open.kal-vip-extended-level"])],
+      fingerprint: createMessageFingerprint(
+        `${original}\nextended-level:${index + 1}:${level.direction}:${level.price}`,
+      ),
+    };
+  });
+}
+
+function referencePriceForSymbol(rawSymbol: string, context: ParserContext): number | undefined {
+  const referencePrices = context.referencePrices ?? {};
+  const resolved = resolveSymbol(rawSymbol, context);
+  const keys = [
+    rawSymbol,
+    normalizeSymbolText(rawSymbol),
+    resolved.canonicalSymbol,
+    resolved.brokerSymbol,
+  ].filter((value): value is string => Boolean(value));
+
+  for (const key of keys) {
+    const direct = referencePrices[key];
+    if (Number.isFinite(direct)) return direct;
+    const upper = referencePrices[key.toUpperCase()];
+    if (Number.isFinite(upper)) return upper;
+  }
+  return undefined;
+}
+
+function extractKalVipExtendedLevels(
+  text: string,
+  referencePrice: number,
+): Array<{ direction: Direction; price: number }> {
+  const levels: Array<{ direction: Direction; price: number }> = [];
+  let pendingDirection: Direction | undefined;
+
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const upper = line.toUpperCase();
+    const lineDirection = /\bBUY\b/.test(upper)
+      ? "BUY"
+      : /\bSELL\b/.test(upper)
+        ? "SELL"
+        : undefined;
+    if (lineDirection && /\b(FIRST|SECOND|THIRD|FOURTH|ZONE|LEVEL|AROUND|IS|AT)\b/.test(upper)) {
+      pendingDirection = lineDirection;
+    }
+
+    const levelText = extractShortLevelText(line);
+    const direction = lineDirection ?? pendingDirection;
+    if (!direction || !levelText) continue;
+    const price = expandShortLevel(levelText, referencePrice);
+    if (price !== undefined) levels.push({ direction, price });
+  }
+
+  return levels;
+}
+
+function extractShortLevelText(line: string): string | undefined {
+  const patterns = [
+    /\bAROUND\s+(\d{1,2})\s+LEVEL\b/i,
+    /\b(\d{1,2})\s+LEVEL\b/i,
+    /\b(?:IS|AT)\s+(\d{1,2})\b/i,
+    /\b(\d{1,2})\s+CAN\s+BE\s+(?:A\s+)?(?:BUY|SELL)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = line.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+  return undefined;
+}
+
+function expandShortLevel(levelText: string, referencePrice: number): number | undefined {
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0) return undefined;
+  const numeric = Number(levelText);
+  if (!Number.isFinite(numeric) || numeric < 0 || numeric > 99) return undefined;
+  return Math.floor(referencePrice / 100) * 100 + numeric;
 }
 
 function extractStopLoss(text: string): number | undefined {

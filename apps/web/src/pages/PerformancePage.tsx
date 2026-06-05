@@ -47,6 +47,7 @@ export interface AccountStatsData {
 
 export function PerformancePage({
   accounts = [],
+  currency,
   data,
   loading = false,
   providers = [],
@@ -79,6 +80,7 @@ export function PerformancePage({
       comment?: string;
     }>;
   }>;
+  currency?: string;
   data: GrowthSeries;
   loading?: boolean;
   providers?: Array<{ id: string; title: string }>;
@@ -138,7 +140,7 @@ export function PerformancePage({
           <GrowthChart
             data={data}
             loading={loading}
-            currency={(account as { currency?: string } | undefined)?.currency}
+            currency={currency ?? (account as { currency?: string } | undefined)?.currency}
           />
           <ExternalActivityPanel accounts={accounts} />
         </>

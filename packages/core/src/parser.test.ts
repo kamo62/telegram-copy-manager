@@ -282,6 +282,83 @@ describe("deterministic signal parser", () => {
     expect(replyChatter[0]!.commandType).toBe("NO_SIGNAL");
   });
 
+  test("expands KAL VIP extended short level commentary from a current symbol reference price", () => {
+    const kalContext: ParserContext = {
+      providerId: "kal-vip",
+      accountId: "mt5-demo-1",
+      globalAliases: { GOLD: "XAUUSD" },
+      providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+      accountMappings: context.accountMappings,
+      parserMode: "kal-vip-extended",
+      referencePrices: { XAUUSD: 4444.2 },
+      defaultStopLoss: { value: 50, unit: "PIPS" },
+      defaultTakeProfit: { value: 200, unit: "PIPS" },
+    };
+
+    const signals = parseSignalTexts(
+      [
+        "First sell zone is the head on the pinbar",
+        "",
+        "Around 41 level",
+        "",
+        "Second sell is 56",
+        "",
+        "The 03 level can be a buy",
+      ].join("\n"),
+      kalContext,
+    );
+
+    expect(signals).toHaveLength(3);
+    expect(signals.map((signal) => signal.direction)).toEqual(["SELL", "SELL", "BUY"]);
+    expect(signals.map((signal) => signal.entry?.from)).toEqual([4441, 4456, 4403]);
+    expect(new Set(signals.map((signal) => signal.fingerprint)).size).toBe(3);
+    for (const signal of signals) {
+      expect(signal.commandType).toBe("OPEN_TRADE");
+      expect(signal.orderType).toBe("LIMIT");
+      expect(signal.rawSymbol).toBe("XAUUSD");
+      expect(signal.brokerSymbol).toBe("XAUUSD.r");
+      expect(signal.defaultStopLoss).toEqual({ value: 50, unit: "PIPS" });
+      expect(signal.defaultTakeProfit).toEqual({ value: 200, unit: "PIPS" });
+      expect(signal.matchedPatternIds).toContain("open.kal-vip-extended-level");
+      expect(shouldRequireManualReview(signal)).toBe(false);
+    }
+  });
+
+  test("keeps KAL VIP short level commentary gated to extended mode with a reference price", () => {
+    const baseContext: ParserContext = {
+      providerId: "kal-vip",
+      accountId: "mt5-demo-1",
+      globalAliases: { GOLD: "XAUUSD" },
+      providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+      accountMappings: context.accountMappings,
+      defaultStopLoss: { value: 50, unit: "PIPS" },
+      defaultTakeProfit: { value: 200, unit: "PIPS" },
+    };
+    const rawText = [
+      "First sell zone is the head on the pinbar",
+      "",
+      "Around 41 level",
+      "",
+      "Second sell is 56",
+      "",
+      "The 03 level can be a buy",
+    ].join("\n");
+
+    expect(
+      parseSignalTexts(rawText, {
+        ...baseContext,
+        parserMode: "deterministic",
+        referencePrices: { XAUUSD: 4444.2 },
+      }),
+    ).toMatchObject([{ commandType: "NO_SIGNAL" }]);
+    expect(
+      parseSignalTexts(rawText, {
+        ...baseContext,
+        parserMode: "kal-vip-extended",
+      }),
+    ).toMatchObject([{ commandType: "NO_SIGNAL" }]);
+  });
+
   test("parses broker copier NEW ORDER blocks without treating ticket numbers as entries", () => {
     const result = parseSignalText(
       [
@@ -546,6 +623,28 @@ describe("symbol resolver", () => {
       },
     });
     expect(unavailable.mappingStatus).toBe("unavailable");
+  });
+
+  test("maps HF-style XAUUSDr gold symbols from the EA inventory", () => {
+    const hfContext: ParserContext = {
+      accountId: "mt5-hf",
+      accountMappings: {
+        "mt5-hf": {
+          accountId: "mt5-hf",
+          availableBrokerSymbols: ["XAUUSDr", "EURUSDr"],
+        },
+      },
+    };
+
+    expect(resolveSymbol("GOLD", hfContext)).toMatchObject({
+      canonicalSymbol: "XAUUSD",
+      brokerSymbol: "XAUUSDr",
+      mappingStatus: "mapped",
+    });
+
+    const signal = parseSignalText("Gold buy limit\n\n4487-86\n\nSL 4481\n\nTP 4492", hfContext);
+    expect(signal.brokerSymbol).toBe("XAUUSDr");
+    expect(shouldRequireManualReview(signal)).toBe(false);
   });
 
   test("uses configured prefix and suffix after exact and known-variant matching", () => {

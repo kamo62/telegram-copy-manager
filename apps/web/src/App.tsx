@@ -55,6 +55,25 @@ export type PerAccountProviderConfig = Partial<
   Pick<ProviderRowData, "riskMode" | "riskAmount" | "takeProfitLevels" | "runner">
 >;
 
+export interface AccountPerformanceSnapshot {
+  accountId?: string;
+  currency: string;
+  heartbeatStatus?: string;
+  lastHeartbeatAt?: string | null;
+  initialBalance: number | null;
+  currentBalance?: number | null;
+  currentEquity?: number | null;
+  currentProfit?: number | null;
+  totalProfit: number | null;
+  realizedPnl?: number | null;
+  floatingPnl?: number | null;
+  netDeposits?: number | null;
+  today: number | null;
+  thisWeek: number | null;
+  thisMonth: number | null;
+  equityCurve?: Array<{ x: number; equity: number; drawdown: number }>;
+}
+
 export interface DashboardSnapshot {
   health: {
     status: string;
@@ -70,27 +89,14 @@ export interface DashboardSnapshot {
     allowedOrderTypes: string[];
     azureOpenAIKeyConfigured: boolean;
     dedupWindowSeconds: number;
+    maxOpenTradeAgeSeconds: number;
     drawdownWarnPct: number;
     drawdownDangerPct: number;
+    reportingCurrency: "USD" | "ZAR";
+    usdZarRate: number;
   };
-  accountPerformance?: {
-    accountId?: string;
-    currency: string;
-    heartbeatStatus?: string;
-    lastHeartbeatAt?: string | null;
-    initialBalance: number | null;
-    currentBalance?: number | null;
-    currentEquity?: number | null;
-    currentProfit?: number | null;
-    totalProfit: number | null;
-    realizedPnl?: number | null;
-    floatingPnl?: number | null;
-    netDeposits?: number | null;
-    today: number | null;
-    thisWeek: number | null;
-    thisMonth: number | null;
-    equityCurve?: Array<{ x: number; equity: number; drawdown: number }>;
-  };
+  accountPerformance?: AccountPerformanceSnapshot;
+  accountPerformanceByAccount?: Record<string, AccountPerformanceSnapshot>;
   providerPerformance?: ProviderPerformanceRow[];
   // Per-account provider performance keyed by MT5 account id (used by the account-scoped
   // Providers tab); aggregate `providerPerformance` is used by the overview.
@@ -128,6 +134,8 @@ export interface DashboardSnapshot {
     currency?: string;
     balance?: number;
     equity?: number;
+    profit?: number;
+    initialBalance?: number;
     openPositionCount?: number;
     pendingOrderCount?: number;
     externalPositionCount?: number;
@@ -298,8 +306,11 @@ const emptySnapshot: DashboardSnapshot = {
     allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
     azureOpenAIKeyConfigured: false,
     dedupWindowSeconds: 300,
+    maxOpenTradeAgeSeconds: 0,
     drawdownWarnPct: 10,
     drawdownDangerPct: 20,
+    reportingCurrency: "USD",
+    usdZarRate: 16,
   },
   accountPerformance: undefined,
   providerPerformance: [],
@@ -692,15 +703,26 @@ export function App({
   ]);
 
   const accountHeaderData = useMemo<AccountHeaderData>(() => {
-    const perf = snapshot.accountPerformance;
     const accounts = snapshot.mt5Accounts;
+    const focusedPerf = focusedAccount
+      ? snapshot.accountPerformanceByAccount?.[focusedAccount.id]
+      : undefined;
+    const perf = focusedPerf ?? snapshot.accountPerformance;
     const onlineCount = accounts.filter((a) => a.heartbeatStatus === "online").length;
     const performanceAccount =
       (perf?.accountId ? accounts.find((account) => account.id === perf.accountId) : undefined) ??
       focusedAccount ??
       accounts[0];
-    const performanceIsLive =
-      !performanceAccount || performanceAccount.heartbeatStatus === "online";
+    const focusedPerformanceMatches = Boolean(
+      focusedAccount && perf?.accountId === focusedAccount.id,
+    );
+    const usePerformanceSeries = !focusedAccount || focusedPerformanceMatches;
+    const performanceIsLive = focusedAccount
+      ? focusedAccount.heartbeatStatus === "online"
+      : perf?.heartbeatStatus
+        ? perf.heartbeatStatus === "online"
+        : !performanceAccount || performanceAccount.heartbeatStatus === "online";
+    const headerCurrency = focusedAccount?.currency ?? perf?.currency ?? "$";
 
     let platform = "—";
     let broker = "—";
@@ -731,7 +753,7 @@ export function App({
     // relevant window. Today/Week/Month slice the last N points as a cheap
     // approximation — exact per-window aggregation would need a separate
     // backend roll-up and isn't worth the round-trip for a 28px chart.
-    const equityPoints = perf?.equityCurve ?? [];
+    const equityPoints = usePerformanceSeries ? (perf?.equityCurve ?? []) : [];
     const equitySeries = equityPoints.map((point) => point.equity);
     const initialBalance = perf?.initialBalance ?? null;
     const profitSeries =
@@ -758,26 +780,49 @@ export function App({
         eaActive,
       },
       kpis: {
-        balance: performanceIsLive ? (perf?.currentBalance ?? null) : null,
-        equity: performanceIsLive ? (perf?.currentEquity ?? null) : null,
+        balance: focusedAccount
+          ? performanceIsLive
+            ? (focusedAccount.balance ?? null)
+            : null
+          : performanceIsLive
+            ? (perf?.currentBalance ?? null)
+            : null,
+        equity: focusedAccount
+          ? performanceIsLive
+            ? (focusedAccount.equity ?? null)
+            : null
+          : performanceIsLive
+            ? (perf?.currentEquity ?? null)
+            : null,
         totalProfit: {
-          amount: performanceIsLive ? (perf?.totalProfit ?? null) : null,
+          amount: focusedAccount
+            ? usePerformanceSeries
+              ? (perf?.totalProfit ?? null)
+              : null
+            : performanceIsLive
+              ? (perf?.totalProfit ?? null)
+              : null,
           deltaPercent: null,
         },
-        today: { amount: perf?.today ?? null, deltaPercent: null },
+        today: { amount: usePerformanceSeries ? (perf?.today ?? null) : null, deltaPercent: null },
         thisWeek: {
-          amount: perf?.thisWeek ?? null,
+          amount: usePerformanceSeries ? (perf?.thisWeek ?? null) : null,
           deltaPercent: null,
         },
         thisMonth: {
-          amount: perf?.thisMonth ?? null,
+          amount: usePerformanceSeries ? (perf?.thisMonth ?? null) : null,
           deltaPercent: null,
         },
       },
       series,
-      currency: perf?.currency ?? "$",
+      currency: headerCurrency,
     };
-  }, [focusedAccount, snapshot.accountPerformance, snapshot.mt5Accounts]);
+  }, [
+    focusedAccount,
+    snapshot.accountPerformance,
+    snapshot.accountPerformanceByAccount,
+    snapshot.mt5Accounts,
+  ]);
 
   const sidebarAccounts = useMemo(
     () =>
@@ -862,7 +907,9 @@ export function App({
 
   const queuePending = snapshot.signalQueue.filter((item) => item.status === "PENDING").length;
   const growthData = useMemo(() => {
-    const series = snapshot.accountPerformance?.equityCurve;
+    const usePerformanceSeries =
+      !focusedAccount || snapshot.accountPerformance?.accountId === focusedAccount.id;
+    const series = usePerformanceSeries ? snapshot.accountPerformance?.equityCurve : undefined;
     if (!series?.length) {
       return buildPlaceholderGrowth(
         snapshot.executionLogs.filter((log) => log.status === "EXECUTED").length,
@@ -877,13 +924,19 @@ export function App({
         number[],
         number[],
       ],
-      totalProfit: snapshot.accountPerformance?.totalProfit ?? 0,
-      realizedPnl: snapshot.accountPerformance?.realizedPnl ?? undefined,
-      floatingPnl: snapshot.accountPerformance?.floatingPnl ?? undefined,
-      netDeposits: snapshot.accountPerformance?.netDeposits ?? undefined,
+      totalProfit: usePerformanceSeries ? (snapshot.accountPerformance?.totalProfit ?? 0) : 0,
+      realizedPnl: usePerformanceSeries
+        ? (snapshot.accountPerformance?.realizedPnl ?? undefined)
+        : undefined,
+      floatingPnl: usePerformanceSeries
+        ? (snapshot.accountPerformance?.floatingPnl ?? undefined)
+        : undefined,
+      netDeposits: usePerformanceSeries
+        ? (snapshot.accountPerformance?.netDeposits ?? undefined)
+        : undefined,
       numberOfTrades: series.length,
     };
-  }, [snapshot.accountPerformance, snapshot.executionLogs]);
+  }, [focusedAccount, snapshot.accountPerformance, snapshot.executionLogs]);
 
   async function refreshDashboard() {
     setRefreshing(true);
@@ -1101,6 +1154,7 @@ export function App({
     }
     await apiPatch(`/api/providers/${provider.id}`, {
       parserMode: payload.parserMode,
+      lockedSymbol: payload.lockedSymbol,
       lotSize: payload.lotSize,
       riskMode: payload.riskMode,
       riskAmount: payload.riskAmount,
@@ -1128,6 +1182,8 @@ export function App({
     }>(`/api/providers/${provider.id}/test-config`, {
       rawText,
       config: {
+        parserMode: payload.parserMode,
+        lockedSymbol: payload.lockedSymbol,
         riskMode: payload.riskMode,
         riskAmount: payload.riskAmount,
         takeProfitLevels: payload.takeProfitLevels,
@@ -1174,9 +1230,12 @@ export function App({
       azureOpenAIApiKey: String(formData.get("azureOpenAIApiKey") ?? ""),
       pollingIntervalSeconds: Number(formData.get("pollingIntervalSeconds")),
       dedupWindowSeconds: Number(formData.get("dedupWindowSeconds")),
+      maxOpenTradeAgeSeconds: Number(formData.get("maxOpenTradeAgeSeconds")),
       allowedOrderTypes: formData.getAll("allowedOrderTypes").map(String),
       drawdownWarnPct: Number(formData.get("drawdownWarnPct")),
       drawdownDangerPct: Number(formData.get("drawdownDangerPct")),
+      reportingCurrency: String(formData.get("reportingCurrency") ?? "USD"),
+      usdZarRate: Number(formData.get("usdZarRate")),
     });
     await refreshDashboard();
   }
@@ -1349,6 +1408,7 @@ export function App({
     accountId: string;
     canonicalSymbol: string;
     brokerSymbol: string;
+    prefix: string;
     suffix: string;
     includeSymbols: string[];
     excludeSymbols: string[];
@@ -1360,6 +1420,7 @@ export function App({
         canonicalOverrides: {
           [payload.canonicalSymbol.trim().toUpperCase()]: payload.brokerSymbol.trim(),
         },
+        prefix: payload.prefix,
         suffix: payload.suffix,
         includeSymbols: payload.includeSymbols,
         excludeSymbols: payload.excludeSymbols,
@@ -1506,6 +1567,7 @@ export function App({
           {showPerformance ? (
             <PerformancePage
               accounts={focusedAccount ? [focusedAccount] : snapshot.mt5Accounts}
+              currency={accountHeaderData.currency}
               data={growthData}
               loading={initialLoading}
               providers={snapshot.providers.map((provider) => ({

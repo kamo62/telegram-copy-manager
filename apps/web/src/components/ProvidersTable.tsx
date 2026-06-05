@@ -14,6 +14,7 @@ export interface ProviderRowData {
   title: string;
   enabled: boolean;
   parserMode: string;
+  lockedSymbol?: string;
   riskProfile: string;
   lotSize: number;
   riskMode?: "fixed" | "percent";

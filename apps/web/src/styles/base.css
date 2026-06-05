@@ -1921,12 +1921,6 @@ h3 {
 }
 
 .dialog-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.dialog-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -2282,81 +2276,6 @@ h3 {
   color: var(--ink);
 }
 
-.sort-indicator {
-  position: relative;
-  display: inline-block;
-  width: 8px;
-  height: 12px;
-  margin-left: 6px;
-  vertical-align: middle;
-}
-
-.sort-indicator::before,
-.sort-indicator::after {
-  content: "";
-  position: absolute;
-  left: 1px;
-  border-inline: 3px solid transparent;
-  opacity: 0.32;
-}
-
-.sort-indicator::before {
-  top: 1px;
-  border-bottom: 4px solid currentColor;
-}
-
-.sort-indicator::after {
-  bottom: 1px;
-  border-top: 4px solid currentColor;
-}
-
-[aria-sort="ascending"] .sort-indicator::before,
-[aria-sort="descending"] .sort-indicator::after {
-  color: var(--accent);
-  opacity: 1;
-}
-
-.data-table .icon-btn {
-  opacity: 0;
-}
-
-.data-table tbody tr:hover .icon-btn,
-.data-table tbody tr:focus-within .icon-btn {
-  opacity: 1;
-}
-
-.modal-overlay {
-  background: hsl(220 30% 12% / 0.28);
-  backdrop-filter: blur(8px) saturate(110%);
-  -webkit-backdrop-filter: blur(8px) saturate(110%);
-  animation: fade-in var(--duration-2) var(--ease-out);
-}
-
-.modal {
-  animation: scale-in var(--duration-3) var(--ease-out);
-  transform-origin: center;
-  box-shadow: var(--shadow-3);
-}
-
-.modal-head {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  background: hsl(0 0% 100% / 0.94);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-}
-
-.signin-shell {
-  background: radial-gradient(circle at top, hsl(199 75% 96%) 0%, var(--bg) 60%);
-}
-
-.signin-logo {
-  box-shadow:
-    inset 0 0 0 1px hsl(0 0% 100% / 0.25),
-    0 8px 28px hsl(199 75% 49% / 0.25);
-}
-
 .signin-title {
   font-weight: 500;
   letter-spacing: -0.02em;
@@ -2418,18 +2337,6 @@ h3 {
 
 .skeleton-chart {
   width: 100%;
-}
-
-.dialog-row-button {
-  width: 100%;
-  justify-content: space-between;
-  text-align: left;
-  cursor: pointer;
-}
-
-.dialog-row-button:disabled {
-  cursor: default;
-  opacity: 0.7;
 }
 
 .dialog-row-muted {
@@ -3579,6 +3486,7 @@ h3 {
 .performance-mode-tabs button.active {
   background: var(--panel);
   color: var(--accent);
+  font-weight: 600;
   box-shadow: var(--shadow-sm);
 }
 
@@ -4152,13 +4060,6 @@ h3 {
 
 /* Provider Config modal — clean, table-aligned ---------------------------- */
 
-.modal-form-clean {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  padding: 20px 22px 22px;
-}
-
 .config-section {
   display: flex;
   flex-direction: column;
@@ -4360,11 +4261,17 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
+  /* Safety net for very narrow viewports: scroll the head + rows together
+     instead of letting the grid clip its trailing columns under the modal edge. */
+  overflow-x: auto;
 }
 
 .config-tp-head {
   display: grid;
-  grid-template-columns: 60px 130px minmax(220px, 1fr) 86px 32px;
+  /* Strategy column is capped (not 1fr) so a short label doesn't float in a huge
+     select; the slack goes to the Lots column, whose content stays right-aligned. */
+  grid-template-columns: 48px 116px minmax(190px, 280px) minmax(72px, 1fr) 30px;
   gap: 10px;
   padding: 0 4px 6px;
   font-family: var(--font-ui);
@@ -4376,9 +4283,14 @@ h3 {
   border-bottom: 1px solid var(--line-subtle);
 }
 
+/* Right-align the Lots header so it sits above the right-aligned lot values. */
+.config-tp-head > span:nth-child(4) {
+  text-align: right;
+}
+
 .config-tp-row {
   display: grid;
-  grid-template-columns: 60px 130px minmax(220px, 1fr) 86px 32px;
+  grid-template-columns: 48px 116px minmax(190px, 280px) minmax(72px, 1fr) 30px;
   gap: 10px;
   align-items: center;
   padding: 4px;
@@ -4845,7 +4757,9 @@ select.config-strategy-input {
   text-decoration: underline;
 }
 
-.modal-wide {
+/* Higher specificity than the later `.modal { max-width: 480px }` so the wide
+   variant wins regardless of source order (it previously did not). */
+.modal.modal-wide {
   max-width: 720px;
 }
 

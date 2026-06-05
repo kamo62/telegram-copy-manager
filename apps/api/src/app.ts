@@ -9,6 +9,7 @@ import {
   matchLifecycleCommandToTrade,
   type OrderType,
   type ParsedSignal,
+  type ParserMode,
   parseSignalText,
   parseSignalTexts,
   type QueueStatus,
@@ -73,6 +74,7 @@ type SymbolAliasScope = "global" | "provider";
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
 type EquityCurveScope = "account" | "provider";
 type StatsRange = "today" | "7d" | "30d" | "90d" | "all";
+type ReportingCurrency = "USD" | "ZAR";
 
 interface AppSettings {
   defaultLotSize: number;
@@ -85,8 +87,11 @@ interface AppSettings {
   leaseTimeoutSeconds: number;
   maxLeaseAttempts: number;
   dedupWindowSeconds: number;
+  maxOpenTradeAgeSeconds: number;
   drawdownWarnPct: number;
   drawdownDangerPct: number;
+  reportingCurrency: ReportingCurrency;
+  usdZarRate: number;
 }
 
 interface AccountSlotInput {
@@ -94,6 +99,8 @@ interface AccountSlotInput {
 }
 
 interface ProviderExecutionConfig {
+  parserMode?: ParserMode | string;
+  lockedSymbol?: string;
   riskMode: "fixed" | "percent";
   riskAmount: number;
   takeProfitLevels: ProviderTakeProfitLevel[];
@@ -114,6 +121,7 @@ type ProviderTakeProfitLevelInput = {
 
 const fallbackAccountId = process.env.DEFAULT_MT5_ACCOUNT_ID ?? demoAccountId;
 const MAX_PROVIDER_TP_LEVELS = 4;
+const REFERENCE_PRICE_MAX_AGE_SECONDS = 60;
 
 const defaultAppSettings: AppSettings = {
   defaultLotSize: 0.1,
@@ -126,9 +134,13 @@ const defaultAppSettings: AppSettings = {
   leaseTimeoutSeconds: 15,
   maxLeaseAttempts: 3,
   dedupWindowSeconds: 300,
+  maxOpenTradeAgeSeconds: 0,
   drawdownWarnPct: 10,
   drawdownDangerPct: 20,
+  reportingCurrency: "USD",
+  usdZarRate: 16,
 };
+const pendingOpenMissingGraceSeconds = 10;
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
 
@@ -265,7 +277,7 @@ export function createApi(options: ApiOptions = {}) {
     const body = await c.req.json<{
       rawText: string;
       accountId?: string;
-      config?: ProviderExecutionConfig;
+      config?: Partial<ProviderExecutionConfig>;
     }>();
     return c.json(store.testProviderConfig(c.req.param("id"), body));
   });
@@ -300,6 +312,7 @@ export function createApi(options: ApiOptions = {}) {
     const body = await c.req.json<{
       enabled?: boolean;
       parserMode?: string;
+      lockedSymbol?: string | null;
       riskProfile?: string;
       lotSize?: number;
       riskMode?: "fixed" | "percent";
@@ -428,9 +441,10 @@ export function createApi(options: ApiOptions = {}) {
 
   app.get("/api/parser/fixtures", (c) => c.json({ fixtures: store.fixtures() }));
 
-  app.get("/api/signals", (c) =>
-    c.json({ signals: store.parsedSignals(), queue: store.queueItems() }),
-  );
+  app.get("/api/signals", (c) => {
+    const queue = store.queueItems();
+    return c.json({ signals: store.parsedSignals(), queue });
+  });
 
   app.post("/api/signals/:id/approve", async (c) => {
     const body = await optionalJson<{ executionMode?: ExecutionMode }>(c.req.raw);
@@ -931,6 +945,7 @@ class AppStore {
           kind: String(row.kind),
           enabled: Boolean(row.enabled),
           parserMode: String(row.parser_mode),
+          lockedSymbol: normalizeLockedSymbol(config?.lockedSymbol),
           riskProfile: String(row.risk_profile),
           lotSize: Number(row.lot_size),
           riskMode: config?.riskMode,
@@ -1061,6 +1076,7 @@ class AppStore {
     input: {
       enabled?: boolean;
       parserMode?: string;
+      lockedSymbol?: string | null;
       riskProfile?: string;
       lotSize?: number;
       riskMode?: "fixed" | "percent";
@@ -1083,6 +1099,7 @@ class AppStore {
         id,
       );
     const hasProviderConfigPatch =
+      "lockedSymbol" in input ||
       input.riskMode !== undefined ||
       input.riskAmount !== undefined ||
       "takeProfitLevels" in input ||
@@ -1097,6 +1114,10 @@ class AppStore {
             ? normalizeProviderTpLevels(input.takeProfitLevels)
             : existingConfig.takeProfitLevels,
         runner: input.runner === undefined ? existingConfig.runner : input.runner,
+        lockedSymbol:
+          "lockedSymbol" in input
+            ? normalizeLockedSymbol(input.lockedSymbol)
+            : existingConfig.lockedSymbol,
       });
     }
     this.audit("provider.update", "info", "Provider settings updated", {
@@ -1109,8 +1130,23 @@ class AppStore {
   providerConfig(providerId: string, accountId?: string): ProviderExecutionConfig {
     const provider = this.providerDetails(providerId);
     const fallbackAmount = provider?.lotSize ?? defaultAppSettings.defaultLotSize;
+    const row = this.db
+      .query("SELECT provider_config_json FROM providers WHERE id = ?")
+      .get(providerId) as Row | null;
+    const config = row?.provider_config_json
+      ? parseJson<Partial<ProviderExecutionConfig>>(String(row.provider_config_json))
+      : {};
+    const providerLevelConfig: ProviderExecutionConfig = {
+      parserMode: normalizeParserMode(provider?.parserMode),
+      lockedSymbol: normalizeLockedSymbol(config.lockedSymbol),
+      riskMode: config.riskMode === "percent" ? "percent" : "fixed",
+      riskAmount: positiveNumber(config.riskAmount, fallbackAmount),
+      takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
+      runner: config.runner,
+    };
     // Per-account override takes precedence; NULL config_json (or no link row) inherits
-    // the provider-level default below.
+    // the provider-level execution defaults below. Parser mode and symbol lock remain
+    // provider-owned so an account override cannot silently widen the parser surface.
     if (accountId) {
       const linkRow = this.db
         .query(
@@ -1120,6 +1156,8 @@ class AppStore {
       if (linkRow?.config_json) {
         const override = parseJson<Partial<ProviderExecutionConfig>>(String(linkRow.config_json));
         return {
+          parserMode: providerLevelConfig.parserMode,
+          lockedSymbol: providerLevelConfig.lockedSymbol,
           riskMode: override.riskMode === "percent" ? "percent" : "fixed",
           riskAmount: positiveNumber(override.riskAmount, fallbackAmount),
           takeProfitLevels: normalizeProviderTpLevels(override.takeProfitLevels),
@@ -1127,18 +1165,7 @@ class AppStore {
         };
       }
     }
-    const row = this.db
-      .query("SELECT provider_config_json FROM providers WHERE id = ?")
-      .get(providerId) as Row | null;
-    const config = row?.provider_config_json
-      ? parseJson<Partial<ProviderExecutionConfig>>(String(row.provider_config_json))
-      : {};
-    return {
-      riskMode: config.riskMode === "percent" ? "percent" : "fixed",
-      riskAmount: positiveNumber(config.riskAmount, fallbackAmount),
-      takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
-      runner: config.runner,
-    };
+    return providerLevelConfig;
   }
 
   providerConfigHistory(providerId: string) {
@@ -1158,18 +1185,40 @@ class AppStore {
 
   testProviderConfig(
     providerId: string,
-    input: { rawText: string; accountId?: string; config?: ProviderExecutionConfig },
+    input: { rawText: string; accountId?: string; config?: Partial<ProviderExecutionConfig> },
   ) {
-    const accountId = input.accountId ?? this.defaultParserAccountId();
-    const parsed = parseSignalText(input.rawText, this.parserContext(providerId, accountId));
-    const config = input.config ?? this.providerConfig(providerId);
+    const accountId = input.accountId ?? this.defaultParserAccountId(providerId);
+    const currentConfig = this.providerConfig(providerId, accountId);
+    const config: ProviderExecutionConfig = input.config
+      ? {
+          parserMode: input.config.parserMode ?? currentConfig.parserMode,
+          lockedSymbol:
+            "lockedSymbol" in input.config
+              ? normalizeLockedSymbol(input.config.lockedSymbol)
+              : currentConfig.lockedSymbol,
+          riskMode: input.config.riskMode === "percent" ? "percent" : currentConfig.riskMode,
+          riskAmount: positiveNumber(input.config.riskAmount, currentConfig.riskAmount),
+          takeProfitLevels:
+            "takeProfitLevels" in input.config
+              ? normalizeProviderTpLevels(input.config.takeProfitLevels)
+              : currentConfig.takeProfitLevels,
+          runner: input.config.runner === undefined ? currentConfig.runner : input.config.runner,
+        }
+      : currentConfig;
+    const context = this.parserContext(providerId, accountId, config);
+    const parsedSignals = parseSignalTexts(input.rawText, context);
     const settings = this.appSettings();
+    const applyConfig = (signal: ParsedSignal) =>
+      applyProviderExecutionConfig(signal, config, {
+        defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" },
+      });
+    const results = parsedSignals.map(applyConfig);
     return {
       providerId,
       accountId,
-      parsed: applyProviderExecutionConfig(parsed, config, {
-        defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" },
-      }),
+      parsed: results[0],
+      results,
+      signalCount: results.length,
       config,
     };
   }
@@ -1471,7 +1520,7 @@ class AppStore {
     const before = this.rawMessageCount(providerId);
     for (const message of messages) {
       const parserText = telegramParserText(message);
-      const context = this.parserContext(providerId, this.defaultParserAccountId());
+      const context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
       const parsed = parseSignalText(parserText, context);
       const parsedSignals = parseSignalTexts(parserText, context);
       this.db
@@ -1548,7 +1597,7 @@ class AppStore {
         const parsed = this.parseUnparsedProviderMessages(
           provider.id,
           Math.max(limit, captured.length),
-          this.defaultParserAccountId(),
+          this.defaultParserAccountId(provider.id),
         );
         result.parsed += parsed.length;
         for (const item of parsed) {
@@ -1583,7 +1632,7 @@ class AppStore {
     providerId: string,
     input: { accountId?: string; dateFrom?: string; dateTo?: string } = {},
   ) {
-    const accountId = input.accountId ?? this.defaultParserAccountId();
+    const accountId = input.accountId ?? this.defaultParserAccountId(providerId);
     const rows = this.rawMessagesForBacktest(providerId, input);
     const commandCounts: Record<string, number> = {};
     const mappingStatusCounts: Record<string, number> = {};
@@ -1677,14 +1726,11 @@ class AppStore {
     };
   }
 
-  parseProviderMessage(
-    providerId: string,
-    rawText: string,
-    accountId = this.defaultParserAccountId(),
-  ) {
+  parseProviderMessage(providerId: string, rawText: string, accountId?: string) {
+    const targetAccountId = accountId ?? this.defaultParserAccountId(providerId);
     const rawMessageId = `raw_${nanoid(10)}`;
     const now = new Date().toISOString();
-    const context = this.parserContext(providerId, accountId);
+    const context = this.parserContext(providerId, targetAccountId);
     const firstResult = parseSignalText(rawText, context);
     const results = parseSignalTexts(rawText, context);
     this.db
@@ -1716,13 +1762,13 @@ class AppStore {
     };
   }
 
-  parseRecentProviderMessages(
-    providerId: string,
-    limit: number,
-    accountId = this.defaultParserAccountId(),
-  ) {
+  parseRecentProviderMessages(providerId: string, limit: number, accountId?: string) {
     this.recentMessages(providerId, limit);
-    return this.parseUnparsedProviderMessages(providerId, limit, accountId);
+    return this.parseUnparsedProviderMessages(
+      providerId,
+      limit,
+      accountId ?? this.defaultParserAccountId(providerId),
+    );
   }
 
   parsedSignals() {
@@ -1804,15 +1850,32 @@ class AppStore {
     const providerId = String(row.provider_id);
     const targetAccountIds = this.targetAccountIdsForProvider(
       providerId,
-      signal.accountId ?? this.defaultParserAccountId(),
+      signal.accountId ?? this.defaultParserAccountId(providerId),
     );
     if (targetAccountIds.length === 0) {
       return { statusCode: 422, error: "Provider is not copied by any MT5 account" };
     }
-    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId();
+    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
     const executionMode = options.executionMode ?? "VIRTUAL_TP";
     const settings = this.appSettings();
     const provider = this.providerDetails(providerId);
+    if (signal.commandType === "OPEN_TRADE" && openTradeSourceExpired(source, settings)) {
+      this.insertNonLeasedQueueItem(parsedSignalId, signal, "EXPIRED", {
+        accountId,
+        executionMode,
+        settings,
+      });
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("EXPIRED", parsedSignalId);
+      this.audit("signal.expired", "warn", "Open trade signal expired before queueing", {
+        parsedSignalId,
+        providerId,
+        messageDate: source?.messageDate,
+        maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
+      });
+      return { statusCode: 409, error: "Open trade signal is too old to queue" };
+    }
     // Dedup window: only collapse against APPROVED signals within the configured window
     // so a provider re-issuing the same short-form signal (e.g. "Sell BTCUSD") after the
     // earlier position closes can still queue. Configurable via settings.dedupWindowSeconds.
@@ -1846,7 +1909,7 @@ class AppStore {
         const signalForTarget =
           targetAccountId === signal.accountId
             ? signal
-            : parseSignalText(signal.originalText, this.parserContext(providerId, targetAccountId));
+            : this.reparseSignalForAccount(signal, providerId, targetAccountId);
         return {
           accountId: targetAccountId,
           config: targetConfig,
@@ -1862,7 +1925,7 @@ class AppStore {
         ) {
           return {
             statusCode: 422,
-            error: "Signal needs GPT extraction or operator confirmation before queueing",
+            error: signalApprovalReviewError(target.accountId, target.signal),
           };
         }
         const orderType = target.signal.orderType ?? "MARKET";
@@ -1939,7 +2002,7 @@ class AppStore {
         const targetSignal = applyProviderExecutionConfig(
           targetAccountId === signal.accountId
             ? signal
-            : parseSignalText(signal.originalText, this.parserContext(providerId, targetAccountId)),
+            : this.reparseSignalForAccount(signal, providerId, targetAccountId),
           targetConfig,
           { defaultTakeProfit },
         );
@@ -2054,7 +2117,7 @@ class AppStore {
 
   ignoreSignal(parsedSignalId: string) {
     const row = this.db
-      .query("SELECT result_json FROM parsed_signals WHERE id = ?")
+      .query("SELECT provider_id, result_json FROM parsed_signals WHERE id = ?")
       .get(parsedSignalId) as Row | null;
     if (row) {
       const existing = this.db
@@ -2062,8 +2125,9 @@ class AppStore {
         .get(parsedSignalId) as Row | null;
       if (!existing) {
         const signal = parseJson<ParsedSignal>(String(row.result_json));
+        const providerId = String(row.provider_id);
         this.insertNonLeasedQueueItem(parsedSignalId, signal, "IGNORED", {
-          accountId: signal.accountId ?? this.defaultParserAccountId(),
+          accountId: signal.accountId ?? this.defaultParserAccountId(providerId),
           executionMode: "VIRTUAL_TP",
           settings: this.appSettings(),
         });
@@ -2120,6 +2184,7 @@ class AppStore {
   }
 
   queueItems() {
+    this.expireStaleOpenTradeQueueItems();
     return (
       this.db
         .query(
@@ -2256,6 +2321,7 @@ class AppStore {
 
   leaseNextQueueItem(accountId?: string): ReturnType<typeof queueRow> | null {
     this.recoverStaleLeases();
+    this.expireStaleOpenTradeQueueItems(accountId);
     const rows = accountId
       ? (this.db
           .query(
@@ -2311,6 +2377,60 @@ class AppStore {
           leaseCount,
         },
       );
+    }
+  }
+
+  private expireStaleOpenTradeQueueItems(accountId?: string) {
+    const settings = this.appSettings();
+    const rows = accountId
+      ? (this.db
+          .query(
+            `SELECT queue_items.id, queue_items.parsed_signal_id, queue_items.logical_trade_id, queue_items.payload_json, queue_items.created_at, logical_trades.data_json
+             FROM queue_items
+             LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
+             WHERE queue_items.status = 'PENDING' AND queue_items.account_id = ?`,
+          )
+          .all(accountId) as Row[])
+      : (this.db
+          .query(
+            `SELECT queue_items.id, queue_items.parsed_signal_id, queue_items.logical_trade_id, queue_items.payload_json, queue_items.created_at, logical_trades.data_json
+             FROM queue_items
+             LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
+             WHERE queue_items.status = 'PENDING'`,
+          )
+          .all() as Row[]);
+    const now = new Date().toISOString();
+    for (const row of rows) {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      if (payload.commandType !== "OPEN_TRADE") continue;
+      const trade = row.data_json ? parseJson<LogicalTrade>(String(row.data_json)) : undefined;
+      const sourceDate = trade?.source?.messageDate || String(row.created_at);
+      if (!openTradeTimestampExpired(sourceDate, settings)) continue;
+      this.db
+        .query("UPDATE queue_items SET status = ?, leased_at = NULL, updated_at = ? WHERE id = ?")
+        .run("EXPIRED", now, String(row.id));
+      if (row.parsed_signal_id) {
+        this.db
+          .query(
+            "UPDATE parsed_signals SET status = ? WHERE id = ? AND status NOT IN ('IGNORED','EXPIRED')",
+          )
+          .run("EXPIRED", String(row.parsed_signal_id));
+      }
+      if (trade && trade.status !== "CLOSED" && trade.status !== "CANCELLED") {
+        const updated = cancelLogicalTrade(trade, {
+          evidence: "Open trade queue expired before MT5 execution",
+          lastSnapshotAt: now,
+        });
+        this.db
+          .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+          .run(updated.status, JSON.stringify(updated), trade.id);
+      }
+      this.audit("queue.expired-open", "warn", "Expired stale open-trade queue item", {
+        queueItemId: String(row.id),
+        logicalTradeId: String(row.logical_trade_id ?? ""),
+        sourceDate,
+        maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
+      });
     }
   }
 
@@ -3775,10 +3895,14 @@ class AppStore {
   }
 
   accountPerformance(accounts = this.mt5Accounts()) {
-    const primary = accounts[0];
+    const settings = this.appSettings();
+    if (usesMixedCurrencies(accounts)) {
+      return this.aggregateAccountPerformance(accounts, settings);
+    }
+    const primary = this.primaryAccount(accounts);
     if (!primary) {
       return {
-        currency: "$",
+        currency: settings.reportingCurrency,
         heartbeatStatus: "offline",
         lastHeartbeatAt: null,
         initialBalance: null,
@@ -3835,6 +3959,112 @@ class AppStore {
       thisMonth,
       equityCurve: this.equityCurve(primary.id, initial, accountOrders),
       monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders, floatingPnl ?? 0),
+    };
+  }
+
+  private aggregateAccountPerformance(
+    accounts: ReturnType<AppStore["mt5Accounts"]>,
+    settings: AppSettings,
+  ) {
+    const currency = settings.reportingCurrency;
+    const heartbeatStatus = aggregateHeartbeatStatus(
+      accounts.map((account) => account.heartbeatStatus),
+    );
+    const lastHeartbeatAt =
+      accounts
+        .map((account) => account.lastHeartbeatAt)
+        .sort()
+        .reverse()[0] ?? null;
+    const unsupportedCurrencies = accounts
+      .map((account) => normalizedMoneyCurrency(account.currency))
+      .filter((accountCurrency) => !canConvertMoneyCurrency(accountCurrency));
+    if (unsupportedCurrencies.length > 0) {
+      return {
+        accountId: "aggregate",
+        currency,
+        heartbeatStatus,
+        lastHeartbeatAt,
+        initialBalance: null,
+        currentBalance: null,
+        currentEquity: null,
+        currentProfit: null,
+        totalProfit: null,
+        realizedPnl: null,
+        floatingPnl: null,
+        netDeposits: null,
+        today: null,
+        thisWeek: null,
+        thisMonth: null,
+        equityCurve: [],
+        monthlyReturns: [],
+      };
+    }
+    const convert = (value: number | null | undefined, fromCurrency: string) =>
+      convertMoney(value, fromCurrency, currency, settings.usdZarRate);
+    const accountOrders = accounts.flatMap((account) =>
+      this.brokerOrdersForAccount(account.id).map((order) => ({
+        ...order,
+        pnlCurrency: convert(order.pnlCurrency, account.currency),
+      })),
+    );
+    const initial = roundCurrency(
+      accounts.reduce(
+        (sum, account) =>
+          sum + convert(account.initialBalance || account.balance, account.currency),
+        0,
+      ),
+    );
+    const liveAccounts = accounts.filter((account) => account.heartbeatStatus === "online");
+    const allOnline = accounts.length > 0 && liveAccounts.length === accounts.length;
+    const realizedPnl = sumPnl(accountOrders);
+    const floatingPnl = allOnline
+      ? roundCurrency(
+          accounts.reduce((sum, account) => {
+            const brokerFloatingPnl = nullableNumber(account.profit);
+            const fallbackFloatingPnl = roundCurrency(
+              Number.isFinite(account.equity) && Number.isFinite(account.balance)
+                ? account.equity - account.balance
+                : floatingPnlFromPositions(
+                    this.mt5SnapshotsByAccount()[account.id]?.positions ?? [],
+                  ),
+            );
+            return sum + convert(brokerFloatingPnl ?? fallbackFloatingPnl, account.currency);
+          }, 0),
+        )
+      : null;
+    const totalProfit = floatingPnl === null ? null : roundCurrency(realizedPnl + floatingPnl);
+    const currentBalance = allOnline
+      ? roundCurrency(
+          accounts.reduce((sum, account) => sum + convert(account.balance, account.currency), 0),
+        )
+      : null;
+    const currentEquity = allOnline
+      ? roundCurrency(
+          accounts.reduce((sum, account) => sum + convert(account.equity, account.currency), 0),
+        )
+      : null;
+    const netDeposits =
+      allOnline && currentEquity !== null && totalProfit !== null
+        ? roundCurrency(currentEquity - initial - totalProfit)
+        : null;
+    return {
+      accountId: "aggregate",
+      currency,
+      heartbeatStatus,
+      lastHeartbeatAt,
+      initialBalance: initial,
+      currentBalance,
+      currentEquity,
+      currentProfit: floatingPnl,
+      totalProfit,
+      realizedPnl,
+      floatingPnl,
+      netDeposits,
+      today: sumPnl(accountOrders.filter((order) => withinCurrentDay(order.createdAt))),
+      thisWeek: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 7))),
+      thisMonth: sumPnl(accountOrders.filter((order) => withinCurrentMonth(order.createdAt))),
+      equityCurve: aggregateEquityCurve(initial, accountOrders, floatingPnl ?? 0),
+      monthlyReturns: aggregateMonthlyReturns(initial, accountOrders, floatingPnl ?? 0),
     };
   }
 
@@ -4936,12 +5166,27 @@ class AppStore {
   }
 
   saveAccountMapping(accountId: string, mapping: AccountSymbolMapping) {
+    const existing = this.storedAccountMapping(accountId) ?? defaultAccountMapping(accountId);
+    const incomingOverrides = normalizeCanonicalOverrides(mapping.canonicalOverrides);
+    const merged: AccountSymbolMapping = {
+      accountId,
+      canonicalOverrides: {
+        ...(existing.canonicalOverrides ?? {}),
+        ...incomingOverrides,
+      },
+      prefix: mapping.prefix ?? existing.prefix ?? "",
+      suffix: mapping.suffix ?? existing.suffix ?? "",
+      includeSymbols: mapping.includeSymbols ?? existing.includeSymbols ?? [],
+      excludeSymbols: mapping.excludeSymbols ?? existing.excludeSymbols ?? [],
+      availableBrokerSymbols:
+        mapping.availableBrokerSymbols ?? existing.availableBrokerSymbols ?? [],
+    };
     this.db
       .query(
         "INSERT INTO account_symbol_mappings (account_id, mapping_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET mapping_json = excluded.mapping_json, updated_at = excluded.updated_at",
       )
-      .run(accountId, JSON.stringify({ ...mapping, accountId }), new Date().toISOString());
-    return { accountId, mapping: { ...mapping, accountId } };
+      .run(accountId, JSON.stringify(merged), new Date().toISOString());
+    return { accountId, mapping: merged };
   }
 
   saveFixture(input: {
@@ -5004,7 +5249,7 @@ class AppStore {
     const rawText = input.redactedRawText?.trim() || message.rawText;
     const parsed = parseSignalText(
       rawText,
-      this.parserContext(message.providerId, this.defaultParserAccountId()),
+      this.parserContext(message.providerId, this.defaultParserAccountId(message.providerId)),
     );
     const expected = fixtureExpected(parsed);
     const expectedCommandType = input.expectedCommandType ?? parsed.commandType;
@@ -5135,9 +5380,9 @@ class AppStore {
 
   dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock") {
     const providers = this.providers();
+    const queue = this.queueItems();
     const parsed = this.parsedSignals();
     const accounts = this.mt5Accounts();
-    const queue = this.queueItems();
     return {
       health: {
         status: "ok",
@@ -5146,6 +5391,9 @@ class AppStore {
       },
       appSettings: this.appSettings(),
       accountPerformance: this.accountPerformance(accounts),
+      accountPerformanceByAccount: Object.fromEntries(
+        accounts.map((account) => [account.id, this.accountPerformance([account])]),
+      ),
       providerPerformance: this.providerPerformance(undefined, accounts),
       providerPerformanceByAccount: Object.fromEntries(
         accounts.map((account) => [account.id, this.providerPerformance(account.id, accounts)]),
@@ -5160,6 +5408,7 @@ class AppStore {
         title: provider.title,
         enabled: provider.enabled,
         parserMode: provider.parserMode,
+        lockedSymbol: provider.lockedSymbol,
         riskProfile: provider.riskProfile,
         lotSize: provider.lotSize,
         lastMessageAt: provider.lastMessageAt,
@@ -5173,6 +5422,11 @@ class AppStore {
         id: account.id,
         accountNumber: account.accountNumber,
         server: account.server,
+        currency: account.currency,
+        balance: account.balance,
+        equity: account.equity,
+        profit: account.profit,
+        initialBalance: account.initialBalance,
         heartbeatStatus: account.heartbeatStatus,
         marginMode: account.marginMode,
         openPositionCount: account.openPositionCount,
@@ -5276,8 +5530,34 @@ class AppStore {
     if (this.allowDemoData) this.ensureMockProvider(profileId);
   }
 
-  private defaultParserAccountId() {
-    return this.mt5Accounts()[0]?.id ?? fallbackAccountId;
+  private primaryAccount(accounts = this.mt5Accounts()) {
+    return [...accounts].sort((a, b) => {
+      const statusDelta =
+        accountFreshnessScore(b.heartbeatStatus) - accountFreshnessScore(a.heartbeatStatus);
+      if (statusDelta !== 0) return statusDelta;
+      const fundedDelta = accountFundedScore(b) - accountFundedScore(a);
+      if (fundedDelta !== 0) return fundedDelta;
+      const heartbeatDelta = Date.parse(b.lastHeartbeatAt) - Date.parse(a.lastHeartbeatAt);
+      if (Number.isFinite(heartbeatDelta) && heartbeatDelta !== 0) return heartbeatDelta;
+      return a.accountNumber.localeCompare(b.accountNumber);
+    })[0];
+  }
+
+  private defaultParserAccountId(providerId?: string) {
+    const accounts = this.mt5Accounts();
+    const linkedAccountIds = providerId
+      ? new Set(
+          this.accountProviderLinks()
+            .filter((link) => link.providerId === providerId && link.enabled)
+            .map((link) => link.accountId),
+        )
+      : undefined;
+    const candidates = linkedAccountIds?.size
+      ? accounts.filter((account) => linkedAccountIds.has(account.id))
+      : accounts;
+    return (
+      this.primaryAccount(candidates)?.id ?? this.primaryAccount(accounts)?.id ?? fallbackAccountId
+    );
   }
 
   private migrate() {
@@ -5958,7 +6238,7 @@ class AppStore {
     demoMessages().forEach((message, index) => {
       const parsed = parseSignalText(
         message.rawText,
-        this.parserContext(providerId, this.defaultParserAccountId()),
+        this.parserContext(providerId, this.defaultParserAccountId(providerId)),
       );
       this.db
         .query(
@@ -5976,14 +6256,26 @@ class AppStore {
     });
   }
 
-  private parserContext(providerId: string, accountId: string) {
+  private parserContext(
+    providerId: string,
+    accountId: string,
+    overrides?: Pick<ProviderExecutionConfig, "parserMode" | "lockedSymbol">,
+  ) {
     const settings = this.appSettings();
+    const providerConfig = this.providerConfig(providerId);
+    const lockedSymbol = normalizeLockedSymbol(
+      overrides?.lockedSymbol ?? providerConfig.lockedSymbol,
+    );
+    const providerDefaultSymbols = this.providerDefaultSymbols();
+    if (lockedSymbol) providerDefaultSymbols[providerId] = lockedSymbol;
     return {
       providerId,
       accountId,
+      parserMode: normalizeParserMode(overrides?.parserMode ?? providerConfig.parserMode),
       globalAliases: this.globalAliases(),
       providerAliases: this.providerAliases(),
-      providerDefaultSymbols: this.providerDefaultSymbols(),
+      providerDefaultSymbols,
+      referencePrices: this.referencePricesForAccount(accountId),
       accountMappings: this.accountMappings(accountId),
       defaultStopLoss: { value: settings.defaultStopLossPips, unit: "PIPS" as const },
       defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" as const },
@@ -6029,8 +6321,76 @@ class AppStore {
   private providerDefaultSymbols() {
     return Object.fromEntries(
       this.providers()
-        .filter((provider) => provider.title.toLowerCase().includes("kal"))
-        .map((provider) => [provider.id, "XAUUSD"]),
+        .map((provider) => {
+          const lockedSymbol = normalizeLockedSymbol(provider.lockedSymbol);
+          if (lockedSymbol) return [provider.id, lockedSymbol] as const;
+          if (provider.title.toLowerCase().includes("kal")) return [provider.id, "XAUUSD"] as const;
+          return undefined;
+        })
+        .filter((entry): entry is readonly [string, string] => Boolean(entry)),
+    );
+  }
+
+  private referencePricesForAccount(accountId: string) {
+    const snapshot = this.mt5SnapshotsByAccount()[accountId];
+    if (!snapshot) return {};
+    const updatedAt = Date.parse(snapshot.updatedAt);
+    if (
+      !Number.isFinite(updatedAt) ||
+      Date.now() - updatedAt > REFERENCE_PRICE_MAX_AGE_SECONDS * 1000
+    ) {
+      return {};
+    }
+
+    const prices: Record<string, number> = {};
+    for (const record of snapshot.symbols) {
+      if (!record || typeof record !== "object") continue;
+      const item = record as Record<string, unknown>;
+      const rawSymbol = item.symbol ?? item.name;
+      const symbol =
+        typeof rawSymbol === "string" || typeof rawSymbol === "number"
+          ? normalizeLockedSymbol(String(rawSymbol))
+          : undefined;
+      const bid = Number(item.bid ?? 0);
+      const ask = Number(item.ask ?? 0);
+      const price =
+        Number.isFinite(bid) && bid > 0 && Number.isFinite(ask) && ask > 0
+          ? (bid + ask) / 2
+          : Number.isFinite(bid) && bid > 0
+            ? bid
+            : Number.isFinite(ask) && ask > 0
+              ? ask
+              : undefined;
+      if (!symbol || price === undefined) continue;
+      prices[symbol] = price;
+      const compact = symbol.replace(/[\s/_.#-]/g, "");
+      prices[compact] = price;
+      if (compact.includes("XAUUSD") || compact.includes("GOLD")) {
+        prices.XAUUSD = price;
+        prices.GOLD = price;
+      }
+    }
+    return prices;
+  }
+
+  private reparseSignalForAccount(
+    signal: ParsedSignal,
+    providerId: string,
+    accountId: string,
+  ): ParsedSignal {
+    const context = this.parserContext(providerId, accountId);
+    const candidates = parseSignalTexts(signal.originalText, context);
+    return (
+      candidates.find((candidate) => candidate.fingerprint === signal.fingerprint) ??
+      candidates.find(
+        (candidate) =>
+          candidate.commandType === signal.commandType &&
+          candidate.direction === signal.direction &&
+          candidate.entry?.from === signal.entry?.from &&
+          candidate.entry?.to === signal.entry?.to,
+      ) ??
+      candidates[0] ??
+      parseSignalText(signal.originalText, context)
     );
   }
 
@@ -6224,7 +6584,7 @@ class AppStore {
   private insertNonLeasedQueueItem(
     parsedSignalId: string,
     signal: ParsedSignal,
-    status: Extract<QueueStatus, "DUPLICATE" | "IGNORED">,
+    status: Extract<QueueStatus, "DUPLICATE" | "IGNORED" | "EXPIRED">,
     options: {
       accountId: string;
       executionMode: ExecutionMode;
@@ -6300,12 +6660,71 @@ class AppStore {
         trade,
         this.brokerOrderTicketsForTrade(trade.id),
       );
-      const updated = snapshotSyncTradeState(trade, match);
+      const missingPendingOpen =
+        match.status === "missing" ? this.missingPendingOpenOrder(trade.id) : null;
+      const updated = missingPendingOpen
+        ? cancelLogicalTrade(trade, {
+            evidence: [
+              "Pending broker order disappeared from latest MT5 snapshot",
+              missingPendingOpen.orderTicket ? `order:${missingPendingOpen.orderTicket}` : "",
+            ]
+              .filter(Boolean)
+              .join(" | "),
+            lastSnapshotAt: match.lastSnapshotAt,
+          })
+        : snapshotSyncTradeState(trade, match);
       if (JSON.stringify(updated) === JSON.stringify(trade)) continue;
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run(updated.status, JSON.stringify(updated), trade.id);
+      if (missingPendingOpen) {
+        this.audit(
+          "logical-trade.pending-missing",
+          "warn",
+          "Cancelled missing broker pending order",
+          {
+            logicalTradeId: trade.id,
+            orderTicket: missingPendingOpen.orderTicket,
+            accountId,
+          },
+        );
+      }
     }
+  }
+
+  private missingPendingOpenOrder(tradeId: string) {
+    const row = this.db
+      .query(
+        `SELECT order_ticket, broker_comment, created_at
+         FROM broker_orders
+         WHERE logical_trade_id = ?
+           AND action = 'PENDING_OPEN'
+           AND order_ticket IS NOT NULL
+           AND order_ticket NOT IN ('','0')
+           AND NOT EXISTS (
+             SELECT 1 FROM broker_orders AS opened
+             WHERE opened.logical_trade_id = broker_orders.logical_trade_id
+               AND opened.action = 'OPEN'
+               AND opened.position_ticket IS NOT NULL
+               AND opened.position_ticket NOT IN ('','0')
+               AND opened.filled_price IS NOT NULL
+               AND opened.filled_price > 0
+           )
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(tradeId) as Row | null;
+    if (!row) return null;
+    const createdAt = String(row.created_at ?? "");
+    const created = Date.parse(normalizedDateInput(createdAt));
+    const graceMs =
+      Math.max(pendingOpenMissingGraceSeconds, this.appSettings().pollingIntervalSeconds * 2) *
+      1000;
+    if (Number.isFinite(created) && Date.now() - created < graceMs) return null;
+    return {
+      orderTicket: String(row.order_ticket ?? ""),
+      brokerComment: String(row.broker_comment ?? ""),
+      createdAt,
+    };
   }
 
   /**
@@ -7421,7 +7840,7 @@ function withinCurrentDay(iso: string) {
 }
 
 function withinCurrentMonth(iso: string) {
-  return monthKey(iso) === new Date().toISOString().slice(0, 7);
+  return monthKey(iso) === new Date(Date.now()).toISOString().slice(0, 7);
 }
 
 function dayKey(iso: string) {
@@ -7435,7 +7854,7 @@ function dayKey(iso: string) {
 function monthKey(iso: string) {
   const normalized = normalizedDateInput(iso);
   const match = normalized.match(/^(\d{4})-(\d{2})/);
-  return match ? `${match[1]}-${match[2]}` : new Date().toISOString().slice(0, 7);
+  return match ? `${match[1]}-${match[2]}` : new Date(Date.now()).toISOString().slice(0, 7);
 }
 
 function heartbeatFreshness(iso: string) {
@@ -7444,6 +7863,16 @@ function heartbeatFreshness(iso: string) {
   if (ageMs <= 10_000) return "online";
   if (ageMs <= 30_000) return "stale";
   return "offline";
+}
+
+function accountFreshnessScore(status: string) {
+  if (status === "online") return 3;
+  if (status === "stale") return 2;
+  return 1;
+}
+
+function accountFundedScore(account: { balance?: number; equity?: number }) {
+  return (account.balance ?? 0) > 0 || (account.equity ?? 0) > 0 ? 1 : 0;
 }
 
 function normalizeProviderTpLevels(
@@ -7477,6 +7906,16 @@ function normalizeProviderTpLevels(
     ...level,
     percentage: Number(((level.percentage / total) * 100).toFixed(2)),
   }));
+}
+
+function normalizeParserMode(value: unknown): ParserMode {
+  return value === "kal-vip" || value === "kal-vip-extended" ? value : "deterministic";
+}
+
+function normalizeLockedSymbol(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const normalized = String(value).trim().toUpperCase().replace(/\s+/g, "");
+  return normalized ? normalized : undefined;
 }
 
 function normalizeTakeProfitStrategy(
@@ -7713,6 +8152,38 @@ function snapshotMatchForRecords(
   };
 }
 
+function openTradeSourceExpired(source: TradeSource | undefined, settings: AppSettings) {
+  return openTradeTimestampExpired(source?.messageDate, settings);
+}
+
+function openTradeTimestampExpired(value: string | undefined, settings: AppSettings) {
+  if (settings.maxOpenTradeAgeSeconds <= 0) return false;
+  if (!value) return false;
+  const timestamp = Date.parse(normalizedDateInput(value));
+  if (!Number.isFinite(timestamp)) return false;
+  return Date.now() - timestamp > settings.maxOpenTradeAgeSeconds * 1000;
+}
+
+function cancelLogicalTrade(
+  trade: LogicalTrade,
+  input: { evidence: string; lastSnapshotAt: string },
+): LogicalTrade {
+  return {
+    ...trade,
+    status: "CANCELLED",
+    livePositionExists: false,
+    outOfSyncReason: undefined,
+    matchedBrokerTickets: [],
+    brokerComment: undefined,
+    lastSnapshotAt: input.lastSnapshotAt,
+    legs: trade.legs.map((leg) =>
+      leg.status === "CLOSED" || leg.status === "HIT"
+        ? leg
+        : { ...leg, status: "SKIPPED" as const, brokerEvidence: input.evidence },
+    ),
+  };
+}
+
 function snapshotSyncTradeState(trade: LogicalTrade, match: SnapshotTradeMatch): LogicalTrade {
   if (match.status === "matched") {
     return {
@@ -7817,6 +8288,16 @@ function reviewReasons(signal: ParsedSignal) {
     reasons.push("lifecycle-missing-symbol");
   }
   return reasons.length ? reasons : ["operator-confirmation-rule"];
+}
+
+function signalApprovalReviewError(accountId: string, signal: ParsedSignal) {
+  const symbolPath = [signal.rawSymbol, signal.canonicalSymbol, signal.brokerSymbol]
+    .filter(Boolean)
+    .join(" -> ");
+  const reasons = reviewReasons(signal).join(", ");
+  return `Signal needs GPT extraction or operator confirmation before queueing for ${accountId}: ${
+    symbolPath || "symbol unavailable"
+  } (${reasons})`;
 }
 
 async function reviewSignalWithAzureOpenAI(input: {
@@ -7967,6 +8448,18 @@ function listMatches(left: string[] | undefined, right: string[]) {
   return normalized.every((item, index) => item === expected[index]);
 }
 
+function normalizeCanonicalOverrides(overrides: Record<string, string> | undefined) {
+  if (!overrides) return {};
+  return Object.fromEntries(
+    Object.entries(overrides)
+      .map(([canonicalSymbol, brokerSymbol]) => [
+        canonicalSymbol.trim().toUpperCase().replace("/", ""),
+        brokerSymbol.trim(),
+      ])
+      .filter(([canonicalSymbol, brokerSymbol]) => canonicalSymbol && brokerSymbol),
+  );
+}
+
 function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
   const allowedOrderTypes =
     input.allowedOrderTypes?.filter((orderType): orderType is AppOrderType =>
@@ -7977,6 +8470,17 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     clampPercent(input.drawdownDangerPct, defaultAppSettings.drawdownDangerPct),
     drawdownWarnPct,
   );
+  const reportingCurrency =
+    input.reportingCurrency === "ZAR" || input.reportingCurrency === "USD"
+      ? input.reportingCurrency
+      : defaultAppSettings.reportingCurrency;
+  const maxOpenTradeAgeInput = Number(input.maxOpenTradeAgeSeconds);
+  const maxOpenTradeAgeSeconds =
+    Number.isFinite(maxOpenTradeAgeInput) && maxOpenTradeAgeInput >= 0
+      ? maxOpenTradeAgeInput === 0
+        ? 0
+        : Math.max(60, Math.min(86_400, Math.round(maxOpenTradeAgeInput)))
+      : defaultAppSettings.maxOpenTradeAgeSeconds;
   return {
     defaultLotSize: positiveNumber(input.defaultLotSize, defaultAppSettings.defaultLotSize),
     defaultRiskPercent: positiveNumber(
@@ -8014,9 +8518,108 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
         Math.round(positiveNumber(input.dedupWindowSeconds, defaultAppSettings.dedupWindowSeconds)),
       ),
     ),
+    maxOpenTradeAgeSeconds,
     drawdownWarnPct,
     drawdownDangerPct,
+    reportingCurrency,
+    usdZarRate: positiveNumber(input.usdZarRate, defaultAppSettings.usdZarRate),
   };
+}
+
+function usesMixedCurrencies(accounts: Array<{ currency: string }>) {
+  const currencies = new Set(accounts.map((account) => normalizedMoneyCurrency(account.currency)));
+  return currencies.size > 1;
+}
+
+function normalizedMoneyCurrency(currency: string): ReportingCurrency | string {
+  const normalized = currency.trim().toUpperCase();
+  if (normalized === "$") return "USD";
+  if (normalized === "R") return "ZAR";
+  return normalized;
+}
+
+function canConvertMoneyCurrency(currency: string) {
+  return currency === "USD" || currency === "ZAR";
+}
+
+function convertMoney(
+  value: number | null | undefined,
+  fromCurrency: string,
+  toCurrency: ReportingCurrency,
+  usdZarRate: number,
+) {
+  if (value === null || value === undefined) return 0;
+  const from = normalizedMoneyCurrency(fromCurrency);
+  if (from === toCurrency) return roundCurrency(value);
+  if (from === "USD" && toCurrency === "ZAR") return roundCurrency(value * usdZarRate);
+  if (from === "ZAR" && toCurrency === "USD") return roundCurrency(value / usdZarRate);
+  return roundCurrency(value);
+}
+
+function aggregateHeartbeatStatus(statuses: string[]) {
+  if (statuses.length === 0) return "offline";
+  if (statuses.some((status) => status === "online")) return "online";
+  if (statuses.some((status) => status === "stale")) return "stale";
+  return "offline";
+}
+
+function aggregateEquityCurve(
+  initialBalance: number,
+  orders: Array<{ pnlCurrency?: number; createdAt: string }>,
+  floatingPnl: number,
+) {
+  let equity = initialBalance;
+  let peak = initialBalance;
+  const points = [{ x: 0, equity, drawdown: 0 }];
+  orders
+    .filter((order) => order.pnlCurrency !== undefined && order.pnlCurrency !== null)
+    .sort(
+      (a, b) =>
+        Date.parse(normalizedDateInput(a.createdAt)) - Date.parse(normalizedDateInput(b.createdAt)),
+    )
+    .forEach((order, index) => {
+      equity += order.pnlCurrency ?? 0;
+      peak = Math.max(peak, equity);
+      points.push({
+        x: index + 1,
+        equity: roundCurrency(equity),
+        drawdown: drawdownPercent(peak, equity),
+      });
+    });
+  const currentTradingEquity = roundCurrency(initialBalance + sumPnl(orders) + floatingPnl);
+  if (points.length === 1 || points[points.length - 1]?.equity !== currentTradingEquity) {
+    peak = Math.max(peak, currentTradingEquity);
+    points.push({
+      x: points.length,
+      equity: currentTradingEquity,
+      drawdown: drawdownPercent(peak, currentTradingEquity),
+    });
+  }
+  return points;
+}
+
+function aggregateMonthlyReturns(
+  initialBalance: number,
+  orders: Array<{ pnlCurrency?: number; createdAt: string }>,
+  floatingPnl: number,
+) {
+  if (initialBalance <= 0) return [];
+  const byMonth = new Map<string, number>();
+  for (const order of orders) {
+    const month = monthKey(order.createdAt);
+    byMonth.set(month, (byMonth.get(month) ?? 0) + (order.pnlCurrency ?? 0));
+  }
+  const currentMonth = new Date().toISOString().slice(0, 7);
+  if (floatingPnl !== 0) {
+    byMonth.set(currentMonth, (byMonth.get(currentMonth) ?? 0) + floatingPnl);
+  }
+  if (byMonth.size === 0) {
+    return [{ month: currentMonth, returnPercent: 0 }];
+  }
+  return [...byMonth.entries()].map(([month, pnl]) => ({
+    month,
+    returnPercent: Number(((pnl / initialBalance) * 100).toFixed(2)),
+  }));
 }
 
 function clampPercent(value: unknown, fallback: number): number {

@@ -1,5 +1,104 @@
 # Changelog
 
+## 1.15.0 - 2026-06-05 (Minor)
+
+Release impact: Minor because this adds a backward-compatible provider parser mode, provider symbol
+lock field, and dry-run parsing behavior without changing EA command contracts or requiring a
+database migration.
+
+- Added a `KAL VIP extended` provider parser mode that expands terse Gold/XAUUSD level commentary
+  into one pending-limit signal per level only when a fresh EA snapshot supplies the current
+  reference price.
+- Added a provider-level locked symbol setting to the provider config modal and API payloads so a
+  provider can be constrained to one symbol before shorthand parsing is allowed.
+- Updated provider config dry-runs to use the multi-signal parser path and return the parsed signal
+  count, so operators can test multi-level posts before saving.
+- Added regression coverage for Automatic-mode gating, missing-reference-price gating, provider
+  symbol lock persistence, dry-run testing, and queued KAL VIP extended short levels.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.15.0`.
+
+## 1.14.1 - 2026-06-05 (Patch)
+
+Release impact: Patch because this tightens dashboard accounting, queue reconciliation, and README
+coverage without changing public API or EA command contracts.
+
+- Fixed mixed-currency aggregate performance so unsupported currencies and partially offline account
+  sets do not publish misleading current totals.
+- Added a freshness guard before cancelling accepted pending orders that disappear from MT5
+  snapshots.
+- Expired parsed-signal state together with stale open-trade queue work so deduplication no longer
+  blocks a reissued signal after the executable queue item has expired.
+- Used per-account performance rollups for focused account Trading P/L instead of heartbeat-only
+  floating profit.
+- Updated the README to cover the current operator surfaces, API endpoints, replay guard, reporting
+  currency settings, provider export, and EA version snippet.
+- Added regression coverage for the PR review fixes.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.14.1`.
+
+## 1.14.0 - 2026-06-05 (Minor)
+
+Release impact: Minor because this adds a backward-compatible stale Telegram replay safety setting
+and tightens MT5 pending-order reconciliation without breaking API or EA command contracts.
+
+- Added a configurable open-trade expiry guard so refetching recent Telegram messages can skip stale
+  open signals instead of queuing trades after a relaunch.
+- Marked accepted pending orders that disappear from the latest MT5 snapshot as cancelled instead of
+  leaving their logical trades permanently out of sync.
+- Added regression coverage for stale Telegram replay expiry, missing pending-order reconciliation,
+  and current-month KPI windows.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.14.0`.
+
+## 1.13.2 - 2026-05-27 (Patch)
+
+Release impact: Patch because this fixes account-level broker symbol resolution and diagnostics
+without changing API or EA command contracts.
+
+- Added HF-style `XAUUSDr` as a recognized `XAUUSD` broker variant when the EA reports that symbol.
+- Preserved EA-reported account symbol inventories and existing overrides when saving account-level
+  mapping edits from the symbol settings UI.
+- Added account-level mapping prefix support to the symbol mapping modal.
+- Included the target account and symbol mapping reason when approval is blocked for operator
+  confirmation.
+
+## 1.13.1 - 2026-05-26 (Patch)
+
+Release impact: Patch because this corrects account-scoped dashboard currency rendering without
+changing API, database, or EA command contracts.
+
+- Fixed account-scoped Live routes to use the selected MT5 account currency instead of the overview
+  reporting currency.
+- Prevented aggregate reporting-currency performance data from being relabeled as account-local
+  currency on account-specific pages.
+- Added regression coverage for the ZAR account Logs route.
+
+## 1.13.0 - 2026-05-26 (Minor)
+
+Release impact: Minor because this adds configurable mixed-currency reporting settings and new
+dashboard summary behavior without breaking existing API, database, or EA command contracts.
+
+- Added reporting currency and USD/ZAR rate settings, defaulting mixed-currency account summaries to
+  USD at 1 USD = R16.
+- Added mixed-currency account performance aggregation so ZAR and USD account balances, equity, and
+  P/L windows are normalized before dashboard display.
+- Fixed overview KPI liveness checks for aggregate account performance so mixed-currency summaries
+  are not hidden because the first account row is offline.
+- Added regression coverage for mixed-currency conversion, settings persistence, settings UI payloads,
+  and aggregate KPI rendering.
+
+## 1.12.3 - 2026-05-26 (Patch)
+
+Release impact: Patch because this fixes account selection for parsing and dashboard summaries
+without changing API or EA command contracts.
+
+- Fixed provider parsing to prefer the freshest online linked MT5 account, so old linked accounts
+  no longer force clean Gold signals into GPT/operator review because their symbol list is stale.
+- Fixed the Live dashboard money summary to prefer the active/funded account instead of the lowest
+  account number.
+- Fixed the Performance growth chart to use the active performance currency instead of the first
+  account row's currency.
+- Included account currency, balance, equity, profit, and initial balance in the dashboard account
+  rows for reliable account-scoped rendering.
+
 ## 1.12.2 - 2026-05-25 (Patch)
 
 Release impact: Patch because this fixes Telegram bootstrap state and slow GramJS dialog refresh
