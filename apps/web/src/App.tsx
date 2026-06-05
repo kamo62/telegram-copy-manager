@@ -70,6 +70,7 @@ export interface DashboardSnapshot {
     allowedOrderTypes: string[];
     azureOpenAIKeyConfigured: boolean;
     dedupWindowSeconds: number;
+    maxOpenTradeAgeSeconds: number;
     drawdownWarnPct: number;
     drawdownDangerPct: number;
     reportingCurrency: "USD" | "ZAR";
@@ -302,6 +303,7 @@ const emptySnapshot: DashboardSnapshot = {
     allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
     azureOpenAIKeyConfigured: false,
     dedupWindowSeconds: 300,
+    maxOpenTradeAgeSeconds: 0,
     drawdownWarnPct: 10,
     drawdownDangerPct: 20,
     reportingCurrency: "USD",
@@ -1216,6 +1218,7 @@ export function App({
       azureOpenAIApiKey: String(formData.get("azureOpenAIApiKey") ?? ""),
       pollingIntervalSeconds: Number(formData.get("pollingIntervalSeconds")),
       dedupWindowSeconds: Number(formData.get("dedupWindowSeconds")),
+      maxOpenTradeAgeSeconds: Number(formData.get("maxOpenTradeAgeSeconds")),
       allowedOrderTypes: formData.getAll("allowedOrderTypes").map(String),
       drawdownWarnPct: Number(formData.get("drawdownWarnPct")),
       drawdownDangerPct: Number(formData.get("drawdownDangerPct")),

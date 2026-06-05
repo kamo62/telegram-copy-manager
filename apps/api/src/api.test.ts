@@ -2602,6 +2602,94 @@ describe("Telegram TC API", () => {
     });
   });
 
+  test("cancels accepted pending orders that disappear from broker snapshots", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request executed",
+        orderTicket: "70001",
+        positionTicket: "0",
+        dealTicket: "0",
+        requestedPrice: 4541,
+        filledPrice: 0,
+        volume: 0.04,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [],
+        orders: [],
+        symbols: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const dashboard = await json<{
+      logicalTrades: Array<{
+        id: string;
+        status: string;
+        outOfSyncReason?: string;
+        livePositionExists?: boolean;
+        legs: Array<{ status: string }>;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    const trade = dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId);
+    expect(trade).toMatchObject({
+      status: "CANCELLED",
+      livePositionExists: false,
+    });
+    expect(trade?.outOfSyncReason).toBeUndefined();
+    expect(trade?.legs.every((leg) => leg.status === "SKIPPED")).toBe(true);
+  });
+
+  test("expires stale open-trade Telegram replays instead of queueing them", async () => {
+    const oldMessageDate = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const telegram = createQueuedTelegramAdapter([
+      {
+        telegramMessageId: "old-gold-1",
+        messageDate: oldMessageDate,
+        rawText: "Gold buy limit\n\n4541-40\n\nSL 4535\n\nTP 4546\nTP 4553",
+      },
+    ]);
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram,
+      telegramPollingEnabled: false,
+    });
+    await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ maxOpenTradeAgeSeconds: 30 * 60 }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const result = await app.runTelegramIngestionOnce();
+    const dashboard = await json<{
+      signalQueue: Array<{ status: string; commandType: string }>;
+      logicalTrades: Array<{ status: string }>;
+    }>(await app.request("/api/dashboard"));
+
+    expect(result.queued).toBe(0);
+    expect(dashboard.signalQueue).toContainEqual(
+      expect.objectContaining({ commandType: "OPEN_TRADE", status: "EXPIRED" }),
+    );
+    expect(dashboard.signalQueue.filter((item) => item.status === "PENDING")).toHaveLength(0);
+    expect(dashboard.logicalTrades).toHaveLength(0);
+  });
+
   test("exposes a line-oriented MT5 poll payload for the MQL5 expert advisor", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
 
@@ -3112,6 +3200,7 @@ describe("Telegram TC API", () => {
         pollingIntervalSeconds: number;
         allowedOrderTypes: string[];
         dedupWindowSeconds: number;
+        maxOpenTradeAgeSeconds: number;
         drawdownWarnPct: number;
         drawdownDangerPct: number;
         reportingCurrency: string;
@@ -3127,6 +3216,7 @@ describe("Telegram TC API", () => {
       leaseTimeoutSeconds: 15,
       maxLeaseAttempts: 3,
       dedupWindowSeconds: 300,
+      maxOpenTradeAgeSeconds: 0,
       pollingIntervalSeconds: 2,
       allowedOrderTypes: ["MARKET", "LIMIT", "STOP"],
       drawdownWarnPct: 10,

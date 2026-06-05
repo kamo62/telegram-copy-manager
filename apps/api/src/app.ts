@@ -86,6 +86,7 @@ interface AppSettings {
   leaseTimeoutSeconds: number;
   maxLeaseAttempts: number;
   dedupWindowSeconds: number;
+  maxOpenTradeAgeSeconds: number;
   drawdownWarnPct: number;
   drawdownDangerPct: number;
   reportingCurrency: ReportingCurrency;
@@ -129,6 +130,7 @@ const defaultAppSettings: AppSettings = {
   leaseTimeoutSeconds: 15,
   maxLeaseAttempts: 3,
   dedupWindowSeconds: 300,
+  maxOpenTradeAgeSeconds: 0,
   drawdownWarnPct: 10,
   drawdownDangerPct: 20,
   reportingCurrency: "USD",
@@ -1815,6 +1817,23 @@ class AppStore {
     const executionMode = options.executionMode ?? "VIRTUAL_TP";
     const settings = this.appSettings();
     const provider = this.providerDetails(providerId);
+    if (signal.commandType === "OPEN_TRADE" && openTradeSourceExpired(source, settings)) {
+      this.insertNonLeasedQueueItem(parsedSignalId, signal, "EXPIRED", {
+        accountId,
+        executionMode,
+        settings,
+      });
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("EXPIRED", parsedSignalId);
+      this.audit("signal.expired", "warn", "Open trade signal expired before queueing", {
+        parsedSignalId,
+        providerId,
+        messageDate: source?.messageDate,
+        maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
+      });
+      return { statusCode: 409, error: "Open trade signal is too old to queue" };
+    }
     // Dedup window: only collapse against APPROVED signals within the configured window
     // so a provider re-issuing the same short-form signal (e.g. "Sell BTCUSD") after the
     // earlier position closes can still queue. Configurable via settings.dedupWindowSeconds.
@@ -2123,6 +2142,7 @@ class AppStore {
   }
 
   queueItems() {
+    this.expireStaleOpenTradeQueueItems();
     return (
       this.db
         .query(
@@ -2259,6 +2279,7 @@ class AppStore {
 
   leaseNextQueueItem(accountId?: string): ReturnType<typeof queueRow> | null {
     this.recoverStaleLeases();
+    this.expireStaleOpenTradeQueueItems(accountId);
     const rows = accountId
       ? (this.db
           .query(
@@ -2314,6 +2335,53 @@ class AppStore {
           leaseCount,
         },
       );
+    }
+  }
+
+  private expireStaleOpenTradeQueueItems(accountId?: string) {
+    const settings = this.appSettings();
+    const rows = accountId
+      ? (this.db
+          .query(
+            `SELECT queue_items.id, queue_items.logical_trade_id, queue_items.payload_json, queue_items.created_at, logical_trades.data_json
+             FROM queue_items
+             LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
+             WHERE queue_items.status = 'PENDING' AND queue_items.account_id = ?`,
+          )
+          .all(accountId) as Row[])
+      : (this.db
+          .query(
+            `SELECT queue_items.id, queue_items.logical_trade_id, queue_items.payload_json, queue_items.created_at, logical_trades.data_json
+             FROM queue_items
+             LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
+             WHERE queue_items.status = 'PENDING'`,
+          )
+          .all() as Row[]);
+    const now = new Date().toISOString();
+    for (const row of rows) {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      if (payload.commandType !== "OPEN_TRADE") continue;
+      const trade = row.data_json ? parseJson<LogicalTrade>(String(row.data_json)) : undefined;
+      const sourceDate = trade?.source?.messageDate || String(row.created_at);
+      if (!openTradeTimestampExpired(sourceDate, settings)) continue;
+      this.db
+        .query("UPDATE queue_items SET status = ?, leased_at = NULL, updated_at = ? WHERE id = ?")
+        .run("EXPIRED", now, String(row.id));
+      if (trade && trade.status !== "CLOSED" && trade.status !== "CANCELLED") {
+        const updated = cancelLogicalTrade(trade, {
+          evidence: "Open trade queue expired before MT5 execution",
+          lastSnapshotAt: now,
+        });
+        this.db
+          .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+          .run(updated.status, JSON.stringify(updated), trade.id);
+      }
+      this.audit("queue.expired-open", "warn", "Expired stale open-trade queue item", {
+        queueItemId: String(row.id),
+        logicalTradeId: String(row.logical_trade_id ?? ""),
+        sourceDate,
+        maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
+      });
     }
   }
 
@@ -6363,7 +6431,7 @@ class AppStore {
   private insertNonLeasedQueueItem(
     parsedSignalId: string,
     signal: ParsedSignal,
-    status: Extract<QueueStatus, "DUPLICATE" | "IGNORED">,
+    status: Extract<QueueStatus, "DUPLICATE" | "IGNORED" | "EXPIRED">,
     options: {
       accountId: string;
       executionMode: ExecutionMode;
@@ -6439,12 +6507,66 @@ class AppStore {
         trade,
         this.brokerOrderTicketsForTrade(trade.id),
       );
-      const updated = snapshotSyncTradeState(trade, match);
+      const missingPendingOpen =
+        match.status === "missing" ? this.missingPendingOpenOrder(trade.id) : null;
+      const updated = missingPendingOpen
+        ? cancelLogicalTrade(trade, {
+            evidence: [
+              "Pending broker order disappeared from latest MT5 snapshot",
+              missingPendingOpen.orderTicket ? `order:${missingPendingOpen.orderTicket}` : "",
+            ]
+              .filter(Boolean)
+              .join(" | "),
+            lastSnapshotAt: match.lastSnapshotAt,
+          })
+        : snapshotSyncTradeState(trade, match);
       if (JSON.stringify(updated) === JSON.stringify(trade)) continue;
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run(updated.status, JSON.stringify(updated), trade.id);
+      if (missingPendingOpen) {
+        this.audit(
+          "logical-trade.pending-missing",
+          "warn",
+          "Cancelled missing broker pending order",
+          {
+            logicalTradeId: trade.id,
+            orderTicket: missingPendingOpen.orderTicket,
+            accountId,
+          },
+        );
+      }
     }
+  }
+
+  private missingPendingOpenOrder(tradeId: string) {
+    const row = this.db
+      .query(
+        `SELECT order_ticket, broker_comment, created_at
+         FROM broker_orders
+         WHERE logical_trade_id = ?
+           AND action = 'PENDING_OPEN'
+           AND order_ticket IS NOT NULL
+           AND order_ticket NOT IN ('','0')
+           AND NOT EXISTS (
+             SELECT 1 FROM broker_orders AS opened
+             WHERE opened.logical_trade_id = broker_orders.logical_trade_id
+               AND opened.action = 'OPEN'
+               AND opened.position_ticket IS NOT NULL
+               AND opened.position_ticket NOT IN ('','0')
+               AND opened.filled_price IS NOT NULL
+               AND opened.filled_price > 0
+           )
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(tradeId) as Row | null;
+    return row
+      ? {
+          orderTicket: String(row.order_ticket ?? ""),
+          brokerComment: String(row.broker_comment ?? ""),
+          createdAt: String(row.created_at ?? ""),
+        }
+      : null;
   }
 
   /**
@@ -7560,7 +7682,7 @@ function withinCurrentDay(iso: string) {
 }
 
 function withinCurrentMonth(iso: string) {
-  return monthKey(iso) === new Date().toISOString().slice(0, 7);
+  return monthKey(iso) === new Date(Date.now()).toISOString().slice(0, 7);
 }
 
 function dayKey(iso: string) {
@@ -7574,7 +7696,7 @@ function dayKey(iso: string) {
 function monthKey(iso: string) {
   const normalized = normalizedDateInput(iso);
   const match = normalized.match(/^(\d{4})-(\d{2})/);
-  return match ? `${match[1]}-${match[2]}` : new Date().toISOString().slice(0, 7);
+  return match ? `${match[1]}-${match[2]}` : new Date(Date.now()).toISOString().slice(0, 7);
 }
 
 function heartbeatFreshness(iso: string) {
@@ -7859,6 +7981,38 @@ function snapshotMatchForRecords(
     livePositionExists: false,
     matchedBrokerTickets: [],
     lastSnapshotAt: now,
+  };
+}
+
+function openTradeSourceExpired(source: TradeSource | undefined, settings: AppSettings) {
+  return openTradeTimestampExpired(source?.messageDate, settings);
+}
+
+function openTradeTimestampExpired(value: string | undefined, settings: AppSettings) {
+  if (settings.maxOpenTradeAgeSeconds <= 0) return false;
+  if (!value) return false;
+  const timestamp = Date.parse(normalizedDateInput(value));
+  if (!Number.isFinite(timestamp)) return false;
+  return Date.now() - timestamp > settings.maxOpenTradeAgeSeconds * 1000;
+}
+
+function cancelLogicalTrade(
+  trade: LogicalTrade,
+  input: { evidence: string; lastSnapshotAt: string },
+): LogicalTrade {
+  return {
+    ...trade,
+    status: "CANCELLED",
+    livePositionExists: false,
+    outOfSyncReason: undefined,
+    matchedBrokerTickets: [],
+    brokerComment: undefined,
+    lastSnapshotAt: input.lastSnapshotAt,
+    legs: trade.legs.map((leg) =>
+      leg.status === "CLOSED" || leg.status === "HIT"
+        ? leg
+        : { ...leg, status: "SKIPPED" as const, brokerEvidence: input.evidence },
+    ),
   };
 }
 
@@ -8152,6 +8306,13 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     input.reportingCurrency === "ZAR" || input.reportingCurrency === "USD"
       ? input.reportingCurrency
       : defaultAppSettings.reportingCurrency;
+  const maxOpenTradeAgeInput = Number(input.maxOpenTradeAgeSeconds);
+  const maxOpenTradeAgeSeconds =
+    Number.isFinite(maxOpenTradeAgeInput) && maxOpenTradeAgeInput >= 0
+      ? maxOpenTradeAgeInput === 0
+        ? 0
+        : Math.max(60, Math.min(86_400, Math.round(maxOpenTradeAgeInput)))
+      : defaultAppSettings.maxOpenTradeAgeSeconds;
   return {
     defaultLotSize: positiveNumber(input.defaultLotSize, defaultAppSettings.defaultLotSize),
     defaultRiskPercent: positiveNumber(
@@ -8189,6 +8350,7 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
         Math.round(positiveNumber(input.dedupWindowSeconds, defaultAppSettings.dedupWindowSeconds)),
       ),
     ),
+    maxOpenTradeAgeSeconds,
     drawdownWarnPct,
     drawdownDangerPct,
     reportingCurrency,

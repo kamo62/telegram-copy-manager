@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.14.0 - 2026-06-05 (Minor)
+
+Release impact: Minor because this adds a backward-compatible stale Telegram replay safety setting
+and tightens MT5 pending-order reconciliation without breaking API or EA command contracts.
+
+- Added a configurable open-trade expiry guard so refetching recent Telegram messages can skip stale
+  open signals instead of queuing trades after a relaunch.
+- Marked accepted pending orders that disappear from the latest MT5 snapshot as cancelled instead of
+  leaving their logical trades permanently out of sync.
+- Added regression coverage for stale Telegram replay expiry, missing pending-order reconciliation,
+  and current-month KPI windows.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.14.0`.
+
 ## 1.13.2 - 2026-05-27 (Patch)
 
 Release impact: Patch because this fixes account-level broker symbol resolution and diagnostics

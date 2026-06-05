@@ -286,6 +286,22 @@ export function SettingsPage({
                 type="number"
               />
             </Field>
+            <Field
+              hint="Open trades older than this are marked expired instead of being sent to MT5 after a reconnect. Use 0 to disable. Range 60–86400."
+              htmlFor="maxOpenTradeAgeSeconds"
+              label="Open trade expiry (seconds)"
+            >
+              <input
+                className="settings-input mono"
+                defaultValue={settings.maxOpenTradeAgeSeconds}
+                id="maxOpenTradeAgeSeconds"
+                max="86400"
+                min="0"
+                name="maxOpenTradeAgeSeconds"
+                step="60"
+                type="number"
+              />
+            </Field>
           </div>
         </SettingsSection>
 

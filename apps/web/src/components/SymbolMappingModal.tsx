@@ -99,7 +99,7 @@ export function SymbolMappingModal({
         </header>
 
         <form
-          className="modal-form modal-form-clean"
+          className="modal-form"
           key={scope}
           noValidate
           onSubmit={(event) => {

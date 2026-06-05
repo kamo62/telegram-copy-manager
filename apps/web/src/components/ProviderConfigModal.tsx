@@ -494,7 +494,7 @@ export function ProviderConfigModal({
         </header>
 
         <form
-          className="modal-form modal-form-clean"
+          className="modal-form"
           key={provider.id}
           noValidate
           onSubmit={(event) => {
