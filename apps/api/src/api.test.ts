@@ -3221,42 +3221,130 @@ describe("Telegram TC API", () => {
     });
   });
 
-  test("updates provider parser mode, risk profile, and channel lot size settings", async () => {
+  test("updates provider parser mode, symbol lock, risk profile, and channel lot size settings", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     const providers = await json<{
-      providers: Array<{ id: string; parserMode: string; riskProfile: string; lotSize: number }>;
+      providers: Array<{
+        id: string;
+        parserMode: string;
+        lockedSymbol?: string;
+        riskProfile: string;
+        lotSize: number;
+      }>;
     }>(await app.request("/api/providers"));
     const providerId = providers.providers[0]!.id;
     expect(providers.providers[0]!.riskProfile).toBe("balanced");
     expect(providers.providers[0]!.lotSize).toBe(0.1);
 
     const update = await json<{
-      provider: { id: string; parserMode: string; riskProfile: string; lotSize: number };
+      provider: {
+        id: string;
+        parserMode: string;
+        lockedSymbol?: string;
+        riskProfile: string;
+        lotSize: number;
+      };
     }>(
       await app.request(`/api/providers/${providerId}`, {
         method: "PATCH",
-        body: JSON.stringify({ parserMode: "kal-vip", riskProfile: "conservative", lotSize: 0.2 }),
+        body: JSON.stringify({
+          parserMode: "kal-vip-extended",
+          lockedSymbol: "XAUUSD",
+          riskProfile: "conservative",
+          lotSize: 0.2,
+        }),
         headers: { "content-type": "application/json" },
       }),
     );
 
     expect(update.provider).toMatchObject({
       id: providerId,
-      parserMode: "kal-vip",
+      parserMode: "kal-vip-extended",
+      lockedSymbol: "XAUUSD",
       riskProfile: "conservative",
       lotSize: 0.2,
     });
     const refreshed = await json<{
-      providers: Array<{ id: string; parserMode: string; riskProfile: string; lotSize: number }>;
+      providers: Array<{
+        id: string;
+        parserMode: string;
+        lockedSymbol?: string;
+        riskProfile: string;
+        lotSize: number;
+      }>;
     }>(await app.request("/api/providers"));
+    expect(refreshed.providers[0]!.parserMode).toBe("kal-vip-extended");
+    expect(refreshed.providers[0]!.lockedSymbol).toBe("XAUUSD");
     expect(refreshed.providers[0]!.riskProfile).toBe("conservative");
     expect(refreshed.providers[0]!.lotSize).toBe(0.2);
 
     const dashboard = await json<{
-      providers: Array<{ id: string; parserMode: string; riskProfile: string; lotSize: number }>;
+      providers: Array<{
+        id: string;
+        parserMode: string;
+        lockedSymbol?: string;
+        riskProfile: string;
+        lotSize: number;
+      }>;
     }>(await app.request("/api/dashboard"));
+    expect(dashboard.providers[0]!.lockedSymbol).toBe("XAUUSD");
     expect(dashboard.providers[0]!.riskProfile).toBe("conservative");
     expect(dashboard.providers[0]!.lotSize).toBe(0.2);
+  });
+
+  test("dry-runs KAL VIP extended parser config with a locked symbol and fresh EA price", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        positions: [],
+        orders: [],
+        symbols: [{ symbol: "XAUUSD.r", bid: 4444.1, ask: 4444.5 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const result = await json<{
+      parsed: { commandType: string; direction?: string; entry?: { from: number } };
+      signalCount: number;
+      config: { parserMode?: string; lockedSymbol?: string };
+    }>(
+      await app.request("/api/providers/provider-alpha/test-config", {
+        method: "POST",
+        body: JSON.stringify({
+          rawText: [
+            "First sell zone is the head on the pinbar",
+            "",
+            "Around 41 level",
+            "",
+            "Second sell is 56",
+            "",
+            "The 03 level can be a buy",
+          ].join("\n"),
+          accountId: "mt5-100200300",
+          config: {
+            parserMode: "kal-vip-extended",
+            lockedSymbol: "XAUUSD",
+            riskMode: "fixed",
+            riskAmount: 0.02,
+            takeProfitLevels: [],
+          },
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    expect(result.signalCount).toBe(3);
+    expect(result.parsed).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      entry: { from: 4441 },
+    });
+    expect(result.config).toMatchObject({
+      parserMode: "kal-vip-extended",
+      lockedSymbol: "XAUUSD",
+    });
   });
 
   test("persists app settings and enforces allowed order behavior", async () => {
@@ -3841,6 +3929,83 @@ describe("Telegram TC API", () => {
       expect(payload).toContain("defaultStopLossValue=50");
       expect(payload).toContain("defaultTakeProfitValue=200");
     }
+  });
+
+  test("queues KAL VIP extended short levels against the locked symbol reference price", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+    await app.request("/api/providers/provider-alpha", {
+      method: "PATCH",
+      body: JSON.stringify({
+        parserMode: "kal-vip-extended",
+        lockedSymbol: "XAUUSD",
+        riskMode: "fixed",
+        riskAmount: 0.02,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        positions: [],
+        orders: [],
+        symbols: [{ symbol: "XAUUSD.r", bid: 4444.1, ask: 4444.5 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{
+      parsedSignalIds: string[];
+      results: Array<{ commandType: string; direction?: string; entry?: { from: number } }>;
+    }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          accountId: "mt5-100200300",
+          rawText: [
+            "First sell zone is the head on the pinbar",
+            "",
+            "Around 41 level",
+            "",
+            "Second sell is 56",
+            "",
+            "The 03 level can be a buy",
+          ].join("\n"),
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    expect(parsed.parsedSignalIds).toHaveLength(3);
+    expect(parsed.results.map((result) => [result.direction, result.entry?.from])).toEqual([
+      ["SELL", 4441],
+      ["SELL", 4456],
+      ["BUY", 4403],
+    ]);
+
+    for (const parsedSignalId of parsed.parsedSignalIds) {
+      const approval = await app.request(`/api/signals/${parsedSignalId}/approve`, {
+        method: "POST",
+      });
+      expect(approval.status).toBe(200);
+    }
+
+    const pollLines = await Promise.all(
+      [0, 1, 2].map(async () => app.request("/api/mt5/poll-line?accountId=mt5-100200300")),
+    );
+    const payloads = await Promise.all(pollLines.map((response) => response.text()));
+    expect(payloads.map((payload) => payload.match(/entryFrom=([^\n]+)/)?.[1])).toEqual([
+      "4441",
+      "4456",
+      "4403",
+    ]);
+    expect(payloads.map((payload) => payload.match(/direction=([^\n]+)/)?.[1])).toEqual([
+      "SELL",
+      "SELL",
+      "BUY",
+    ]);
   });
 
   test("uses provider channel lot size and ignores Telegram-provided lot and risk hints", async () => {

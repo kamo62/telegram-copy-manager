@@ -747,7 +747,10 @@ describe("App dashboard", () => {
     clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
-      target: { value: "kal-vip" },
+      target: { value: "kal-vip-extended" },
+    });
+    fireEvent.input(view.getByLabelText("Locked symbol for Alpha FX Signals"), {
+      target: { value: "XAUUSD" },
     });
     fireEvent.change(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
       target: { value: "0.2" },
@@ -763,7 +766,8 @@ describe("App dashboard", () => {
     const settingsCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
     expect(settingsCall?.init?.method).toBe("PATCH");
     expect(JSON.parse(String(settingsCall?.init?.body))).toMatchObject({
-      parserMode: "kal-vip",
+      parserMode: "kal-vip-extended",
+      lockedSymbol: "XAUUSD",
       lotSize: 0.2,
       riskMode: "fixed",
       riskAmount: 0.2,
@@ -982,6 +986,12 @@ describe("App dashboard", () => {
     const view = render(<App initialSnapshot={snapshot} />);
     clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
+    fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
+      target: { value: "kal-vip-extended" },
+    });
+    fireEvent.input(view.getByLabelText("Locked symbol for Alpha FX Signals"), {
+      target: { value: "XAUUSD" },
+    });
     fireEvent.input(view.getByLabelText("Provider test message for Alpha FX Signals"), {
       target: { value: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910" },
     });
@@ -995,6 +1005,8 @@ describe("App dashboard", () => {
     const body = JSON.parse(String(testCall?.init?.body));
     expect(body.rawText).toBe("BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910");
     expect(body.config).toMatchObject({
+      parserMode: "kal-vip-extended",
+      lockedSymbol: "XAUUSD",
       riskMode: "fixed",
       riskAmount: 0.1,
     });

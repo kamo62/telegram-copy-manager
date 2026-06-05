@@ -9,6 +9,7 @@ import {
   matchLifecycleCommandToTrade,
   type OrderType,
   type ParsedSignal,
+  type ParserMode,
   parseSignalText,
   parseSignalTexts,
   type QueueStatus,
@@ -98,6 +99,8 @@ interface AccountSlotInput {
 }
 
 interface ProviderExecutionConfig {
+  parserMode?: ParserMode | string;
+  lockedSymbol?: string;
   riskMode: "fixed" | "percent";
   riskAmount: number;
   takeProfitLevels: ProviderTakeProfitLevel[];
@@ -118,6 +121,7 @@ type ProviderTakeProfitLevelInput = {
 
 const fallbackAccountId = process.env.DEFAULT_MT5_ACCOUNT_ID ?? demoAccountId;
 const MAX_PROVIDER_TP_LEVELS = 4;
+const REFERENCE_PRICE_MAX_AGE_SECONDS = 60;
 
 const defaultAppSettings: AppSettings = {
   defaultLotSize: 0.1,
@@ -273,7 +277,7 @@ export function createApi(options: ApiOptions = {}) {
     const body = await c.req.json<{
       rawText: string;
       accountId?: string;
-      config?: ProviderExecutionConfig;
+      config?: Partial<ProviderExecutionConfig>;
     }>();
     return c.json(store.testProviderConfig(c.req.param("id"), body));
   });
@@ -308,6 +312,7 @@ export function createApi(options: ApiOptions = {}) {
     const body = await c.req.json<{
       enabled?: boolean;
       parserMode?: string;
+      lockedSymbol?: string | null;
       riskProfile?: string;
       lotSize?: number;
       riskMode?: "fixed" | "percent";
@@ -940,6 +945,7 @@ class AppStore {
           kind: String(row.kind),
           enabled: Boolean(row.enabled),
           parserMode: String(row.parser_mode),
+          lockedSymbol: normalizeLockedSymbol(config?.lockedSymbol),
           riskProfile: String(row.risk_profile),
           lotSize: Number(row.lot_size),
           riskMode: config?.riskMode,
@@ -1070,6 +1076,7 @@ class AppStore {
     input: {
       enabled?: boolean;
       parserMode?: string;
+      lockedSymbol?: string | null;
       riskProfile?: string;
       lotSize?: number;
       riskMode?: "fixed" | "percent";
@@ -1092,6 +1099,7 @@ class AppStore {
         id,
       );
     const hasProviderConfigPatch =
+      "lockedSymbol" in input ||
       input.riskMode !== undefined ||
       input.riskAmount !== undefined ||
       "takeProfitLevels" in input ||
@@ -1106,6 +1114,10 @@ class AppStore {
             ? normalizeProviderTpLevels(input.takeProfitLevels)
             : existingConfig.takeProfitLevels,
         runner: input.runner === undefined ? existingConfig.runner : input.runner,
+        lockedSymbol:
+          "lockedSymbol" in input
+            ? normalizeLockedSymbol(input.lockedSymbol)
+            : existingConfig.lockedSymbol,
       });
     }
     this.audit("provider.update", "info", "Provider settings updated", {
@@ -1118,8 +1130,23 @@ class AppStore {
   providerConfig(providerId: string, accountId?: string): ProviderExecutionConfig {
     const provider = this.providerDetails(providerId);
     const fallbackAmount = provider?.lotSize ?? defaultAppSettings.defaultLotSize;
+    const row = this.db
+      .query("SELECT provider_config_json FROM providers WHERE id = ?")
+      .get(providerId) as Row | null;
+    const config = row?.provider_config_json
+      ? parseJson<Partial<ProviderExecutionConfig>>(String(row.provider_config_json))
+      : {};
+    const providerLevelConfig: ProviderExecutionConfig = {
+      parserMode: normalizeParserMode(provider?.parserMode),
+      lockedSymbol: normalizeLockedSymbol(config.lockedSymbol),
+      riskMode: config.riskMode === "percent" ? "percent" : "fixed",
+      riskAmount: positiveNumber(config.riskAmount, fallbackAmount),
+      takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
+      runner: config.runner,
+    };
     // Per-account override takes precedence; NULL config_json (or no link row) inherits
-    // the provider-level default below.
+    // the provider-level execution defaults below. Parser mode and symbol lock remain
+    // provider-owned so an account override cannot silently widen the parser surface.
     if (accountId) {
       const linkRow = this.db
         .query(
@@ -1129,6 +1156,8 @@ class AppStore {
       if (linkRow?.config_json) {
         const override = parseJson<Partial<ProviderExecutionConfig>>(String(linkRow.config_json));
         return {
+          parserMode: providerLevelConfig.parserMode,
+          lockedSymbol: providerLevelConfig.lockedSymbol,
           riskMode: override.riskMode === "percent" ? "percent" : "fixed",
           riskAmount: positiveNumber(override.riskAmount, fallbackAmount),
           takeProfitLevels: normalizeProviderTpLevels(override.takeProfitLevels),
@@ -1136,18 +1165,7 @@ class AppStore {
         };
       }
     }
-    const row = this.db
-      .query("SELECT provider_config_json FROM providers WHERE id = ?")
-      .get(providerId) as Row | null;
-    const config = row?.provider_config_json
-      ? parseJson<Partial<ProviderExecutionConfig>>(String(row.provider_config_json))
-      : {};
-    return {
-      riskMode: config.riskMode === "percent" ? "percent" : "fixed",
-      riskAmount: positiveNumber(config.riskAmount, fallbackAmount),
-      takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
-      runner: config.runner,
-    };
+    return providerLevelConfig;
   }
 
   providerConfigHistory(providerId: string) {
@@ -1167,18 +1185,40 @@ class AppStore {
 
   testProviderConfig(
     providerId: string,
-    input: { rawText: string; accountId?: string; config?: ProviderExecutionConfig },
+    input: { rawText: string; accountId?: string; config?: Partial<ProviderExecutionConfig> },
   ) {
     const accountId = input.accountId ?? this.defaultParserAccountId(providerId);
-    const parsed = parseSignalText(input.rawText, this.parserContext(providerId, accountId));
-    const config = input.config ?? this.providerConfig(providerId);
+    const currentConfig = this.providerConfig(providerId, accountId);
+    const config: ProviderExecutionConfig = input.config
+      ? {
+          parserMode: input.config.parserMode ?? currentConfig.parserMode,
+          lockedSymbol:
+            "lockedSymbol" in input.config
+              ? normalizeLockedSymbol(input.config.lockedSymbol)
+              : currentConfig.lockedSymbol,
+          riskMode: input.config.riskMode === "percent" ? "percent" : currentConfig.riskMode,
+          riskAmount: positiveNumber(input.config.riskAmount, currentConfig.riskAmount),
+          takeProfitLevels:
+            "takeProfitLevels" in input.config
+              ? normalizeProviderTpLevels(input.config.takeProfitLevels)
+              : currentConfig.takeProfitLevels,
+          runner: input.config.runner === undefined ? currentConfig.runner : input.config.runner,
+        }
+      : currentConfig;
+    const context = this.parserContext(providerId, accountId, config);
+    const parsedSignals = parseSignalTexts(input.rawText, context);
     const settings = this.appSettings();
+    const applyConfig = (signal: ParsedSignal) =>
+      applyProviderExecutionConfig(signal, config, {
+        defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" },
+      });
+    const results = parsedSignals.map(applyConfig);
     return {
       providerId,
       accountId,
-      parsed: applyProviderExecutionConfig(parsed, config, {
-        defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" },
-      }),
+      parsed: results[0],
+      results,
+      signalCount: results.length,
       config,
     };
   }
@@ -1869,7 +1909,7 @@ class AppStore {
         const signalForTarget =
           targetAccountId === signal.accountId
             ? signal
-            : parseSignalText(signal.originalText, this.parserContext(providerId, targetAccountId));
+            : this.reparseSignalForAccount(signal, providerId, targetAccountId);
         return {
           accountId: targetAccountId,
           config: targetConfig,
@@ -1962,7 +2002,7 @@ class AppStore {
         const targetSignal = applyProviderExecutionConfig(
           targetAccountId === signal.accountId
             ? signal
-            : parseSignalText(signal.originalText, this.parserContext(providerId, targetAccountId)),
+            : this.reparseSignalForAccount(signal, providerId, targetAccountId),
           targetConfig,
           { defaultTakeProfit },
         );
@@ -5368,6 +5408,7 @@ class AppStore {
         title: provider.title,
         enabled: provider.enabled,
         parserMode: provider.parserMode,
+        lockedSymbol: provider.lockedSymbol,
         riskProfile: provider.riskProfile,
         lotSize: provider.lotSize,
         lastMessageAt: provider.lastMessageAt,
@@ -6215,14 +6256,26 @@ class AppStore {
     });
   }
 
-  private parserContext(providerId: string, accountId: string) {
+  private parserContext(
+    providerId: string,
+    accountId: string,
+    overrides?: Pick<ProviderExecutionConfig, "parserMode" | "lockedSymbol">,
+  ) {
     const settings = this.appSettings();
+    const providerConfig = this.providerConfig(providerId);
+    const lockedSymbol = normalizeLockedSymbol(
+      overrides?.lockedSymbol ?? providerConfig.lockedSymbol,
+    );
+    const providerDefaultSymbols = this.providerDefaultSymbols();
+    if (lockedSymbol) providerDefaultSymbols[providerId] = lockedSymbol;
     return {
       providerId,
       accountId,
+      parserMode: normalizeParserMode(overrides?.parserMode ?? providerConfig.parserMode),
       globalAliases: this.globalAliases(),
       providerAliases: this.providerAliases(),
-      providerDefaultSymbols: this.providerDefaultSymbols(),
+      providerDefaultSymbols,
+      referencePrices: this.referencePricesForAccount(accountId),
       accountMappings: this.accountMappings(accountId),
       defaultStopLoss: { value: settings.defaultStopLossPips, unit: "PIPS" as const },
       defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" as const },
@@ -6268,8 +6321,76 @@ class AppStore {
   private providerDefaultSymbols() {
     return Object.fromEntries(
       this.providers()
-        .filter((provider) => provider.title.toLowerCase().includes("kal"))
-        .map((provider) => [provider.id, "XAUUSD"]),
+        .map((provider) => {
+          const lockedSymbol = normalizeLockedSymbol(provider.lockedSymbol);
+          if (lockedSymbol) return [provider.id, lockedSymbol] as const;
+          if (provider.title.toLowerCase().includes("kal")) return [provider.id, "XAUUSD"] as const;
+          return undefined;
+        })
+        .filter((entry): entry is readonly [string, string] => Boolean(entry)),
+    );
+  }
+
+  private referencePricesForAccount(accountId: string) {
+    const snapshot = this.mt5SnapshotsByAccount()[accountId];
+    if (!snapshot) return {};
+    const updatedAt = Date.parse(snapshot.updatedAt);
+    if (
+      !Number.isFinite(updatedAt) ||
+      Date.now() - updatedAt > REFERENCE_PRICE_MAX_AGE_SECONDS * 1000
+    ) {
+      return {};
+    }
+
+    const prices: Record<string, number> = {};
+    for (const record of snapshot.symbols) {
+      if (!record || typeof record !== "object") continue;
+      const item = record as Record<string, unknown>;
+      const rawSymbol = item.symbol ?? item.name;
+      const symbol =
+        typeof rawSymbol === "string" || typeof rawSymbol === "number"
+          ? normalizeLockedSymbol(String(rawSymbol))
+          : undefined;
+      const bid = Number(item.bid ?? 0);
+      const ask = Number(item.ask ?? 0);
+      const price =
+        Number.isFinite(bid) && bid > 0 && Number.isFinite(ask) && ask > 0
+          ? (bid + ask) / 2
+          : Number.isFinite(bid) && bid > 0
+            ? bid
+            : Number.isFinite(ask) && ask > 0
+              ? ask
+              : undefined;
+      if (!symbol || price === undefined) continue;
+      prices[symbol] = price;
+      const compact = symbol.replace(/[\s/_.#-]/g, "");
+      prices[compact] = price;
+      if (compact.includes("XAUUSD") || compact.includes("GOLD")) {
+        prices.XAUUSD = price;
+        prices.GOLD = price;
+      }
+    }
+    return prices;
+  }
+
+  private reparseSignalForAccount(
+    signal: ParsedSignal,
+    providerId: string,
+    accountId: string,
+  ): ParsedSignal {
+    const context = this.parserContext(providerId, accountId);
+    const candidates = parseSignalTexts(signal.originalText, context);
+    return (
+      candidates.find((candidate) => candidate.fingerprint === signal.fingerprint) ??
+      candidates.find(
+        (candidate) =>
+          candidate.commandType === signal.commandType &&
+          candidate.direction === signal.direction &&
+          candidate.entry?.from === signal.entry?.from &&
+          candidate.entry?.to === signal.entry?.to,
+      ) ??
+      candidates[0] ??
+      parseSignalText(signal.originalText, context)
     );
   }
 
@@ -7785,6 +7906,16 @@ function normalizeProviderTpLevels(
     ...level,
     percentage: Number(((level.percentage / total) * 100).toFixed(2)),
   }));
+}
+
+function normalizeParserMode(value: unknown): ParserMode {
+  return value === "kal-vip" || value === "kal-vip-extended" ? value : "deterministic";
+}
+
+function normalizeLockedSymbol(value: unknown): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const normalized = String(value).trim().toUpperCase().replace(/\s+/g, "");
+  return normalized ? normalized : undefined;
 }
 
 function normalizeTakeProfitStrategy(

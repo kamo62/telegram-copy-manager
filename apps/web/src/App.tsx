@@ -1154,6 +1154,7 @@ export function App({
     }
     await apiPatch(`/api/providers/${provider.id}`, {
       parserMode: payload.parserMode,
+      lockedSymbol: payload.lockedSymbol,
       lotSize: payload.lotSize,
       riskMode: payload.riskMode,
       riskAmount: payload.riskAmount,
@@ -1181,6 +1182,8 @@ export function App({
     }>(`/api/providers/${provider.id}/test-config`, {
       rawText,
       config: {
+        parserMode: payload.parserMode,
+        lockedSymbol: payload.lockedSymbol,
         riskMode: payload.riskMode,
         riskAmount: payload.riskAmount,
         takeProfitLevels: payload.takeProfitLevels,

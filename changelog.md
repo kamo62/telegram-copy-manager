@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.15.0 - 2026-06-05 (Minor)
+
+Release impact: Minor because this adds a backward-compatible provider parser mode, provider symbol
+lock field, and dry-run parsing behavior without changing EA command contracts or requiring a
+database migration.
+
+- Added a `KAL VIP extended` provider parser mode that expands terse Gold/XAUUSD level commentary
+  into one pending-limit signal per level only when a fresh EA snapshot supplies the current
+  reference price.
+- Added a provider-level locked symbol setting to the provider config modal and API payloads so a
+  provider can be constrained to one symbol before shorthand parsing is allowed.
+- Updated provider config dry-runs to use the multi-signal parser path and return the parsed signal
+  count, so operators can test multi-level posts before saving.
+- Added regression coverage for Automatic-mode gating, missing-reference-price gating, provider
+  symbol lock persistence, dry-run testing, and queued KAL VIP extended short levels.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.15.0`.
+
 ## 1.14.1 - 2026-06-05 (Patch)
 
 Release impact: Patch because this tightens dashboard accounting, queue reconciliation, and README

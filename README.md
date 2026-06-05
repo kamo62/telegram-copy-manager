@@ -14,9 +14,12 @@ enabled for the backend URL.
 
 - Connects a Telegram account with either the deterministic mock adapter or the real GramJS adapter.
 - Turns selected Telegram channels or groups into providers that can be enabled, disabled, tested,
-  configured, and assigned to one or more MT5 accounts.
+  configured, symbol-locked, and assigned to one or more MT5 accounts.
 - Parses open-trade and lifecycle messages, including market/limit/stop entries, SL/TP levels,
   partial closes, move-SL commands, TP-hit announcements, and trailing-stop commands.
+- Supports a KAL VIP extended parser mode for terse Gold/XAUUSD level posts, expanding short levels
+  like `41`, `56`, and `03` from a fresh EA-reported reference price when the provider is locked to
+  one symbol.
 - Resolves symbols through global aliases, provider aliases, account-specific overrides, broker
   suffix/prefix rules, and EA-reported broker symbol inventories.
 - Builds logical trades and queue items for the EA while keeping parser intent separate from broker
@@ -51,9 +54,9 @@ Inside the Live workspace:
 
 - `Performance`: overview chart, statistics view, account/provider range metrics, and external
   manual broker activity that affects equity.
-- `Providers`: aggregate provider overview, account-scoped copy chips, provider config, lot/risk
-  sizing, TP allocation, runner config, provider config dry-run tests, parse-recent action, and CSV
-  performance export.
+- `Providers`: aggregate provider overview, account-scoped copy chips, provider config, parser
+  template and symbol lock, lot/risk sizing, TP allocation, runner config, provider config dry-run
+  tests, parse-recent action, and CSV performance export.
 - `History`: open positions/orders, external positions/orders, closed trade rollups, and per-leg
   close detail.
 - `Equity Guardian`: account drawdown thresholds and manual unpause controls.
@@ -258,7 +261,7 @@ The root `package.json` `version` field is the canonical application version. Th
 `mt5/TelegramTC_EA.mq5` must stay aligned with it:
 
 ```mql5
-#property version   "1.14.1"
+#property version   "1.15.0"
 ```
 
 Classify every change with SemVer before final verification:
