@@ -7380,6 +7380,230 @@ describe("Telegram TC API", () => {
     }
   });
 
+  test("account attribution splits provider-linked, manual external, and unknown EA P/L", async () => {
+    const originalDateNow = Date.now;
+    Date.now = () => Date.UTC(2026, 4, 21, 10, 0, 0);
+    try {
+      const app = createApi({
+        databasePath: ":memory:",
+        telegramAdapter: "mock",
+        seedDemoData: false,
+      });
+
+      const approved = await approveGoldBuyLimit(app);
+      await reportGoldFill(app, approved);
+      await app.request("/api/mt5/history", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          deals: [
+            {
+              dealTicket: "provider-manual-close",
+              orderTicket: "provider-manual-order",
+              positionTicket: "247596888",
+              entry: "1",
+              type: "1",
+              reason: 0,
+              symbol: "XAUUSD",
+              price: 4535,
+              volume: 0.04,
+              profit: -20,
+              commission: 0,
+              swap: 0,
+              fee: 0,
+              comment: "",
+              timeMsc: Date.UTC(2026, 4, 21, 8, 10, 0),
+            },
+          ],
+        }),
+      });
+      await app.request("/api/mt5/history", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          deals: [
+            {
+              dealTicket: "manual-open",
+              orderTicket: "manual-order-open",
+              positionTicket: "manual-position",
+              entry: "0",
+              type: "0",
+              reason: 1,
+              symbol: "XAUUSD",
+              price: 4540,
+              volume: 0.02,
+              profit: 0,
+              commission: 0,
+              swap: 0,
+              fee: 0,
+              comment: "",
+              timeMsc: Date.UTC(2026, 4, 21, 8, 20, 0),
+            },
+            {
+              dealTicket: "manual-close",
+              orderTicket: "manual-order-close",
+              positionTicket: "manual-position",
+              entry: "1",
+              type: "1",
+              reason: 1,
+              symbol: "XAUUSD",
+              price: 4530,
+              volume: 0.02,
+              profit: -55,
+              commission: 0,
+              swap: 0,
+              fee: 0,
+              comment: "",
+              timeMsc: Date.UTC(2026, 4, 21, 8, 25, 0),
+            },
+            {
+              dealTicket: "expert-close",
+              orderTicket: "expert-order-close",
+              positionTicket: "expert-position",
+              entry: "1",
+              type: "1",
+              reason: 3,
+              symbol: "XAUUSD",
+              price: 4529,
+              volume: 0.01,
+              profit: -7.5,
+              commission: 0,
+              swap: 0,
+              fee: 0,
+              comment: "",
+              timeMsc: Date.UTC(2026, 4, 21, 8, 30, 0),
+            },
+          ],
+        }),
+      });
+
+      const attribution = await json<{
+        range: string;
+        totals: {
+          totalPnl: number;
+          providerPnl: number;
+          manualExternalPnl: number;
+          unknownEaPnl: number;
+        };
+        attributionRows: Array<{
+          bucket: string;
+          label: string;
+          tradeCount: number;
+          pnl: number;
+        }>;
+        sourceBreakdown: Array<{ source: string; label: string; tradeCount: number; pnl: number }>;
+        topTrades: Array<{
+          bucket: string;
+          sourceLabel: string;
+          providerTitle?: string;
+          closeReason: string;
+          pnl: number;
+        }>;
+      }>(await app.request("/api/accounts/mt5-63442826/attribution?range=30d"));
+
+      expect(attribution.range).toBe("30d");
+      expect(attribution.totals).toMatchObject({
+        totalPnl: -82.5,
+        providerPnl: -20,
+        manualExternalPnl: -55,
+        unknownEaPnl: -7.5,
+      });
+      expect(attribution.attributionRows).toEqual([
+        { bucket: "provider", label: "Provider-linked", tradeCount: 1, pnl: -20 },
+        { bucket: "manual_external", label: "Manual / external", tradeCount: 1, pnl: -55 },
+        { bucket: "unknown_ea", label: "Unknown / EA", tradeCount: 1, pnl: -7.5 },
+      ]);
+      expect(attribution.sourceBreakdown).toEqual(
+        expect.arrayContaining([
+          { source: "manual-terminal", label: "Manual terminal", tradeCount: 1, pnl: -20 },
+          { source: "manual-mobile", label: "Manual mobile", tradeCount: 1, pnl: -55 },
+          { source: "expert", label: "Expert", tradeCount: 1, pnl: -7.5 },
+        ]),
+      );
+      expect(attribution.topTrades[0]).toMatchObject({
+        bucket: "manual_external",
+        sourceLabel: "Manual mobile",
+        closeReason: "Manual",
+        pnl: -55,
+      });
+      expect(attribution.topTrades.find((trade) => trade.bucket === "provider")).toMatchObject({
+        providerTitle: "Test Forex Group",
+        sourceLabel: "Provider: Test Forex Group",
+        closeReason: "Manual",
+        pnl: -20,
+      });
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("account attribution range filters by close time", async () => {
+    const originalDateNow = Date.now;
+    Date.now = () => Date.UTC(2026, 4, 21, 10, 0, 0);
+    try {
+      const app = createApi({
+        databasePath: ":memory:",
+        telegramAdapter: "mock",
+        seedDemoData: true,
+      });
+
+      await app.request("/api/mt5/history", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountId: "mt5-100200300",
+          deals: [
+            {
+              dealTicket: "old-manual-close",
+              orderTicket: "old-manual-order",
+              positionTicket: "old-manual-position",
+              entry: "1",
+              type: "1",
+              reason: 1,
+              symbol: "XAUUSD",
+              price: 4501,
+              volume: 0.01,
+              profit: -99,
+              commission: 0,
+              swap: 0,
+              fee: 0,
+              comment: "",
+              timeMsc: Date.UTC(2026, 3, 1, 8, 0, 0),
+            },
+            {
+              dealTicket: "today-manual-close",
+              orderTicket: "today-manual-order",
+              positionTicket: "today-manual-position",
+              entry: "1",
+              type: "1",
+              reason: 1,
+              symbol: "XAUUSD",
+              price: 4502,
+              volume: 0.01,
+              profit: -5,
+              commission: 0,
+              swap: 0,
+              fee: 0,
+              comment: "",
+              timeMsc: Date.UTC(2026, 4, 21, 8, 0, 0),
+            },
+          ],
+        }),
+      });
+
+      const attribution = await json<{ totals: { totalPnl: number }; range: string }>(
+        await app.request("/api/accounts/mt5-100200300/attribution?range=today"),
+      );
+
+      expect(attribution.range).toBe("today");
+      expect(attribution.totals.totalPnl).toBe(-5);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
   test("account stats accepts range=today and echoes it back", async () => {
     const app = createApi({
       databasePath: ":memory:",

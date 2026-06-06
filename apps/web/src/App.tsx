@@ -907,9 +907,13 @@ export function App({
 
   const queuePending = snapshot.signalQueue.filter((item) => item.status === "PENDING").length;
   const growthData = useMemo(() => {
-    const usePerformanceSeries =
-      !focusedAccount || snapshot.accountPerformance?.accountId === focusedAccount.id;
-    const series = usePerformanceSeries ? snapshot.accountPerformance?.equityCurve : undefined;
+    const performance = focusedAccount
+      ? (snapshot.accountPerformanceByAccount?.[focusedAccount.id] ??
+        (snapshot.accountPerformance?.accountId === focusedAccount.id
+          ? snapshot.accountPerformance
+          : undefined))
+      : snapshot.accountPerformance;
+    const series = performance?.equityCurve;
     if (!series?.length) {
       return buildPlaceholderGrowth(
         snapshot.executionLogs.filter((log) => log.status === "EXECUTED").length,
@@ -924,19 +928,18 @@ export function App({
         number[],
         number[],
       ],
-      totalProfit: usePerformanceSeries ? (snapshot.accountPerformance?.totalProfit ?? 0) : 0,
-      realizedPnl: usePerformanceSeries
-        ? (snapshot.accountPerformance?.realizedPnl ?? undefined)
-        : undefined,
-      floatingPnl: usePerformanceSeries
-        ? (snapshot.accountPerformance?.floatingPnl ?? undefined)
-        : undefined,
-      netDeposits: usePerformanceSeries
-        ? (snapshot.accountPerformance?.netDeposits ?? undefined)
-        : undefined,
+      totalProfit: performance?.totalProfit ?? 0,
+      realizedPnl: performance?.realizedPnl ?? undefined,
+      floatingPnl: performance?.floatingPnl ?? undefined,
+      netDeposits: performance?.netDeposits ?? undefined,
       numberOfTrades: series.length,
     };
-  }, [focusedAccount, snapshot.accountPerformance, snapshot.executionLogs]);
+  }, [
+    focusedAccount,
+    snapshot.accountPerformance,
+    snapshot.accountPerformanceByAccount,
+    snapshot.executionLogs,
+  ]);
 
   async function refreshDashboard() {
     setRefreshing(true);

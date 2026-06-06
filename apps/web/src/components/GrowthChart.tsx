@@ -27,6 +27,10 @@ export function GrowthChart({
     setSize: (s: { width: number; height: number }) => void;
   } | null>(null);
   const [view, setView] = useState<"growth" | "drawdown">("growth");
+  const isTimeSeries = data.growth[0].some((value) => value > 1_000_000);
+  const sampleLabel = isTimeSeries
+    ? `${data.numberOfTrades} sample${data.numberOfTrades === 1 ? "" : "s"}`
+    : `${data.numberOfTrades} trade${data.numberOfTrades === 1 ? "" : "s"}`;
 
   useEffect(() => {
     if (loading) return;
@@ -51,7 +55,6 @@ export function GrowthChart({
 
       const series = view === "growth" ? data.growth : data.drawdown;
       const isGrowth = view === "growth";
-      const isTimeSeries = series[0].some((value) => value > 1_000_000);
       const opts = {
         width: container.clientWidth || 600,
         height: 320,
@@ -78,7 +81,7 @@ export function GrowthChart({
         scales: { x: { time: isTimeSeries } },
         legend: { show: false },
         series: [
-          { label: "Trades" },
+          { label: isTimeSeries ? "Time" : "Trades" },
           isGrowth
             ? {
                 label: "Account growth",
@@ -114,7 +117,7 @@ export function GrowthChart({
       plotRef.current?.destroy();
       plotRef.current = null;
     };
-  }, [data, view, loading]);
+  }, [data, isTimeSeries, view, loading]);
 
   return (
     <section className="chart-card" aria-label="Account growth chart">
@@ -122,7 +125,7 @@ export function GrowthChart({
         <div>
           <h3 className="chart-card-title">Account growth</h3>
           <span className="chart-card-meta">
-            {data.numberOfTrades} trades · trading P/L{" "}
+            {sampleLabel} · trading P/L{" "}
             <Money value={data.totalProfit} currency={currency} signTone />
             {data.netDeposits !== undefined ? (
               <>
@@ -160,9 +163,7 @@ export function GrowthChart({
         </div>
       </header>
       {loading ? <SkeletonChart /> : <div className="chart-canvas-wrap" ref={containerRef} />}
-      <footer className="chart-card-foot">
-        {data.growth[0].some((value) => value > 1_000_000) ? "Time" : "Number of trades"}
-      </footer>
+      <footer className="chart-card-foot">{isTimeSeries ? "Time" : "Number of trades"}</footer>
     </section>
   );
 }

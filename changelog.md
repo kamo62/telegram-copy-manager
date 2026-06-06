@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.16.0 - 2026-06-06 (Minor)
+
+Release impact: Minor because this adds backward-compatible account performance attribution API
+data and in-place dashboard UI without changing EA command contracts or requiring a database
+migration.
+
+- Added `GET /api/accounts/:accountId/attribution` to split account realized P/L into
+  provider-linked, manual/external, and unknown/EA buckets with close-source and top-trade detail.
+- Enhanced the existing Performance overview with attribution cards, compact P/L bars,
+  close-source breakdown, and a largest contributing trades table instead of adding another tab.
+- Fixed account-scoped Performance charts to use the focused account performance series and label
+  sampled time-series points as samples rather than trades.
+- Added regression coverage for attribution bucket classification, range filtering, focused account
+  chart data, and the enhanced Performance overview.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.16.0`.
+
 ## 1.15.0 - 2026-06-05 (Minor)
 
 Release impact: Minor because this adds a backward-compatible provider parser mode, provider symbol

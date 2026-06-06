@@ -3490,6 +3490,239 @@ h3 {
   box-shadow: var(--shadow-sm);
 }
 
+.attribution-panel {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.attribution-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.attribution-panel-head h3,
+.attribution-breakdown h4 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.attribution-panel-head p {
+  margin: 3px 0 0;
+  max-width: 640px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+.attribution-panel-head select {
+  min-height: 32px;
+  padding: 5px 10px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.attribution-error,
+.attribution-loading,
+.attribution-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.attribution-error {
+  color: var(--down);
+}
+
+.attribution-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 10px;
+}
+
+.attribution-kpi {
+  display: grid;
+  gap: 5px;
+  min-height: 74px;
+  padding: 12px 13px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+}
+
+.attribution-kpi.provider {
+  border-left-color: hsl(218 70% 46%);
+}
+
+.attribution-kpi.manual-external {
+  border-left-color: hsl(32 88% 44%);
+}
+
+.attribution-kpi.unknown-ea {
+  border-left-color: hsl(344 68% 48%);
+}
+
+.attribution-kpi span {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.attribution-kpi-value {
+  justify-self: start;
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.attribution-breakdown-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
+  gap: 12px;
+}
+
+.attribution-breakdown {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+
+.attribution-bars {
+  display: grid;
+  gap: 10px;
+}
+
+.attribution-bar-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.8fr) minmax(130px, 1fr) minmax(96px, auto);
+  align-items: center;
+  gap: 10px;
+}
+
+.attribution-bar-row strong {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.attribution-bar-row span {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+.attribution-bar-track {
+  height: 9px;
+  overflow: hidden;
+  background: var(--panel-2);
+  border-radius: 999px;
+}
+
+.attribution-bar {
+  display: block;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--line-strong);
+}
+
+.attribution-bar.provider {
+  background: hsl(218 70% 46%);
+}
+
+.attribution-bar.manual-external {
+  background: hsl(32 88% 44%);
+}
+
+.attribution-bar.unknown-ea {
+  background: hsl(344 68% 48%);
+}
+
+.source-breakdown-list {
+  display: grid;
+  gap: 8px;
+}
+
+.source-breakdown-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto minmax(88px, auto);
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.source-breakdown-row span {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.source-breakdown-row small {
+  color: var(--ink-faint);
+}
+
+.attribution-table-wrap {
+  box-shadow: var(--shadow-sm);
+}
+
+.attribution-source-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--ink);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.attribution-source-chip.provider {
+  color: hsl(218 70% 32%);
+  background: hsl(218 84% 96%);
+  border-color: hsl(218 72% 86%);
+}
+
+.attribution-source-chip.manual-external {
+  color: hsl(28 80% 30%);
+  background: hsl(35 90% 96%);
+  border-color: hsl(35 80% 86%);
+}
+
+.attribution-source-chip.unknown-ea {
+  color: hsl(344 68% 32%);
+  background: hsl(344 80% 96%);
+  border-color: hsl(344 72% 88%);
+}
+
+@media (max-width: 900px) {
+  .attribution-breakdown-grid,
+  .attribution-bar-row,
+  .source-breakdown-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .statistics-panel {
   display: grid;
   gap: 12px;

@@ -75,6 +75,7 @@ type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
 type EquityCurveScope = "account" | "provider";
 type StatsRange = "today" | "7d" | "30d" | "90d" | "all";
 type ReportingCurrency = "USD" | "ZAR";
+type AccountAttributionBucket = "provider" | "manual_external" | "unknown_ea";
 
 interface AppSettings {
   defaultLotSize: number;
@@ -547,6 +548,9 @@ export function createApi(options: ApiOptions = {}) {
   );
 
   app.get("/api/account/performance", (c) => c.json(store.accountPerformance()));
+  app.get("/api/accounts/:accountId/attribution", (c) =>
+    c.json(store.accountAttribution(c.req.param("accountId"), { range: c.req.query("range") })),
+  );
   app.get("/api/accounts/:accountId/stats", (c) =>
     c.json(
       store.accountStats(c.req.param("accountId"), {
@@ -4238,6 +4242,197 @@ class AppStore {
     };
   }
 
+  accountAttribution(accountId: string, input: { range?: string } = {}) {
+    const range = normalizeStatsRange(input.range);
+    const from = statsRangeStart(range);
+    const account = this.mt5Accounts().find((item) => item.id === accountId);
+    const logicalTrades = new Map(this.logicalTrades().map((trade) => [trade.id, trade]));
+    const providers = new Map(this.providers().map((provider) => [provider.id, provider.title]));
+    const externalRows = new Map(
+      (
+        this.db
+          .query(
+            `SELECT position_ticket, symbol, direction, open_at, close_at
+             FROM external_closes
+             WHERE account_id = ?`,
+          )
+          .all(accountId) as Row[]
+      ).map((row) => [
+        String(row.position_ticket),
+        {
+          symbol: String(row.symbol ?? ""),
+          direction: String(row.direction ?? ""),
+          openAt: nullableString(row.open_at),
+          closeAt: nullableString(row.close_at),
+        },
+      ]),
+    );
+    const grouped = new Map<
+      string,
+      {
+        tradeId: string;
+        bucket: AccountAttributionBucket;
+        providerId?: string;
+        providerTitle?: string;
+        symbol: string;
+        direction: string;
+        pnl: number;
+        closeAt: string;
+        openAt?: string;
+        closeSources: string[];
+        allSources: string[];
+      }
+    >();
+    const allOrders = this.brokerOrdersForAccount(accountId);
+    const openTimes = new Map<string, string>();
+    const allSourcesByTrade = new Map<string, Set<string>>();
+    const positionsByTrade = new Map<string, Set<string>>();
+    for (const order of allOrders) {
+      if (!allSourcesByTrade.has(order.logicalTradeId)) {
+        allSourcesByTrade.set(order.logicalTradeId, new Set());
+      }
+      allSourcesByTrade.get(order.logicalTradeId)?.add(order.source);
+      if (order.positionTicket) {
+        if (!positionsByTrade.has(order.logicalTradeId)) {
+          positionsByTrade.set(order.logicalTradeId, new Set());
+        }
+        positionsByTrade.get(order.logicalTradeId)?.add(order.positionTicket);
+      }
+      if (order.action === "OPEN") {
+        const current = openTimes.get(order.logicalTradeId);
+        if (!current || order.createdAt < current) {
+          openTimes.set(order.logicalTradeId, order.createdAt);
+        }
+      }
+    }
+
+    for (const order of allOrders) {
+      if (order.action !== "FULL_CLOSE" && order.action !== "PARTIAL_CLOSE") continue;
+      if (from && Date.parse(normalizedDateInput(order.createdAt)) < Date.parse(from)) continue;
+      const trade = logicalTrades.get(order.logicalTradeId);
+      const sources = [...(allSourcesByTrade.get(order.logicalTradeId) ?? new Set<string>())];
+      const bucket = attributionBucketForTrade(order.logicalTradeId, trade, sources);
+      const providerTitle = trade?.providerId ? providers.get(trade.providerId) : undefined;
+      const external = externalSummaryForTrade(
+        positionsByTrade.get(order.logicalTradeId) ?? new Set<string>(),
+        externalRows,
+      );
+      const current = grouped.get(order.logicalTradeId) ?? {
+        tradeId: order.logicalTradeId,
+        bucket,
+        providerId: trade?.providerId,
+        providerTitle,
+        symbol:
+          trade?.symbol.brokerSymbol ??
+          trade?.symbol.canonicalSymbol ??
+          external?.symbol ??
+          "unmapped",
+        direction: trade?.direction ?? external?.direction ?? "",
+        pnl: 0,
+        closeAt: order.createdAt,
+        openAt: openTimes.get(order.logicalTradeId) ?? external?.openAt,
+        closeSources: [],
+        allSources: sources,
+      };
+      current.pnl = roundCurrency(current.pnl + (order.pnlCurrency ?? 0));
+      if (order.createdAt > current.closeAt) current.closeAt = order.createdAt;
+      if (!current.openAt && external?.openAt) current.openAt = external.openAt;
+      current.closeSources.push(order.source);
+      grouped.set(order.logicalTradeId, current);
+    }
+
+    const trades = [...grouped.values()].map((trade) => {
+      const closeReason = deriveCloseResult(trade.closeSources);
+      const source = primaryAttributionSource(trade.closeSources);
+      const displayId = trade.tradeId.startsWith("external_")
+        ? trade.tradeId.replace(/^external_/, "external-").replaceAll("_", "-")
+        : trade.tradeId;
+      return {
+        ...trade,
+        displayId,
+        source,
+        sourceLabel:
+          trade.bucket === "provider"
+            ? `Provider: ${trade.providerTitle ?? trade.providerId ?? "Unknown"}`
+            : brokerSourceLabel(source),
+        closeReason,
+      };
+    });
+
+    const totals = {
+      totalPnl: roundCurrency(trades.reduce((sum, trade) => sum + trade.pnl, 0)),
+      providerPnl: sumBucketPnl(trades, "provider"),
+      manualExternalPnl: sumBucketPnl(trades, "manual_external"),
+      unknownEaPnl: sumBucketPnl(trades, "unknown_ea"),
+    };
+    const bucketLabels: Record<AccountAttributionBucket, string> = {
+      provider: "Provider-linked",
+      manual_external: "Manual / external",
+      unknown_ea: "Unknown / EA",
+    };
+    const attributionRows = (
+      ["provider", "manual_external", "unknown_ea"] as AccountAttributionBucket[]
+    ).map((bucket) => {
+      const rows = trades.filter((trade) => trade.bucket === bucket);
+      return {
+        bucket,
+        label: bucketLabels[bucket],
+        tradeCount: rows.length,
+        pnl: roundCurrency(rows.reduce((sum, trade) => sum + trade.pnl, 0)),
+      };
+    });
+    const sourceGroups = new Map<string, { source: string; tradeCount: number; pnl: number }>();
+    for (const trade of trades) {
+      const current = sourceGroups.get(trade.source) ?? {
+        source: trade.source,
+        tradeCount: 0,
+        pnl: 0,
+      };
+      current.tradeCount += 1;
+      current.pnl = roundCurrency(current.pnl + trade.pnl);
+      sourceGroups.set(trade.source, current);
+    }
+    const sourceBreakdown = [...sourceGroups.values()]
+      .map((row) => ({ ...row, label: brokerSourceLabel(row.source) }))
+      .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl) || a.label.localeCompare(b.label));
+    const losses = trades
+      .filter((trade) => trade.pnl < 0)
+      .sort((a, b) => a.pnl - b.pnl)
+      .slice(0, 5);
+    const wins = trades
+      .filter((trade) => trade.pnl > 0)
+      .sort((a, b) => b.pnl - a.pnl)
+      .slice(0, 5);
+    const breakEven = trades.filter((trade) => trade.pnl === 0).slice(0, 5);
+    const topTrades = [...losses, ...wins, ...breakEven]
+      .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl) || b.closeAt.localeCompare(a.closeAt))
+      .slice(0, 10)
+      .map((trade) => ({
+        tradeId: trade.displayId,
+        bucket: trade.bucket,
+        providerId: trade.providerId,
+        providerTitle: trade.providerTitle,
+        source: trade.source,
+        sourceLabel: trade.sourceLabel,
+        closeReason: trade.closeReason,
+        symbol: trade.symbol,
+        direction: trade.direction,
+        pnl: trade.pnl,
+        openAt: trade.openAt,
+        closeAt: trade.closeAt,
+      }));
+    return {
+      accountId,
+      range,
+      currency: account?.currency ?? "$",
+      generatedAt: nowIso(),
+      totals,
+      attributionRows,
+      sourceBreakdown,
+      topTrades,
+    };
+  }
+
   private resolveRiskThresholds(accountId: string): {
     warnPct: number;
     dangerPct: number;
@@ -7699,6 +7894,92 @@ function deriveCloseResult(sources: string[]): string {
   return "Mixed";
 }
 
+function attributionBucketForTrade(
+  tradeId: string,
+  trade: LogicalTrade | undefined,
+  sources: string[],
+): AccountAttributionBucket {
+  if (trade?.providerId) return "provider";
+  if (sources.some(isManualSource)) return "manual_external";
+  if (tradeId.startsWith("external_") && !sources.some((source) => source === "expert")) {
+    return "manual_external";
+  }
+  return "unknown_ea";
+}
+
+function isManualSource(source: string) {
+  return source === "manual" || source.startsWith("manual-");
+}
+
+function primaryAttributionSource(sources: string[]) {
+  if (sources.length === 0) return "history";
+  if (sources.includes("stop-out")) return "stop-out";
+  if (sources.every((source) => source === sources[0])) return sources[0] ?? "history";
+  const priority = [
+    "manual-mobile",
+    "manual-terminal",
+    "manual-web",
+    "manual",
+    "sl-hit",
+    "tp-hit",
+    "expert",
+    "history",
+  ];
+  return priority.find((source) => sources.includes(source)) ?? sources[0] ?? "history";
+}
+
+function brokerSourceLabel(source: string) {
+  const labels: Record<string, string> = {
+    "app-cancel": "App cancel",
+    "app-close": "App close",
+    "app-command": "App command",
+    "app-modify": "App modify",
+    "app-trailing": "App trailing",
+    expert: "Expert",
+    history: "History",
+    manual: "Manual",
+    "manual-mobile": "Manual mobile",
+    "manual-terminal": "Manual terminal",
+    "manual-web": "Manual web",
+    signal: "Signal",
+    "sl-hit": "SL hit",
+    "stop-out": "Stop-out",
+    "tp-hit": "TP hit",
+  };
+  if (labels[source]) return labels[source];
+  return source
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function sumBucketPnl(
+  trades: Array<{ bucket: AccountAttributionBucket; pnl: number }>,
+  bucket: AccountAttributionBucket,
+) {
+  return roundCurrency(
+    trades.filter((trade) => trade.bucket === bucket).reduce((sum, trade) => sum + trade.pnl, 0),
+  );
+}
+
+function externalSummaryForTrade(
+  positionTickets: Set<string>,
+  rows: Map<string, { symbol: string; direction: string; openAt?: string; closeAt?: string }>,
+) {
+  for (const ticket of positionTickets) {
+    const row = rows.get(ticket);
+    if (row) return row;
+  }
+  return undefined;
+}
+
+function nullableString(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const text = String(value);
+  return text ? text : undefined;
+}
+
 function isRealOpenBrokerOrder(order: {
   action: string;
   positionTicket: string;
@@ -7749,7 +8030,7 @@ function normalizeStatsRange(value: string | undefined): StatsRange {
 function statsRangeStart(range: StatsRange) {
   if (range === "all") return undefined;
   if (range === "today") {
-    const now = new Date();
+    const now = new Date(Date.now());
     const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     return start.toISOString();
   }

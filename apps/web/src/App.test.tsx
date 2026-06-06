@@ -1,5 +1,5 @@
 import "./test-setup";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render as rtlRender, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import packageJson from "../../../package.json";
@@ -9,6 +9,10 @@ import { SettingsPage } from "./pages/SettingsPage";
 // App now reads its view/tab/account from the URL, so every render needs Router context.
 const render = (ui: Parameters<typeof rtlRender>[0], options?: Parameters<typeof rtlRender>[1]) =>
   rtlRender(ui, { wrapper: MemoryRouter, ...options });
+
+beforeEach(() => {
+  globalThis.fetch = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
+});
 
 afterEach(() => cleanup());
 
@@ -127,6 +131,14 @@ function clickSidebar(view: ReturnType<typeof render>, label: string) {
   const sidebarButton = buttons.find((button) => button.closest("aside"));
   if (!sidebarButton) throw new Error(`No sidebar button labelled ${label}`);
   fireEvent.click(sidebarButton);
+}
+
+function fixtureResponse(url: string | URL | Request, payload: unknown = snapshot) {
+  const requestUrl = String(url);
+  if (/\/api\/accounts\/[^/]+\/attribution/.test(requestUrl)) {
+    return new Promise<Response>(() => {});
+  }
+  return Response.json(payload);
 }
 
 describe("App dashboard", () => {
@@ -456,6 +468,72 @@ describe("App dashboard", () => {
     expect(header.getAllByText(/\$45\.50/).length).toBeGreaterThanOrEqual(1);
   });
 
+  test("account growth chart uses the focused account performance series", () => {
+    const routeSnapshot: DashboardSnapshot = {
+      ...snapshot,
+      accountPerformance: {
+        accountId: "aggregate",
+        currency: "USD",
+        heartbeatStatus: "online",
+        initialBalance: 300,
+        currentBalance: 300,
+        currentEquity: 300,
+        totalProfit: 0,
+        realizedPnl: 0,
+        floatingPnl: 0,
+        netDeposits: 0,
+        today: 0,
+        thisWeek: 0,
+        thisMonth: 0,
+        equityCurve: [],
+      },
+      accountPerformanceByAccount: {
+        "mt5-secondary": {
+          accountId: "mt5-secondary",
+          currency: "USD",
+          heartbeatStatus: "online",
+          initialBalance: 100,
+          currentBalance: 100,
+          currentEquity: 145.5,
+          totalProfit: 45.5,
+          realizedPnl: 45.5,
+          floatingPnl: 0,
+          netDeposits: 0,
+          today: 45.5,
+          thisWeek: 45.5,
+          thisMonth: 45.5,
+          equityCurve: [
+            { x: 1_779_292_800, equity: 100, drawdown: 0 },
+            { x: 1_779_296_400, equity: 145.5, drawdown: 0 },
+          ],
+        },
+      },
+      mt5Accounts: [
+        {
+          ...snapshot.mt5Accounts[0]!,
+          id: "mt5-primary",
+          accountNumber: "100200300",
+        },
+        {
+          ...snapshot.mt5Accounts[0]!,
+          id: "mt5-secondary",
+          accountNumber: "200300400",
+        },
+      ],
+    };
+    const view = rtlRender(<App initialSnapshot={routeSnapshot} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={["/accounts/mt5-secondary/performance"]}>
+          {children}
+        </MemoryRouter>
+      ),
+    });
+
+    const chart = within(view.getByLabelText("Account growth chart"));
+    expect(chart.getByText(/2 samples/)).toBeTruthy();
+    expect(chart.getByText(/\$45\.50/)).toBeTruthy();
+  });
+
   test("account header does not present stale MT5 telemetry as live PnL", () => {
     const view = render(
       <App
@@ -578,7 +656,7 @@ describe("App dashboard", () => {
           stillOffline: [],
         });
       }
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
     const view = render(<App initialSnapshot={snapshot} />);
 
@@ -597,7 +675,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -620,7 +698,7 @@ describe("App dashboard", () => {
           headers: { "content-type": "text/csv" },
         });
       }
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -662,7 +740,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const linkedSnapshot: DashboardSnapshot = {
@@ -700,7 +778,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const linkedSnapshot: DashboardSnapshot = {
@@ -740,7 +818,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -784,7 +862,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -828,7 +906,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(
@@ -867,7 +945,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -933,7 +1011,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -980,7 +1058,7 @@ describe("App dashboard", () => {
           },
         });
       }
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -1019,7 +1097,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -1108,7 +1186,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -1171,7 +1249,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
@@ -1192,8 +1270,8 @@ describe("App dashboard", () => {
   });
 
   test("Live shows an OUT_OF_SYNC banner when a trade has drifted from the broker", () => {
-    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
-      Response.json(snapshot)) as typeof fetch;
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
+      fixtureResponse(url)) as typeof fetch;
     const view = render(
       <App
         initialSnapshot={{
@@ -1226,8 +1304,8 @@ describe("App dashboard", () => {
   });
 
   test("shows the History empty state when there are no closed trades", async () => {
-    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
-      Response.json(snapshot)) as typeof fetch;
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
+      fixtureResponse(url)) as typeof fetch;
     const view = render(<App initialSnapshot={{ ...snapshot, logicalTrades: [] }} />);
     await clickTabAsync(view, "History");
     clickTab(view, "Closed");
@@ -1235,8 +1313,8 @@ describe("App dashboard", () => {
   });
 
   test("History › Closed groups partial closes under a parent row and reveals per-leg detail on expand", () => {
-    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
-      Response.json(snapshot)) as typeof fetch;
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
+      fixtureResponse(url)) as typeof fetch;
     const view = render(
       <App
         initialSnapshot={{
@@ -1347,8 +1425,8 @@ describe("App dashboard", () => {
   });
 
   test("History › Closed shows manual closed trades from external MT5 history", () => {
-    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
-      Response.json(snapshot)) as typeof fetch;
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
+      fixtureResponse(url)) as typeof fetch;
     const view = render(
       <App
         initialSnapshot={{
@@ -1409,8 +1487,8 @@ describe("App dashboard", () => {
   });
 
   test("History › Open is the default sub-tab and shows EA-vs-external positions", () => {
-    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
-      Response.json(snapshot)) as typeof fetch;
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
+      fixtureResponse(url)) as typeof fetch;
     const view = render(
       <App
         initialSnapshot={{
@@ -1469,8 +1547,8 @@ describe("App dashboard", () => {
   });
 
   test("History › Open labels pending MT5 order sides from order enums", () => {
-    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
-      Response.json(snapshot)) as typeof fetch;
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
+      fixtureResponse(url)) as typeof fetch;
     const view = render(
       <App
         initialSnapshot={{
@@ -1529,8 +1607,8 @@ describe("App dashboard", () => {
   });
 
   test("shows the Logs empty states when queue + execution logs are empty", () => {
-    globalThis.fetch = (async (_url: string | URL | Request, _init?: RequestInit) =>
-      Response.json(snapshot)) as typeof fetch;
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
+      fixtureResponse(url)) as typeof fetch;
     const view = render(
       <App
         initialSnapshot={{
@@ -1676,7 +1754,7 @@ describe("App dashboard", () => {
           timing: { averageTradeMinutes: 15, bestWeekday: "Thu", worstWeekday: "Fri" },
         });
       }
-      return Response.json(snapshot);
+      return fixtureResponse(url);
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);

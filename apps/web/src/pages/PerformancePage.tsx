@@ -45,6 +45,47 @@ export interface AccountStatsData {
   riskThresholds: { warnPct: number; dangerPct: number };
 }
 
+type AttributionBucket = "provider" | "manual_external" | "unknown_ea";
+
+interface AccountAttributionData {
+  accountId: string;
+  range: StatsRange;
+  currency: string;
+  generatedAt: string;
+  totals: {
+    totalPnl: number;
+    providerPnl: number;
+    manualExternalPnl: number;
+    unknownEaPnl: number;
+  };
+  attributionRows: Array<{
+    bucket: AttributionBucket;
+    label: string;
+    tradeCount: number;
+    pnl: number;
+  }>;
+  sourceBreakdown: Array<{
+    source: string;
+    label: string;
+    tradeCount: number;
+    pnl: number;
+  }>;
+  topTrades: Array<{
+    tradeId: string;
+    bucket: AttributionBucket;
+    providerId?: string;
+    providerTitle?: string;
+    source: string;
+    sourceLabel: string;
+    closeReason: string;
+    symbol: string;
+    direction: string;
+    pnl: number;
+    openAt?: string;
+    closeAt: string;
+  }>;
+}
+
 export function PerformancePage({
   accounts = [],
   currency,
@@ -92,6 +133,9 @@ export function PerformancePage({
   const [stats, setStats] = useState<AccountStatsData | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState("");
+  const [attribution, setAttribution] = useState<AccountAttributionData | null>(null);
+  const [attributionLoading, setAttributionLoading] = useState(false);
+  const [attributionError, setAttributionError] = useState("");
   const account = accounts[0];
   const effectiveProviderId = scope === "provider" ? providerId || providers[0]?.id || "" : "";
 
@@ -112,6 +156,22 @@ export function PerformancePage({
       .finally(() => setStatsLoading(false));
     return () => controller.abort();
   }, [account?.id, effectiveProviderId, range, scope, view]);
+
+  useEffect(() => {
+    if (view !== "overview" || !account?.id) return;
+    const controller = new AbortController();
+    setAttributionLoading(true);
+    setAttributionError("");
+    apiGet<AccountAttributionData>(`/api/accounts/${account.id}/attribution?range=${range}`, {
+      signal: controller.signal,
+    })
+      .then((payload) => setAttribution(payload))
+      .catch((error) => {
+        if ((error as Error).name !== "AbortError") setAttributionError((error as Error).message);
+      })
+      .finally(() => setAttributionLoading(false));
+    return () => controller.abort();
+  }, [account?.id, range, view]);
 
   return (
     <div aria-labelledby="tab-performance" id="tabpanel-performance" role="tabpanel">
@@ -137,6 +197,14 @@ export function PerformancePage({
       </div>
       {view === "overview" ? (
         <>
+          <AttributionPanel
+            attribution={attribution}
+            currency={currency ?? (account as { currency?: string } | undefined)?.currency}
+            error={attributionError}
+            loading={attributionLoading}
+            range={range}
+            setRange={setRange}
+          />
           <GrowthChart
             data={data}
             loading={loading}
@@ -159,6 +227,187 @@ export function PerformancePage({
         />
       )}
     </div>
+  );
+}
+
+function AttributionPanel({
+  attribution,
+  currency,
+  error,
+  loading,
+  range,
+  setRange,
+}: {
+  attribution: AccountAttributionData | null;
+  currency?: string;
+  error: string;
+  loading: boolean;
+  range: StatsRange;
+  setRange: (value: StatsRange) => void;
+}) {
+  const { locale } = useLocale();
+  const activeCurrency = attribution?.currency ?? currency;
+  const totals = attribution?.totals;
+  const cards: Array<{ label: string; value: number; bucket?: AttributionBucket }> = [
+    { label: "Total trading P/L", value: totals?.totalPnl ?? 0 },
+    { label: "Provider-linked P/L", value: totals?.providerPnl ?? 0, bucket: "provider" },
+    {
+      label: "Manual / external P/L",
+      value: totals?.manualExternalPnl ?? 0,
+      bucket: "manual_external",
+    },
+    { label: "Unknown / EA P/L", value: totals?.unknownEaPnl ?? 0, bucket: "unknown_ea" },
+  ];
+  const rows = attribution?.attributionRows ?? [];
+  const sourceRows = attribution?.sourceBreakdown ?? [];
+  const topTrades = attribution?.topTrades ?? [];
+  const maxAbsPnl = Math.max(1, ...rows.map((row) => Math.abs(row.pnl)));
+
+  return (
+    <section className="attribution-panel" aria-label="Performance attribution">
+      <header className="attribution-panel-head">
+        <div>
+          <h3>P/L attribution</h3>
+          <p>Manual/external means MT5 activity observed outside provider-linked copy flow.</p>
+        </div>
+        <select
+          aria-label="Attribution date range"
+          value={range}
+          onChange={(event) => setRange(event.target.value as StatsRange)}
+        >
+          <option value="today">Today</option>
+          <option value="7d">7d</option>
+          <option value="30d">30d</option>
+          <option value="all">All</option>
+        </select>
+      </header>
+      {error ? <p className="attribution-error">{error}</p> : null}
+      {loading && !attribution ? <p className="attribution-loading">Loading attribution…</p> : null}
+      <div className="attribution-strip">
+        {cards.map((card) => (
+          <div
+            className={`attribution-kpi ${card.bucket ? attributionBucketClass(card.bucket) : ""}`}
+            key={card.label}
+          >
+            <span>{card.label}</span>
+            <Money
+              value={card.value}
+              currency={activeCurrency}
+              locale={locale}
+              signTone
+              className="attribution-kpi-value"
+            />
+          </div>
+        ))}
+      </div>
+      {attribution ? (
+        <>
+          <div className="attribution-breakdown-grid">
+            <section className="attribution-breakdown" aria-label="P/L by attribution bucket">
+              <h4>P/L by source</h4>
+              <div className="attribution-bars">
+                {rows.map((row) => (
+                  <div className="attribution-bar-row" key={row.bucket}>
+                    <div>
+                      <strong>{row.label}</strong>
+                      <span>
+                        {row.tradeCount} trade{row.tradeCount === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                    <div className="attribution-bar-track" aria-hidden="true">
+                      <span
+                        className={`attribution-bar ${attributionBucketClass(row.bucket)}`}
+                        style={{
+                          width: `${Math.max(4, (Math.abs(row.pnl) / maxAbsPnl) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                    <Money value={row.pnl} currency={activeCurrency} locale={locale} signTone />
+                  </div>
+                ))}
+              </div>
+            </section>
+            <section className="attribution-breakdown" aria-label="Close-source breakdown">
+              <h4>Close-source breakdown</h4>
+              <div className="source-breakdown-list">
+                {sourceRows.length > 0 ? (
+                  sourceRows.map((row) => (
+                    <div className="source-breakdown-row" key={row.source}>
+                      <span>{row.label}</span>
+                      <small>
+                        {row.tradeCount} trade{row.tradeCount === 1 ? "" : "s"}
+                      </small>
+                      <Money value={row.pnl} currency={activeCurrency} locale={locale} signTone />
+                    </div>
+                  ))
+                ) : (
+                  <p className="attribution-empty">No close-source data for this range.</p>
+                )}
+              </div>
+            </section>
+          </div>
+          <div className="data-table-wrap attribution-table-wrap">
+            <table
+              className="data-table attribution-trades-table"
+              aria-label="Largest attribution trades"
+            >
+              <thead>
+                <tr>
+                  <th scope="col">Trade</th>
+                  <th scope="col">Source</th>
+                  <th scope="col">Close</th>
+                  <th scope="col">Opened</th>
+                  <th scope="col">Closed</th>
+                  <th className="num" scope="col">
+                    Realized P/L
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {topTrades.length > 0 ? (
+                  topTrades.map((trade) => (
+                    <tr key={trade.tradeId}>
+                      <th className="data-table-row-head" scope="row">
+                        <strong>{trade.symbol || "unmapped"}</strong>
+                        <span className="data-table-subtle">
+                          {trade.direction || "—"} · {trade.tradeId}
+                        </span>
+                      </th>
+                      <td>
+                        <span
+                          className={`attribution-source-chip ${attributionBucketClass(trade.bucket)}`}
+                        >
+                          {trade.sourceLabel}
+                        </span>
+                      </td>
+                      <td>{trade.closeReason}</td>
+                      <td className="data-table-subtle">
+                        {formatAttributionTime(trade.openAt, locale)}
+                      </td>
+                      <td className="data-table-subtle">
+                        {formatAttributionTime(trade.closeAt, locale)}
+                      </td>
+                      <td className="num-cell">
+                        <Money
+                          value={trade.pnl}
+                          currency={activeCurrency}
+                          locale={locale}
+                          signTone
+                        />
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr className="data-table-empty">
+                    <td colSpan={6}>No closed trades for this range.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
+    </section>
   );
 }
 
@@ -436,6 +685,22 @@ function StatisticsView({
       ) : null}
     </section>
   );
+}
+
+function attributionBucketClass(bucket: AttributionBucket) {
+  return bucket.replace("_", "-");
+}
+
+function formatAttributionTime(value: string | undefined, locale: string) {
+  if (!value) return "—";
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return value;
+  return new Intl.DateTimeFormat(locale, {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(time));
 }
 
 function ExternalActivityPanel({
