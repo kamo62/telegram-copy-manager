@@ -174,7 +174,7 @@ export function AccountHeader({
               role="status"
             >
               <CheckCircle2 size={12} aria-hidden="true" />
-              {connectedPlatform.eaActive ? "EA connected" : "EA offline"}
+              {connectedPlatform.eaActive ? "EA WORKING" : "EA OFFLINE"}
             </div>
           </div>
         </div>
@@ -193,14 +193,14 @@ export function AccountHeader({
             const delta = formatDelta(kpi.delta, locale);
             const Icon = kpi.icon;
             const sparkData = series?.[kpi.key];
-            // The ledger value carries the signal; only the primary P/L trend earns color.
-            const sparkColor = kpi.primary
-              ? kpi.delta !== null && kpi.delta < 0
+            // Sparkline tone tracks P/L sign for the windowed cards;
+            // Balance/Equity stay on their fixed accent.
+            const sparkColor =
+              kpi.delta !== null && kpi.delta < 0
                 ? "var(--down-dim)"
                 : kpi.delta !== null && kpi.delta > 0
                   ? "var(--up-dim)"
-                  : accentColor(kpi.accent)
-              : "var(--ink-faint)";
+                  : accentColor(kpi.accent);
             return (
               <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
                 <div className="kpi-head">

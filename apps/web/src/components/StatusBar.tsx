@@ -64,12 +64,12 @@ export function StatusBar({
       <div className="sync-strip">
         <span aria-label={liveDotLabel} className={liveDotClass} role="img" title={liveDotLabel} />
         <span className="sync-metric">
-          <span className="sync-label">Last sync</span>
+          <span className="sync-label">Last sync:</span>
           <span className="sync-value">{lastSyncLabel}</span>
         </span>
         <span className="sync-metric">
           <Tag size={13} aria-hidden="true" />
-          <span className="sync-label">Version</span>
+          <span className="sync-label">Version:</span>
           <span className="sync-value">{appVersion}</span>
         </span>
       </div>

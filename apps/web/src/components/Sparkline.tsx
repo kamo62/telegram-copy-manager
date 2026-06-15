@@ -7,13 +7,14 @@ type SparklineProps = {
   ariaLabel?: string;
 };
 
-// Pure-SVG sparkline. Zero dependencies, accepts any numeric series and renders
-// a restrained trend stroke for AccountHeader KPI cards.
+// Pure-SVG sparkline. ~30 lines, zero dependencies, accepts any numeric series
+// and renders a line + faint area under it. Used in AccountHeader KPI cards
+// to mimic the Codex LB trend strip without pulling in recharts.
 export function Sparkline({
   data,
-  color = "var(--ink-faint)",
+  color = "var(--accent)",
   height = 28,
-  fill = false,
+  fill = true,
   className,
   ariaLabel,
 }: SparklineProps) {
@@ -57,7 +58,7 @@ export function Sparkline({
         stroke={color}
         strokeLinecap="round"
         strokeLinejoin="round"
-        strokeWidth="1.25"
+        strokeWidth="1.5"
       />
     </svg>
   );
