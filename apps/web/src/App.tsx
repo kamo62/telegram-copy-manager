@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import packageJson from "../../../package.json";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountsOverview } from "./components/AccountsOverview";
+import { BetaDashboard } from "./components/BetaDashboard";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -906,6 +907,7 @@ export function App({
     "";
 
   const queuePending = snapshot.signalQueue.filter((item) => item.status === "PENDING").length;
+  const isBetaRoute = location.pathname === "/beta";
   const growthData = useMemo(() => {
     const performance = focusedAccount
       ? (snapshot.accountPerformanceByAccount?.[focusedAccount.id] ??
@@ -1483,6 +1485,18 @@ export function App({
         startTelegramConnection={startTelegramConnection}
         submitCode={submitCode}
         submitPassword={submitPassword}
+      />
+    );
+  }
+
+  if (isBetaRoute) {
+    return (
+      <BetaDashboard
+        lastSyncAt={lastSyncAt}
+        onRefresh={refreshDashboard}
+        queuePending={queuePending}
+        refreshing={refreshing}
+        snapshot={snapshot}
       />
     );
   }

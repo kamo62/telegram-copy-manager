@@ -7,8 +7,18 @@ import { App, type DashboardSnapshot } from "./App";
 import { SettingsPage } from "./pages/SettingsPage";
 
 // App now reads its view/tab/account from the URL, so every render needs Router context.
-const render = (ui: Parameters<typeof rtlRender>[0], options?: Parameters<typeof rtlRender>[1]) =>
-  rtlRender(ui, { wrapper: MemoryRouter, ...options });
+const render = (
+  ui: Parameters<typeof rtlRender>[0],
+  options?: Parameters<typeof rtlRender>[1] & { route?: string },
+) => {
+  const { route, ...renderOptions } = options ?? {};
+  return rtlRender(ui, {
+    wrapper: ({ children }) => (
+      <MemoryRouter initialEntries={[route ?? "/"]}>{children}</MemoryRouter>
+    ),
+    ...renderOptions,
+  });
+};
 
 beforeEach(() => {
   globalThis.fetch = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
@@ -1310,6 +1320,65 @@ describe("App dashboard", () => {
     await clickTabAsync(view, "History");
     clickTab(view, "Closed");
     expect(await view.findByText("No closed trades yet")).toBeTruthy();
+  });
+
+  test("renders beta dashboard for 322103933 and separates cashflow from trading P/L", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          health: { status: "ok", database: "connected", telegramAdapter: "gramjs" },
+          mt5Accounts: [
+            {
+              ...snapshot.mt5Accounts[0]!,
+              id: "mt5-322103933",
+              accountNumber: "322103933",
+              server: "XMGlobal-MT5",
+              currency: "ZAR",
+              balance: 4000.78,
+              equity: 6586.19,
+              profit: 1724.3,
+              openPositionCount: 2,
+              pendingOrderCount: 8,
+            },
+          ],
+          accountPerformance: {
+            accountId: "mt5-322103933",
+            currency: "ZAR",
+            heartbeatStatus: "online",
+            initialBalance: 4000,
+            currentBalance: 4000.78,
+            currentEquity: 6586.19,
+            currentProfit: 1724.3,
+            totalProfit: 2593.78,
+            realizedPnl: 869.48,
+            floatingPnl: 1724.3,
+            netDeposits: 100,
+            today: 212.06,
+            thisWeek: 123.36,
+            thisMonth: -23.47,
+            equityCurve: [
+              { x: 1, equity: 4000, drawdown: 0 },
+              { x: 2, equity: 5200, drawdown: 2.1 },
+              { x: 3, equity: 6586.19, drawdown: 8.42 },
+            ],
+          },
+        }}
+      />,
+      { route: "/beta" },
+    );
+
+    expect(view.getByLabelText("Beta ledger dashboard")).toBeTruthy();
+    expect(view.getAllByText("322103933").length).toBeGreaterThan(0);
+    expect(view.getAllByText("Deposits").length).toBeGreaterThan(0);
+    expect(view.getByText("Deposits are excluded from trading P/L")).toBeTruthy();
+  });
+
+  test("keeps attribution time and realized P/L cells in table layout", async () => {
+    const source = await Bun.file(new URL("./styles/base.css", import.meta.url)).text();
+
+    expect(source).toContain(".data-table td.data-table-subtle");
+    expect(source).toContain("display: table-cell");
   });
 
   test("History › Closed groups partial closes under a parent row and reveals per-leg detail on expand", () => {
