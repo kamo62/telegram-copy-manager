@@ -4,7 +4,7 @@ import { Money } from "../components/Money";
 import { Stat } from "../components/Stat";
 import { useLocale } from "../contexts/LocaleContext";
 import { apiGet } from "../lib/api";
-import { formatLot, formatNumber, formatPercent } from "../lib/format";
+import { formatLot, formatMoney, formatNumber, formatPercent } from "../lib/format";
 
 type PerformanceView = "overview" | "statistics";
 type StatsRange = "today" | "7d" | "30d" | "all";
@@ -81,6 +81,8 @@ interface AccountAttributionData {
     symbol: string;
     direction: string;
     pnl: number;
+    ticket?: string;
+    volume?: number;
     openAt?: string;
     closeAt: string;
   }>;
@@ -108,6 +110,18 @@ export function PerformancePage({
       magic?: number;
       comment?: string;
     }>;
+    appPositions?: Array<{
+      ticket: string;
+      symbol: string;
+      type: number;
+      volume: number;
+      openPrice: number;
+      sl?: number;
+      tp?: number;
+      profit?: number;
+      magic?: number;
+      comment?: string;
+    }>;
     externalOrders?: Array<{
       ticket: string;
       symbol: string;
@@ -120,6 +134,19 @@ export function PerformancePage({
       magic?: number;
       comment?: string;
     }>;
+    appOrders?: Array<{
+      ticket: string;
+      symbol: string;
+      type: number;
+      volume: number;
+      openPrice: number;
+      sl?: number;
+      tp?: number;
+      profit?: number;
+      magic?: number;
+      comment?: string;
+    }>;
+    symbols?: Array<{ symbol: string; bid?: number; ask?: number }>;
   }>;
   currency?: string;
   data: GrowthSeries;
@@ -198,10 +225,12 @@ export function PerformancePage({
       {view === "overview" ? (
         <>
           <AttributionPanel
+            account={account}
             attribution={attribution}
             currency={currency ?? (account as { currency?: string } | undefined)?.currency}
             error={attributionError}
             loading={attributionLoading}
+            performance={data}
             range={range}
             setRange={setRange}
           />
@@ -231,17 +260,21 @@ export function PerformancePage({
 }
 
 function AttributionPanel({
+  account,
   attribution,
   currency,
   error,
   loading,
+  performance,
   range,
   setRange,
 }: {
+  account?: NonNullable<Parameters<typeof PerformancePage>[0]["accounts"]>[number];
   attribution: AccountAttributionData | null;
   currency?: string;
   error: string;
   loading: boolean;
+  performance: GrowthSeries;
   range: StatsRange;
   setRange: (value: StatsRange) => void;
 }) {
@@ -262,6 +295,18 @@ function AttributionPanel({
   const sourceRows = attribution?.sourceBreakdown ?? [];
   const topTrades = attribution?.topTrades ?? [];
   const maxAbsPnl = Math.max(1, ...rows.map((row) => Math.abs(row.pnl)));
+  const openPositions = [...(account?.appPositions ?? []), ...(account?.externalPositions ?? [])];
+  const pendingOrders = [...(account?.appOrders ?? []), ...(account?.externalOrders ?? [])];
+  const openLots = openPositions.reduce((sum, position) => sum + position.volume, 0);
+  const floatingPnl =
+    performance.floatingPnl ??
+    openPositions.reduce((sum, position) => sum + (position.profit ?? 0), 0);
+  const drawdowns = performance.drawdown[1] ?? [];
+  const maxDrawdown = drawdowns.length > 0 ? Math.max(...drawdowns) : 0;
+  const netCashflow = performance.netDeposits ?? 0;
+  const cashflowLabel =
+    netCashflow > 0 ? "Deposits" : netCashflow < 0 ? "Withdrawals" : "Deposits / withdrawals";
+  const symbolsActive = new Set(openPositions.map((position) => position.symbol)).size;
 
   return (
     <section className="attribution-panel" aria-label="Performance attribution">
@@ -327,6 +372,17 @@ function AttributionPanel({
                 ))}
               </div>
             </section>
+            <RiskExposureCard
+              cashflowLabel={cashflowLabel}
+              currency={activeCurrency}
+              floatingPnl={floatingPnl}
+              maxDrawdown={maxDrawdown}
+              netCashflow={netCashflow}
+              openLots={openLots}
+              openTrades={openPositions.length}
+              pendingOrders={pendingOrders.length}
+              symbolsActive={symbolsActive}
+            />
             <section className="attribution-breakdown" aria-label="Close-source breakdown">
               <h4>Close-source breakdown</h4>
               <div className="source-breakdown-list">
@@ -346,69 +402,166 @@ function AttributionPanel({
               </div>
             </section>
           </div>
-          <div className="data-table-wrap attribution-table-wrap">
-            <table
-              className="data-table attribution-trades-table"
-              aria-label="Largest attribution trades"
-            >
-              <thead>
-                <tr>
-                  <th scope="col">Trade</th>
-                  <th scope="col">Source</th>
-                  <th scope="col">Close</th>
-                  <th scope="col">Opened</th>
-                  <th scope="col">Closed</th>
-                  <th className="num" scope="col">
-                    Realized P/L
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {topTrades.length > 0 ? (
-                  topTrades.map((trade) => (
-                    <tr key={trade.tradeId}>
-                      <th className="data-table-row-head" scope="row">
-                        <strong>{trade.symbol || "unmapped"}</strong>
-                        <span className="data-table-subtle">
-                          {trade.direction || "—"} · {trade.tradeId}
-                        </span>
-                      </th>
-                      <td>
-                        <span
-                          className={`attribution-source-chip ${attributionBucketClass(trade.bucket)}`}
-                        >
-                          {trade.sourceLabel}
-                        </span>
-                      </td>
-                      <td>{trade.closeReason}</td>
-                      <td className="data-table-subtle">
-                        {formatAttributionTime(trade.openAt, locale)}
-                      </td>
-                      <td className="data-table-subtle">
-                        {formatAttributionTime(trade.closeAt, locale)}
-                      </td>
-                      <td className="num-cell">
-                        <Money
-                          value={trade.pnl}
-                          currency={activeCurrency}
-                          locale={locale}
-                          signTone
-                        />
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr className="data-table-empty">
-                    <td colSpan={6}>No closed trades for this range.</td>
+          <section className="recent-closed-card" aria-label="Recent closed trades">
+            <header className="recent-closed-card-head">
+              <h4>RECENT CLOSED TRADES</h4>
+              <button type="button">Export</button>
+            </header>
+            <div className="data-table-wrap attribution-table-wrap recent-closed-table-wrap">
+              <table
+                className="data-table attribution-trades-table recent-closed-table"
+                aria-label="Recent closed trades"
+              >
+                <thead>
+                  <tr>
+                    <th scope="col">Close time</th>
+                    <th scope="col">Ticket</th>
+                    <th scope="col">Symbol</th>
+                    <th scope="col">Type</th>
+                    <th className="num" scope="col">
+                      Volume
+                    </th>
+                    <th scope="col">Source</th>
+                    <th scope="col">Close reason</th>
+                    <th className="num" scope="col">
+                      Realised P/L
+                    </th>
+                    <th aria-label="Open trade" scope="col" />
                   </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {topTrades.length > 0 ? (
+                    topTrades.map((trade) => (
+                      <tr key={trade.tradeId}>
+                        <td className="data-table-subtle">
+                          {formatAttributionTime(trade.closeAt, locale)}
+                        </td>
+                        <td>{trade.ticket ?? shortTradeId(trade.tradeId)}</td>
+                        <td>{trade.symbol || "unmapped"}</td>
+                        <td>
+                          <span
+                            className={`recent-closed-side ${trade.direction === "SELL" ? "sell" : "buy"}`}
+                          >
+                            {trade.direction || "—"}
+                          </span>
+                        </td>
+                        <td className="num-cell">{formatLot(trade.volume)}</td>
+                        <td>
+                          <span
+                            className={`attribution-source-chip ${attributionBucketClass(trade.bucket)}`}
+                          >
+                            {trade.sourceLabel}
+                          </span>
+                        </td>
+                        <td>{trade.closeReason}</td>
+                        <td className="num-cell">
+                          <Money
+                            value={trade.pnl}
+                            currency={activeCurrency}
+                            locale={locale}
+                            signTone
+                          />
+                        </td>
+                        <td className="recent-closed-chevron">›</td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr className="data-table-empty">
+                      <td colSpan={9}>No closed trades for this range.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
         </>
       ) : null}
     </section>
   );
+}
+
+function RiskExposureCard({
+  cashflowLabel,
+  currency,
+  floatingPnl,
+  maxDrawdown,
+  netCashflow,
+  openLots,
+  openTrades,
+  pendingOrders,
+  symbolsActive,
+}: {
+  cashflowLabel: string;
+  currency?: string;
+  floatingPnl: number;
+  maxDrawdown: number;
+  netCashflow: number;
+  openLots: number;
+  openTrades: number;
+  pendingOrders: number;
+  symbolsActive: number;
+}) {
+  const { locale } = useLocale();
+  return (
+    <section className="risk-exposure-card" aria-label="Risk and exposure">
+      <header>
+        <h4>RISK &amp; EXPOSURE</h4>
+        <button type="button">View all</button>
+      </header>
+      <div className="risk-exposure-grid">
+        <RiskExposureCell label="Open trades" value={openTrades} />
+        <RiskExposureCell label="Open lots" value={formatLot(openLots)} />
+        <RiskExposureCell
+          label="Floating P/L"
+          tone={floatingPnl > 0 ? "up" : floatingPnl < 0 ? "down" : undefined}
+          value={formatMoney(floatingPnl, currency ?? "USD", locale)}
+        />
+        <RiskExposureCell
+          label="Max drawdown"
+          value={formatPercent(maxDrawdown, { locale })}
+          danger
+        />
+        <RiskExposureCell
+          label={cashflowLabel}
+          tone={netCashflow > 0 ? "up" : netCashflow < 0 ? "down" : undefined}
+          value={formatMoney(netCashflow, currency ?? "USD", locale)}
+        />
+        <RiskExposureCell label="Symbols active" value={symbolsActive} />
+        <RiskExposureCell label="Pending orders" value={pendingOrders} />
+      </div>
+    </section>
+  );
+}
+
+function RiskExposureCell({
+  danger = false,
+  label,
+  tone,
+  value,
+}: {
+  danger?: boolean;
+  label: string;
+  tone?: "up" | "down";
+  value: ReactNode;
+}) {
+  const valueClass = danger
+    ? "money-down"
+    : tone === "up"
+      ? "money-up"
+      : tone === "down"
+        ? "money-down"
+        : "";
+  return (
+    <div className="risk-exposure-cell">
+      <span>{label}</span>
+      <strong className={`${valueClass} risk-exposure-value`}>{value}</strong>
+    </div>
+  );
+}
+
+function shortTradeId(value: string) {
+  const parts = value.split("-").filter(Boolean);
+  return parts[parts.length - 1] ?? value;
 }
 
 function StatisticsView({
