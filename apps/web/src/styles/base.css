@@ -3588,7 +3588,7 @@ h3 {
 
 .attribution-breakdown-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.75fr);
+  grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
   gap: 12px;
 }
 
@@ -3679,137 +3679,6 @@ h3 {
 
 .attribution-table-wrap {
   box-shadow: var(--shadow-sm);
-}
-
-.risk-exposure-card,
-.recent-closed-card {
-  display: grid;
-  gap: 14px;
-  padding: 16px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  box-shadow: var(--shadow-sm);
-}
-
-.risk-exposure-card header,
-.recent-closed-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.risk-exposure-card h4,
-.recent-closed-card h4 {
-  margin: 0;
-  font-family: var(--font-ui);
-  font-size: 13px;
-  font-weight: 750;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ink);
-}
-
-.risk-exposure-card button,
-.recent-closed-card button {
-  border: 0;
-  background: transparent;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.risk-exposure-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-}
-
-.risk-exposure-cell {
-  display: grid;
-  gap: 7px;
-  min-height: 68px;
-  padding: 12px 13px;
-  border-right: 1px solid var(--line-subtle);
-  border-bottom: 1px solid var(--line-subtle);
-}
-
-.risk-exposure-cell:nth-child(3n) {
-  border-right: 0;
-}
-
-.risk-exposure-cell:nth-child(6) {
-  border-bottom: 0;
-}
-
-.risk-exposure-cell:last-child {
-  border-right: 0;
-  border-bottom: 0;
-}
-
-.risk-exposure-cell span {
-  font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-}
-
-.risk-exposure-cell strong {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 18px;
-  font-weight: 650;
-  color: var(--ink);
-}
-
-.recent-closed-table-wrap {
-  box-shadow: none;
-}
-
-.recent-closed-table {
-  font-size: 12px;
-}
-
-.recent-closed-table thead th {
-  padding: 10px 11px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--ink-faint);
-}
-
-.recent-closed-table tbody td {
-  padding: 10px 11px;
-}
-
-.recent-closed-side {
-  display: inline-flex;
-  padding: 2px 7px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.recent-closed-side.buy {
-  color: var(--up-dim);
-  background: var(--up-soft);
-}
-
-.recent-closed-side.sell {
-  color: var(--down-dim);
-  background: var(--down-soft);
-}
-
-.recent-closed-chevron {
-  color: var(--ink-dim);
-  font-size: 18px;
-  text-align: right;
 }
 
 .attribution-source-chip {

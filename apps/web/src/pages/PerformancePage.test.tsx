@@ -114,9 +114,8 @@ describe("PerformancePage", () => {
     expect(view.getByText("Close-source breakdown")).toBeTruthy();
     expect(view.getAllByText("Manual mobile").length).toBeGreaterThanOrEqual(1);
     expect(view.getByText("Provider: KAL VIP")).toBeTruthy();
-    const table = view.getByRole("table", { name: "Recent closed trades" });
+    const table = view.getByRole("table", { name: "Largest attribution trades" });
     expect(within(table).getAllByText("XAUUSD").length).toBeGreaterThanOrEqual(1);
-    expect(within(table).getByText("Realised P/L")).toBeTruthy();
   });
 
   test("describes sampled time-series points as samples instead of trades", () => {
