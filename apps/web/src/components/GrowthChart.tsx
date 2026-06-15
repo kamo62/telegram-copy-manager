@@ -55,6 +55,7 @@ export function GrowthChart({
 
       const series = view === "growth" ? data.growth : data.drawdown;
       const isGrowth = view === "growth";
+      const smoothPath = uPlot.paths.spline();
       const opts = {
         width: container.clientWidth || 600,
         height: 320,
@@ -65,13 +66,13 @@ export function GrowthChart({
             stroke: "#9ca3af",
             grid: { stroke: "rgba(225, 228, 237, 0.6)", width: 1 },
             ticks: { stroke: "transparent" },
-            font: '11px "Inter", sans-serif',
+            font: '11px "JetBrains Mono", ui-monospace, monospace',
           },
           {
             stroke: "#9ca3af",
             grid: { stroke: "rgba(225, 228, 237, 0.6)", width: 1 },
             ticks: { stroke: "transparent" },
-            font: '11px "Inter", sans-serif',
+            font: '11px "JetBrains Mono", ui-monospace, monospace',
             values: (_self: unknown, ticks: number[]) =>
               ticks.map((value) =>
                 isGrowth ? `$${value.toLocaleString()}` : `${value.toFixed(1)}%`,
@@ -88,6 +89,7 @@ export function GrowthChart({
                 stroke: "#5046e5",
                 width: 2,
                 fill: "rgba(80, 70, 229, 0.12)",
+                paths: smoothPath,
                 points: { show: false },
               }
             : {
@@ -95,6 +97,7 @@ export function GrowthChart({
                 stroke: "#ef4444",
                 width: 2,
                 fill: "rgba(239, 68, 68, 0.12)",
+                paths: smoothPath,
                 points: { show: false },
               },
         ],
