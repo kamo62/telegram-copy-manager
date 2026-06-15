@@ -346,7 +346,7 @@ describe("App dashboard", () => {
 
     expect(view.getByText(/200\.00/)).toBeTruthy();
     expect(view.getByText(/220\.00/)).toBeTruthy();
-    expect(view.getByText("EA WORKING")).toBeTruthy();
+    expect(view.getByText("EA connected")).toBeTruthy();
   });
 
   test("account scoped pages use the selected account currency instead of reporting currency", () => {
@@ -561,7 +561,7 @@ describe("App dashboard", () => {
       />,
     );
 
-    expect(view.getByText("EA OFFLINE")).toBeTruthy();
+    expect(view.getByText("EA offline")).toBeTruthy();
     expect(view.queryByText(/12,345\.67/)).toBeNull();
     expect(view.queryByText("Balance")).toBeTruthy();
     expect(view.queryByText("Equity")).toBeTruthy();
@@ -1660,8 +1660,8 @@ describe("App dashboard", () => {
 
   test("StatusBar shows last sync and app version", () => {
     const view = render(<App initialSnapshot={snapshot} />);
-    expect(view.getByText("Last sync:")).toBeTruthy();
-    expect(view.getByText("Version:")).toBeTruthy();
+    expect(view.getByText("Last sync")).toBeTruthy();
+    expect(view.getByText("Version")).toBeTruthy();
     expect(view.getByText(packageJson.version)).toBeTruthy();
   });
 

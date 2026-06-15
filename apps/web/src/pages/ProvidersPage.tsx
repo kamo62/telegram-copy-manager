@@ -45,11 +45,9 @@ export function ProvidersPage({
       </div>
       {isAccountMode ? (
         <p className="panel-intro">
-          Stats, copy status, and configuration shown for{" "}
-          <strong>{accountLabel ?? "this account"}</strong>. Use <strong>Copy</strong> to start or
-          stop copying a provider here, and <strong>Configure</strong> to set this account's lot
-          size, risk, and take-profit. Enable or remove a provider from{" "}
-          <strong>Telegram Setup</strong>.
+          Stats, copy status, and configuration for {accountLabel ?? "this account"}. Use Copy to
+          start or stop copying a provider, and Configure to set lot size, risk, and take-profit.
+          Enable or remove providers from Telegram Setup.
         </p>
       ) : (
         <p className="panel-intro">

@@ -72,13 +72,10 @@ h3 {
   font-family: var(--font-ui);
   font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  background: hsl(0 0% 100% / 0.72);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+  letter-spacing: 0.01em;
+  text-transform: none;
+  background: var(--bg-elevated);
   border-bottom: 1px solid var(--line);
-  box-shadow: var(--shadow-glass);
   color: var(--ink-dim);
   white-space: nowrap;
   overflow: hidden;
@@ -135,8 +132,8 @@ h3 {
 
 .status-bar .sync-label {
   flex: 0 0 auto;
-  font-weight: 650;
-  color: var(--ink);
+  font-weight: 550;
+  color: var(--ink-2);
 }
 
 .status-bar .sync-value {
@@ -756,8 +753,7 @@ h3 {
 .accounts-overview-eyebrow {
   font-size: 11px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.01em;
   color: var(--ink-3);
 }
 
@@ -783,8 +779,7 @@ h3 {
 .accounts-overview-stats span {
   font-size: 10px;
   font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.01em;
   color: var(--ink-3);
 }
 
@@ -966,8 +961,7 @@ h3 {
   display: block;
   font-size: 10px;
   font-weight: 500;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
   color: var(--ink-dim);
 }
 
@@ -1021,9 +1015,8 @@ h3 {
   gap: 6px;
   padding: 8px 10px;
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
+  font-weight: 500;
+  letter-spacing: 0.01em;
   color: var(--ink-dim);
   background: var(--panel-2);
   border-bottom: 1px solid var(--line);
@@ -2217,15 +2210,12 @@ h3 {
 }
 
 .account-platform-card {
-  background: linear-gradient(180deg, var(--bg-elevated), var(--bg));
   border-radius: var(--radius-2);
 }
 
 .account-platform-card-icon {
   width: 32px;
   height: 32px;
-  color: white;
-  background: linear-gradient(135deg, var(--accent-9), var(--accent-10));
 }
 
 .ea-badge.ea-on::before {
@@ -5338,9 +5328,8 @@ select.config-strategy-input {
 .modal-section-title {
   margin: 0;
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-weight: 500;
+  letter-spacing: 0.01em;
   color: var(--ink-dim);
 }
 
@@ -5799,7 +5788,7 @@ select.config-strategy-input {
 
 .account-platform-card-grid dd {
   margin: 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-variant-numeric: tabular-nums;
   font-size: 12px;
   font-weight: 500;
@@ -5816,9 +5805,8 @@ select.config-strategy-input {
   align-self: flex-start;
   padding: 3px 8px;
   font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-weight: 500;
+  letter-spacing: 0.01em;
   border-radius: 4px;
 }
 
@@ -5868,11 +5856,10 @@ select.config-strategy-input {
   align-items: baseline;
   gap: 4px;
   flex-wrap: wrap;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.06em;
-  color: var(--ink-faint);
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
+  color: var(--ink-3);
 }
 
 .kpi-spark-placeholder {
@@ -6140,10 +6127,8 @@ select.config-strategy-input {
 
 /* Final P2/P4 polish overrides: intentionally last. */
 .status-bar {
-  background: hsl(0 0% 100% / 0.72);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: var(--shadow-glass);
+  background: var(--bg-elevated);
+  box-shadow: none;
 }
 
 .status-bar .refresh-btn:focus-visible {
@@ -6158,15 +6143,12 @@ select.config-strategy-input {
 }
 
 .account-platform-card {
-  background: linear-gradient(180deg, var(--bg-elevated), var(--bg));
   border-radius: var(--radius-2);
 }
 
 .account-platform-card-icon {
   width: 32px;
   height: 32px;
-  color: white;
-  background: linear-gradient(135deg, var(--accent-9), var(--accent-10));
 }
 
 .ea-badge.ea-on {
@@ -6267,9 +6249,7 @@ select.config-strategy-input {
   position: sticky;
   top: 0;
   z-index: 2;
-  background: hsl(0 0% 100% / 0.94);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  background: var(--bg-elevated);
 }
 
 .signin-shell {
