@@ -89,11 +89,11 @@ describe("telegram reconnect resilience helpers", () => {
     expect(parseConnectionRetries("20")).toBe(20);
   });
 
-  test("clientLooksDead flags disconnected or not-connected handles only", () => {
+  test("clientLooksDead flags only an explicitly disconnected handle", () => {
     expect(clientLooksDead({ disconnected: true })).toBe(true);
-    expect(clientLooksDead({ connected: false })).toBe(true);
-    expect(clientLooksDead({ connected: true, disconnected: false })).toBe(false);
-    // Unknown state (fresh handle, getters undefined) is not treated as dead.
+    expect(clientLooksDead({ disconnected: false })).toBe(false);
+    // The unreliable gramjs `connected` getter must NOT drive liveness — reviving
+    // on it caused a reconnect storm — so an unknown handle is not treated as dead.
     expect(clientLooksDead({})).toBe(false);
   });
 });

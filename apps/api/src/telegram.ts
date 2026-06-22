@@ -95,8 +95,13 @@ const TELEGRAM_STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS ?? 180)
 // connection that may never come back; the next poll retries.
 const TELEGRAM_REVIVE_TIMEOUT_MS = 15_000;
 
-export function clientLooksDead(client: { connected?: boolean; disconnected?: boolean }): boolean {
-  return client.disconnected === true || client.connected === false;
+// Only an explicitly torn-down sender counts as dead. gramjs's `connected`
+// getter proved unreliable in practice — it reads false on a client that is
+// actively completing RPCs — so reviving on it caused a reconnect storm. Real
+// stalls are prevented by unbounded auto-reconnect and detected via contact
+// recency instead (see contactIsStale / sessionHealth).
+export function clientLooksDead(client: { disconnected?: boolean }): boolean {
+  return client.disconnected === true;
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -444,7 +449,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
   // the existing 2s capture loop doubles as a reconnect watchdog. Concurrent
   // callers share a single in-flight revive.
   private async ensureAlive(sessionId: string, client: GramjsClient): Promise<GramjsClient> {
-    if (!clientLooksDead(client)) return client;
+    if (!clientLooksDead(client) && !this.contactIsStale(sessionId)) return client;
     const inFlight = this.reviving.get(sessionId);
     if (inFlight) return await inFlight;
     const revive = this.reviveClient(sessionId, client).finally(() => {
@@ -481,18 +486,26 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     this.lastContactAt.set(sessionId, Date.now());
   }
 
-  sessionHealth(sessionId: string): TelegramSessionHealth {
-    const client = this.clients.get(sessionId) ?? this.pending.get(sessionId)?.client;
+  private contactIsStale(sessionId: string): boolean {
     const last = this.lastContactAt.get(sessionId);
-    const connected = client ? !clientLooksDead(client) : false;
+    return last !== undefined && (Date.now() - last) / 1000 > TELEGRAM_STALL_SECONDS;
+  }
+
+  sessionHealth(sessionId: string): TelegramSessionHealth {
+    const last = this.lastContactAt.get(sessionId);
     const stalledSeconds = last !== undefined ? Math.floor((Date.now() - last) / 1000) : undefined;
+    // Health is judged by how recently a Telegram RPC actually succeeded, not by
+    // gramjs connection getters (which misreport). A session that has not made
+    // contact yet (no lastContactAt) reports not-connected but not stalled, so a
+    // fresh boot doesn't raise a false alarm before its first poll lands.
+    const stalled = stalledSeconds !== undefined && stalledSeconds > TELEGRAM_STALL_SECONDS;
+    const connected = stalledSeconds !== undefined && !stalled;
     return {
       sessionId,
       connected,
       lastContactAt: last !== undefined ? new Date(last).toISOString() : undefined,
       stalledSeconds,
-      stalled:
-        !connected || (stalledSeconds !== undefined && stalledSeconds > TELEGRAM_STALL_SECONDS),
+      stalled,
     };
   }
 
