@@ -28,6 +28,7 @@ import {
   type TelegramAdapter,
   type TelegramCapturedMessage,
   type TelegramDialog,
+  type TelegramSessionHealth,
   type TelegramSessionStatus,
 } from "./telegram";
 
@@ -497,6 +498,11 @@ export function createApi(options: ApiOptions = {}) {
   });
 
   app.get("/api/mt5/accounts", (c) => c.json({ accounts: store.mt5Accounts() }));
+  app.delete("/api/mt5/accounts/:accountId", (c) => {
+    const result = store.deleteMt5Account(c.req.param("accountId"));
+    if ("error" in result) return c.json(result, 404);
+    return c.json(result);
+  });
 
   app.get("/api/account-slots", (c) => c.json({ slots: store.accountSlots() }));
   app.post("/api/account-slots", async (c) => {
@@ -861,6 +867,9 @@ class AppStore {
   // Telegram session" state, so we log once per offline→online edge instead
   // of once per poll. Reset when a session connects.
   private readonly providersWithoutSession = new Set<string>();
+  // Last known Telegram session health per session id, recorded by the capture
+  // loop and surfaced in the dashboard so a silent stall is visible.
+  private readonly telegramHealth = new Map<string, TelegramSessionHealth>();
 
   constructor(databasePath: string, allowDemoData = false) {
     this.allowDemoData = allowDemoData;
@@ -1310,6 +1319,47 @@ class AppStore {
     return { providerId, status: "DELETED" };
   }
 
+  // Hard-delete an MT5 account and every row scoped to it. account_slots is
+  // freed (unlinked) rather than dropped so the provisioning link code can be
+  // reused. Wrapped in a transaction so a failure can't leave half the rows.
+  deleteMt5Account(accountId: string) {
+    const account = this.mt5Accounts().find((item) => item.id === accountId);
+    if (!account) return { error: "Account not found" };
+    const accountScopedTables = [
+      "queue_items",
+      "logical_trades",
+      "account_provider_links",
+      "equity_guardians",
+      "account_symbol_mappings",
+      "mt5_snapshots",
+      "equity_curve_points",
+      "equity_curve_state",
+      "drawdown_events",
+      "execution_reports",
+      "broker_orders",
+      "external_closes",
+    ];
+    const now = new Date().toISOString();
+    const removeAll = this.db.transaction(() => {
+      for (const table of accountScopedTables) {
+        this.db.query(`DELETE FROM ${table} WHERE account_id = ?`).run(accountId);
+      }
+      this.db
+        .query(
+          "UPDATE account_slots SET status = ?, account_id = '', updated_at = ? WHERE account_id = ?",
+        )
+        .run("waiting", now, accountId);
+      this.db.query("DELETE FROM mt5_accounts WHERE id = ?").run(accountId);
+    });
+    removeAll();
+    this.audit("mt5-account.delete", "warn", "MT5 account hard-deleted", {
+      accountId,
+      accountNumber: account.accountNumber,
+      server: account.server,
+    });
+    return { accountId, status: "DELETED" };
+  }
+
   connectedSessionIdForProfile(profileId: string) {
     return this.connectedTelegramSession(profileId)?.id;
   }
@@ -1573,9 +1623,11 @@ class AppStore {
       reviewRequired: 0,
       errors: 0,
     };
+    const activeSessions = new Set<string>();
     for (const provider of this.providers().filter((item) => item.enabled)) {
       result.providers += 1;
       const sessionId = this.connectedSessionIdForProfile(provider.profileId);
+      if (sessionId) activeSessions.add(sessionId);
       if (!sessionId) {
         if (!this.providersWithoutSession.has(provider.id)) {
           this.providersWithoutSession.add(provider.id);
@@ -1629,7 +1681,79 @@ class AppStore {
         });
       }
     }
+    this.recordTelegramHealth(telegram, activeSessions);
     return result;
+  }
+
+  private recordTelegramHealth(telegram: TelegramAdapter, sessionIds: Set<string>) {
+    if (!telegram.sessionHealth) return;
+    for (const sessionId of sessionIds) {
+      const health = telegram.sessionHealth(sessionId);
+      const previous = this.telegramHealth.get(sessionId);
+      this.telegramHealth.set(sessionId, health);
+      // Log the healthy->stalled and stalled->recovered edges once each so the
+      // condition lands in the audit log, not only the live snapshot.
+      if (health.stalled && !previous?.stalled) {
+        this.audit("telegram.session.stalled", "error", "Telegram session stalled", {
+          sessionId,
+          lastContactAt: health.lastContactAt,
+          stalledSeconds: health.stalledSeconds,
+        });
+      } else if (!health.stalled && previous?.stalled) {
+        this.audit("telegram.session.recovered", "info", "Telegram session recovered", {
+          sessionId,
+        });
+      }
+    }
+  }
+
+  telegramSessionHealth(): TelegramSessionHealth[] {
+    return [...this.telegramHealth.values()];
+  }
+
+  // Operational conditions that silently block trading and should be shown
+  // prominently in the UI: a latched Equity Guardian rejecting every signal,
+  // or a Telegram session that has stopped receiving updates.
+  operationalAlerts() {
+    const alerts: Array<{
+      kind: "guardian-paused" | "telegram-stalled";
+      severity: "warn" | "error";
+      message: string;
+      accountId?: string;
+      detail?: Record<string, unknown>;
+    }> = [];
+    for (const guardian of this.equityGuardians()) {
+      if (!guardian.paused) continue;
+      const lastBreach = guardian.breaches.at(-1) as { at?: string; drawdown?: number } | undefined;
+      alerts.push({
+        kind: "guardian-paused",
+        severity: "error",
+        message: `Equity Guardian paused for account ${
+          guardian.accountNumber || guardian.accountId
+        } — OPEN_TRADE signals are being rejected`,
+        accountId: guardian.accountId,
+        detail: {
+          threshold: guardian.threshold,
+          breachedAt: lastBreach?.at,
+          drawdown: lastBreach?.drawdown,
+        },
+      });
+    }
+    for (const health of this.telegramSessionHealth()) {
+      if (!health.stalled) continue;
+      alerts.push({
+        kind: "telegram-stalled",
+        severity: "error",
+        message:
+          "Telegram session is not receiving updates — incoming signals may be delayed or missed",
+        detail: {
+          sessionId: health.sessionId,
+          lastContactAt: health.lastContactAt,
+          stalledSeconds: health.stalledSeconds,
+        },
+      });
+    }
+    return alerts;
   }
 
   backtestProviderMessages(
@@ -5597,6 +5721,8 @@ class AppStore {
       accountProviderLinks: this.accountProviderLinks(),
       equityGuardians: this.equityGuardians(),
       telegramSessions: this.telegramSessionSummaries(),
+      telegramHealth: this.telegramSessionHealth(),
+      alerts: this.operationalAlerts(),
       providers: providers.map((provider) => ({
         id: provider.id,
         dialogId: provider.dialogId,

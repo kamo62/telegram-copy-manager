@@ -1,4 +1,4 @@
-import { ArrowRight, Hand, Plug, Plus, Server } from "lucide-react";
+import { ArrowRight, Hand, Plug, Plus, Server, Trash2 } from "lucide-react";
 import type { ExternalBrokerPosition } from "../App";
 import { AccountRow } from "../components/AccountRow";
 import { EmptyState } from "../components/EmptyState";
@@ -22,6 +22,7 @@ export function LinkedAccountsPage({
   providerLinks = [],
   onCreateSlot,
   onEditProviderLinks,
+  onDeleteAccount,
   variant = "page",
 }: {
   slots: Array<{
@@ -37,6 +38,7 @@ export function LinkedAccountsPage({
   providerLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
   onCreateSlot: (event: React.FormEvent<HTMLFormElement>) => void;
   onEditProviderLinks?: () => void;
+  onDeleteAccount?: (account: LinkedAccount) => void;
   variant?: "page" | "live";
 }) {
   const { locale } = useLocale();
@@ -113,6 +115,18 @@ export function LinkedAccountsPage({
               return (
                 <li className="linked-account-card" key={account.id}>
                   <AccountRow account={account} />
+                  {onDeleteAccount ? (
+                    <div className="linked-account-actions">
+                      <button
+                        className="btn btn-ghost btn-small btn-danger"
+                        onClick={() => onDeleteAccount(account)}
+                        type="button"
+                      >
+                        <Trash2 aria-hidden="true" size={12} />
+                        Remove account
+                      </button>
+                    </div>
+                  ) : null}
                   {providers.length > 0 ? (
                     <div className="provider-link-block">
                       <div className="provider-link-summary">

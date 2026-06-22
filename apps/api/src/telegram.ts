@@ -28,6 +28,14 @@ export interface TelegramFetchOptions {
   offsetDate?: string;
 }
 
+export interface TelegramSessionHealth {
+  sessionId: string;
+  connected: boolean;
+  lastContactAt?: string;
+  stalledSeconds?: number;
+  stalled: boolean;
+}
+
 export interface TelegramLoginStartInput {
   appSessionId: string;
   profileId: string;
@@ -56,6 +64,53 @@ export interface TelegramAdapter {
     limit: number,
     options?: TelegramFetchOptions,
   ): Promise<TelegramCapturedMessage[]>;
+  sessionHealth?(sessionId: string): TelegramSessionHealth;
+}
+
+// gramjs defaults connectionRetries to Infinity. The previous override of 5
+// capped MTProto reconnect attempts, so any network blip longer than ~5s left
+// the client permanently disconnected with no further retries and live signal
+// capture silently stopped until the process restarted. Restore unbounded
+// auto-reconnect, overridable via env for tests and diagnostics.
+export function parseConnectionRetries(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return Number.POSITIVE_INFINITY;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : Number.POSITIVE_INFINITY;
+}
+
+const TELEGRAM_CONNECTION_RETRIES = parseConnectionRetries(process.env.TELEGRAM_CONNECTION_RETRIES);
+
+const GRAMJS_CLIENT_OPTIONS = {
+  connectionRetries: TELEGRAM_CONNECTION_RETRIES,
+  autoReconnect: true,
+  retryDelay: 2000,
+};
+
+// How long without a successful Telegram RPC before the session is considered
+// stalled. Surfaced in the status snapshot so a silent capture outage is
+// visible instead of looking like "no new messages".
+const TELEGRAM_STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS ?? 180);
+
+// Bound each revive attempt so a poll cycle can't hang forever waiting on a
+// connection that may never come back; the next poll retries.
+const TELEGRAM_REVIVE_TIMEOUT_MS = 15_000;
+
+export function clientLooksDead(client: { connected?: boolean; disconnected?: boolean }): boolean {
+  return client.disconnected === true || client.connected === false;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Telegram operation timed out")), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export function createTelegramAdapter(
@@ -91,6 +146,10 @@ class MockTelegramAdapter implements TelegramAdapter {
   async fetchRecentMessages(_sessionId: string, _dialogId: string, limit: number) {
     return demoMessages().slice(0, limit);
   }
+
+  sessionHealth(sessionId: string): TelegramSessionHealth {
+    return { sessionId, connected: true, stalled: false };
+  }
 }
 
 interface PendingLogin {
@@ -106,6 +165,8 @@ interface PendingLogin {
 }
 
 interface GramjsClient {
+  readonly connected?: boolean;
+  readonly disconnected?: boolean;
   connect(): Promise<boolean>;
   start(params: {
     phoneNumber: () => Promise<string>;
@@ -147,6 +208,8 @@ class GramjsTelegramAdapter implements TelegramAdapter {
   private readonly pending = new Map<string, PendingLogin>();
   private readonly clients = new Map<string, GramjsClient>();
   private readonly dialogEntities = new Map<string, unknown>();
+  private readonly lastContactAt = new Map<string, number>();
+  private readonly reviving = new Map<string, Promise<GramjsClient>>();
   private readonly sessionDir = process.env.TELEGRAM_SESSION_DIR ?? "data/telegram-sessions";
 
   async startLogin(input: TelegramLoginStartInput) {
@@ -156,17 +219,23 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     ]);
     let sessionString = await this.readSession(input.appSessionId);
     let session = new StringSession(sessionString);
-    let client = new TelegramClient(session, Number(input.apiId), input.apiHash, {
-      connectionRetries: 5,
-    }) as unknown as GramjsClient;
+    let client = new TelegramClient(
+      session,
+      Number(input.apiId),
+      input.apiHash,
+      GRAMJS_CLIENT_OPTIONS,
+    ) as unknown as GramjsClient;
 
     if (sessionString && !(await this.sessionMatchesPhone(client, input.phone))) {
       await client.disconnect().catch(() => undefined);
       sessionString = "";
       session = new StringSession("");
-      client = new TelegramClient(session, Number(input.apiId), input.apiHash, {
-        connectionRetries: 5,
-      }) as unknown as GramjsClient;
+      client = new TelegramClient(
+        session,
+        Number(input.apiId),
+        input.apiHash,
+        GRAMJS_CLIENT_OPTIONS,
+      ) as unknown as GramjsClient;
     }
 
     const pending: PendingLogin = {
@@ -256,6 +325,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
   async listDialogs(sessionId: string): Promise<TelegramDialog[]> {
     const client = await this.connectedClient(sessionId);
     const dialogs = await client.getDialogs({ limit: 100 });
+    this.markContact(sessionId);
     return dialogs.map((dialog) => {
       const id = String(dialog.id ?? dialog.entity?.id ?? dialog.inputEntity?.channelId);
       this.dialogEntities.set(
@@ -305,6 +375,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
         senderName: message.sender?.username ?? message.sender?.firstName,
       });
     }
+    this.markContact(sessionId);
     return messages;
   }
 
@@ -329,17 +400,24 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     if (pending) {
       await pending.loginPromise;
       if (pending.error) throw new Error(pending.error);
-      return pending.client;
+      return await this.ensureAlive(sessionId, pending.client);
     }
 
     const existing = this.clients.get(sessionId);
-    if (existing) return existing;
+    if (existing) return await this.ensureAlive(sessionId, existing);
 
     const sessionString = await this.readSession(sessionId);
     if (!sessionString) {
       throw new Error("No saved Telegram session is available for this profile");
     }
+    const client = await this.createClient(sessionString);
+    await client.connect();
+    this.clients.set(sessionId, client);
+    this.markContact(sessionId);
+    return client;
+  }
 
+  private async createClient(sessionString: string): Promise<GramjsClient> {
     const apiId = process.env.TELEGRAM_API_ID;
     const apiHash = process.env.TELEGRAM_API_HASH;
     if (!apiId || !apiHash) {
@@ -347,17 +425,75 @@ class GramjsTelegramAdapter implements TelegramAdapter {
         "TELEGRAM_API_ID and TELEGRAM_API_HASH are required to reuse a saved session",
       );
     }
-
     const [{ TelegramClient }, { StringSession }] = await Promise.all([
       import("telegram"),
       import("telegram/sessions"),
     ]);
-    const client = new TelegramClient(new StringSession(sessionString), Number(apiId), apiHash, {
-      connectionRetries: 5,
-    }) as unknown as GramjsClient;
-    await client.connect();
-    this.clients.set(sessionId, client);
-    return client;
+    return new TelegramClient(
+      new StringSession(sessionString),
+      Number(apiId),
+      apiHash,
+      GRAMJS_CLIENT_OPTIONS,
+    ) as unknown as GramjsClient;
+  }
+
+  // A cached gramjs client can lose its connection without throwing. Auto-
+  // reconnect normally recovers it, but if retries were exhausted the handle is
+  // left dead and every poll silently returns nothing. Detect that here and
+  // reconnect (or rebuild from the saved session) before the client is used, so
+  // the existing 2s capture loop doubles as a reconnect watchdog. Concurrent
+  // callers share a single in-flight revive.
+  private async ensureAlive(sessionId: string, client: GramjsClient): Promise<GramjsClient> {
+    if (!clientLooksDead(client)) return client;
+    const inFlight = this.reviving.get(sessionId);
+    if (inFlight) return await inFlight;
+    const revive = this.reviveClient(sessionId, client).finally(() => {
+      this.reviving.delete(sessionId);
+    });
+    this.reviving.set(sessionId, revive);
+    return await revive;
+  }
+
+  private async reviveClient(sessionId: string, dead: GramjsClient): Promise<GramjsClient> {
+    try {
+      const reconnected = await withTimeout(dead.connect(), TELEGRAM_REVIVE_TIMEOUT_MS);
+      if (reconnected && !clientLooksDead(dead)) {
+        this.markContact(sessionId);
+        return dead;
+      }
+    } catch {
+      // fall through and rebuild from the saved session
+    }
+    await dead.disconnect?.().catch(() => undefined);
+    this.clients.delete(sessionId);
+    const sessionString = await this.readSession(sessionId);
+    if (!sessionString) {
+      throw new Error("No saved Telegram session is available for this profile");
+    }
+    const fresh = await this.createClient(sessionString);
+    await withTimeout(fresh.connect(), TELEGRAM_REVIVE_TIMEOUT_MS);
+    this.clients.set(sessionId, fresh);
+    this.markContact(sessionId);
+    return fresh;
+  }
+
+  private markContact(sessionId: string) {
+    this.lastContactAt.set(sessionId, Date.now());
+  }
+
+  sessionHealth(sessionId: string): TelegramSessionHealth {
+    const client = this.clients.get(sessionId) ?? this.pending.get(sessionId)?.client;
+    const last = this.lastContactAt.get(sessionId);
+    const connected = client ? !clientLooksDead(client) : false;
+    const stalledSeconds = last !== undefined ? Math.floor((Date.now() - last) / 1000) : undefined;
+    return {
+      sessionId,
+      connected,
+      lastContactAt: last !== undefined ? new Date(last).toISOString() : undefined,
+      stalledSeconds,
+      stalled:
+        !connected || (stalledSeconds !== undefined && stalledSeconds > TELEGRAM_STALL_SECONDS),
+    };
   }
 
   private requirePending(sessionId: string) {

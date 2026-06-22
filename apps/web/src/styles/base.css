@@ -7045,6 +7045,60 @@ select.config-strategy-input {
   word-break: break-all;
 }
 
+/* Operational alerts banner — guardian paused / Telegram stalled. */
+.alerts-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0 0;
+}
+
+.alerts-banner-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid hsl(0 75% 72%);
+  background: hsl(0 85% 97%);
+  color: var(--ink);
+}
+
+.alerts-banner-warn {
+  border-color: hsl(35 85% 70%);
+  background: hsl(38 95% 96%);
+}
+
+.alerts-banner-icon {
+  display: inline-flex;
+  color: hsl(0 70% 45%);
+}
+
+.alerts-banner-warn .alerts-banner-icon {
+  color: hsl(32 80% 42%);
+}
+
+.alerts-banner-message {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* Remove-account action on a linked account card. */
+.linked-account-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.btn-danger {
+  color: hsl(0 70% 45%);
+}
+
+.btn-danger:hover {
+  background: hsl(0 85% 96%);
+  color: hsl(0 72% 40%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .skeleton,
   .modal,

@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import packageJson from "../../../package.json";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountsOverview } from "./components/AccountsOverview";
+import { AlertsBanner } from "./components/AlertsBanner";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -124,6 +125,20 @@ export interface DashboardSnapshot {
     breaches: unknown[];
   }>;
   telegramSessions: Array<{ id: string; phone: string; status: string; profileId?: string }>;
+  telegramHealth?: Array<{
+    sessionId: string;
+    connected: boolean;
+    lastContactAt?: string;
+    stalledSeconds?: number;
+    stalled: boolean;
+  }>;
+  alerts?: Array<{
+    kind: string;
+    severity: "warn" | "error";
+    message: string;
+    accountId?: string;
+    detail?: Record<string, unknown>;
+  }>;
   providers: ProviderRowData[];
   mt5Accounts: Array<{
     id: string;
@@ -1131,6 +1146,18 @@ export function App({
     await refreshDashboard();
   }
 
+  async function deleteAccount(account: { id: string; accountNumber?: string }) {
+    if (
+      !window.confirm(
+        `Permanently delete account ${account.accountNumber ?? account.id} and all of its history, queue items, and snapshots? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    await apiDelete(`/api/mt5/accounts/${account.id}`);
+    await refreshDashboard();
+  }
+
   async function saveProviderSettings(
     provider: ProviderRowData,
     payload: ProviderConfigSubmission,
@@ -1520,6 +1547,7 @@ export function App({
 
       <ErrorBoundary fallbackLabel="This view hit an unexpected error">
         <section className="workspace" id="main-content" tabIndex={-1}>
+          <AlertsBanner alerts={snapshot.alerts ?? []} />
           {showDashboard && focusedSlot ? (
             <PendingSlotView slot={focusedSlot} />
           ) : showDashboard ? (
@@ -1702,6 +1730,7 @@ export function App({
                 accounts={snapshot.mt5Accounts}
                 slots={snapshot.accountSlots ?? []}
                 onCreateSlot={(event) => void createAccountSlot(event)}
+                onDeleteAccount={(account) => void deleteAccount(account)}
                 onEditProviderLinks={() => {
                   setActiveView("dashboard");
                   setActiveTab("providers");
