@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createApi } from "./app";
-import { clientLooksDead, parseConnectionRetries } from "./telegram";
+import { parseConnectionRetries } from "./telegram";
 
 const json = async <T>(response: Response) => (await response.json()) as T;
 
@@ -87,14 +87,6 @@ describe("telegram reconnect resilience helpers", () => {
   test("parseConnectionRetries honours an explicit positive override", () => {
     expect(parseConnectionRetries("5")).toBe(5);
     expect(parseConnectionRetries("20")).toBe(20);
-  });
-
-  test("clientLooksDead flags only an explicitly disconnected handle", () => {
-    expect(clientLooksDead({ disconnected: true })).toBe(true);
-    expect(clientLooksDead({ disconnected: false })).toBe(false);
-    // The unreliable gramjs `connected` getter must NOT drive liveness — reviving
-    // on it caused a reconnect storm — so an unknown handle is not treated as dead.
-    expect(clientLooksDead({})).toBe(false);
   });
 });
 

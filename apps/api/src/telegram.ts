@@ -91,33 +91,6 @@ const GRAMJS_CLIENT_OPTIONS = {
 // visible instead of looking like "no new messages".
 const TELEGRAM_STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS ?? 180);
 
-// Bound each revive attempt so a poll cycle can't hang forever waiting on a
-// connection that may never come back; the next poll retries.
-const TELEGRAM_REVIVE_TIMEOUT_MS = 15_000;
-
-// Only an explicitly torn-down sender counts as dead. gramjs's `connected`
-// getter proved unreliable in practice — it reads false on a client that is
-// actively completing RPCs — so reviving on it caused a reconnect storm. Real
-// stalls are prevented by unbounded auto-reconnect and detected via contact
-// recency instead (see contactIsStale / sessionHealth).
-export function clientLooksDead(client: { disconnected?: boolean }): boolean {
-  return client.disconnected === true;
-}
-
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("Telegram operation timed out")), ms);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
 export function createTelegramAdapter(
   name = process.env.TELEGRAM_ADAPTER ?? "mock",
 ): TelegramAdapter {
@@ -214,7 +187,6 @@ class GramjsTelegramAdapter implements TelegramAdapter {
   private readonly clients = new Map<string, GramjsClient>();
   private readonly dialogEntities = new Map<string, unknown>();
   private readonly lastContactAt = new Map<string, number>();
-  private readonly reviving = new Map<string, Promise<GramjsClient>>();
   private readonly sessionDir = process.env.TELEGRAM_SESSION_DIR ?? "data/telegram-sessions";
 
   async startLogin(input: TelegramLoginStartInput) {
@@ -405,11 +377,16 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     if (pending) {
       await pending.loginPromise;
       if (pending.error) throw new Error(pending.error);
-      return await this.ensureAlive(sessionId, pending.client);
+      return pending.client;
     }
 
+    // Return the cached client as-is. gramjs reconnects the transport on its own
+    // (connectionRetries is unbounded — see GRAMJS_CLIENT_OPTIONS), and its
+    // connection getters misreport on a working client, so we do NOT health-check
+    // or rebuild here: doing so caused a reconnect storm. A genuine stall is
+    // surfaced via sessionHealth (contact recency) for the operator instead.
     const existing = this.clients.get(sessionId);
-    if (existing) return await this.ensureAlive(sessionId, existing);
+    if (existing) return existing;
 
     const sessionString = await this.readSession(sessionId);
     if (!sessionString) {
@@ -442,53 +419,8 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     ) as unknown as GramjsClient;
   }
 
-  // A cached gramjs client can lose its connection without throwing. Auto-
-  // reconnect normally recovers it, but if retries were exhausted the handle is
-  // left dead and every poll silently returns nothing. Detect that here and
-  // reconnect (or rebuild from the saved session) before the client is used, so
-  // the existing 2s capture loop doubles as a reconnect watchdog. Concurrent
-  // callers share a single in-flight revive.
-  private async ensureAlive(sessionId: string, client: GramjsClient): Promise<GramjsClient> {
-    if (!clientLooksDead(client) && !this.contactIsStale(sessionId)) return client;
-    const inFlight = this.reviving.get(sessionId);
-    if (inFlight) return await inFlight;
-    const revive = this.reviveClient(sessionId, client).finally(() => {
-      this.reviving.delete(sessionId);
-    });
-    this.reviving.set(sessionId, revive);
-    return await revive;
-  }
-
-  private async reviveClient(sessionId: string, dead: GramjsClient): Promise<GramjsClient> {
-    try {
-      const reconnected = await withTimeout(dead.connect(), TELEGRAM_REVIVE_TIMEOUT_MS);
-      if (reconnected && !clientLooksDead(dead)) {
-        this.markContact(sessionId);
-        return dead;
-      }
-    } catch {
-      // fall through and rebuild from the saved session
-    }
-    await dead.disconnect?.().catch(() => undefined);
-    this.clients.delete(sessionId);
-    const sessionString = await this.readSession(sessionId);
-    if (!sessionString) {
-      throw new Error("No saved Telegram session is available for this profile");
-    }
-    const fresh = await this.createClient(sessionString);
-    await withTimeout(fresh.connect(), TELEGRAM_REVIVE_TIMEOUT_MS);
-    this.clients.set(sessionId, fresh);
-    this.markContact(sessionId);
-    return fresh;
-  }
-
   private markContact(sessionId: string) {
     this.lastContactAt.set(sessionId, Date.now());
-  }
-
-  private contactIsStale(sessionId: string): boolean {
-    const last = this.lastContactAt.get(sessionId);
-    return last !== undefined && (Date.now() - last) / 1000 > TELEGRAM_STALL_SECONDS;
   }
 
   sessionHealth(sessionId: string): TelegramSessionHealth {
