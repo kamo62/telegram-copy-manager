@@ -11,6 +11,11 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import { KeyboardShortcutsOverlay } from "./components/KeyboardShortcutsOverlay";
 import { LiveRegion } from "./components/LiveRegion";
+import {
+  ManualSignalModal,
+  type ManualSignalPayload,
+  type ManualSignalSeed,
+} from "./components/ManualSignalModal";
 import { OutOfSyncBanner } from "./components/OutOfSyncBanner";
 import { PendingSlotView } from "./components/PendingSlotView";
 import {
@@ -146,6 +151,7 @@ export interface DashboardSnapshot {
     server: string;
     heartbeatStatus: string;
     marginMode: string;
+    availableSymbols?: string[];
     currency?: string;
     balance?: number;
     equity?: number;
@@ -469,6 +475,8 @@ export function App({
     ...initialPendingAuth,
   });
   const [mappingModalOpen, setMappingModalOpen] = useState(false);
+  const [manualSignalOpen, setManualSignalOpen] = useState(false);
+  const [manualSignalSeed, setManualSignalSeed] = useState<ManualSignalSeed | undefined>(undefined);
   const [fixtureClassifications, setFixtureClassifications] = useState<
     Record<string, "entry" | "management" | "noise" | "unknown">
   >({});
@@ -1368,6 +1376,17 @@ export function App({
     await refreshDashboard();
   }
 
+  function openManualSignal(seed?: ManualSignalSeed) {
+    setManualSignalSeed(seed);
+    setManualSignalOpen(true);
+  }
+
+  async function submitManualSignal(payload: ManualSignalPayload) {
+    await apiPost("/api/signals/manual", payload);
+    announce("Manual signal force-pushed to MT5");
+    await refreshDashboard();
+  }
+
   async function createAccountSlot(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -1706,6 +1725,7 @@ export function App({
                 onAiReview={(result) => void requestAiReview(result)}
                 onApprove={(result) => void approveParsedSignal(result)}
                 onIgnore={(result) => void ignoreParsedSignal(result)}
+                onForcePush={openManualSignal}
                 aiReviewStatus={aiReviewStatus}
                 parserActionStatus={parserActionStatus}
                 fixtureStatus={fixtureStatus}
@@ -1790,6 +1810,14 @@ export function App({
         onSaveAccountMapping={saveAccountMapping}
         onSaveGlobalAlias={saveSymbolAlias}
         open={mappingModalOpen}
+      />
+
+      <ManualSignalModal
+        accounts={snapshot.mt5Accounts}
+        onClose={() => setManualSignalOpen(false)}
+        onSubmit={submitManualSignal}
+        open={manualSignalOpen}
+        seed={manualSignalSeed}
       />
 
       <CommandPalette

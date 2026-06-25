@@ -3,6 +3,8 @@ import {
   type AccountSymbolMapping,
   buildExecutionCommand,
   createLogicalTradeFromSignal,
+  createMessageFingerprint,
+  type Direction,
   type ExecutionMode,
   type ExecutionQueueItem,
   type LogicalTrade,
@@ -464,6 +466,13 @@ export function createApi(options: ApiOptions = {}) {
 
   app.post("/api/signals/:id/ignore", (c) => c.json(store.ignoreSignal(c.req.param("id"))));
 
+  app.post("/api/signals/manual", async (c) => {
+    const body = await c.req.json<ManualSignalInput>();
+    const result = store.submitManualSignal(body);
+    if ("body" in result) return c.json(result.body);
+    return c.json({ error: result.error }, result.statusCode);
+  });
+
   app.post("/api/signals/:id/ai-review", async (c) => {
     const review = await store.aiReviewSignal(c.req.param("id"));
     if ("error" in review) {
@@ -753,6 +762,40 @@ function createTelegramIngestionLoop(
       if (timer) clearInterval(timer);
     },
   };
+}
+
+interface ManualSignalInput {
+  accountId: string;
+  providerId?: string;
+  rawMessageId?: string;
+  rawText?: string;
+  commandType?: string;
+  direction: Direction;
+  orderType?: OrderType;
+  brokerSymbol: string;
+  canonicalSymbol?: string;
+  entry?: { from?: number; to?: number };
+  stopLoss?: number;
+  takeProfits?: Array<{ price: number; allocationPercent?: number }>;
+  volume?: number;
+  riskPercent?: number;
+  executionMode?: ExecutionMode;
+}
+
+function manualTicketSummary(
+  input: { direction: Direction; stopLoss?: number; takeProfits?: Array<{ price: number }> },
+  brokerSymbol: string,
+  orderType: OrderType,
+  entry: { from: number; to: number } | undefined,
+): string {
+  const parts = [`${input.direction} ${brokerSymbol} ${orderType}`];
+  if (entry) {
+    parts.push(entry.from === entry.to ? `@ ${entry.from}` : `@ ${entry.from}-${entry.to}`);
+  }
+  if (Number.isFinite(input.stopLoss)) parts.push(`SL ${input.stopLoss}`);
+  const tps = (input.takeProfits ?? []).filter((tp) => Number.isFinite(tp.price));
+  if (tps.length > 0) parts.push(`TP ${tps.map((tp) => tp.price).join("/")}`);
+  return `Manual: ${parts.join(" ")}`;
 }
 
 interface ExecutionReportInput {
@@ -2241,6 +2284,170 @@ class AppStore {
         },
       };
     }
+  }
+
+  // Force-push a manually composed or corrected signal straight to one
+  // account's MT5 queue, bypassing the parser. Used when the parser got a
+  // Telegram signal wrong (or missed it). Operator-supplied values are used
+  // as-is — no provider TP/risk config is layered on top — and the staleness
+  // and dedup guards are skipped (the source timestamp is "now"). The Equity
+  // Guardian still gates execution at lease time, so a paused account is not
+  // silently overridden.
+  submitManualSignal(input: ManualSignalInput):
+    | {
+        body: {
+          queueItemId: string;
+          logicalTradeId: string;
+          parsedSignalId: string;
+          status: string;
+        };
+      }
+    | { statusCode: 404 | 422; error: string } {
+    const account = this.mt5Accounts().find((item) => item.id === input.accountId);
+    if (!account) return { statusCode: 404, error: "Account not found" };
+    if ((input.commandType ?? "OPEN_TRADE") !== "OPEN_TRADE") {
+      return { statusCode: 422, error: "Manual push currently supports open trades only" };
+    }
+    if (input.direction !== "BUY" && input.direction !== "SELL") {
+      return { statusCode: 422, error: "direction must be BUY or SELL" };
+    }
+    const brokerSymbol = input.brokerSymbol?.trim();
+    if (!brokerSymbol) return { statusCode: 422, error: "symbol is required" };
+
+    const settings = this.appSettings();
+    const orderType: OrderType = input.orderType ?? "MARKET";
+    if (!settings.allowedOrderTypes.includes(orderType)) {
+      return { statusCode: 422, error: `${orderType} orders are not allowed by settings` };
+    }
+    if (orderType !== "MARKET" && !Number.isFinite(input.entry?.from)) {
+      return { statusCode: 422, error: "entry price is required for limit and stop orders" };
+    }
+
+    const executionMode: ExecutionMode = input.executionMode ?? "VIRTUAL_TP";
+    const riskPercent = Number.isFinite(input.riskPercent) ? Number(input.riskPercent) : undefined;
+    const volume = Number.isFinite(input.volume)
+      ? Number(input.volume)
+      : riskPercent !== undefined
+        ? undefined
+        : settings.defaultLotSize;
+
+    const legs = (input.takeProfits ?? []).filter((tp) => Number.isFinite(tp.price));
+    const takeProfits = legs.map((tp, index) => ({
+      leg: index + 1,
+      price: Number(tp.price),
+      allocationPercent:
+        Number.isFinite(tp.allocationPercent) && Number(tp.allocationPercent) > 0
+          ? Number(tp.allocationPercent)
+          : Math.floor(100 / Math.max(legs.length, 1)),
+    }));
+
+    const entry =
+      orderType === "MARKET"
+        ? undefined
+        : { from: Number(input.entry?.from), to: Number(input.entry?.to ?? input.entry?.from) };
+    const originalText =
+      input.rawText?.trim() || manualTicketSummary(input, brokerSymbol, orderType, entry);
+    const fingerprint = createMessageFingerprint(`${originalText}:${nanoid(6)}`);
+
+    const signal: ParsedSignal = {
+      originalText,
+      commandType: "OPEN_TRADE",
+      direction: input.direction,
+      orderType,
+      rawSymbol: brokerSymbol,
+      canonicalSymbol: input.canonicalSymbol?.trim() || brokerSymbol,
+      brokerSymbol,
+      mappingStatus: "mapped",
+      mappingWarnings: [],
+      entry,
+      stopLoss: Number.isFinite(input.stopLoss) ? Number(input.stopLoss) : undefined,
+      takeProfits,
+      lotSize: volume,
+      riskPercent,
+      confidence: 1,
+      matchedPatternIds: ["manual"],
+      missingFields: [],
+      warnings: [],
+      providerId: input.providerId,
+      accountId: input.accountId,
+      fingerprint,
+    };
+
+    const now = new Date().toISOString();
+    const providerId = input.providerId ?? "";
+    // Reuse the linked raw message when correcting one; otherwise synthesize a
+    // manual raw message so the trade keeps a source and audit trail.
+    let rawMessageId = input.rawMessageId;
+    if (!rawMessageId) {
+      rawMessageId = `raw_${nanoid(10)}`;
+      this.db
+        .query(
+          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          rawMessageId,
+          providerId,
+          `manual-${Date.now()}`,
+          now,
+          originalText,
+          fingerprint,
+          "entry",
+        );
+    }
+    const parsedSignalId = `parse_${nanoid(10)}`;
+    this.db
+      .query(
+        "INSERT INTO parsed_signals (id, provider_id, raw_message_id, result_json, review_required, fingerprint, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        parsedSignalId,
+        providerId,
+        rawMessageId,
+        JSON.stringify(signal),
+        0,
+        fingerprint,
+        "APPROVED",
+        now,
+      );
+
+    const source: TradeSource = {
+      parsedSignalId,
+      rawMessageId,
+      telegramMessageId: "manual",
+      messageDate: now,
+      rawText: originalText,
+    };
+    const logicalTradeId = `trade_${nanoid(10)}`;
+    const queueItemId = `queue_${nanoid(10)}`;
+    const trade = createLogicalTradeFromSignal(signal, {
+      id: logicalTradeId,
+      providerId: input.providerId,
+      accountId: input.accountId,
+      source,
+      executionMode,
+    });
+    this.insertTrade(trade);
+    const item = buildExecutionCommand(signal, {
+      id: queueItemId,
+      accountId: input.accountId,
+      logicalTradeId,
+      executionMode,
+      volume,
+      riskPercent,
+    });
+    this.insertQueueItem(item, parsedSignalId);
+
+    this.audit("signal.manual-push", "warn", "Manual signal force-pushed to MT5 queue", {
+      parsedSignalId,
+      queueItemId,
+      logicalTradeId,
+      accountId: input.accountId,
+      brokerSymbol,
+      direction: input.direction,
+      orderType,
+      force: true,
+    });
+    return { body: { queueItemId, logicalTradeId, parsedSignalId, status: "PENDING" } };
   }
 
   ignoreSignal(parsedSignalId: string) {

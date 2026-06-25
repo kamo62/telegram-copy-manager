@@ -1,4 +1,4 @@
-import { Check, Sparkles, X } from "lucide-react";
+import { Check, Send, Sparkles, X } from "lucide-react";
 import { useRef } from "react";
 import { Field } from "./Field";
 import { Tag } from "./Tag";
@@ -20,6 +20,7 @@ export function ParserResult({
   onAiReview,
   onApprove,
   onIgnore,
+  onForcePush,
   aiReview,
   status,
 }: {
@@ -44,6 +45,7 @@ export function ParserResult({
   onAiReview?: () => void;
   onApprove?: () => void;
   onIgnore?: () => void;
+  onForcePush?: () => void;
   aiReview?: string;
   status?: string;
 }) {
@@ -98,6 +100,17 @@ export function ParserResult({
           >
             <X aria-hidden="true" size={13} />
             Ignore
+          </button>
+        ) : null}
+        {onForcePush ? (
+          <button
+            className="btn btn-ghost btn-small"
+            onClick={onForcePush}
+            title="Correct the fields and force-push this trade to MT5"
+            type="button"
+          >
+            <Send aria-hidden="true" size={13} />
+            Correct &amp; push
           </button>
         ) : null}
         {aiReview ? <small className="ai-review-note">{aiReview}</small> : null}

@@ -137,6 +137,120 @@ describe("MT5 account hard delete", () => {
   });
 });
 
+async function registerAccount(app: ReturnType<typeof createApi>, accountNumber = "63442826") {
+  await app.request("/api/mt5/register", {
+    method: "POST",
+    body: JSON.stringify({
+      accountNumber,
+      server: "OctaFX-Real",
+      company: "OctaFX",
+      currency: "USD",
+      balance: 10000,
+      equity: 10000,
+      marginMode: "HEDGING",
+      availableSymbols: ["XAUUSD", "GOLD"],
+    }),
+    headers: { "content-type": "application/json" },
+  });
+  return `mt5-${accountNumber}`;
+}
+
+describe("manual force-push", () => {
+  test("queues a manually composed signal to the target account", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegramPollingEnabled: false,
+    });
+    const accountId = await registerAccount(app);
+    const res = await app.request("/api/signals/manual", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId,
+        direction: "SELL",
+        orderType: "LIMIT",
+        brokerSymbol: "GOLD",
+        entry: { from: 4214, to: 4215 },
+        stopLoss: 4220,
+        takeProfits: [{ price: 4209 }, { price: 4202 }],
+        volume: 0.02,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(res.status).toBe(200);
+    const body = await json<{ status: string; queueItemId: string }>(res);
+    expect(body.status).toBe("PENDING");
+    expect(body.queueItemId).toBeTruthy();
+
+    const dash = await json<{ signalQueue: Array<{ status: string; symbol: string }> }>(
+      await app.request("/api/dashboard"),
+    );
+    const pending = dash.signalQueue.find((q) => q.status === "PENDING");
+    expect(pending).toBeTruthy();
+    expect(pending?.symbol).toBe("GOLD");
+  });
+
+  test("a paused Equity Guardian still blocks a manual push at lease time", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegramPollingEnabled: false,
+    });
+    const accountId = await registerAccount(app);
+    await app.request(`/api/equity-guardian/${accountId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ threshold: 10, paused: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/signals/manual", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId,
+        direction: "BUY",
+        orderType: "MARKET",
+        brokerSymbol: "GOLD",
+        stopLoss: 4100,
+        takeProfits: [{ price: 4200 }],
+        volume: 0.01,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    // The EA poll leases pending work; a paused guardian rejects the open trade.
+    const poll = await json<{ item: unknown }>(
+      await app.request(`/api/mt5/poll?accountId=${accountId}`),
+    );
+    expect(poll.item).toBeNull();
+    const dash = await json<{ signalQueue: Array<{ status: string }> }>(
+      await app.request("/api/dashboard"),
+    );
+    expect(dash.signalQueue.some((q) => q.status === "FAILED")).toBe(true);
+    expect(dash.signalQueue.some((q) => q.status === "PENDING")).toBe(false);
+  });
+
+  test("rejects an unknown account and a limit order without an entry", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const accountId = await registerAccount(app);
+    const unknown = await app.request("/api/signals/manual", {
+      method: "POST",
+      body: JSON.stringify({ accountId: "mt5-nope", direction: "BUY", brokerSymbol: "GOLD" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(unknown.status).toBe(404);
+    const noEntry = await app.request("/api/signals/manual", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId,
+        direction: "BUY",
+        orderType: "LIMIT",
+        brokerSymbol: "GOLD",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(noEntry.status).toBe(422);
+  });
+});
+
 describe("operational alerts", () => {
   test("surfaces a paused Equity Guardian and clears it on unpause", async () => {
     const app = createApi({

@@ -1,7 +1,8 @@
-import { Inbox, ListChecks, RefreshCw, Terminal } from "lucide-react";
+import { Inbox, ListChecks, RefreshCw, Send, Terminal } from "lucide-react";
 import type { DashboardSnapshot } from "../App";
 import { EmptyState } from "../components/EmptyState";
 import { LogRow } from "../components/LogRow";
+import type { ManualSignalSeed } from "../components/ManualSignalModal";
 import { Panel } from "../components/Panel";
 import { ParserResult } from "../components/ParserResult";
 import { QueueItem } from "../components/QueueItem";
@@ -20,6 +21,7 @@ export function LogsPage({
   onAiReview,
   onApprove,
   onIgnore,
+  onForcePush,
   aiReviewStatus,
   parserActionStatus,
   fixtureStatus,
@@ -40,6 +42,7 @@ export function LogsPage({
   onAiReview: (result: DashboardSnapshot["parserResults"][number]) => void;
   onApprove: (result: DashboardSnapshot["parserResults"][number]) => void;
   onIgnore: (result: DashboardSnapshot["parserResults"][number]) => void;
+  onForcePush: (seed?: ManualSignalSeed) => void;
   aiReviewStatus: Record<string, string>;
   parserActionStatus: Record<string, string>;
   fixtureStatus: Record<string, string>;
@@ -91,6 +94,14 @@ export function LogsPage({
                     onAiReview={() => onAiReview(result)}
                     onApprove={() => onApprove(result)}
                     onIgnore={() => onIgnore(result)}
+                    onForcePush={() =>
+                      onForcePush({
+                        rawMessageId: result.rawMessageId,
+                        rawText: result.rawText,
+                        brokerSymbol: result.brokerSymbol,
+                        canonicalSymbol: result.canonicalSymbol,
+                      })
+                    }
                     aiReview={aiReviewStatus[result.id]}
                     redactedText={redactedFixtureText[rawMessageId] ?? ""}
                     result={result}
@@ -126,6 +137,16 @@ export function LogsPage({
       </Panel>
 
       <Panel className="wide-panel" title="Signal Queue">
+        <div className="panel-toolbar">
+          <button
+            onClick={() => onForcePush()}
+            title="Compose a trade and force-push it to an account's MT5 queue"
+            type="button"
+          >
+            <Send size={13} aria-hidden="true" />
+            New manual ticket
+          </button>
+        </div>
         <div className="queue-board">
           {snapshot.signalQueue.length === 0 ? (
             <EmptyState
