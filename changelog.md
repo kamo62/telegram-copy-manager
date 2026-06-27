@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.18.1 - 2026-06-27 (Patch)
+
+Release impact: Patch — fixes a virtual-TP retry loop in execution reconciliation. No API contract,
+database schema, or EA protocol change; the EA `#property version` is bumped only to stay aligned.
+
+- Treat a FAILED close/SL-modify report whose broker comment says the position is gone
+  (`virtual TP position ticket not found`, `No matching position`) as terminal: the targeted
+  leg(s) are marked `CLOSED` (the close intent is already satisfied) instead of being left in a
+  non-terminal state. Previously a vanished position could leave a virtual-TP command being
+  re-issued every poll, producing tens of thousands of identical FAILED execution reports from a
+  handful of stuck queue items and bloating `audit_logs` / `execution_reports`.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.18.1`.
+
 ## 1.18.0 - 2026-06-27 (Minor)
 
 Release impact: Minor — adds backward-compatible dashboard UI states (a default Summary tab, a

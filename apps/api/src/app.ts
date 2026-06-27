@@ -7770,14 +7770,36 @@ class AppStore {
     let updated: LogicalTrade = trade;
 
     if (input.status === "FAILED") {
-      updated = {
-        ...trade,
-        status: payload.commandType === "OPEN_TRADE" ? "OUT_OF_SYNC" : trade.status,
-        legs:
-          payload.commandType === "OPEN_TRADE"
-            ? trade.legs.map((leg) => ({ ...leg, status: "FAILED", brokerEvidence: evidence }))
-            : trade.legs,
-      };
+      if (payload.commandType === "OPEN_TRADE") {
+        updated = {
+          ...trade,
+          status: "OUT_OF_SYNC",
+          legs: trade.legs.map((leg) => ({ ...leg, status: "FAILED", brokerEvidence: evidence })),
+        };
+      } else if (isPositionGoneFailure(input)) {
+        // The targeted position is already gone, so the close/SL-modify is
+        // effectively done. Mark the targeted leg(s) terminal so nothing
+        // re-queues this command against a vanished position (the virtual-TP
+        // retry loop). A full-close / SL-modify with no specific leg retires
+        // every still-open leg; a TP-leg close retires just that leg.
+        const targetLeg =
+          virtualTpLegFromExecutionReport(payload, input) ??
+          (payload.commandType === "CLOSE_PARTIAL" && payload.partialClose?.kind === "TP_LEG"
+            ? payload.partialClose.value
+            : undefined);
+        const legs = trade.legs.map((leg) =>
+          (targetLeg === undefined || leg.leg === targetLeg) && leg.status !== "CLOSED"
+            ? {
+                ...leg,
+                status: "CLOSED" as const,
+                brokerEvidence: `position gone: ${input.brokerComment}`,
+              }
+            : leg,
+        );
+        updated = { ...trade, status: virtualTpStatusAfterLegClose(trade, legs, payload), legs };
+      }
+      // Other failures (invalid stops, no money, autotrading disabled) leave the
+      // trade unchanged so the operator can intervene.
     } else if (virtualTpLeg !== undefined) {
       const legs = trade.legs.map((leg) =>
         leg.leg === virtualTpLeg
@@ -8488,6 +8510,20 @@ function isPendingOrderAcceptance(
     !truthyBrokerTicket(input.dealTicket) &&
     Number(input.filledPrice ?? 0) <= 0
   );
+}
+
+/**
+ * A close / SL-modify report can come back FAILED because the targeted broker
+ * position no longer exists (closed by an earlier TP, stop-out, or manual
+ * action). The close intent is therefore already satisfied, so this must be
+ * treated as terminal rather than retried — historically a virtual-TP retry
+ * loop re-issued the same command every poll and produced tens of thousands of
+ * identical "virtual TP position ticket not found" FAILED reports from a
+ * handful of stuck items.
+ */
+function isPositionGoneFailure(input: ExecutionReportInput): boolean {
+  const comment = (input.brokerComment ?? "").toLowerCase();
+  return comment.includes("position ticket not found") || comment.includes("no matching position");
 }
 
 function truthyBrokerTicket(value: string | undefined): value is string {

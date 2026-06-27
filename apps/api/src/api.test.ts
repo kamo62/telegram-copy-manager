@@ -1757,6 +1757,56 @@ describe("Telegram TC API", () => {
     expect(noDuplicate).toContain("status=NO_WORK");
   });
 
+  test("retires a virtual-TP leg when the broker reports the position is gone, with no retry loop", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+    await reportGoldFill(app, approved);
+
+    // Price crosses TP1 -> the app queues a CLOSE_PARTIAL for leg 1.
+    await sendGoldSnapshot(app, { shortId: approved.shortId, bid: 4546.2 });
+    const lease = await json<{ item: { id: string; payload: { commandType: string } } | null }>(
+      await app.request("/api/mt5/poll?accountId=mt5-63442826"),
+    );
+    expect(lease.item?.payload.commandType).toBe("CLOSE_PARTIAL");
+
+    // The broker reports the targeted position no longer exists. This must be
+    // treated as terminal (the close intent is already satisfied) so the command
+    // is never re-issued — previously this drove a retry loop that produced tens
+    // of thousands of identical "position ticket not found" FAILED reports.
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: lease.item!.id,
+        status: "FAILED",
+        retcode: 0,
+        retcodeExternal: 0,
+        brokerComment: "virtual TP position ticket not found",
+        orderTicket: "0",
+        positionTicket: "247596888",
+        dealTicket: "0",
+        requestedPrice: 4546,
+        filledPrice: 0,
+        volume: 0.01,
+        errorText: "virtual TP position ticket not found",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const dashboard = await json<{
+      logicalTrades: Array<{ id: string; legs: Array<{ leg: number; status: string }> }>;
+    }>(await app.request("/api/dashboard"));
+    const trade = dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId);
+    // Leg 1 is terminal, not left in a HIT/OPEN state that any path could retry.
+    expect(trade?.legs.find((leg) => leg.leg === 1)?.status).toBe("CLOSED");
+
+    // A further snapshot beyond TP1 must not re-queue the vanished close.
+    await sendGoldSnapshot(app, { shortId: approved.shortId, bid: 4547 });
+    const noWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(noWork).toContain("status=NO_WORK");
+  });
+
   test("sizes app-managed TP closes from broker-filled volume when EA lot override changes actual size", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const approved = await approveGoldBuyLimit(app);
