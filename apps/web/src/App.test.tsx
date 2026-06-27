@@ -187,6 +187,10 @@ describe("App dashboard", () => {
     expect(view.getAllByText("Linked Accounts").length).toBeGreaterThan(0);
     expect(view.getAllByText("Live").length).toBeGreaterThan(0);
     expect(view.queryByText("Get started today")).toBeNull();
+    expect(view.getByRole("tab", { name: "Summary" })).toBeTruthy();
+    expect(view.getByRole("tab", { name: "Summary" }).getAttribute("aria-selected")).toBe("true");
+    // The heavy growth chart now lives behind the Performance tab, not on the landing.
+    expect(view.queryByLabelText("Account growth chart")).toBeNull();
     expect(view.getByRole("tab", { name: "Performance" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Providers" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Logs" })).toBeTruthy();
@@ -297,6 +301,7 @@ describe("App dashboard", () => {
       />,
     );
 
+    clickTab(view, "Performance");
     const chart = within(view.getByLabelText("Account growth chart"));
     expect(chart.getByText(/\$12\.34/)).toBeTruthy();
     expect(chart.queryByText(/R\s*12\.34/)).toBeNull();
@@ -566,7 +571,9 @@ describe("App dashboard", () => {
     expect(view.queryByText("Balance")).toBeTruthy();
     expect(view.queryByText("Equity")).toBeTruthy();
     expect(view.queryByText("Trading P/L")).toBeTruthy();
-    expect(view.getAllByText(/57\.89/).length).toBeGreaterThanOrEqual(3);
+    // The windowed P/L card still shows the real (closed-trade) PnL while the
+    // stale balance/equity telemetry is suppressed.
+    expect(view.getAllByText(/57\.89/).length).toBeGreaterThanOrEqual(1);
   });
 
   test("shows an empty-state CTA on Live when no account is connected", () => {
@@ -1682,7 +1689,7 @@ describe("App dashboard", () => {
     expect(telegramChip?.querySelector(".chip-dot")?.className).toContain("ok");
   });
 
-  test("surfaces external manual MT5 positions on the Performance view", () => {
+  test("surfaces external manual MT5 positions in the History tab", () => {
     const view = render(
       <App
         initialSnapshot={{
@@ -1712,7 +1719,7 @@ describe("App dashboard", () => {
       />,
     );
 
-    expect(view.getByText("External activity")).toBeTruthy();
+    clickTab(view, "History");
     expect(view.getByText("XAUUSD")).toBeTruthy();
     expect(view.getByText(/247564387/)).toBeTruthy();
   });
@@ -1760,6 +1767,7 @@ describe("App dashboard", () => {
     const view = render(<App initialSnapshot={snapshot} />);
 
     expect(calls.some((call) => call.url.includes("/stats"))).toBe(false);
+    clickTab(view, "Performance");
     fireEvent.click(view.getByRole("tab", { name: "Statistics" }));
 
     await view.findByText("Profit / Return");

@@ -6,8 +6,10 @@ import { AccountHeader, type AccountHeaderData } from "./components/AccountHeade
 import { AccountsOverview } from "./components/AccountsOverview";
 import { AlertsBanner } from "./components/AlertsBanner";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
+import { useConfirm } from "./components/ConfirmDialog";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ExposurePanel } from "./components/ExposurePanel";
 import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import { KeyboardShortcutsOverlay } from "./components/KeyboardShortcutsOverlay";
 import { LiveRegion } from "./components/LiveRegion";
@@ -16,6 +18,7 @@ import {
   type ManualSignalPayload,
   type ManualSignalSeed,
 } from "./components/ManualSignalModal";
+import { OnboardingCard } from "./components/OnboardingCard";
 import { OutOfSyncBanner } from "./components/OutOfSyncBanner";
 import { PendingSlotView } from "./components/PendingSlotView";
 import {
@@ -29,11 +32,14 @@ import { navItems, Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { SmallViewportNotice } from "./components/SmallViewportNotice";
 import { StatusBar } from "./components/StatusBar";
+import { SummaryPanel } from "./components/SummaryPanel";
 import { SymbolMappingModal } from "./components/SymbolMappingModal";
 import { type TabId, WorkspaceTabs } from "./components/WorkspaceTabs";
+import { useToast } from "./contexts/ToastContext";
 import { useAnnouncer } from "./hooks/useAnnouncer";
 import { useHotkeys } from "./hooks/useHotkeys";
 import { apiDelete, apiFetch, apiGet, apiPatch, apiPost } from "./lib/api";
+import type { ExposurePosition } from "./lib/exposure";
 import { EquityGuardianPage } from "./pages/EquityGuardianPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { LinkedAccountsPage } from "./pages/LinkedAccountsPage";
@@ -204,6 +210,8 @@ export interface DashboardSnapshot {
     commandType: string;
     symbol: string;
     status: string;
+    volume?: number | null;
+    riskPercent?: number | null;
   }>;
   logicalTrades: Array<{
     id: string;
@@ -390,6 +398,7 @@ function clearPendingAuth() {
 //   /accounts/:accountId/:tab          → dashboard scoped to one account, given tab
 //   /telegram | /linked-accounts | /settings → global views
 const TAB_IDS: TabId[] = [
+  "summary",
   "performance",
   "providers",
   "history",
@@ -410,14 +419,13 @@ function parseRoute(pathname: string): RouteState {
   if (seg[0] === "linked-accounts") return { view: "mt5", accountId: null, tab: "performance" };
   if (seg[0] === "settings") return { view: "settings", accountId: null, tab: "performance" };
   if (seg[0] === "accounts" && seg[1]) {
-    const tab =
-      seg[2] && (TAB_IDS as string[]).includes(seg[2]) ? (seg[2] as TabId) : "performance";
+    const tab = seg[2] && (TAB_IDS as string[]).includes(seg[2]) ? (seg[2] as TabId) : "summary";
     return { view: "dashboard", accountId: seg[1], tab };
   }
   if (seg[0] && (TAB_IDS as string[]).includes(seg[0])) {
     return { view: "dashboard", accountId: null, tab: seg[0] as TabId };
   }
-  return { view: "dashboard", accountId: null, tab: "performance" };
+  return { view: "dashboard", accountId: null, tab: "summary" };
 }
 
 function pathForView(viewId: string, accountId: string | null, tab: TabId): string {
@@ -425,12 +433,12 @@ function pathForView(viewId: string, accountId: string | null, tab: TabId): stri
   if (viewId === "mt5") return "/linked-accounts";
   if (viewId === "settings") return "/settings";
   if (accountId) return `/accounts/${accountId}/${tab}`;
-  return tab === "performance" ? "/" : `/${tab}`;
+  return tab === "summary" ? "/" : `/${tab}`;
 }
 
 function pathForTab(accountId: string | null, tab: TabId): string {
   if (accountId) return `/accounts/${accountId}/${tab}`;
-  return tab === "performance" ? "/" : `/${tab}`;
+  return tab === "summary" ? "/" : `/${tab}`;
 }
 
 export function App({
@@ -520,6 +528,8 @@ export function App({
     [navigate],
   );
   const announce = useAnnouncer();
+  const toast = useToast();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [viewportTooSmall, setViewportTooSmall] = useState(() => {
     if (typeof window === "undefined") return false;
     if (window.localStorage.getItem("tg-tc.viewport-override") === "1") return false;
@@ -565,20 +575,75 @@ export function App({
       }
     }
     void load();
-    let interval = window.setInterval(() => void load(), 15_000);
-    function handleVisibilityChange() {
-      if (document.visibilityState === "hidden") {
+
+    // Real-time refresh: subscribe to the server event stream and reload on any
+    // delta. Polling stays as a fallback — a slow safety poll while SSE is
+    // connected, reverting to the fast 15s poll if SSE is unavailable or drops.
+    // EventSource is feature-detected so non-browser/test environments (which
+    // lack it) keep the original polling behaviour.
+    let pollMs = 15_000;
+    let interval = 0;
+    const startPolling = () => {
+      if (interval === 0 && active) interval = window.setInterval(() => void load(), pollMs);
+    };
+    const stopPolling = () => {
+      if (interval !== 0) {
         window.clearInterval(interval);
         interval = 0;
-      } else if (interval === 0 && active) {
+      }
+    };
+
+    let source: EventSource | null = null;
+    let debounce = 0;
+    const scheduleLoad = () => {
+      window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => void load(), 200);
+    };
+    if (typeof EventSource !== "undefined") {
+      try {
+        source = new EventSource("/api/events");
+        const onEvent = () => scheduleLoad();
+        for (const type of [
+          "queue",
+          "trade",
+          "snapshot",
+          "heartbeat",
+          "audit",
+          "reconciliation",
+          "score",
+        ]) {
+          source.addEventListener(type, onEvent);
+        }
+        source.onopen = () => {
+          pollMs = 60_000;
+          stopPolling();
+          startPolling();
+        };
+        source.onerror = () => {
+          pollMs = 15_000;
+          stopPolling();
+          startPolling();
+        };
+      } catch {
+        source = null;
+      }
+    }
+    startPolling();
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        stopPolling();
+      } else if (active) {
         void load();
-        interval = window.setInterval(() => void load(), 15_000);
+        startPolling();
       }
     }
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       active = false;
-      window.clearInterval(interval);
+      stopPolling();
+      window.clearTimeout(debounce);
+      source?.close();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [initialSnapshot]);
@@ -995,6 +1060,27 @@ export function App({
     link.remove();
   }
 
+  async function exportTradeJournal() {
+    const accountId = focusedAccount?.id;
+    const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
+    try {
+      const data = await apiGet<{ journal: unknown[] }>(`/api/export/journal${query}`);
+      const filename = `trade-journal-${new Date().toISOString().slice(0, 10)}.json`;
+      const link = document.createElement("a");
+      link.href = `data:application/json;charset=utf-8,${encodeURIComponent(
+        JSON.stringify(data.journal, null, 2),
+      )}`;
+      link.download = filename;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success(`Exported ${data.journal.length} closed trades`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Export failed");
+    }
+  }
+
   async function startTelegramConnection(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
@@ -1145,24 +1231,41 @@ export function App({
 
   async function toggleProvider(provider: DashboardSnapshot["providers"][number]) {
     await apiPatch(`/api/providers/${provider.id}`, { enabled: !provider.enabled });
+    toast.success(`${provider.title} ${provider.enabled ? "disabled" : "enabled"}`);
     await refreshDashboard();
   }
 
   async function deleteProvider(provider: DashboardSnapshot["providers"][number]) {
-    if (!window.confirm(`Remove ${provider.title} from configured providers?`)) return;
-    await apiDelete(`/api/providers/${provider.id}`);
+    const confirmed = await confirm({
+      title: "Remove provider?",
+      description: `${provider.title} will be removed from configured providers.`,
+      confirmLabel: "Remove provider",
+    });
+    if (!confirmed) return;
+    try {
+      await apiDelete(`/api/providers/${provider.id}`);
+      toast.success(`Removed ${provider.title}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to remove provider");
+    }
     await refreshDashboard();
   }
 
   async function deleteAccount(account: { id: string; accountNumber?: string }) {
-    if (
-      !window.confirm(
-        `Permanently delete account ${account.accountNumber ?? account.id} and all of its history, queue items, and snapshots? This cannot be undone.`,
-      )
-    ) {
-      return;
+    const label = account.accountNumber ?? account.id;
+    const confirmed = await confirm({
+      title: "Delete account?",
+      description: `Permanently delete account ${label} and all of its history, queue items, and snapshots. This cannot be undone.`,
+      confirmLabel: "Delete account",
+      typeToConfirm: account.accountNumber,
+    });
+    if (!confirmed) return;
+    try {
+      await apiDelete(`/api/mt5/accounts/${account.id}`);
+      toast.success(`Deleted account ${label}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete account");
     }
-    await apiDelete(`/api/mt5/accounts/${account.id}`);
     await refreshDashboard();
   }
 
@@ -1187,6 +1290,7 @@ export function App({
       });
       setConfigProvider(null);
       announce(`Saved configuration for ${provider.title} on this account`);
+      toast.success(`Saved configuration for ${provider.title}`);
       await refreshDashboard();
       return;
     }
@@ -1201,6 +1305,7 @@ export function App({
     });
     setConfigProvider(null);
     announce(`Saved configuration for ${provider.title}`);
+    toast.success(`Saved configuration for ${provider.title}`);
     await refreshDashboard();
   }
 
@@ -1353,7 +1458,7 @@ export function App({
   }
 
   async function approveParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Approving..." }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Queued" }));
     try {
       await apiPost(`/api/signals/${result.id}/approve`);
     } catch (error) {
@@ -1361,18 +1466,32 @@ export function App({
         ...current,
         [result.id]: error instanceof Error ? error.message : "Approval failed",
       }));
+      toast.error(error instanceof Error ? error.message : "Approval failed");
+      await refreshDashboard();
       return;
     }
     setParserActionStatus((current) => ({ ...current, [result.id]: "Queued" }));
     announce("Signal approved and queued for MT5");
+    toast.success("Signal approved and queued");
     await refreshDashboard();
   }
 
   async function ignoreParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignoring..." }));
-    await apiPost(`/api/signals/${result.id}/ignore`);
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignored" }));
+    try {
+      await apiPost(`/api/signals/${result.id}/ignore`);
+    } catch (error) {
+      setParserActionStatus((current) => ({
+        ...current,
+        [result.id]: error instanceof Error ? error.message : "Ignore failed",
+      }));
+      toast.error(error instanceof Error ? error.message : "Ignore failed");
+      await refreshDashboard();
+      return;
+    }
     setParserActionStatus((current) => ({ ...current, [result.id]: "Ignored" }));
     announce("Signal ignored");
+    toast.success("Signal ignored");
     await refreshDashboard();
   }
 
@@ -1384,6 +1503,7 @@ export function App({
   async function submitManualSignal(payload: ManualSignalPayload) {
     await apiPost("/api/signals/manual", payload);
     announce("Manual signal force-pushed to MT5");
+    toast.success("Manual signal force-pushed to MT5");
     await refreshDashboard();
   }
 
@@ -1491,11 +1611,12 @@ export function App({
   const showSettings = activeView === "settings";
   const showEquityGuardian = dashTab("equity-guardian");
   const showPerformance = dashTab("performance");
+  const showSummary = dashTab("summary");
 
   function navigateSidebar(viewId: string) {
     if (viewId === "dashboard") {
       setSelectedSlotId(null);
-      navigate(selectedAccountId ? `/accounts/${selectedAccountId}/performance` : "/");
+      navigate(selectedAccountId ? `/accounts/${selectedAccountId}/summary` : "/");
       return;
     }
     setActiveView(viewId);
@@ -1572,9 +1693,33 @@ export function App({
           ) : showDashboard ? (
             <>
               <AccountHeader data={accountHeaderData} loading={initialLoading} />
+              {snapshot.providers.length === 0 &&
+              snapshot.mt5Accounts.length === 0 &&
+              sidebarPendingSlots.length === 0 ? (
+                <OnboardingCard
+                  hasAccounts={snapshot.mt5Accounts.length > 0}
+                  hasProviders={snapshot.providers.length > 0}
+                  onConnectTelegram={() => setActiveView("telegram")}
+                  onLinkAccount={() => setActiveView("mt5")}
+                  telegramConnected={Boolean(
+                    snapshot.telegramSessions?.some((s) => s.status === "CONNECTED"),
+                  )}
+                />
+              ) : null}
               <OutOfSyncBanner
                 trades={snapshot.logicalTrades.filter((trade) => trade.status === "OUT_OF_SYNC")}
               />
+              {focusedAccount ? (
+                <ExposurePanel
+                  accountId={focusedAccount.id}
+                  positions={[
+                    ...((focusedAccount as { appPositions?: ExposurePosition[] }).appPositions ??
+                      []),
+                    ...((focusedAccount as { externalPositions?: ExposurePosition[] })
+                      .externalPositions ?? []),
+                  ]}
+                />
+              ) : null}
               {snapshot.mt5Accounts.length === 0 && sidebarPendingSlots.length === 0 ? (
                 <section className="live-empty">
                   <div className="live-empty-glyph" aria-hidden="true">
@@ -1612,6 +1757,10 @@ export function App({
               ) : null}
               <WorkspaceTabs onChange={setActiveTab} value={activeTab} />
             </>
+          ) : null}
+
+          {showSummary ? (
+            <SummaryPanel data={growthData} currency={accountHeaderData.currency} />
           ) : null}
 
           {showPerformance ? (
@@ -1742,6 +1891,7 @@ export function App({
                 }
                 focusedAccountId={selectedAccountId}
                 onTabChange={setHistoryTab}
+                onExportJournal={() => void exportTradeJournal()}
               />
             ) : null}
 
@@ -1825,6 +1975,8 @@ export function App({
         onClose={() => setCommandPaletteOpen(false)}
         open={commandPaletteOpen}
       />
+
+      {confirmDialog}
     </main>
   );
 }

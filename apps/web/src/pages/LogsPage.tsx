@@ -1,5 +1,6 @@
 import { Inbox, ListChecks, RefreshCw, Send, Terminal } from "lucide-react";
 import type { DashboardSnapshot } from "../App";
+import { ActivityFeed } from "../components/ActivityFeed";
 import { EmptyState } from "../components/EmptyState";
 import { LogRow } from "../components/LogRow";
 import type { ManualSignalSeed } from "../components/ManualSignalModal";
@@ -172,6 +173,10 @@ export function LogsPage({
             snapshot.executionLogs.map((log) => <LogRow key={log.id} log={log} />)
           )}
         </div>
+      </Panel>
+
+      <Panel className="wide-panel" title="Activity">
+        <ActivityFeed />
       </Panel>
     </>
   );

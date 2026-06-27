@@ -9,6 +9,7 @@ import {
   TrendingUp,
   Wallet,
 } from "lucide-react";
+import { useState } from "react";
 import { useLocale } from "../contexts/LocaleContext";
 import { formatPercent } from "../lib/format";
 import { Money } from "./Money";
@@ -87,6 +88,9 @@ export function AccountHeader({
 }) {
   const { connectedPlatform, kpis, series, currency } = data;
   const { locale } = useLocale();
+  // Today / This Week / This Month are the same metric over three windows, so
+  // they collapse into one card with a toggle instead of three separate cards.
+  const [pnlWindow, setPnlWindow] = useState<"today" | "thisWeek" | "thisMonth">("today");
 
   // Each card carries its own icon + accent so the badge palette stays
   // distinct even when several values move in the same direction.
@@ -124,31 +128,30 @@ export function AccountHeader({
       accent: "emerald",
       primary: true,
     },
-    {
-      key: "today",
-      label: "Today",
-      amount: kpis.today.amount,
-      delta: kpis.today.deltaPercent,
-      icon: Sun,
-      accent: "amber",
-    },
-    {
-      key: "thisWeek",
-      label: "This Week",
-      amount: kpis.thisWeek.amount,
-      delta: kpis.thisWeek.deltaPercent,
-      icon: CalendarRange,
-      accent: "blue",
-    },
-    {
-      key: "thisMonth",
-      label: "This Month",
-      amount: kpis.thisMonth.amount,
-      delta: kpis.thisMonth.deltaPercent,
-      icon: CalendarDays,
-      accent: "violet",
-    },
   ];
+
+  const windowOptions: Array<{
+    key: "today" | "thisWeek" | "thisMonth";
+    short: string;
+    icon: LucideIcon;
+    accent: Accent;
+  }> = [
+    { key: "today", short: "Today", icon: Sun, accent: "amber" },
+    { key: "thisWeek", short: "Week", icon: CalendarRange, accent: "blue" },
+    { key: "thisMonth", short: "Month", icon: CalendarDays, accent: "violet" },
+  ];
+  const activeWindow =
+    windowOptions.find((option) => option.key === pnlWindow) ?? windowOptions[0]!;
+  const windowKpi = kpis[pnlWindow];
+  const WindowIcon = activeWindow.icon;
+  const windowDelta = formatDelta(windowKpi.deltaPercent, locale);
+  const windowSpark = series?.[pnlWindow];
+  const windowSparkColor =
+    windowKpi.deltaPercent !== null && windowKpi.deltaPercent < 0
+      ? "var(--down-dim)"
+      : windowKpi.deltaPercent !== null && windowKpi.deltaPercent > 0
+        ? "var(--up-dim)"
+        : accentColor(activeWindow.accent);
 
   return (
     <section className="account-header" aria-label="Account performance">
@@ -182,57 +185,108 @@ export function AccountHeader({
 
       <div className="account-kpis anim-stagger">
         {loading && kpis.balance === null
-          ? Array.from({ length: 6 }, (_, index) => (
+          ? Array.from({ length: 4 }, (_, index) => (
               <div className="kpi" key={`kpi-skeleton-${index}`}>
                 <SkeletonStat />
               </div>
             ))
           : null}
-        {!(loading && kpis.balance === null) &&
-          kpiList.map((kpi) => {
-            const delta = formatDelta(kpi.delta, locale);
-            const Icon = kpi.icon;
-            const sparkData = series?.[kpi.key];
-            // Sparkline tone tracks P/L sign for the windowed cards;
-            // Balance/Equity stay on their fixed accent.
-            const sparkColor =
-              kpi.delta !== null && kpi.delta < 0
-                ? "var(--down-dim)"
-                : kpi.delta !== null && kpi.delta > 0
-                  ? "var(--up-dim)"
-                  : accentColor(kpi.accent);
-            return (
-              <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
-                <div className="kpi-head">
-                  <span className="kpi-label">
-                    <span>{kpi.label}</span>
-                    {currency ? <span className="kpi-label-currency">· {currency}</span> : null}
-                  </span>
-                  <span className={`kpi-badge kpi-badge-${kpi.accent}`} aria-hidden="true">
-                    <Icon size={13} />
-                  </span>
+        {!(loading && kpis.balance === null) ? (
+          <>
+            {kpiList.map((kpi) => {
+              const delta = formatDelta(kpi.delta, locale);
+              const Icon = kpi.icon;
+              const sparkData = series?.[kpi.key];
+              // Sparkline tone tracks P/L sign for the windowed cards;
+              // Balance/Equity stay on their fixed accent.
+              const sparkColor =
+                kpi.delta !== null && kpi.delta < 0
+                  ? "var(--down-dim)"
+                  : kpi.delta !== null && kpi.delta > 0
+                    ? "var(--up-dim)"
+                    : accentColor(kpi.accent);
+              return (
+                <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
+                  <div className="kpi-head">
+                    <span className="kpi-label">
+                      <span>{kpi.label}</span>
+                      {currency ? <span className="kpi-label-currency">· {currency}</span> : null}
+                    </span>
+                    <span className={`kpi-badge kpi-badge-${kpi.accent}`} aria-hidden="true">
+                      <Icon size={13} />
+                    </span>
+                  </div>
+                  <Money
+                    value={kpi.amount}
+                    currency={currency}
+                    locale={locale}
+                    signTone={kpi.delta !== null}
+                    className="kpi-amount"
+                  />
+                  <span className={`kpi-delta kpi-delta-${delta.tone}`}>{delta.text}</span>
+                  {sparkData &&
+                  sparkData.length >= 2 &&
+                  Math.min(...sparkData) !== Math.max(...sparkData) ? (
+                    <Sparkline
+                      ariaLabel={`${kpi.label} trend`}
+                      color={sparkColor}
+                      data={sparkData}
+                    />
+                  ) : (
+                    // Reserve the sparkline strip even when no series is
+                    // available (or the series is flat) so layout doesn't
+                    // shift once real data lands.
+                    <div aria-hidden="true" className="kpi-spark-placeholder" />
+                  )}
                 </div>
-                <Money
-                  value={kpi.amount}
-                  currency={currency}
-                  locale={locale}
-                  signTone={kpi.delta !== null}
-                  className="kpi-amount"
-                />
-                <span className={`kpi-delta kpi-delta-${delta.tone}`}>{delta.text}</span>
-                {sparkData &&
-                sparkData.length >= 2 &&
-                Math.min(...sparkData) !== Math.max(...sparkData) ? (
-                  <Sparkline ariaLabel={`${kpi.label} trend`} color={sparkColor} data={sparkData} />
-                ) : (
-                  // Reserve the sparkline strip even when no series is
-                  // available (or the series is flat) so layout doesn't
-                  // shift once real data lands.
-                  <div aria-hidden="true" className="kpi-spark-placeholder" />
-                )}
+              );
+            })}
+            <div className="kpi kpi-window">
+              <div className="kpi-head">
+                <span className="kpi-label">
+                  <span>P/L</span>
+                  {currency ? <span className="kpi-label-currency">· {currency}</span> : null}
+                </span>
+                <span className={`kpi-badge kpi-badge-${activeWindow.accent}`} aria-hidden="true">
+                  <WindowIcon size={13} />
+                </span>
               </div>
-            );
-          })}
+              <div className="kpi-window-toggle" role="tablist" aria-label="P/L window">
+                {windowOptions.map((option) => (
+                  <button
+                    aria-selected={pnlWindow === option.key}
+                    className={pnlWindow === option.key ? "active" : ""}
+                    key={option.key}
+                    onClick={() => setPnlWindow(option.key)}
+                    role="tab"
+                    type="button"
+                  >
+                    {option.short}
+                  </button>
+                ))}
+              </div>
+              <Money
+                value={windowKpi.amount}
+                currency={currency}
+                locale={locale}
+                signTone={windowKpi.deltaPercent !== null}
+                className="kpi-amount"
+              />
+              <span className={`kpi-delta kpi-delta-${windowDelta.tone}`}>{windowDelta.text}</span>
+              {windowSpark &&
+              windowSpark.length >= 2 &&
+              Math.min(...windowSpark) !== Math.max(...windowSpark) ? (
+                <Sparkline
+                  ariaLabel={`${activeWindow.short} P/L trend`}
+                  color={windowSparkColor}
+                  data={windowSpark}
+                />
+              ) : (
+                <div aria-hidden="true" className="kpi-spark-placeholder" />
+              )}
+            </div>
+          </>
+        ) : null}
       </div>
     </section>
   );

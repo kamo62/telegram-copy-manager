@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import {
   type AccountSymbolMapping,
   buildExecutionCommand,
+  correlateMessages,
   createLogicalTradeFromSignal,
   createMessageFingerprint,
   type Direction,
@@ -11,10 +12,12 @@ import {
   matchLifecycleCommandToTrade,
   type OrderType,
   type ParsedSignal,
+  type ParserContext,
   type ParserMode,
   parseSignalText,
   parseSignalTexts,
   type QueueStatus,
+  resolveSymbol,
   shouldRequireManualReview,
   type TakeProfitStrategy,
   type TradeSource,
@@ -22,6 +25,7 @@ import {
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
+import { streamSSE } from "hono/streaming";
 import { nanoid } from "nanoid";
 import {
   createTelegramAdapter,
@@ -593,6 +597,16 @@ export function createApi(options: ApiOptions = {}) {
   });
   app.get("/api/providers/performance", (c) => c.json({ providers: store.providerPerformance() }));
 
+  app.get("/api/providers/:id/score", (c) => {
+    const score = store.providerScore(c.req.param("id"));
+    if (!score) return c.json({ error: "Provider not found" }, 404);
+    return c.json(score);
+  });
+
+  app.delete("/api/providers/:id/learning", (c) =>
+    c.json(store.resetProviderLearning(c.req.param("id"))),
+  );
+
   app.post("/api/mt5/register", async (c) => {
     const parsed = await mt5Json<{
       accountNumber: string;
@@ -693,6 +707,81 @@ export function createApi(options: ApiOptions = {}) {
 
   app.get("/api/trades/:id/broker-orders", (c) =>
     c.json({ orders: store.brokerOrders(c.req.param("id")) }),
+  );
+
+  app.get("/api/audit-logs", (c) =>
+    c.json({
+      logs: store.listAuditLogs({
+        limit: optionalPositiveInteger(c.req.query("limit"), 500),
+        event: c.req.query("event"),
+      }),
+    }),
+  );
+
+  app.get("/api/export/trades", (c) =>
+    c.json({
+      trades: store.exportClosedTrades({
+        accountId: c.req.query("accountId"),
+        from: c.req.query("from"),
+        to: c.req.query("to"),
+      }),
+    }),
+  );
+
+  app.get("/api/accounts/:accountId/symbol-metadata", (c) =>
+    c.json({ symbols: store.symbolMetadata(c.req.param("accountId")) }),
+  );
+
+  app.get("/api/export/journal", (c) => {
+    const input = {
+      accountId: c.req.query("accountId"),
+      from: c.req.query("from"),
+      to: c.req.query("to"),
+    };
+    if ((c.req.query("format") ?? "json").toLowerCase() === "csv") {
+      const filename = `trade-journal-${new Date(Date.now()).toISOString().slice(0, 10)}.csv`;
+      return c.text(store.exportTradeJournalCsv(input), 200, {
+        "content-type": "text/csv; charset=utf-8",
+        "content-disposition": `attachment; filename="${filename}"`,
+      });
+    }
+    return c.json({ journal: store.exportTradeJournal(input) });
+  });
+
+  // Real-time dashboard push. Replaces the 15s client poll: the client opens
+  // one EventSource and the server forwards typed deltas as they happen. The
+  // client keeps /api/dashboard for initial hydration and polling fallback.
+  app.get("/api/events", (c) =>
+    streamSSE(c, async (stream) => {
+      const pending: AppStoreEvent[] = [];
+      const unsubscribe = store.subscribeEvents((event) => {
+        pending.push(event);
+      });
+      stream.onAbort(() => {
+        unsubscribe();
+      });
+      await stream.writeSSE({ event: "hello", data: JSON.stringify({ ts: Date.now() }) });
+      // ponytail: 250ms drain loop rather than a true push wakeup. Ceiling — up
+      // to ~250ms added delivery latency; upgrade path is an async notifier.
+      let sinceHeartbeatMs = 0;
+      while (!stream.aborted && !stream.closed) {
+        if (pending.length > 0) {
+          const batch = pending.splice(0, pending.length);
+          for (const event of batch) {
+            await stream.writeSSE({ event: String(event.type), data: JSON.stringify(event) });
+          }
+          sinceHeartbeatMs = 0;
+          continue;
+        }
+        await stream.sleep(250);
+        sinceHeartbeatMs += 250;
+        if (sinceHeartbeatMs >= 25_000) {
+          await stream.writeSSE({ event: "heartbeat", data: JSON.stringify({ ts: Date.now() }) });
+          sinceHeartbeatMs = 0;
+        }
+      }
+      unsubscribe();
+    }),
   );
 
   if (options.staticRoot) {
@@ -903,6 +992,16 @@ export function brokerOrderSourceForDealReason(reason: number | undefined): stri
 
 type RawMessageClassification = "entry" | "management" | "noise" | "unknown";
 
+/**
+ * A minimal real-time delta pushed over the SSE stream. `type` names the
+ * subsystem (queue, trade, snapshot, heartbeat, audit, reconciliation, score);
+ * the remaining fields are an intentionally small payload, not a full snapshot.
+ */
+export interface AppStoreEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
 class AppStore {
   private readonly db: Database;
   private readonly allowDemoData: boolean;
@@ -913,6 +1012,12 @@ class AppStore {
   // Last known Telegram session health per session id, recorded by the capture
   // loop and surfaced in the dashboard so a silent stall is visible.
   private readonly telegramHealth = new Map<string, TelegramSessionHealth>();
+  // In-memory pub/sub for the SSE stream. Subscribers are SSE connections that
+  // forward typed deltas to the dashboard so it stops polling on a timer.
+  // ponytail: single-process in-memory bus. Ceiling — events do not survive a
+  // restart and do not fan out across multiple API processes; the upgrade path
+  // is a shared broker (Redis/Postgres LISTEN) if the API is ever scaled out.
+  private readonly eventSubscribers = new Set<(event: AppStoreEvent) => void>();
 
   constructor(databasePath: string, allowDemoData = false) {
     this.allowDemoData = allowDemoData;
@@ -1613,10 +1718,36 @@ class AppStore {
     };
   }
 
+  /** Per-provider correlation window in seconds (0 disables). Default 30s. */
+  private correlationWindowSeconds(providerId: string): number {
+    const row = this.db
+      .query("SELECT provider_config_json FROM providers WHERE id = ?")
+      .get(providerId) as Row | null;
+    if (!row) return 30;
+    const config =
+      parseJson<{ correlationWindowSeconds?: number }>(String(row.provider_config_json)) ?? {};
+    const value = Number(config.correlationWindowSeconds);
+    return Number.isFinite(value) && value >= 0 ? value : 30;
+  }
+
   captureMessages(providerId: string, messages: TelegramCapturedMessage[]) {
     const before = this.rawMessageCount(providerId);
-    for (const message of messages) {
-      const parserText = telegramParserText(message);
+    // Correlate same-sender follow-up fragments into their directional anchor so
+    // a "BUY GOLD" + "SL 2290 TP 2320" pair parses as one complete signal. For a
+    // lone message this is a no-op (group of one), so existing behaviour is kept.
+    // ponytail: correlation only spans a single capture batch; if the anchor and
+    // its fragment arrive in separate polls they are stored separately. Upgrade
+    // path is correlating against recently stored raw_messages.
+    const windowSeconds = this.correlationWindowSeconds(providerId);
+    const groups =
+      windowSeconds > 0
+        ? correlateMessages(messages, windowSeconds)
+        : messages.map((message) => ({
+            ...message,
+            correlatedMessageIds: [message.telegramMessageId],
+          }));
+    for (const group of groups) {
+      const parserText = telegramParserText(group);
       const context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
       const parsed = parseSignalText(parserText, context);
       const parsedSignals = parseSignalTexts(parserText, context);
@@ -1627,10 +1758,10 @@ class AppStore {
            ON CONFLICT(id) DO NOTHING`,
         )
         .run(
-          `raw_${providerId}_${message.telegramMessageId}`,
+          `raw_${providerId}_${group.telegramMessageId}`,
           providerId,
-          message.telegramMessageId,
-          message.messageDate,
+          group.telegramMessageId,
+          group.messageDate,
           parserText,
           parsed.fingerprint,
           parsedSignals.some((signal) => signal.commandType === "OPEN_TRADE")
@@ -1759,7 +1890,7 @@ class AppStore {
   // or a Telegram session that has stopped receiving updates.
   operationalAlerts() {
     const alerts: Array<{
-      kind: "guardian-paused" | "telegram-stalled";
+      kind: "guardian-paused" | "telegram-stalled" | "unmapped-symbols" | "provider-health";
       severity: "warn" | "error";
       message: string;
       accountId?: string;
@@ -1796,7 +1927,119 @@ class AppStore {
         },
       });
     }
+    const needsMapping = this.providerSymbolsNeedingMapping();
+    if (needsMapping.length > 0) {
+      const shown = needsMapping.slice(0, 8);
+      alerts.push({
+        kind: "unmapped-symbols",
+        severity: "warn",
+        message: `${needsMapping.length} provider symbol${
+          needsMapping.length === 1 ? "" : "s"
+        } could not be mapped: ${shown.join(", ")}${
+          needsMapping.length > shown.length ? "…" : ""
+        } — add a symbol mapping.`,
+        detail: { symbols: needsMapping },
+      });
+    }
+    // Provider health: surface providers whose rolling win rate has turned red.
+    // ponytail: providerScore recomputes per provider here. Ceiling — O(providers
+    // × trades) per dashboard build; upgrade path is the provider_score_cache.
+    for (const provider of this.providers()) {
+      const score = this.providerScore(provider.id);
+      if (!score) continue;
+      const breach = providerScoreAlert(provider.title, score);
+      if (!breach) continue;
+      alerts.push({
+        kind: "provider-health",
+        severity: "warn",
+        message: breach.message,
+        detail: { providerId: provider.id, winRate: breach.winRate, badge: score.badge },
+      });
+    }
     return alerts;
+  }
+
+  /**
+   * Symbols the operator's PROVIDERS have actually posted that do not currently
+   * resolve to a broker symbol — the actionable "configure a mapping" set.
+   * Deliberately NOT driven by the EA's reported instrument catalog: a broker
+   * advertises hundreds/thousands of CFDs the operator will never trade, so
+   * alerting on those is pure noise. Re-resolves against current mappings so the
+   * alert clears once the symbol is mapped.
+   * ponytail: re-resolves recent signals on each dashboard build. Ceiling —
+   * O(distinct provider symbols); upgrade path is caching resolution per symbol.
+   */
+  providerSymbolsNeedingMapping(): string[] {
+    const rows = this.db
+      .query(
+        "SELECT provider_id, result_json FROM parsed_signals ORDER BY created_at DESC LIMIT 300",
+      )
+      .all() as Row[];
+    const contexts = new Map<string, ParserContext>();
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const row of rows) {
+      if (out.length >= 12) break;
+      const signal = parseJson<ParsedSignal>(String(row.result_json));
+      if (!signal || signal.commandType === "NO_SIGNAL") continue;
+      const raw = signal.rawSymbol;
+      if (!raw) continue;
+      const key = raw.replace(/[^a-z0-9]/gi, "").toUpperCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const providerId = String(row.provider_id);
+      let context = contexts.get(providerId);
+      if (!context) {
+        context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
+        contexts.set(providerId, context);
+      }
+      // Only flag symbols that still do not resolve to a broker symbol.
+      if (resolveSymbol(raw, context).mappingStatus !== "mapped") out.push(raw);
+    }
+    return out;
+  }
+
+  /** Persisted broker symbol metadata (point/digits/pip) for an account. */
+  symbolMetadata(accountId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT symbol, point, digits, pip_size, updated_at FROM symbol_metadata WHERE account_id = ? ORDER BY symbol",
+        )
+        .all(accountId) as Row[]
+    ).map((row) => ({
+      symbol: String(row.symbol),
+      point: nullableNumber(row.point) ?? null,
+      digits: nullableNumber(row.digits) ?? null,
+      pipSize: nullableNumber(row.pip_size) ?? null,
+      updatedAt: String(row.updated_at),
+    }));
+  }
+
+  private persistSymbolMetadata(accountId: string, symbols: unknown[]) {
+    const now = new Date().toISOString();
+    for (const entry of symbols) {
+      if (!entry || typeof entry !== "object") continue;
+      const record = entry as Record<string, unknown>;
+      const symbol = typeof record.symbol === "string" ? record.symbol : null;
+      if (!symbol) continue;
+      const point = nullableNumber(record.point);
+      const digits = nullableNumber(record.digits);
+      // 3/5-digit FX/metals quote in fractional pips, so a pip is 10 points.
+      const pipSize =
+        point !== undefined ? (digits === 3 || digits === 5 ? point * 10 : point) : undefined;
+      this.db
+        .query(
+          `INSERT INTO symbol_metadata (account_id, symbol, point, digits, pip_size, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(account_id, symbol) DO UPDATE SET
+             point = COALESCE(excluded.point, symbol_metadata.point),
+             digits = COALESCE(excluded.digits, symbol_metadata.digits),
+             pip_size = COALESCE(excluded.pip_size, symbol_metadata.pip_size),
+             updated_at = excluded.updated_at`,
+        )
+        .run(accountId, symbol, point ?? null, digits ?? null, pipSize ?? null, now);
+    }
   }
 
   backtestProviderMessages(
@@ -2146,11 +2389,17 @@ class AppStore {
       this.db
         .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
         .run("APPROVED", parsedSignalId);
-      this.audit("signal.approve", "info", "Signal approved for MT5 queue", {
-        parsedSignalId,
-        queueItems,
-        logicalTradeIds,
-      });
+      this.audit(
+        "signal.approve",
+        "info",
+        "Signal approved for MT5 queue",
+        {
+          parsedSignalId,
+          queueItems,
+          logicalTradeIds,
+        },
+        "operator",
+      );
       return {
         body: {
           queueItemId: queueItems[0],
@@ -2437,16 +2686,24 @@ class AppStore {
     });
     this.insertQueueItem(item, parsedSignalId);
 
-    this.audit("signal.manual-push", "warn", "Manual signal force-pushed to MT5 queue", {
-      parsedSignalId,
-      queueItemId,
-      logicalTradeId,
-      accountId: input.accountId,
-      brokerSymbol,
-      direction: input.direction,
-      orderType,
-      force: true,
-    });
+    this.audit(
+      "signal.manual-push",
+      "warn",
+      "Manual signal force-pushed to MT5 queue",
+      {
+        parsedSignalId,
+        queueItemId,
+        logicalTradeId,
+        accountId: input.accountId,
+        brokerSymbol,
+        direction: input.direction,
+        orderType,
+        force: true,
+      },
+      "operator",
+    );
+    // Operator force-pushing a signal teaches the parser this approved structure.
+    if (input.providerId) this.recordTrainingExample(input.providerId, originalText, signal);
     return { body: { queueItemId, logicalTradeId, parsedSignalId, status: "PENDING" } };
   }
 
@@ -2471,6 +2728,13 @@ class AppStore {
     this.db
       .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
       .run("IGNORED", parsedSignalId);
+    this.audit(
+      "signal.ignore",
+      "info",
+      "Signal ignored by operator",
+      { parsedSignalId },
+      "operator",
+    );
     return { parsedSignalId, status: "IGNORED" };
   }
 
@@ -2651,6 +2915,7 @@ class AppStore {
       }
     }
     this.recordEquityCurveSamples(input, now);
+    this.emitEvent({ type: "heartbeat", accountId: input.accountId });
     return { accountId: input.accountId, heartbeatStatus: "online", at: now };
   }
 
@@ -2925,6 +3190,7 @@ class AppStore {
         JSON.stringify(input.symbols ?? []),
         now,
       );
+    this.persistSymbolMetadata(input.accountId, input.symbols ?? []);
     this.reconcileSnapshotState(input.accountId, input.positions, input.orders);
     this.reconcileManualBrokerClosures(input.accountId, input.positions, input.orders);
     this.evaluateVirtualTakeProfits({
@@ -5863,7 +6129,7 @@ class AppStore {
     this.db
       .query("INSERT OR REPLACE INTO app_settings (id, settings_json, updated_at) VALUES (?, ?, ?)")
       .run("default", JSON.stringify(settings), new Date().toISOString());
-    this.audit("settings.update", "info", "Application settings updated", settings);
+    this.audit("settings.update", "info", "Application settings updated", settings, "operator");
     return settings;
   }
 
@@ -5992,6 +6258,8 @@ class AppStore {
         commandType: item.payload.commandType,
         symbol: item.payload.brokerSymbol ?? item.payload.canonicalSymbol ?? "unmapped",
         status: item.status,
+        volume: item.payload.volume ?? null,
+        riskPercent: item.payload.riskPercent ?? null,
       })),
       logicalTrades: this.logicalTradesForDashboard(),
       symbolMappings: this.symbolMappings().preview,
@@ -6466,6 +6734,35 @@ class AppStore {
         created_at TEXT NOT NULL
       );
     `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS symbol_metadata (
+        account_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        point REAL,
+        digits INTEGER,
+        pip_size REAL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, symbol)
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS parser_training_examples (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        raw_text TEXT NOT NULL,
+        command_type TEXT NOT NULL,
+        symbol TEXT,
+        direction TEXT,
+        entry REAL,
+        stop_loss REAL,
+        take_profits_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_parser_training_provider_fingerprint ON parser_training_examples(provider_id, fingerprint)",
+    );
     const operatorStateBefore = this.operatorStateSnapshot();
     this.backfillStuckOutOfSyncTrades();
     this.assertOperatorStatePreserved(
@@ -7008,7 +7305,14 @@ class AppStore {
   }) {
     return input.results.map((result) => {
       const parsedSignalId = `parse_${nanoid(10)}`;
-      const reviewRequired = shouldRequireManualReview(result);
+      // Adaptive learning: if the operator has approved this signal structure
+      // enough times, stop flagging mapped open trades for review.
+      const reviewRequired =
+        shouldRequireManualReview(result) &&
+        !learnedOverrideApplies(
+          result,
+          this.trainingExampleCount(input.providerId, structuralFingerprint(result.originalText)),
+        );
       this.db
         .query(
           "INSERT INTO parsed_signals (id, provider_id, raw_message_id, result_json, review_required, fingerprint, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -7205,6 +7509,29 @@ class AppStore {
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run(updated.status, JSON.stringify(updated), trade.id);
+      // Only surface an event/audit on a real status transition — snapshots
+      // arrive every ~2s and most updates only refresh lastSnapshotAt.
+      if (updated.status !== trade.status) {
+        this.emitEvent({
+          type: "reconciliation",
+          tradeId: trade.id,
+          accountId,
+          from: trade.status,
+          to: updated.status,
+        });
+        this.audit(
+          "logical-trade.reconciled",
+          updated.status === "OUT_OF_SYNC" ? "warn" : "info",
+          `Trade reconciled ${trade.status} → ${updated.status}`,
+          {
+            logicalTradeId: trade.id,
+            accountId,
+            from: trade.status,
+            to: updated.status,
+            reason: updated.outOfSyncReason,
+          },
+        );
+      }
       if (missingPendingOpen) {
         this.audit(
           "logical-trade.pending-missing",
@@ -7780,12 +8107,258 @@ class AppStore {
     };
   }
 
+  /**
+   * Record an operator-approved signal shape so the parser can learn to stop
+   * flagging that structure for review. Stored per provider, keyed by a
+   * number-stripped structural fingerprint.
+   */
+  private recordTrainingExample(providerId: string, rawText: string, signal: ParsedSignal) {
+    if (!providerId || signal.commandType !== "OPEN_TRADE" || !rawText.trim()) return;
+    this.db
+      .query(
+        `INSERT INTO parser_training_examples
+           (id, provider_id, fingerprint, raw_text, command_type, symbol, direction, entry, stop_loss, take_profits_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `train_${nanoid(10)}`,
+        providerId,
+        structuralFingerprint(rawText),
+        rawText,
+        signal.commandType,
+        signal.canonicalSymbol ?? signal.rawSymbol ?? null,
+        signal.direction ?? null,
+        signal.entry?.from ?? null,
+        signal.stopLoss ?? null,
+        JSON.stringify(signal.takeProfits.map((tp) => tp.price ?? null)),
+        nowIso(),
+      );
+  }
+
+  private trainingExampleCount(providerId: string, fingerprint: string): number {
+    const row = this.db
+      .query(
+        "SELECT COUNT(*) AS count FROM parser_training_examples WHERE provider_id = ? AND fingerprint = ?",
+      )
+      .get(providerId, fingerprint) as Row | null;
+    return Number(row?.count ?? 0);
+  }
+
+  /** Number of distinct structures the parser has learned (>=3 examples) for a provider. */
+  learnedPatternCount(providerId: string): number {
+    const row = this.db
+      .query(
+        "SELECT COUNT(*) AS count FROM (SELECT fingerprint FROM parser_training_examples WHERE provider_id = ? GROUP BY fingerprint HAVING COUNT(*) >= 3)",
+      )
+      .get(providerId) as Row | null;
+    return Number(row?.count ?? 0);
+  }
+
+  /** Clears learned examples for a provider and reverts to default review behaviour. */
+  resetProviderLearning(providerId: string): { providerId: string; cleared: number } {
+    const before = this.db
+      .query("SELECT COUNT(*) AS count FROM parser_training_examples WHERE provider_id = ?")
+      .get(providerId) as Row | null;
+    this.db.query("DELETE FROM parser_training_examples WHERE provider_id = ?").run(providerId);
+    const cleared = Number(before?.count ?? 0);
+    this.audit(
+      "provider.learning.reset",
+      "info",
+      "Parser learning reset for provider",
+      { providerId, cleared },
+      "operator",
+    );
+    return { providerId, cleared };
+  }
+
+  /**
+   * Rolling provider quality score from broker fills. Computed on demand so it
+   * always reflects the latest broker history.
+   * ponytail: recomputed per request rather than materialized in a cache table.
+   * Ceiling — O(trades) per call; upgrade path is provider_score_cache refreshed
+   * on history ingestion if a provider accumulates thousands of trades.
+   */
+  providerScore(providerId: string) {
+    const provider = this.providers().find((item) => item.id === providerId);
+    if (!provider) return null;
+    const trades = this.logicalTrades().filter((trade) => trade.providerId === providerId);
+    const scoreTrades: ScoreTrade[] = [];
+    for (const trade of trades) {
+      const orders = this.brokerOrders(trade.id);
+      const closeOrders = orders.filter(
+        (order) => order.action === "FULL_CLOSE" || order.action === "PARTIAL_CLOSE",
+      );
+      if (closeOrders.length === 0) continue;
+      const pnl = roundCurrency(
+        closeOrders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0),
+      );
+      const pips = Number(
+        closeOrders.reduce((sum, order) => sum + (order.pnlPips ?? 0), 0).toFixed(1),
+      );
+      const closeAt = closeOrders
+        .map((order) => order.createdAt)
+        .sort()
+        .at(-1) as string;
+      const openAt = orders
+        .filter((order) => order.action === "OPEN")
+        .map((order) => order.createdAt)
+        .sort()[0];
+      const signalAt = trade.source?.messageDate;
+      let latencyMs: number | undefined;
+      if (signalAt && openAt) {
+        const delta =
+          Date.parse(normalizedDateInput(openAt)) - Date.parse(normalizedDateInput(signalAt));
+        if (Number.isFinite(delta)) latencyMs = Math.max(0, delta);
+      }
+      scoreTrades.push({ pnl, pips, closeAt, latencyMs });
+    }
+    const reviewRow = this.db
+      .query(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(review_required), 0) AS reviewed FROM parsed_signals WHERE provider_id = ?",
+      )
+      .get(providerId) as Row | null;
+    const cfgRow = this.db
+      .query("SELECT provider_config_json FROM providers WHERE id = ?")
+      .get(providerId) as Row | null;
+    const config = cfgRow
+      ? (parseJson<{ scoreThresholds?: { green?: number; amber?: number } }>(
+          String(cfgRow.provider_config_json),
+        ) ?? {})
+      : {};
+    const score = computeProviderScore(scoreTrades, {
+      reviewRequired: Number(reviewRow?.reviewed ?? 0),
+      reviewTotal: Number(reviewRow?.total ?? 0),
+      thresholds: config.scoreThresholds,
+    });
+    return {
+      providerId,
+      title: provider.title,
+      learnedPatterns: this.learnedPatternCount(providerId),
+      ...score,
+    };
+  }
+
+  /** Closed trades with full detail across one or all accounts, for JSON export. */
+  exportClosedTrades(input: { accountId?: string; from?: string; to?: string } = {}) {
+    const accounts = input.accountId
+      ? this.mt5Accounts().filter((account) => account.id === input.accountId)
+      : this.mt5Accounts();
+    const providerTitle = new Map(
+      this.providers().map((provider) => [provider.id, provider.title]),
+    );
+    const tradeProvider = new Map(
+      this.logicalTrades().map((trade) => [trade.id, trade.providerId]),
+    );
+    const out: Array<Record<string, unknown>> = [];
+    for (const account of accounts) {
+      for (const trade of this.closedTradesForAccount(account.id)) {
+        const closedAtIso = normalizedDateInput(trade.closedAt);
+        if (input.from && closedAtIso < input.from) continue;
+        if (input.to && closedAtIso > input.to) continue;
+        const providerId = tradeProvider.get(trade.tradeId);
+        out.push({
+          ...trade,
+          accountId: account.id,
+          accountNumber: account.accountNumber,
+          providerId: providerId ?? null,
+          provider: providerId ? (providerTitle.get(providerId) ?? null) : null,
+        });
+      }
+    }
+    return out.sort((a, b) => String(b.closedAt).localeCompare(String(a.closedAt)));
+  }
+
+  /** One flat row per closed trade, suitable for spreadsheet analysis. */
+  exportTradeJournal(input: { accountId?: string; from?: string; to?: string } = {}) {
+    return this.exportClosedTrades(input).map((trade) => ({
+      tradeId: trade.tradeId,
+      accountNumber: trade.accountNumber,
+      provider: trade.provider,
+      symbol: trade.symbol,
+      direction: trade.direction,
+      volume: trade.volume,
+      openPrice: trade.openPrice,
+      closePrice: trade.closePrice,
+      realizedPnl: trade.realizedPnl,
+      result: trade.result,
+      tpHitCount: trade.tpHitCount,
+      tpTotal: trade.tpTotal,
+      closedAt: trade.closedAt,
+    }));
+  }
+
+  exportTradeJournalCsv(input: { accountId?: string; from?: string; to?: string } = {}) {
+    const rows = this.exportTradeJournal(input);
+    const header = [
+      "trade_id",
+      "account_number",
+      "provider",
+      "symbol",
+      "direction",
+      "volume",
+      "open_price",
+      "close_price",
+      "realized_pnl",
+      "result",
+      "tp_hit_count",
+      "tp_total",
+      "closed_at",
+    ];
+    const lines = rows.map((row) =>
+      [
+        row.tradeId,
+        row.accountNumber,
+        row.provider,
+        row.symbol,
+        row.direction,
+        row.volume,
+        row.openPrice,
+        row.closePrice,
+        row.realizedPnl,
+        row.result,
+        row.tpHitCount,
+        row.tpTotal,
+        row.closedAt,
+      ]
+        .map(csvCell)
+        .join(","),
+    );
+    return `${header.join(",")}\n${lines.join("\n")}${lines.length ? "\n" : ""}`;
+  }
+
+  /** Subscribe an SSE connection to the event bus. Returns an unsubscribe fn. */
+  subscribeEvents(listener: (event: AppStoreEvent) => void): () => void {
+    this.eventSubscribers.add(listener);
+    return () => {
+      this.eventSubscribers.delete(listener);
+    };
+  }
+
+  /** Broadcast a delta to every subscriber. A broken listener never blocks a write. */
+  emitEvent(event: AppStoreEvent) {
+    for (const listener of this.eventSubscribers) {
+      try {
+        listener(event);
+      } catch {
+        // A slow or closed SSE connection must not break the write path.
+      }
+    }
+  }
+
   private audit(
     eventType: string,
     level: "info" | "warn" | "error",
     message: string,
     data: unknown,
+    actor: "operator" | "system" = "system",
   ) {
+    // actor lives inside data_json so no schema migration is needed.
+    // ponytail: a dedicated audit_logs.actor column is the upgrade path once
+    // multi-user identity exists.
+    const payload =
+      data && typeof data === "object" && !Array.isArray(data)
+        ? { ...(data as Record<string, unknown>), actor }
+        : { value: data, actor };
     this.db
       .query(
         "INSERT INTO audit_logs (id, event_type, level, message, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -7795,9 +8368,45 @@ class AppStore {
         eventType,
         level,
         message,
-        JSON.stringify(data),
+        JSON.stringify(payload),
         new Date().toISOString(),
       );
+    this.emitEvent({ type: "audit", event: eventType, level, actor });
+  }
+
+  /**
+   * Chronological operator + system action feed. Supports an `event` filter that
+   * may be an exact event type or a `prefix*` wildcard (e.g. `signal.*`).
+   */
+  listAuditLogs(opts: { limit?: number; event?: string } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
+    const event = opts.event?.trim();
+    const rows = (
+      event
+        ? this.db
+            .query(
+              "SELECT id, event_type, level, message, data_json, created_at FROM audit_logs WHERE event_type LIKE ? ORDER BY created_at DESC, id DESC LIMIT ?",
+            )
+            .all(event.endsWith("*") ? `${event.slice(0, -1)}%` : event, limit)
+        : this.db
+            .query(
+              "SELECT id, event_type, level, message, data_json, created_at FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ?",
+            )
+            .all(limit)
+    ) as Row[];
+    return rows.map((row) => {
+      const data = parseJson<Record<string, unknown>>(String(row.data_json)) ?? {};
+      const actor = typeof data.actor === "string" ? data.actor : "system";
+      return {
+        id: String(row.id),
+        eventType: String(row.event_type),
+        level: String(row.level),
+        message: String(row.message),
+        actor,
+        data,
+        createdAt: String(row.created_at),
+      };
+    });
   }
 }
 
@@ -8329,6 +8938,242 @@ function isRealOpenBrokerOrder(order: {
 
 function sumPnl(orders: Array<{ pnlCurrency?: number }>) {
   return roundCurrency(orders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0));
+}
+
+export interface ScoreTrade {
+  pnl: number;
+  pips: number;
+  closeAt: string;
+  latencyMs?: number;
+}
+
+/**
+ * Pure provider-quality scoring over a list of closed trades. Kept side-effect
+ * free so it is unit-testable without a database. Win rate / streak use the most
+ * recent 20 trades; the badge is a configurable traffic light.
+ */
+export function computeProviderScore(
+  trades: ScoreTrade[],
+  input: {
+    reviewRequired?: number;
+    reviewTotal?: number;
+    thresholds?: { green?: number; amber?: number };
+  } = {},
+) {
+  const sorted = [...trades].sort((a, b) => a.closeAt.localeCompare(b.closeAt));
+  const recent = sorted.slice(-20);
+  const wins = recent.filter((trade) => trade.pnl > 0).length;
+  const winRate = recent.length ? wins / recent.length : 0;
+
+  let streak = 0;
+  let streakKind: "win" | "loss" | "none" = "none";
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
+    const kind = (sorted[i] as ScoreTrade).pnl > 0 ? "win" : "loss";
+    if (streakKind === "none") {
+      streakKind = kind;
+      streak = 1;
+    } else if (kind === streakKind) {
+      streak += 1;
+    } else {
+      break;
+    }
+  }
+
+  const avgPips = recent.length
+    ? Number((recent.reduce((sum, trade) => sum + trade.pips, 0) / recent.length).toFixed(1))
+    : 0;
+  const bestTrade = sorted.length ? roundCurrency(Math.max(...sorted.map((t) => t.pnl))) : 0;
+  const worstTrade = sorted.length ? roundCurrency(Math.min(...sorted.map((t) => t.pnl))) : 0;
+  const latencies = sorted
+    .map((trade) => trade.latencyMs)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const avgFillLatencyMs = latencies.length
+    ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
+    : null;
+  const reviewTotal = input.reviewTotal ?? 0;
+  const reviewRate = reviewTotal > 0 ? (input.reviewRequired ?? 0) / reviewTotal : 0;
+
+  const green = input.thresholds?.green ?? 0.55;
+  const amber = input.thresholds?.amber ?? 0.4;
+  const badge: "green" | "amber" | "red" | "neutral" =
+    sorted.length < 5 ? "neutral" : winRate >= green ? "green" : winRate >= amber ? "amber" : "red";
+
+  return {
+    tradeCount: sorted.length,
+    sampleSize: recent.length,
+    winRate: Number(winRate.toFixed(4)),
+    wins,
+    losses: recent.length - wins,
+    streak,
+    streakKind,
+    avgPips,
+    bestTrade,
+    worstTrade,
+    avgFillLatencyMs,
+    reviewRate: Number(reviewRate.toFixed(4)),
+    badge,
+  };
+}
+
+type ProviderScoreResult = ReturnType<typeof computeProviderScore>;
+
+/**
+ * Operational alert when a provider's rolling health turns red (win rate below
+ * the danger threshold) with a meaningful sample. Null when healthy or too new.
+ */
+export function providerScoreAlert(
+  title: string,
+  score: ProviderScoreResult,
+): { message: string; winRate: number } | null {
+  if (score.badge !== "red" || score.sampleSize < 5) return null;
+  return {
+    message: `Provider ${title} win rate dropped to ${Math.round(
+      score.winRate * 100,
+    )}% (last ${score.sampleSize} trades)`,
+    winRate: score.winRate,
+  };
+}
+
+function roundToLotStep(lots: number, lotStep: number, minLot: number) {
+  const step = lotStep > 0 ? lotStep : 0.01;
+  const rounded = Math.round(lots / step) * step;
+  const clamped = Math.max(rounded, minLot > 0 ? minLot : 0);
+  return Number(clamped.toFixed(2));
+}
+
+export interface VolumePreviewInput {
+  riskMode: "fixed" | "percent";
+  /** Lots when riskMode=fixed, percent-of-balance when riskMode=percent. */
+  riskAmount: number;
+  balance?: number;
+  /** Absolute stop distance in price terms (|entry - SL|). */
+  stopLossDistancePrice?: number;
+  tickSize?: number;
+  tickValue?: number;
+  minLot?: number;
+  lotStep?: number;
+}
+
+/**
+ * App-side mirror of the EA's volume sizing so the operator can preview the lot
+ * size a signal will execute at before it is handed to MT5. Display-only.
+ * Returns null lots when percent sizing is requested but the required broker
+ * metadata (balance, SL distance, tick size/value) is not yet known.
+ */
+export function computeVolumePreview(input: VolumePreviewInput) {
+  const minLot = input.minLot ?? 0;
+  const lotStep = input.lotStep ?? 0.01;
+  const hasRiskInputs =
+    typeof input.stopLossDistancePrice === "number" &&
+    input.stopLossDistancePrice > 0 &&
+    typeof input.tickSize === "number" &&
+    input.tickSize > 0 &&
+    typeof input.tickValue === "number" &&
+    input.tickValue > 0;
+  const valuePerLot = hasRiskInputs
+    ? ((input.stopLossDistancePrice as number) / (input.tickSize as number)) *
+      (input.tickValue as number)
+    : null;
+
+  if (input.riskMode === "fixed") {
+    const lots = roundToLotStep(Math.max(input.riskAmount, 0), lotStep, minLot);
+    const riskCurrency = valuePerLot !== null ? Number((valuePerLot * lots).toFixed(2)) : null;
+    return {
+      lots,
+      riskCurrency,
+      riskPercentOfBalance:
+        riskCurrency !== null && input.balance
+          ? Number(((riskCurrency / input.balance) * 100).toFixed(2))
+          : null,
+      basis: "fixed" as const,
+    };
+  }
+
+  // percent of balance
+  if (!input.balance || valuePerLot === null || valuePerLot <= 0) {
+    return {
+      lots: null,
+      riskCurrency: null,
+      riskPercentOfBalance: input.riskAmount,
+      basis: "unavailable" as const,
+    };
+  }
+  const riskCurrency = (input.riskAmount / 100) * input.balance;
+  const lots = roundToLotStep(riskCurrency / valuePerLot, lotStep, minLot);
+  return {
+    lots,
+    riskCurrency: Number(riskCurrency.toFixed(2)),
+    riskPercentOfBalance: input.riskAmount,
+    basis: "percent" as const,
+  };
+}
+
+export interface ReconciliationInput {
+  status: string;
+  openedAtMs: number;
+  nowMs: number;
+  /** True if any matched broker ticket is present in the latest snapshot. */
+  matchedInCurrentSnapshot: boolean;
+  /** How many consecutive snapshots have missed this trade's tickets. */
+  consecutiveMissingSnapshots: number;
+  /** A close deal for the position exists in broker history. */
+  hasCloseDealInHistory: boolean;
+  /** The trade was actually executed (an OPEN broker order / EXECUTED report exists). */
+  wasExecuted: boolean;
+  /** Minimum age before a trade can be reconciled (default 60s). */
+  minAgeSeconds?: number;
+}
+
+export type ReconciliationAction = "none" | "close" | "cancel" | "out_of_sync";
+
+/**
+ * Decide how to heal a logical trade that has no matching broker position.
+ * Pure so the transition rules are unit-testable without a database.
+ * - close: broker history shows the position was closed.
+ * - cancel: the trade was never executed.
+ * - out_of_sync: executed but the position vanished with no close deal (ambiguous).
+ */
+export function classifyReconciliation(input: ReconciliationInput): {
+  action: ReconciliationAction;
+  reason?: string;
+} {
+  if (input.status !== "OPEN" && input.status !== "PENDING") return { action: "none" };
+  if (input.matchedInCurrentSnapshot) return { action: "none" };
+  const ageSeconds = (input.nowMs - input.openedAtMs) / 1000;
+  if (ageSeconds < (input.minAgeSeconds ?? 60)) return { action: "none", reason: "too-fresh" };
+  if (input.consecutiveMissingSnapshots < 2) {
+    return { action: "none", reason: "needs-confirmation" };
+  }
+  if (input.hasCloseDealInHistory) return { action: "close", reason: "broker-close-deal" };
+  if (!input.wasExecuted) return { action: "cancel", reason: "never-executed" };
+  return { action: "out_of_sync", reason: "executed-but-vanished" };
+}
+
+/**
+ * Structural fingerprint of a message: numbers collapse to `#` so signals that
+ * differ only in their price levels share a fingerprint. Used to recognise a
+ * provider's repeated signal shapes for adaptive learning.
+ */
+export function structuralFingerprint(text: string): string {
+  return text
+    .toUpperCase()
+    .replace(/\d+(\.\d+)?/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Whether enough approved examples of this signal's structure exist to skip the
+ * manual-review gate. Only relaxes confidence-based review for mapped open
+ * trades — never auto-approves an unmapped symbol.
+ */
+export function learnedOverrideApplies(
+  signal: Pick<ParsedSignal, "commandType" | "mappingStatus">,
+  exampleCount: number,
+): boolean {
+  return (
+    signal.commandType === "OPEN_TRADE" && signal.mappingStatus === "mapped" && exampleCount >= 3
+  );
 }
 
 function floatingPnlFromPositions(positions: unknown[]) {

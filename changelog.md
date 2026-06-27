@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.18.0 - 2026-06-27 (Minor)
+
+Release impact: Minor — adds backward-compatible dashboard UI states (a default Summary tab, a
+collapsible Today/Week/Month KPI window, dismissible operational-alert banners) and relocates the
+external-activity panel to the History tab. No API contract, database schema, or EA protocol change;
+the EA `#property version` is bumped only to stay aligned with the app version.
+
+- Added a lightweight **Summary** tab as the default account landing. The persistent account header
+  (Balance / Equity / Trading P/L KPIs) and the exposure panel now sit above a clean summary with a
+  single glanceable equity trend, while the full growth chart, P/L attribution, and statistics stay
+  one click away under **Performance** — decluttering the busy landing.
+- Collapsed the six KPI cards to four: Balance, Equity, and Trading P/L plus one windowed P/L card
+  with a Today / Week / Month toggle, cutting header density by a third.
+- Removed the redundant **External activity** panel from the Performance overview. External/manual
+  broker positions are already surfaced (with a Manual chip) in the **History › Open** positions
+  table, so the separate panel only added clutter to the landing.
+- Made operational-alert banners (unmapped symbols, Equity Guardian latched, Telegram stalled)
+  dismissible. Dismissal is session-scoped — a reload re-shows any still-active trade-blocking
+  condition so a safety-critical alert can never be permanently hidden.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.18.0`.
+
+## 1.17.1 - 2026-06-27 (Patch)
+
+Release impact: Patch — fixes operator-facing noise and styling regressions from 1.17.0 without
+changing the API contract, database schema, or EA protocol.
+
+- Fixed the unmapped-symbol alert spamming the dashboard with hundreds of entries: it was scanning
+  the EA's entire reported instrument catalog (every broker CFD/index). It now only flags symbols
+  the operator's providers have actually posted that still do not resolve to a broker symbol, and it
+  clears once a mapping exists.
+- Re-themed the new 1.17.0 UI (toasts, onboarding, Activity feed, provider health cards, exposure
+  panel, volume badges) to the application's light design tokens — they were rendering with dark
+  hardcoded fallback colours because they referenced non-existent CSS variables.
+- Removed the duplicate "Recent activity" card from the Live overview; the operator/system activity
+  feed now lives only under the Logs view.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.17.1`.
+
+## 1.17.0 - 2026-06-26 (Minor)
+
+Release impact: Minor because this adds backward-compatible real-time push, new read-only API
+endpoints, additive `symbol_metadata` and `parser_training_examples` tables created with
+`CREATE TABLE IF NOT EXISTS`, and dashboard UI without changing EA command contracts or requiring a
+migration of existing data.
+
+- Added a Server-Sent Events stream at `GET /api/events` backed by an in-process AppStore event bus;
+  the dashboard now refreshes from `audit`, `reconciliation`, and `heartbeat` events via
+  `EventSource` with a polling fallback (feature-detected) instead of a fixed 15s poll.
+- Added multi-message correlation in `@telegram-tc/core` (`correlateMessages`) so a directional
+  signal and a rapid same-sender SL/TP follow-up inside a per-provider window merge into one signal.
+- Extended `this.audit()` with an `actor` field and added `GET /api/audit-logs?event=prefix*`, surfaced
+  as an Activity feed in Logs and a Recent activity card on the overview.
+- Added a reusable `ConfirmDialog` + `useConfirm()` gating provider/account deletion (type-to-confirm
+  for accounts), replacing `window.confirm`.
+- Added adaptive parser learning: operator-approved signal structures are stored in
+  `parser_training_examples`; a number-stripped fingerprint with >=3 examples relaxes the review gate.
+  Learned-pattern count and a Reset-learning control surface per provider.
+- Persisted EA symbol metadata (point/digits/pip) in `symbol_metadata` and added an unmapped-symbol
+  operational alert that clears once the symbol is mapped.
+- Added an app-side volume preview (`computeVolumePreview`) shown as a per-queue-item badge and an
+  aggregate exposure panel (open lots + volume-weighted pip risk per symbol).
+- Added provider scoring at `GET /api/providers/:id/score` (rolling win rate, streak, avg pips,
+  review rate, learned patterns) surfaced as Provider Health cards with traffic-light badges.
+- Routed self-healing reconciliation status transitions through SSE and the audit log
+  (`logical-trade.reconciled`).
+- Added data export endpoints `GET /api/export/trades` and `GET /api/export/journal` (JSON + CSV)
+  with an Export journal button on the History view.
+- Added a dependency-free toast system, optimistic approve/ignore UI, and a first-run onboarding card.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.17.0`.
+
 ## 1.16.0 - 2026-06-06 (Minor)
 
 Release impact: Minor because this adds backward-compatible account performance attribution API

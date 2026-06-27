@@ -55,7 +55,7 @@ export function GrowthChart({
 
       const series = view === "growth" ? data.growth : data.drawdown;
       const isGrowth = view === "growth";
-      const smoothPath = uPlot.paths.spline();
+      const smoothPath = uPlot.paths.spline?.();
       const opts = {
         width: container.clientWidth || 600,
         height: 320,

@@ -22,12 +22,14 @@ export function HistoryPage({
   accounts,
   focusedAccountId,
   currency,
+  onExportJournal,
 }: {
   activeTab: HistoryTab;
   onTabChange: (tab: HistoryTab) => void;
   accounts: HistoryAccount[];
   focusedAccountId: string | null;
   currency?: string;
+  onExportJournal?: () => void;
 }) {
   return (
     <Panel
@@ -44,11 +46,20 @@ export function HistoryPage({
           currency={currency}
         />
       ) : (
-        <ClosedPositionsTable
-          accounts={accounts}
-          focusedAccountId={focusedAccountId}
-          currency={currency}
-        />
+        <>
+          {onExportJournal ? (
+            <div className="history-export-row">
+              <button className="btn btn-ghost btn-small" onClick={onExportJournal} type="button">
+                Export journal (JSON)
+              </button>
+            </div>
+          ) : null}
+          <ClosedPositionsTable
+            accounts={accounts}
+            focusedAccountId={focusedAccountId}
+            currency={currency}
+          />
+        </>
       )}
     </Panel>
   );

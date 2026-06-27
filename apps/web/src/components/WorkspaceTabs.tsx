@@ -1,4 +1,5 @@
 export type TabId =
+  | "summary"
   | "performance"
   | "providers"
   | "history"
@@ -7,6 +8,7 @@ export type TabId =
   | "logs";
 
 export const tabOptions: Array<{ id: TabId; label: string }> = [
+  { id: "summary", label: "Summary" },
   { id: "performance", label: "Performance" },
   { id: "providers", label: "Providers" },
   { id: "history", label: "History" },
