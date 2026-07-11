@@ -1,9 +1,11 @@
 # Changelog
 
-## Unreleased - 2026-07-11 (Minor)
+## 1.19.0 - 2026-07-11 (Minor)
 
-Release impact: Minor — adds held queue recovery and account-slot lifecycle controls. The canonical
-application version remains unchanged as requested.
+Release impact: Minor — adds recoverable held-signal handling, account-slot lifecycle controls,
+out-of-sync resolution, outbound alerting, database backups, and the supporting operator UI. No API
+contract break, database migration, or EA protocol change; the EA `#property version` is bumped only
+to stay aligned with the app version.
 
 - Added HELD/DISMISSED queue states, audited held-item requeue/dismiss actions, guardian and late
   signal recovery, stale OPEN_TRADE delivery safety, and the release-held setting.
@@ -13,6 +15,12 @@ application version remains unchanged as requested.
   plain close/modify reports targeting missing positions.
 - Added optional Telegram bot alerting, alert-test delivery, SQLite backup/list endpoints, and the
   documented restore/nightly backup procedure.
+- Added the Held signals operator view (requeue at market / as original order / dismiss, with
+  price-drift and dropped-lifecycle context), guardian unpause-with-requeue, slot deletion, an
+  out-of-sync resolve menu, and alerting/backup controls in Settings.
+- Fixed the force-push trade modal so a parsed signal pre-fills every field (direction, order type,
+  entry, stop loss, take profits, volume) instead of forcing full manual re-entry.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.19.0`.
 
 ## 1.18.1 - 2026-06-27 (Patch)
 
