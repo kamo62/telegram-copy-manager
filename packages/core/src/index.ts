@@ -128,7 +128,7 @@ export interface LogicalTrade {
   source?: TradeSource;
   symbol: SymbolResolution;
   direction: Direction;
-  status: "PLANNED" | "OPEN" | "PENDING" | "CLOSED" | "OUT_OF_SYNC" | "CANCELLED";
+  status: "PLANNED" | "OPEN" | "PENDING" | "CLOSED" | "OUT_OF_SYNC" | "CANCELLED" | "ARCHIVED";
   executionMode: ExecutionMode;
   entry?: PriceZone;
   stopLoss?: number;

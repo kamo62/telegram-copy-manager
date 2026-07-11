@@ -1,4 +1,13 @@
-import { DollarSign, ShieldAlert, Sliders, Sparkles, Timer, TrendingUp } from "lucide-react";
+import {
+  Bell,
+  DatabaseBackup,
+  DollarSign,
+  ShieldAlert,
+  Sliders,
+  Sparkles,
+  Timer,
+  TrendingUp,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 import type { DashboardSnapshot } from "../App";
 import { Panel } from "../components/Panel";
@@ -62,6 +71,8 @@ export function SettingsPage({
   onSaveForm,
   accounts = [],
   onAccountRiskThresholdsSave,
+  onAlertTest,
+  onBackup,
 }: {
   settings: DashboardSnapshot["appSettings"];
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
@@ -72,7 +83,12 @@ export function SettingsPage({
     warnPct: number | null,
     dangerPct: number | null,
   ) => void;
+  onAlertTest?: () => Promise<void> | void;
+  onBackup?: () => Promise<string>;
 }) {
+  const [testSending, setTestSending] = useState(false);
+  const [backupRunning, setBackupRunning] = useState(false);
+  const [backupFilename, setBackupFilename] = useState("");
   return (
     <Panel className="wide-panel" title="Settings">
       <p className="panel-intro">
@@ -302,6 +318,108 @@ export function SettingsPage({
                 type="number"
               />
             </Field>
+          </div>
+        </SettingsSection>
+
+        <SettingsSection
+          description="Send operational alerts through a Telegram bot. Each alert type can be enabled independently."
+          icon={<Bell aria-hidden="true" size={18} />}
+          title="Alerting"
+        >
+          <div className="settings-grid">
+            <Field
+              hint="Token issued by BotFather. Leave blank to keep the currently stored token."
+              htmlFor="alertBotToken"
+              label="Bot token"
+            >
+              <input
+                className="settings-input mono"
+                defaultValue={settings.alertBotToken ?? ""}
+                id="alertBotToken"
+                name="alertBotToken"
+                placeholder="123456:ABC..."
+                type="password"
+              />
+            </Field>
+            <Field
+              hint="Telegram chat or channel ID that receives operational alerts."
+              htmlFor="alertChatId"
+              label="Chat ID"
+            >
+              <input
+                className="settings-input mono"
+                defaultValue={settings.alertChatId ?? ""}
+                id="alertChatId"
+                name="alertChatId"
+                placeholder="-100..."
+                type="text"
+              />
+            </Field>
+          </div>
+          <div className="settings-checkbox-row settings-alert-toggles">
+            {(
+              [
+                ["alertOnGuardianPause", "Equity Guardian pauses"],
+                ["alertOnEaOffline", "EA offline"],
+                ["alertOnExecFailed", "Execution failures"],
+                ["alertOnHeld", "Held signals"],
+                ["alertOnTelegramStall", "Telegram ingestion stalls"],
+              ] as const
+            ).map(([name, label]) => (
+              <label className="settings-checkbox" key={name}>
+                <input defaultChecked={settings[name] ?? false} name={name} type="checkbox" />
+                <span>{label}</span>
+              </label>
+            ))}
+          </div>
+          {onAlertTest ? (
+            <div className="settings-inline-actions">
+              <button
+                className="btn btn-ghost btn-small"
+                disabled={testSending}
+                onClick={async () => {
+                  setTestSending(true);
+                  try {
+                    await onAlertTest();
+                  } finally {
+                    setTestSending(false);
+                  }
+                }}
+                type="button"
+              >
+                {testSending ? "Sending..." : "Send test message"}
+              </button>
+            </div>
+          ) : null}
+        </SettingsSection>
+
+        <SettingsSection
+          description="Create an immediate SQLite backup on the server. The server retains the newest backup files."
+          icon={<DatabaseBackup aria-hidden="true" size={18} />}
+          title="Database backup"
+        >
+          <div className="settings-inline-actions">
+            <button
+              className="btn btn-ghost btn-small"
+              disabled={backupRunning}
+              onClick={async () => {
+                if (!onBackup) return;
+                setBackupRunning(true);
+                try {
+                  setBackupFilename(await onBackup());
+                } finally {
+                  setBackupRunning(false);
+                }
+              }}
+              type="button"
+            >
+              {backupRunning ? "Backing up..." : "Back up database now"}
+            </button>
+            {backupFilename ? (
+              <span className="settings-backup-filename">
+                Created <code>{backupFilename}</code>
+              </span>
+            ) : null}
           </div>
         </SettingsSection>
 

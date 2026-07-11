@@ -7537,7 +7537,13 @@ select.config-strategy-input {
   margin-top: 8px;
   font-size: 12px;
 }
-.exposure-table th,
+/* biome-ignore lint/style/noDescendingSpecificity: base.css cascade order is intentional. */
+.exposure-table th {
+  text-align: left;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+}
+/* biome-ignore lint/style/noDescendingSpecificity: base.css cascade order is intentional. */
 .exposure-table td {
   text-align: left;
   padding: 4px 6px;
@@ -7573,4 +7579,206 @@ select.config-strategy-input {
 }
 .recent-activity-head strong {
   font-size: 13px;
+}
+
+/* WS7 workflow surfaces. Keep these at the end: base.css is cascade-order-sensitive. */
+.sidebar-count-held {
+  margin-left: 0;
+  color: hsl(28 80% 30%);
+  background: hsl(35 90% 90%);
+  border: 1px solid hsl(35 80% 76%);
+}
+
+.alerts-banner-link {
+  margin-left: auto;
+  padding: 3px 7px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: hsl(28 80% 32%);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.alerts-banner-link + .alerts-banner-close {
+  margin-left: 0;
+}
+
+.queue-item {
+  grid-template-columns: 32px minmax(0, 1fr) auto auto auto;
+}
+
+.queue-item-failed {
+  border-left: 3px solid var(--down);
+}
+
+.queue-item-held {
+  border-left: 3px solid var(--warn);
+  background: hsl(38 95% 97%);
+}
+
+.queue-item-dismissed {
+  opacity: 0.65;
+}
+
+.queue-item-held-link {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
+}
+
+.held-table-wrap {
+  padding: 0;
+}
+
+.held-table {
+  min-width: 1050px;
+}
+
+.table-sort {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.held-price-cell {
+  display: grid;
+  gap: 2px;
+}
+
+.held-price-cell small {
+  font-size: 10px;
+}
+
+.held-dropped-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: hsl(0 85% 95%);
+  color: var(--down);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.held-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.linked-slot-row {
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+}
+
+.linked-slot-row-expired {
+  opacity: 0.58;
+  background: var(--panel-2);
+}
+
+.linked-slot-delete {
+  align-self: center;
+}
+
+.settings-alert-toggles {
+  padding-top: 2px;
+}
+
+.settings-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.settings-backup-filename {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.settings-backup-filename code {
+  color: var(--ink);
+}
+
+.out-of-sync-resolution {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid hsl(35 80% 78%);
+  border-radius: var(--radius-2);
+  background: hsl(38 95% 97%);
+}
+
+.out-of-sync-resolution > header {
+  display: grid;
+  gap: 2px;
+}
+
+.out-of-sync-resolution > header strong {
+  font-size: 13px;
+  color: hsl(28 80% 28%);
+}
+
+.out-of-sync-resolution > header span {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.resolve-menu {
+  position: relative;
+}
+
+.resolve-menu summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.resolve-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.resolve-menu-popover {
+  position: absolute;
+  z-index: 10;
+  right: 0;
+  top: calc(100% + 4px);
+  display: grid;
+  min-width: 190px;
+  padding: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  box-shadow: var(--shadow-2);
+}
+
+.resolve-menu-popover button {
+  padding: 7px 9px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-2);
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.resolve-menu-popover button:hover:not(:disabled) {
+  background: var(--panel-2);
+  color: var(--ink);
+}
+
+.resolve-menu-popover button:disabled {
+  color: var(--ink-faint);
+  cursor: not-allowed;
 }

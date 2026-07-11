@@ -1,4 +1,6 @@
 import { ShieldCheck } from "lucide-react";
+import { useState } from "react";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
 import { Panel } from "../components/Panel";
 import { useLocale } from "../contexts/LocaleContext";
@@ -24,12 +26,15 @@ export function EquityGuardianPage({
   guardians,
   onSave,
   onUnpause,
+  guardianHeldCounts = {},
 }: {
   guardians: Guardian[];
   onSave: (accountId: string, form: HTMLFormElement) => void;
-  onUnpause: (accountId: string) => void;
+  onUnpause: (accountId: string, requeueHeld: boolean) => void;
+  guardianHeldCounts?: Record<string, number>;
 }) {
   const { locale } = useLocale();
+  const [unpauseChoice, setUnpauseChoice] = useState<Guardian | null>(null);
   return (
     <Panel className="wide-panel" title="Equity Guardian">
       <p className="panel-intro">
@@ -119,7 +124,13 @@ export function EquityGuardianPage({
                 {guardian.paused ? (
                   <button
                     className="btn btn-ghost btn-small"
-                    onClick={() => onUnpause(guardian.accountId)}
+                    onClick={() => {
+                      if ((guardianHeldCounts[guardian.accountId] ?? 0) > 0) {
+                        setUnpauseChoice(guardian);
+                      } else {
+                        onUnpause(guardian.accountId, false);
+                      }
+                    }}
                     type="button"
                   >
                     Unpause
@@ -130,6 +141,25 @@ export function EquityGuardianPage({
           );
         })}
       </div>
+      {unpauseChoice ? (
+        <ConfirmDialog
+          cancelLabel="Keep paused"
+          confirmLabel={`Unpause and requeue ${guardianHeldCounts[unpauseChoice.accountId]} held trade${guardianHeldCounts[unpauseChoice.accountId] === 1 ? "" : "s"}`}
+          description="Choose whether to release guardian-held trades at market after unpausing. Lifecycle commands that arrived while held are not replayed automatically."
+          destructive={false}
+          onCancel={() => setUnpauseChoice(null)}
+          onConfirm={() => {
+            setUnpauseChoice(null);
+            onUnpause(unpauseChoice.accountId, true);
+          }}
+          onSecondary={() => {
+            setUnpauseChoice(null);
+            onUnpause(unpauseChoice.accountId, false);
+          }}
+          secondaryLabel="Unpause only"
+          title="Unpause Equity Guardian?"
+        />
+      ) : null}
     </Panel>
   );
 }

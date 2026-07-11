@@ -224,6 +224,31 @@ Docker daemon restarts.
 Use `docker compose`, not the old `docker-compose` v1 binary. The v1 binary can fail during
 container recreation with `KeyError: 'ContainerConfig'` on newer image metadata.
 
+## Backups and restore
+
+Create a SQLite backup through the admin endpoint. The API keeps the newest 14 files under
+`data/backups/`:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:18787/api/admin/backup
+curl -fsS http://127.0.0.1:18787/api/admin/backups
+```
+
+To restore, stop the container, copy the chosen backup over `data/telegram-tc.db`, then start the
+container again:
+
+```bash
+docker compose stop app
+cp data/backups/telegram-tc-<UTC-timestamp>.db data/telegram-tc.db
+docker compose up -d app
+```
+
+Example host crontab entry for a nightly backup at 02:17:
+
+```cron
+17 2 * * * curl -fsS -X POST http://127.0.0.1:18787/api/admin/backup >/dev/null
+```
+
 ## License
 
 Telegram TC is source-available under the custom licence in `LICENSE`.

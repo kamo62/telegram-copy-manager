@@ -1,4 +1,6 @@
 import { Database } from "bun:sqlite";
+import { readdirSync, unlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
   type AccountSymbolMapping,
   buildExecutionCommand,
@@ -83,6 +85,12 @@ type EquityCurveScope = "account" | "provider";
 type StatsRange = "today" | "7d" | "30d" | "90d" | "all";
 type ReportingCurrency = "USD" | "ZAR";
 type AccountAttributionBucket = "provider" | "manual_external" | "unknown_ea";
+type AlertSetting =
+  | "alertOnGuardianPause"
+  | "alertOnEaOffline"
+  | "alertOnExecFailed"
+  | "alertOnHeld"
+  | "alertOnTelegramStall";
 
 interface AppSettings {
   defaultLotSize: number;
@@ -101,6 +109,13 @@ interface AppSettings {
   reportingCurrency: ReportingCurrency;
   usdZarRate: number;
   releaseHeldOnGuardianUnpause: boolean;
+  alertBotToken: string;
+  alertChatId: string;
+  alertOnGuardianPause: boolean;
+  alertOnEaOffline: boolean;
+  alertOnExecFailed: boolean;
+  alertOnHeld: boolean;
+  alertOnTelegramStall: boolean;
 }
 
 interface AccountSlotInput {
@@ -149,8 +164,17 @@ const defaultAppSettings: AppSettings = {
   reportingCurrency: "USD",
   usdZarRate: 16,
   releaseHeldOnGuardianUnpause: false,
+  alertBotToken: "",
+  alertChatId: "",
+  alertOnGuardianPause: false,
+  alertOnEaOffline: false,
+  alertOnExecFailed: false,
+  alertOnHeld: false,
+  alertOnTelegramStall: false,
 };
 const pendingOpenMissingGraceSeconds = 10;
+const EA_HEARTBEAT_SECONDS = 5;
+const ALERT_DEDUP_MS = 30 * 60 * 1000;
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
 
@@ -200,6 +224,17 @@ export function createApi(options: ApiOptions = {}) {
     const body = await c.req.json<Partial<AppSettings> & { azureOpenAIApiKey?: string }>();
     return c.json({ settings: store.updateAppSettings(body) });
   });
+  app.post("/api/admin/alert-test", async (c) => {
+    const result = await store.sendAlertTest();
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
+  app.post("/api/admin/backup", (c) => {
+    const result = store.backupDatabase();
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json({ filename: result.filename });
+  });
+  app.get("/api/admin/backups", (c) => c.json({ backups: store.backups() }));
 
   app.post("/api/telegram/start", async (c) => {
     const body = await c.req.json<{
@@ -728,6 +763,12 @@ export function createApi(options: ApiOptions = {}) {
   app.get("/api/trades/:id/broker-orders", (c) =>
     c.json({ orders: store.brokerOrders(c.req.param("id")) }),
   );
+  app.post("/api/trades/:id/resolve", async (c) => {
+    const body = await c.req.json<{ action?: string }>();
+    const result = store.resolveTrade(c.req.param("id"), body.action);
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
 
   app.get("/api/audit-logs", (c) =>
     c.json({
@@ -1043,6 +1084,7 @@ export function isTelegramDeadSessionError(error: unknown): boolean {
 
 class AppStore {
   private readonly db: Database;
+  private readonly databasePath: string;
   private readonly allowDemoData: boolean;
   // Tracks providers we've already warned about for the "no connected
   // Telegram session" state, so we log once per offline→online edge instead
@@ -1057,8 +1099,10 @@ class AppStore {
   // restart and do not fan out across multiple API processes; the upgrade path
   // is a shared broker (Redis/Postgres LISTEN) if the API is ever scaled out.
   private readonly eventSubscribers = new Set<(event: AppStoreEvent) => void>();
+  private readonly alertSentAt = new Map<string, number>();
 
   constructor(databasePath: string, allowDemoData = false) {
+    this.databasePath = databasePath;
     this.allowDemoData = allowDemoData;
     if (databasePath !== ":memory:") {
       const dir = databasePath.split("/").slice(0, -1).join("/");
@@ -1884,6 +1928,26 @@ class AppStore {
               providerId: provider.id,
               parsedSignalId: item.parsedSignalId,
             });
+            if (isUnmatchedLifecycleError(approval.error)) {
+              const linked = this.linkDroppedLifecycle(
+                provider.id,
+                item.parsedSignalId,
+                item.result,
+              );
+              if (linked > 0) {
+                this.audit(
+                  "telegram.ingest.lifecycle-dropped",
+                  "warn",
+                  "Linked dropped lifecycle command to held open trade",
+                  {
+                    providerId: provider.id,
+                    parsedSignalId: item.parsedSignalId,
+                    commandType: item.result.commandType,
+                    linked,
+                  },
+                );
+              }
+            }
           }
         }
       } catch (error) {
@@ -1905,6 +1969,54 @@ class AppStore {
     }
     this.recordTelegramHealth(telegram, activeSessions);
     return result;
+  }
+
+  private linkDroppedLifecycle(providerId: string, parsedSignalId: string, signal: ParsedSignal) {
+    const raw = this.db
+      .query("SELECT raw_message_id FROM parsed_signals WHERE id = ?")
+      .get(parsedSignalId) as Row | null;
+    if (!raw?.raw_message_id) return 0;
+    const rows = this.db
+      .query(
+        `SELECT queue_items.id, queue_items.payload_json
+         FROM queue_items
+         JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
+         WHERE queue_items.status = 'HELD'
+           AND parsed_signals.provider_id = ?
+           AND json_extract(queue_items.payload_json, '$.commandType') = 'OPEN_TRADE'`,
+      )
+      .all(providerId) as Row[];
+    const lifecycleSymbols = [signal.brokerSymbol, signal.canonicalSymbol, signal.rawSymbol]
+      .map((value) => normalizeLockedSymbol(value))
+      .filter((value): value is string => Boolean(value));
+    let linked = 0;
+    for (const row of rows) {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      const heldSymbols = [payload.brokerSymbol, payload.canonicalSymbol]
+        .map((value) => normalizeLockedSymbol(value))
+        .filter((value): value is string => Boolean(value));
+      if (
+        lifecycleSymbols.length > 0 &&
+        !lifecycleSymbols.some((symbol) => heldSymbols.includes(symbol))
+      ) {
+        continue;
+      }
+      const inserted = this.db
+        .query(
+          `INSERT OR IGNORE INTO held_lifecycle_drops
+            (id, held_queue_item_id, raw_message_id, command_type, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `held_drop_${nanoid(10)}`,
+          String(row.id),
+          String(raw.raw_message_id),
+          signal.commandType,
+          nowIso(),
+        );
+      if (inserted.changes > 0) linked += 1;
+    }
+    return linked;
   }
 
   // A GramJS session's auth key can be revoked server-side (logged out from
@@ -1948,6 +2060,12 @@ class AppStore {
           lastContactAt: health.lastContactAt,
           stalledSeconds: health.stalledSeconds,
         });
+        this.dispatchAlert(
+          "telegram-stalled",
+          sessionId,
+          `Telegram ingestion stalled for session ${sessionId}.`,
+          "alertOnTelegramStall",
+        );
       } else if (!health.stalled && previous?.stalled) {
         this.audit("telegram.session.recovered", "info", "Telegram session recovered", {
           sessionId,
@@ -1987,6 +2105,26 @@ class AppStore {
           drawdown: lastBreach?.drawdown,
         },
       });
+      this.dispatchAlert(
+        "guardian-paused",
+        guardian.accountId,
+        `Equity Guardian paused for account ${guardian.accountNumber || guardian.accountId}.`,
+        "alertOnGuardianPause",
+      );
+    }
+    for (const account of this.mt5Accounts()) {
+      const lastHeartbeat = Date.parse(account.lastHeartbeatAt);
+      if (
+        Number.isFinite(lastHeartbeat) &&
+        Date.now() - lastHeartbeat > EA_HEARTBEAT_SECONDS * 3 * 1000
+      ) {
+        this.dispatchAlert(
+          "ea-offline",
+          account.id,
+          `EA offline for account ${account.accountNumber || account.id}.`,
+          "alertOnEaOffline",
+        );
+      }
     }
     for (const health of this.telegramSessionHealth()) {
       if (!health.stalled) continue;
@@ -2359,6 +2497,7 @@ class AppStore {
         queueItemId,
         heldReason: "NO_ACCOUNT",
       });
+      this.alertHeldQueueItem(queueItemId, "NO_ACCOUNT");
       return { body: { queueItemId, status: "HELD" } };
     }
     const accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
@@ -2381,6 +2520,7 @@ class AppStore {
         messageDate: source?.messageDate,
         maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
       });
+      this.alertHeldQueueItem(queueItemId, "EXPIRED_LATE");
       return { body: { queueItemId, status: "HELD" } };
     }
     // Dedup window: only collapse against APPROVED signals within the configured window
@@ -2887,7 +3027,6 @@ class AppStore {
   }
 
   heldQueueItems() {
-    const accounts = new Map(this.mt5Accounts().map((account) => [account.id, account]));
     const rows = this.db
       .query(
         `SELECT queue_items.id, queue_items.account_id, queue_items.logical_trade_id,
@@ -2902,39 +3041,57 @@ class AppStore {
          ORDER BY queue_items.created_at DESC`,
       )
       .all() as Row[];
+    const droppedByQueueItem = this.droppedLifecycleForQueueItems(
+      rows.map((row) => String(row.id)),
+    );
     return rows.map((row) => {
       const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
       const accountId = String(row.account_id ?? "");
       const currentPrice = this.freshestEaReportedPrice(accountId, payload);
       const symbol = payload.brokerSymbol ?? payload.canonicalSymbol ?? "";
-      const signal = row.result_json ? parseJson<ParsedSignal>(String(row.result_json)) : undefined;
+      const originalEntry = payload.entry?.from;
+      const droppedLifecycle = droppedByQueueItem.get(String(row.id)) ?? [];
+      const driftPct =
+        originalEntry !== undefined && currentPrice?.price !== undefined && originalEntry !== 0
+          ? Number((((currentPrice.price - originalEntry) / originalEntry) * 100).toFixed(2))
+          : undefined;
       return {
         id: String(row.id),
         heldReason: String(row.held_reason ?? ""),
-        signalSummary: {
-          commandType: payload.commandType,
-          symbol,
-          direction: payload.direction,
-          orderType: payload.orderType,
-          originalText: signal?.originalText ?? payload.originalText,
-        },
-        provider: row.provider_id
-          ? { id: String(row.provider_id), title: String(row.provider_title ?? row.provider_id) }
-          : undefined,
-        account: {
-          id: accountId,
-          accountNumber: accounts.get(accountId)?.accountNumber ?? "",
-          server: accounts.get(accountId)?.server ?? "",
-          currency: accounts.get(accountId)?.currency ?? "",
-        },
-        originalEntryPrice: payload.entry?.from,
-        freshestEaReportedPrice: currentPrice?.price,
-        freshestEaReportedAt: currentPrice?.updatedAt,
+        accountId,
+        providerId: String(row.provider_id ?? ""),
+        providerTitle: row.provider_id ? String(row.provider_title ?? row.provider_id) : undefined,
+        commandType: payload.commandType,
+        symbol,
+        originalEntry,
         currentPrice: currentPrice?.price,
-        originQueueItemId: row.origin_queue_item_id ? String(row.origin_queue_item_id) : undefined,
+        driftPct,
+        droppedLifecycleCount: droppedLifecycle.length,
+        droppedLifecycle,
         createdAt: String(row.created_at),
       };
     });
+  }
+
+  private droppedLifecycleForQueueItems(queueItemIds: string[]) {
+    const dropped = new Map<string, string[]>();
+    if (queueItemIds.length === 0) return dropped;
+    const placeholders = queueItemIds.map(() => "?").join(", ");
+    const rows = this.db
+      .query(
+        `SELECT held_queue_item_id, command_type
+         FROM held_lifecycle_drops
+         WHERE held_queue_item_id IN (${placeholders})
+         ORDER BY created_at ASC`,
+      )
+      .all(...queueItemIds) as Row[];
+    for (const row of rows) {
+      const id = String(row.held_queue_item_id);
+      const commands = dropped.get(id) ?? [];
+      commands.push(String(row.command_type));
+      dropped.set(id, commands);
+    }
+    return dropped;
   }
 
   requeueQueueItem(id: string, mode?: string) {
@@ -3001,12 +3158,15 @@ class AppStore {
       },
       "operator",
     );
+    const droppedLifecycle = this.droppedLifecycleForQueueItems([id]).get(id) ?? [];
     return {
       queueItemId,
       originQueueItemId: id,
       accountId: targetAccountId,
       mode,
       status: "PENDING" as const,
+      droppedLifecycleCount: droppedLifecycle.length,
+      droppedLifecycle,
     };
   }
 
@@ -3208,6 +3368,13 @@ class AppStore {
         )
         .run("HELD", "GUARDIAN", now, item.id);
       this.audit("equity-guardian.reject", "warn", "OPEN_TRADE rejected by Equity Guardian", item);
+      this.dispatchAlert(
+        "guardian-rejection",
+        item.id,
+        `Equity Guardian rejected OPEN_TRADE queue item ${item.id} for account ${item.accountId}.`,
+        "alertOnGuardianPause",
+      );
+      this.alertHeldQueueItem(item.id, "GUARDIAN");
       return false;
     }) as Row | undefined;
     if (!row) return null;
@@ -3252,6 +3419,7 @@ class AppStore {
           leaseCount,
         },
       );
+      if (nextStatus === "HELD") this.alertHeldQueueItem(String(row.id), String(heldReason));
     }
   }
 
@@ -3300,6 +3468,7 @@ class AppStore {
         sourceDate,
         maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
       });
+      this.alertHeldQueueItem(String(row.id), "EXPIRED_LATE");
     }
   }
 
@@ -3355,6 +3524,14 @@ class AppStore {
         JSON.stringify(breaches),
         new Date().toISOString(),
       );
+    if (paused && !current.paused) {
+      this.dispatchAlert(
+        "guardian-paused",
+        accountId,
+        `Equity Guardian paused for account ${current.accountNumber || accountId}.`,
+        "alertOnGuardianPause",
+      );
+    }
     return this.equityGuardian(accountId);
   }
 
@@ -3423,6 +3600,14 @@ class AppStore {
       "MT5 execution report received",
       input,
     );
+    if (input.status === "FAILED") {
+      this.dispatchAlert(
+        "execution-failed",
+        input.queueItemId,
+        `MT5 execution failed for queue item ${input.queueItemId}: ${input.brokerComment || input.errorText || "unknown error"}.`,
+        "alertOnExecFailed",
+      );
+    }
     log(input.status === "EXECUTED" ? "info" : "error", "mt5.report", {
       accountId: input.accountId,
       queueItemId: input.queueItemId,
@@ -4288,7 +4473,7 @@ class AppStore {
     positionTicket: string,
   ) {
     const trade = this.logicalTrade(tradeId);
-    if (!trade) return;
+    if (!trade || trade.status === "ARCHIVED") return;
     const evidence = [source, deal.comment, deal.dealTicket ? `deal:${deal.dealTicket}` : ""]
       .filter(Boolean)
       .join(" | ");
@@ -4776,6 +4961,164 @@ class AppStore {
         )
         .all(logicalTradeId) as Row[]
     ).map((row) => this.brokerOrderFromRow(row));
+  }
+
+  resolveTrade(tradeId: string, action?: string) {
+    if (action !== "close_from_history" && action !== "readopt" && action !== "archive") {
+      return {
+        statusCode: 422 as const,
+        error: 'Trade resolve action must be "close_from_history", "readopt", or "archive"',
+      };
+    }
+    const trade = this.logicalTrade(tradeId);
+    if (!trade) return { statusCode: 404 as const, error: "Logical trade not found" };
+    if (trade.status !== "OUT_OF_SYNC") {
+      return { statusCode: 409 as const, error: "Only OUT_OF_SYNC trades can be resolved" };
+    }
+
+    let updated: LogicalTrade;
+    if (action === "archive") {
+      updated = {
+        ...trade,
+        status: "ARCHIVED",
+        livePositionExists: false,
+        outOfSyncReason: undefined,
+        matchedBrokerTickets: [],
+        brokerComment: undefined,
+        legs: trade.legs.map((leg) =>
+          leg.status === "CLOSED" || leg.status === "HIT"
+            ? leg
+            : { ...leg, status: "SKIPPED" as const, brokerEvidence: "Archived by operator" },
+        ),
+      };
+    } else if (action === "readopt") {
+      const candidates = this.reconcilerCandidateBrokerTickets(trade);
+      const snapshot = trade.accountId ? this.mt5SnapshotsByAccount()[trade.accountId] : undefined;
+      const position = snapshot?.positions.find((record) =>
+        candidates.includes(brokerTicketFromSnapshot(record)),
+      );
+      const positionTicket = position ? brokerTicketFromSnapshot(position) : "";
+      if (!positionTicket) {
+        return {
+          statusCode: 409 as const,
+          error: "No live broker position candidate is available for readopt",
+        };
+      }
+      updated = {
+        ...trade,
+        status: "OPEN",
+        livePositionExists: true,
+        outOfSyncReason: undefined,
+        matchedBrokerTickets: [positionTicket],
+        brokerComment: brokerCommentFromSnapshot(position),
+        lastSnapshotAt: snapshot?.updatedAt,
+        legs: trade.legs.map((leg) =>
+          leg.status === "CLOSED" || leg.status === "HIT"
+            ? leg
+            : {
+                ...leg,
+                status: "OPEN" as const,
+                brokerEvidence: `Readopted ticket ${positionTicket}`,
+              },
+        ),
+      };
+    } else {
+      const closeOrders = this.brokerOrders(tradeId).filter(
+        (order) =>
+          (order.action === "FULL_CLOSE" || order.action === "PARTIAL_CLOSE") &&
+          order.source !== "manual" &&
+          !order.source.startsWith("app-"),
+      );
+      if (closeOrders.length === 0) {
+        return {
+          statusCode: 409 as const,
+          error: "No matching broker history close deal is available",
+        };
+      }
+      const closedLegs = new Set(
+        closeOrders
+          .map((order) => parseLegIndex(order.legId))
+          .filter((leg): leg is number => leg !== undefined),
+      );
+      const matchedBrokerTickets = [
+        ...new Set(
+          closeOrders
+            .map((order) => order.positionTicket)
+            .filter((ticket): ticket is string => truthyBrokerTicket(ticket)),
+        ),
+      ];
+      updated = {
+        ...trade,
+        status: "CLOSED",
+        livePositionExists: false,
+        outOfSyncReason: undefined,
+        matchedBrokerTickets: matchedBrokerTickets.length
+          ? matchedBrokerTickets
+          : trade.matchedBrokerTickets,
+        legs: trade.legs.map((leg) =>
+          closedLegs.has(leg.leg)
+            ? { ...leg, status: "CLOSED" as const, brokerEvidence: "Resolved from broker history" }
+            : { ...leg, status: "SKIPPED" as const, brokerEvidence: "No matching history deal" },
+        ),
+      };
+    }
+    this.db
+      .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+      .run(updated.status, JSON.stringify(updated), tradeId);
+    this.audit(
+      "logical-trade.resolved",
+      "info",
+      `Logical trade resolved via ${action}`,
+      {
+        logicalTradeId: tradeId,
+        action,
+        status: updated.status,
+        matchedBrokerTickets: updated.matchedBrokerTickets,
+      },
+      "operator",
+    );
+    this.emitEvent({
+      type: "reconciliation",
+      tradeId,
+      accountId: trade.accountId,
+      to: updated.status,
+    });
+    return {
+      tradeId,
+      action,
+      status: updated.status,
+      matchedBrokerTickets: updated.matchedBrokerTickets ?? [],
+    };
+  }
+
+  private reconcilerCandidateBrokerTickets(trade: LogicalTrade) {
+    const tickets = new Set(
+      (trade.matchedBrokerTickets ?? []).filter((ticket) => truthyBrokerTicket(ticket)),
+    );
+    for (const ticket of this.brokerPositionTicketsForTrade(trade.id)) tickets.add(ticket);
+    const snapshot = trade.accountId ? this.mt5SnapshotsByAccount()[trade.accountId] : undefined;
+    const match = snapshot
+      ? matchedBrokerRecordForTrade(snapshot.positions, trade, tickets)
+      : undefined;
+    const ticket = match ? brokerTicketFromSnapshot(match) : "";
+    if (ticket) tickets.add(ticket);
+    return [...tickets];
+  }
+
+  private brokerPositionTicketsForTrade(tradeId: string) {
+    return (
+      this.db
+        .query(
+          `SELECT position_ticket FROM broker_orders
+           WHERE logical_trade_id = ?
+             AND action = 'OPEN'
+             AND position_ticket IS NOT NULL
+             AND position_ticket NOT IN ('', '0')`,
+        )
+        .all(tradeId) as Row[]
+    )
+      .map((row) => String(row.position_ticket))
+      .filter((ticket) => truthyBrokerTicket(ticket));
   }
 
   private brokerOrderFromRow(row: Row) {
@@ -6452,6 +6795,124 @@ class AppStore {
     return row ? String(row.value) : "";
   }
 
+  async sendAlertTest() {
+    const settings = this.appSettings();
+    if (!settings.alertBotToken || !settings.alertChatId) {
+      return {
+        statusCode: 400 as const,
+        error: "Alert bot token and chat id must be configured",
+      };
+    }
+    const result = await this.postTelegramAlert(
+      settings.alertBotToken,
+      settings.alertChatId,
+      "Telegram TC alert test: outbound alerting is configured.",
+    );
+    if (!result.ok) {
+      this.audit("alert.delivery-failed", "error", "Telegram alert test failed", {
+        error: result.error,
+      });
+      return { statusCode: 502 as const, error: result.error };
+    }
+    this.audit("alert.test", "info", "Telegram alert test sent", {}, "operator");
+    return { status: "SENT" as const };
+  }
+
+  private dispatchAlert(event: string, key: string, text: string, setting: AlertSetting) {
+    const settings = this.appSettings();
+    if (!settings[setting] || !settings.alertBotToken || !settings.alertChatId) return;
+    const dedupKey = `${event}:${key}`;
+    const lastSentAt = this.alertSentAt.get(dedupKey) ?? 0;
+    if (Date.now() - lastSentAt < ALERT_DEDUP_MS) return;
+    this.alertSentAt.set(dedupKey, Date.now());
+    void this.postTelegramAlert(settings.alertBotToken, settings.alertChatId, text).then(
+      (result) => {
+        if (result.ok) return;
+        this.audit("alert.delivery-failed", "error", "Telegram alert delivery failed", {
+          event,
+          key,
+          error: result.error,
+        });
+      },
+    );
+  }
+
+  private async postTelegramAlert(token: string, chatId: string, text: string) {
+    try {
+      const response = await fetch(
+        `https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text }),
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+      if (!response.ok) return { ok: false as const, error: `Telegram HTTP ${response.status}` };
+      return { ok: true as const };
+    } catch (error) {
+      return {
+        ok: false as const,
+        error: error instanceof Error ? error.message : "Unknown Telegram alert error",
+      };
+    }
+  }
+
+  private alertHeldQueueItem(queueItemId: string, reason: string) {
+    this.dispatchAlert(
+      "held",
+      queueItemId,
+      `Telegram TC held queue item ${queueItemId}: ${reason}`,
+      "alertOnHeld",
+    );
+  }
+
+  backupDatabase() {
+    if (this.databasePath === ":memory:") {
+      return { statusCode: 400 as const, error: "Backups require a file-backed database" };
+    }
+    const backupDir = join(dirname(this.databasePath), "backups");
+    Bun.spawnSync(["mkdir", "-p", backupDir]);
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .replace(/\.\d{3}Z$/, "Z");
+    const filename = `telegram-tc-${timestamp}.db`;
+    const path = join(backupDir, filename);
+    try {
+      this.db.query("VACUUM INTO ?").run(path);
+      this.pruneBackups(backupDir);
+      this.audit("admin.backup", "info", "SQLite backup created", { filename }, "operator");
+      return { filename };
+    } catch (error) {
+      return {
+        statusCode: 500 as const,
+        error: error instanceof Error ? error.message : "Database backup failed",
+      };
+    }
+  }
+
+  backups() {
+    if (this.databasePath === ":memory:") return [];
+    return this.backupFiles(join(dirname(this.databasePath), "backups")).map((file) => file.name);
+  }
+
+  private pruneBackups(backupDir: string) {
+    const files = this.backupFiles(backupDir);
+    for (const file of files.slice(14)) unlinkSync(join(backupDir, file.name));
+  }
+
+  private backupFiles(backupDir: string) {
+    try {
+      return readdirSync(backupDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && /^telegram-tc-.+\.db$/.test(entry.name))
+        .map((entry) => ({ name: basename(entry.name) }))
+        .sort((a, b) => b.name.localeCompare(a.name));
+    } catch {
+      return [];
+    }
+  }
+
   telegramSessionSummaries() {
     return (
       this.db
@@ -6769,6 +7230,16 @@ class AppStore {
     this.ensureColumn("queue_items", "lease_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("queue_items", "held_reason", "TEXT");
     this.ensureColumn("queue_items", "origin_queue_item_id", "TEXT");
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS held_lifecycle_drops (
+        id TEXT PRIMARY KEY,
+        held_queue_item_id TEXT NOT NULL,
+        raw_message_id TEXT NOT NULL,
+        command_type TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (held_queue_item_id, raw_message_id)
+      );
+    `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS mt5_accounts (
         id TEXT PRIMARY KEY,
@@ -7801,7 +8272,13 @@ class AppStore {
       // the next snapshot doesn't see the ticket in positions[] and overwrites
       // status back to 'OUT_OF_SYNC'. That's how we ended up with 6 stuck
       // trades on prod despite the closes being recorded correctly.
-      if (!hasBrokerState || trade.status === "CLOSED" || trade.status === "CANCELLED") continue;
+      if (
+        !hasBrokerState ||
+        trade.status === "CLOSED" ||
+        trade.status === "CANCELLED" ||
+        trade.status === "ARCHIVED"
+      )
+        continue;
       if (this.hasRecordedRealFullClose(trade.id)) continue;
 
       const match = snapshotMatchForTrade(
@@ -7983,6 +8460,10 @@ class AppStore {
 
   private logicalTradesForDashboard() {
     return this.logicalTrades().map((trade) => {
+      const matchedBrokerTickets =
+        trade.status === "OUT_OF_SYNC"
+          ? this.reconcilerCandidateBrokerTickets(trade)
+          : (trade.matchedBrokerTickets ?? []);
       return {
         id: trade.id,
         symbol: trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "unmapped",
@@ -7992,7 +8473,7 @@ class AppStore {
         source: trade.source,
         outOfSyncReason: trade.outOfSyncReason,
         livePositionExists: trade.livePositionExists,
-        matchedBrokerTickets: trade.matchedBrokerTickets,
+        matchedBrokerTickets,
         brokerComment: trade.brokerComment,
         lastSnapshotAt: trade.lastSnapshotAt,
         legs: trade.legs.map((leg) => ({
@@ -8030,7 +8511,7 @@ class AppStore {
 
   private appendTradeCommand(tradeId: string, signal: ParsedSignal) {
     const trade = this.logicalTrade(tradeId);
-    if (!trade) return;
+    if (!trade || trade.status === "ARCHIVED") return;
     const updated: LogicalTrade = {
       ...trade,
       commandHistory: [
@@ -8080,7 +8561,7 @@ class AppStore {
     if (!row || !tradeId) return;
 
     const trade = this.logicalTrade(tradeId);
-    if (!trade) return;
+    if (!trade || trade.status === "ARCHIVED") return;
 
     const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
     const evidence = executionEvidence(input);
@@ -8841,7 +9322,10 @@ function isPendingOrderAcceptance(
  */
 function isPositionGoneFailure(input: ExecutionReportInput): boolean {
   const comment = (input.brokerComment ?? "").toLowerCase();
-  return comment.includes("position ticket not found") || comment.includes("no matching position");
+  return (
+    input.retcode === 0 &&
+    (comment.includes("position ticket not found") || comment.includes("no matching position"))
+  );
 }
 
 function truthyBrokerTicket(value: string | undefined): value is string {
@@ -9678,6 +10162,10 @@ function heartbeatFreshness(iso: string) {
   return "offline";
 }
 
+function isUnmatchedLifecycleError(error: string) {
+  return error.includes("No open logical trade matched this provider command");
+}
+
 function accountFreshnessScore(status: string) {
   if (status === "online") return 3;
   if (status === "stale") return 2;
@@ -10339,6 +10827,13 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     reportingCurrency,
     usdZarRate: positiveNumber(input.usdZarRate, defaultAppSettings.usdZarRate),
     releaseHeldOnGuardianUnpause: input.releaseHeldOnGuardianUnpause === true,
+    alertBotToken: typeof input.alertBotToken === "string" ? input.alertBotToken.trim() : "",
+    alertChatId: typeof input.alertChatId === "string" ? input.alertChatId.trim() : "",
+    alertOnGuardianPause: input.alertOnGuardianPause === true,
+    alertOnEaOffline: input.alertOnEaOffline === true,
+    alertOnExecFailed: input.alertOnExecFailed === true,
+    alertOnHeld: input.alertOnHeld === true,
+    alertOnTelegramStall: input.alertOnTelegramStall === true,
   };
 }
 

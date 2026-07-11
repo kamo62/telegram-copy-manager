@@ -8,6 +8,11 @@ application version remains unchanged as requested.
 - Added HELD/DISMISSED queue states, audited held-item requeue/dismiss actions, guardian and late
   signal recovery, stale OPEN_TRADE delivery safety, and the release-held setting.
 - Added account-slot expiry and deletion guards.
+- Added flat held-item payloads with dropped lifecycle visibility and requeue warnings.
+- Added OUT_OF_SYNC close-from-history, readopt, and archive resolution plus terminal handling for
+  plain close/modify reports targeting missing positions.
+- Added optional Telegram bot alerting, alert-test delivery, SQLite backup/list endpoints, and the
+  documented restore/nightly backup procedure.
 
 ## 1.18.1 - 2026-06-27 (Patch)
 

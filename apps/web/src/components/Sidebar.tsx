@@ -31,6 +31,7 @@ export function Sidebar({
   onSelectAccount,
   onSelectSlot,
   onAddAccount,
+  heldCount = 0,
 }: {
   activeView: string;
   onNavigate: (id: string) => void;
@@ -41,6 +42,7 @@ export function Sidebar({
   onSelectAccount?: (accountId: string | null) => void;
   onSelectSlot?: (slotId: string | null) => void;
   onAddAccount?: () => void;
+  heldCount?: number;
 }) {
   return (
     <aside className="sidebar" aria-label="Primary">
@@ -77,6 +79,14 @@ export function Sidebar({
                 {isLive && accounts.length > 0 ? (
                   <span className="sidebar-count" title={`${accounts.length} accounts`}>
                     {accounts.length}
+                  </span>
+                ) : null}
+                {isLive && heldCount > 0 ? (
+                  <span
+                    className="sidebar-count sidebar-count-held"
+                    title={`${heldCount} held signals`}
+                  >
+                    {heldCount}
                   </span>
                 ) : null}
               </button>

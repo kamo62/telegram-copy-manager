@@ -29,7 +29,13 @@ function alertKey(alert: OperationalAlert): string {
  * ponytail: dismissal lives in state, so it resets on reload — that is the
  * intended ceiling; persisting it would risk hiding live trade-blocking alerts.
  */
-export function AlertsBanner({ alerts }: { alerts: OperationalAlert[] }) {
+export function AlertsBanner({
+  alerts,
+  onViewHeld,
+}: {
+  alerts: OperationalAlert[];
+  onViewHeld?: () => void;
+}) {
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
 
   // Drop dismissals whose condition has cleared so the alert shows again if it
@@ -62,6 +68,11 @@ export function AlertsBanner({ alerts }: { alerts: OperationalAlert[] }) {
               <ShieldAlert size={15} />
             </span>
             <span className="alerts-banner-message">{alert.message}</span>
+            {onViewHeld && /guardian|held/i.test(alert.kind) ? (
+              <button className="alerts-banner-link" onClick={onViewHeld} type="button">
+                View held
+              </button>
+            ) : null}
             <button
               aria-label="Dismiss alert"
               className="alerts-banner-close"

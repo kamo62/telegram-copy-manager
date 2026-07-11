@@ -9,6 +9,13 @@ export interface ManualSignalSeed {
   rawText?: string;
   brokerSymbol?: string;
   canonicalSymbol?: string;
+  direction?: "BUY" | "SELL";
+  orderType?: "MARKET" | "LIMIT" | "STOP";
+  entry?: { from?: number; to?: number };
+  stopLoss?: number;
+  takeProfits?: Array<{ price: number } | number>;
+  volume?: number;
+  executionMode?: "VIRTUAL_TP" | "SPLIT_ORDER";
 }
 
 export interface ManualSignalPayload {
@@ -79,14 +86,18 @@ export function ManualSignalModal({
     if (!open) return;
     setAccountId(seed?.accountId ?? accounts[0]?.id ?? "");
     setSymbol(seed?.brokerSymbol ?? "");
-    setDirection("BUY");
-    setOrderType("LIMIT");
-    setEntryFrom("");
-    setEntryTo("");
-    setStopLoss("");
-    setTps([newTp()]);
-    setVolume("");
-    setExecutionMode("VIRTUAL_TP");
+    setDirection(seed?.direction ?? "BUY");
+    setOrderType(seed?.orderType ?? "LIMIT");
+    setEntryFrom(seed?.entry?.from == null ? "" : String(seed.entry.from));
+    setEntryTo(seed?.entry?.to == null ? "" : String(seed.entry.to));
+    setStopLoss(seed?.stopLoss == null ? "" : String(seed.stopLoss));
+    setTps(
+      seed?.takeProfits === undefined
+        ? [newTp()]
+        : seed.takeProfits.map((tp) => newTp(String(typeof tp === "number" ? tp : tp.price))),
+    );
+    setVolume(seed?.volume == null ? "" : String(seed.volume));
+    setExecutionMode(seed?.executionMode ?? "VIRTUAL_TP");
     setError("");
     setSubmitting(false);
   }, [open, seed, accounts]);

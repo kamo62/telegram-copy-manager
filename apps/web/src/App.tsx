@@ -38,7 +38,17 @@ import { type TabId, WorkspaceTabs } from "./components/WorkspaceTabs";
 import { useToast } from "./contexts/ToastContext";
 import { useAnnouncer } from "./hooks/useAnnouncer";
 import { useHotkeys } from "./hooks/useHotkeys";
-import { apiDelete, apiFetch, apiGet, apiPatch, apiPost } from "./lib/api";
+import {
+  apiDelete,
+  apiFetch,
+  apiGet,
+  apiPatch,
+  apiPost,
+  type HeldQueueItem,
+  type HeldQueueItemsResponse,
+  type HeldRequeueMode,
+  type TradeResolutionAction,
+} from "./lib/api";
 import type { ExposurePosition } from "./lib/exposure";
 import { EquityGuardianPage } from "./pages/EquityGuardianPage";
 import { HistoryPage } from "./pages/HistoryPage";
@@ -106,6 +116,13 @@ export interface DashboardSnapshot {
     drawdownDangerPct: number;
     reportingCurrency: "USD" | "ZAR";
     usdZarRate: number;
+    alertBotToken?: string;
+    alertChatId?: string;
+    alertOnGuardianPause?: boolean;
+    alertOnEaOffline?: boolean;
+    alertOnExecFailed?: boolean;
+    alertOnHeld?: boolean;
+    alertOnTelegramStall?: boolean;
   };
   accountPerformance?: AccountPerformanceSnapshot;
   accountPerformanceByAccount?: Record<string, AccountPerformanceSnapshot>;
@@ -120,6 +137,7 @@ export interface DashboardSnapshot {
     status: string;
     accountNumber: string;
     server: string;
+    createdAt?: string;
   }>;
   accountProviderLinks?: Array<{
     accountId: string;
@@ -195,6 +213,15 @@ export interface DashboardSnapshot {
     mappingStatus: string;
     confidence: number;
     reviewRequired: boolean;
+    accountId?: string;
+    providerId?: string;
+    direction?: "BUY" | "SELL";
+    orderType?: "MARKET" | "LIMIT" | "STOP";
+    entry?: { from?: number; to?: number };
+    stopLoss?: number;
+    takeProfits?: Array<{ price: number } | number>;
+    volume?: number;
+    executionMode?: "VIRTUAL_TP" | "SPLIT_ORDER";
   }>;
   parserFixtures?: Array<{
     id: string;
@@ -449,6 +476,7 @@ export function App({
   initialSnapshot?: DashboardSnapshot;
 }) {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(initialSnapshot ?? emptySnapshot);
+  const [heldItems, setHeldItems] = useState<HeldQueueItem[]>([]);
   const [availableDialogs, setAvailableDialogs] = useState<TelegramDialogSummary[]>(initialDialogs);
   const [initialLoading, setInitialLoading] = useState(!initialSnapshot);
   const [refreshing, setRefreshing] = useState(false);
@@ -496,6 +524,10 @@ export function App({
   // Pending link-slots are transient pre-account UI state (not represented in the URL);
   // selecting one clears any focused account and vice versa.
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const refreshHeldItems = useCallback(async () => {
+    const data = await apiGet<HeldQueueItemsResponse>("/api/queue-items/held");
+    setHeldItems(Array.isArray(data.items) ? data.items : []);
+  }, []);
 
   // Navigation setters — keep the original names so existing call sites are unchanged, but
   // route changes now flow through the URL instead of local state.
@@ -564,6 +596,7 @@ export function App({
           setSnapshot(data);
           setLastPollError(false);
           setLastSyncAt(new Date().toISOString());
+          void refreshHeldItems().catch(() => undefined);
         }
       } catch {
         if (active) setLastPollError(true);
@@ -646,7 +679,15 @@ export function App({
       source?.close();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [initialSnapshot]);
+  }, [initialSnapshot, refreshHeldItems]);
+
+  const telegramConnected = snapshot.telegramSessions.some(
+    (session) => session.status === "CONNECTED",
+  );
+  useEffect(() => {
+    if (!telegramConnected) return;
+    void refreshHeldItems().catch(() => undefined);
+  }, [refreshHeldItems, telegramConnected]);
 
   useEffect(() => {
     if (initialSnapshot) return;
@@ -929,6 +970,17 @@ export function App({
       .filter((slot) => !slot.accountNumber && !linkedAccountIds.has(slot.id))
       .map((slot) => ({ id: slot.id, name: slot.name, linkCode: slot.linkCode }));
   }, [snapshot.accountSlots, snapshot.mt5Accounts]);
+
+  const guardianHeldCounts = useMemo(
+    () =>
+      heldItems.reduce<Record<string, number>>((counts, item) => {
+        if (item.heldReason === "GUARDIAN" && item.accountId) {
+          counts[item.accountId] = (counts[item.accountId] ?? 0) + 1;
+        }
+        return counts;
+      }, {}),
+    [heldItems],
+  );
 
   const paletteCommands = useMemo<PaletteCommand[]>(
     () => [
@@ -1379,8 +1431,36 @@ export function App({
       drawdownDangerPct: Number(formData.get("drawdownDangerPct")),
       reportingCurrency: String(formData.get("reportingCurrency") ?? "USD"),
       usdZarRate: Number(formData.get("usdZarRate")),
+      alertBotToken: String(formData.get("alertBotToken") ?? ""),
+      alertChatId: String(formData.get("alertChatId") ?? ""),
+      alertOnGuardianPause: formData.has("alertOnGuardianPause"),
+      alertOnEaOffline: formData.has("alertOnEaOffline"),
+      alertOnExecFailed: formData.has("alertOnExecFailed"),
+      alertOnHeld: formData.has("alertOnHeld"),
+      alertOnTelegramStall: formData.has("alertOnTelegramStall"),
     });
+    toast.success("Settings saved");
     await refreshDashboard();
+  }
+
+  async function sendAlertTest() {
+    try {
+      await apiPost("/api/admin/alert-test");
+      toast.success("Test alert sent");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to send test alert");
+    }
+  }
+
+  async function backupDatabase() {
+    try {
+      const data = await apiPost<{ filename: string }>("/api/admin/backup");
+      toast.success(`Database backup created: ${data.filename}`);
+      return data.filename;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Database backup failed");
+      return "";
+    }
   }
 
   async function parseRecentProviderMessages() {
@@ -1517,6 +1597,45 @@ export function App({
     await refreshDashboard();
   }
 
+  async function deleteAccountSlot(slot: { id: string; name: string }) {
+    const confirmed = await confirm({
+      title: "Delete link slot?",
+      description: `${slot.name || "This link slot"} and its link code will be removed.`,
+      confirmLabel: "Delete slot",
+    });
+    if (!confirmed) return;
+    try {
+      await apiDelete(`/api/account-slots/${slot.id}`);
+      if (selectedSlotId === slot.id) selectSlot(null);
+      toast.success(`Deleted ${slot.name || "link slot"}`);
+      await refreshDashboard();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete link slot");
+    }
+  }
+
+  async function requeueHeldItem(item: HeldQueueItem, mode: HeldRequeueMode) {
+    try {
+      await apiPost(`/api/queue-items/${item.id}/requeue`, { mode });
+      toast.success(
+        mode === "market" ? `${item.symbol} requeued at market` : `${item.symbol} requeued`,
+      );
+      await Promise.all([refreshHeldItems(), refreshDashboard()]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to requeue held signal");
+    }
+  }
+
+  async function dismissHeldItem(item: HeldQueueItem) {
+    try {
+      await apiPost(`/api/queue-items/${item.id}/dismiss`);
+      toast.success(`Dismissed held ${item.symbol} signal`);
+      await Promise.all([refreshHeldItems(), refreshDashboard()]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to dismiss held signal");
+    }
+  }
+
   async function toggleAccountProviderLink(
     accountId: string,
     providerId: string,
@@ -1537,10 +1656,28 @@ export function App({
     await refreshDashboard();
   }
 
-  async function unpauseGuardian(accountId: string) {
+  async function unpauseGuardian(accountId: string, requeueHeld: boolean) {
     await apiPost(`/api/equity-guardian/${accountId}/unpause`);
+    if (requeueHeld) {
+      for (const item of heldItems.filter(
+        (held) => held.accountId === accountId && held.heldReason === "GUARDIAN",
+      )) {
+        await apiPost(`/api/queue-items/${item.id}/requeue`, { mode: "market" });
+      }
+    }
     announce("Equity Guardian unpaused");
-    await refreshDashboard();
+    toast.success(requeueHeld ? "Guardian unpaused and held trades requeued" : "Guardian unpaused");
+    await Promise.all([refreshHeldItems(), refreshDashboard()]);
+  }
+
+  async function resolveTrade(tradeId: string, action: TradeResolutionAction) {
+    try {
+      await apiPost(`/api/trades/${tradeId}/resolve`, { action });
+      toast.success("Out-of-sync trade resolved");
+      await refreshDashboard();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to resolve trade");
+    }
   }
 
   async function saveSymbolAlias(payload: {
@@ -1683,11 +1820,12 @@ export function App({
         pendingSlots={sidebarPendingSlots}
         selectedAccountId={selectedAccountId}
         selectedSlotId={selectedSlotId}
+        heldCount={heldItems.length}
       />
 
       <ErrorBoundary fallbackLabel="This view hit an unexpected error">
         <section className="workspace" id="main-content" tabIndex={-1}>
-          <AlertsBanner alerts={snapshot.alerts ?? []} />
+          <AlertsBanner alerts={snapshot.alerts ?? []} onViewHeld={() => navigate("/logs#held")} />
           {showDashboard && focusedSlot ? (
             <PendingSlotView slot={focusedSlot} />
           ) : showDashboard ? (
@@ -1778,9 +1916,10 @@ export function App({
 
           {showEquityGuardian ? (
             <EquityGuardianPage
+              guardianHeldCounts={guardianHeldCounts}
               guardians={snapshot.equityGuardians ?? []}
               onSave={(accountId, formElement) => void saveGuardian(accountId, formElement)}
-              onUnpause={(accountId) => void unpauseGuardian(accountId)}
+              onUnpause={(accountId, requeueHeld) => void unpauseGuardian(accountId, requeueHeld)}
             />
           ) : null}
 
@@ -1878,6 +2017,9 @@ export function App({
                 aiReviewStatus={aiReviewStatus}
                 parserActionStatus={parserActionStatus}
                 fixtureStatus={fixtureStatus}
+                heldItems={heldItems}
+                onHeldDismiss={dismissHeldItem}
+                onHeldRequeue={requeueHeldItem}
               />
             ) : null}
 
@@ -1892,6 +2034,8 @@ export function App({
                 focusedAccountId={selectedAccountId}
                 onTabChange={setHistoryTab}
                 onExportJournal={() => void exportTradeJournal()}
+                onResolveTrade={resolveTrade}
+                trades={snapshot.logicalTrades}
               />
             ) : null}
 
@@ -1901,6 +2045,7 @@ export function App({
                 slots={snapshot.accountSlots ?? []}
                 onCreateSlot={(event) => void createAccountSlot(event)}
                 onDeleteAccount={(account) => void deleteAccount(account)}
+                onDeleteSlot={(slot) => void deleteAccountSlot(slot)}
                 onEditProviderLinks={() => {
                   setActiveView("dashboard");
                   setActiveTab("providers");
@@ -1933,6 +2078,8 @@ export function App({
                 }
                 onSubmit={saveExecutionSettings}
                 onSaveForm={(formElement) => void saveExecutionSettingsForm(formElement)}
+                onAlertTest={sendAlertTest}
+                onBackup={backupDatabase}
                 settings={snapshot.appSettings}
               />
             ) : null}

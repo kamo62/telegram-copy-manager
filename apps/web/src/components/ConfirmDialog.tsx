@@ -6,6 +6,7 @@ export interface ConfirmOptions {
   description?: ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
+  secondaryLabel?: string;
   /** Style the confirm button as destructive (default true — gates dangerous actions). */
   destructive?: boolean;
   /**
@@ -20,13 +21,16 @@ export function ConfirmDialog({
   description,
   confirmLabel = "Confirm",
   cancelLabel = "Cancel",
+  secondaryLabel,
   destructive = true,
   typeToConfirm,
   onConfirm,
   onCancel,
+  onSecondary,
 }: ConfirmOptions & {
   onConfirm: () => void;
   onCancel: () => void;
+  onSecondary?: () => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [typed, setTyped] = useState("");
@@ -81,6 +85,11 @@ export function ConfirmDialog({
           <button className="btn btn-ghost" onClick={onCancel} type="button">
             {cancelLabel}
           </button>
+          {secondaryLabel && onSecondary ? (
+            <button className="btn btn-ghost" onClick={onSecondary} type="button">
+              {secondaryLabel}
+            </button>
+          ) : null}
           <button
             className={destructive ? "btn btn-destructive-subtle" : "btn btn-primary"}
             disabled={confirmDisabled}

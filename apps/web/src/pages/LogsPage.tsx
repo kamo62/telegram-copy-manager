@@ -2,11 +2,13 @@ import { Inbox, ListChecks, RefreshCw, Send, Terminal } from "lucide-react";
 import type { DashboardSnapshot } from "../App";
 import { ActivityFeed } from "../components/ActivityFeed";
 import { EmptyState } from "../components/EmptyState";
+import { HeldSignalsTable } from "../components/HeldSignalsTable";
 import { LogRow } from "../components/LogRow";
 import type { ManualSignalSeed } from "../components/ManualSignalModal";
 import { Panel } from "../components/Panel";
 import { ParserResult } from "../components/ParserResult";
 import { QueueItem } from "../components/QueueItem";
+import type { HeldQueueItem, HeldRequeueMode } from "../lib/api";
 
 export function LogsPage({
   parserTab,
@@ -26,6 +28,9 @@ export function LogsPage({
   aiReviewStatus,
   parserActionStatus,
   fixtureStatus,
+  heldItems,
+  onHeldRequeue,
+  onHeldDismiss,
 }: {
   parserTab: string;
   onParserTabChange: (tab: string) => void;
@@ -47,6 +52,9 @@ export function LogsPage({
   aiReviewStatus: Record<string, string>;
   parserActionStatus: Record<string, string>;
   fixtureStatus: Record<string, string>;
+  heldItems: HeldQueueItem[];
+  onHeldRequeue: (item: HeldQueueItem, mode: HeldRequeueMode) => Promise<void> | void;
+  onHeldDismiss: (item: HeldQueueItem) => Promise<void> | void;
 }) {
   return (
     <>
@@ -95,14 +103,7 @@ export function LogsPage({
                     onAiReview={() => onAiReview(result)}
                     onApprove={() => onApprove(result)}
                     onIgnore={() => onIgnore(result)}
-                    onForcePush={() =>
-                      onForcePush({
-                        rawMessageId: result.rawMessageId,
-                        rawText: result.rawText,
-                        brokerSymbol: result.brokerSymbol,
-                        canonicalSymbol: result.canonicalSymbol,
-                      })
-                    }
+                    onForcePush={onForcePush}
                     aiReview={aiReviewStatus[result.id]}
                     redactedText={redactedFixtureText[rawMessageId] ?? ""}
                     result={result}
@@ -137,6 +138,24 @@ export function LogsPage({
         )}
       </Panel>
 
+      <section className="wide-panel" id="held">
+        <Panel testId="held-signals-panel" title="Held signals">
+          <HeldSignalsTable
+            accountLabel={(accountId) =>
+              snapshot.mt5Accounts.find((account) => account.id === accountId)?.accountNumber ??
+              (accountId || "Unassigned")
+            }
+            items={heldItems}
+            onDismiss={onHeldDismiss}
+            onRequeue={onHeldRequeue}
+            providerLabel={(providerId) =>
+              snapshot.providers.find((provider) => provider.id === providerId)?.title ??
+              (providerId || "Unassigned")
+            }
+          />
+        </Panel>
+      </section>
+
       <Panel className="wide-panel" title="Signal Queue">
         <div className="panel-toolbar">
           <button
@@ -156,7 +175,9 @@ export function LogsPage({
               title="Queue is empty"
             />
           ) : (
-            snapshot.signalQueue.map((item) => <QueueItem key={item.id} item={item} />)
+            snapshot.signalQueue.map((item) => (
+              <QueueItem key={item.id} item={item} heldHref="/logs#held" />
+            ))
           )}
         </div>
       </Panel>
