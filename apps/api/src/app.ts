@@ -1002,6 +1002,25 @@ export interface AppStoreEvent {
   [key: string]: unknown;
 }
 
+// Telegram RPC errors that mean the session's auth key is permanently dead and
+// the operator must log in again. Kept deliberately separate from transient
+// network/timeout errors: those must NOT disconnect a live session, or a brief
+// connectivity blip would log the operator out.
+const TELEGRAM_DEAD_SESSION_ERROR_CODES = [
+  "AUTH_KEY_UNREGISTERED",
+  "AUTH_KEY_INVALID",
+  "AUTH_KEY_DUPLICATED",
+  "SESSION_REVOKED",
+  "SESSION_EXPIRED",
+  "USER_DEACTIVATED",
+  "USER_DEACTIVATED_BAN",
+];
+
+export function isTelegramDeadSessionError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toUpperCase();
+  return TELEGRAM_DEAD_SESSION_ERROR_CODES.some((code) => message.includes(code));
+}
+
 class AppStore {
   private readonly db: Database;
   private readonly allowDemoData: boolean;
@@ -1853,10 +1872,46 @@ class AppStore {
           providerId: provider.id,
           error: error instanceof Error ? error.message : "Unknown ingestion error",
         });
+        // A revoked/expired GramJS auth key keeps the DB row CONNECTED forever
+        // (gramjs just retries the dead key), so /api/telegram/status reports
+        // connected:true and the web UI stays pinned to the "connected" screen
+        // with no login form. Reconcile the row to DISCONNECTED so the operator
+        // can re-authenticate. Subsequent providers on the same dead session
+        // then resolve no connected session and are skipped, not re-polled.
+        if (isTelegramDeadSessionError(error)) {
+          await this.reconcileDeadTelegramSession(telegram, sessionId, error);
+        }
       }
     }
     this.recordTelegramHealth(telegram, activeSessions);
     return result;
+  }
+
+  // A GramJS session's auth key can be revoked server-side (logged out from
+  // another device, session expired, account deactivated). GramJS surfaces it
+  // as AUTH_KEY_UNREGISTERED on the next RPC and then retries the dead key
+  // forever, but nothing flips the DB row off CONNECTED — so telegramStatus()
+  // keeps reporting connected:true and the login form stays hidden. Drop the
+  // dead client and mark the row DISCONNECTED so re-login becomes possible.
+  private async reconcileDeadTelegramSession(
+    telegram: TelegramAdapter,
+    sessionId: string,
+    error: unknown,
+  ) {
+    const current = this.db
+      .query("SELECT status FROM telegram_sessions WHERE id = ?")
+      .get(sessionId) as Row | null;
+    if (!current || String(current.status) === "DISCONNECTED") return;
+    // disconnect() also removes the dead session file, so the unbounded
+    // reconnect storm stops and the file can't be re-imported on next boot.
+    await telegram.disconnect(sessionId).catch(() => undefined);
+    this.updateTelegramSession(sessionId, "DISCONNECTED");
+    this.audit(
+      "telegram.session.dead",
+      "error",
+      "Telegram session auth key is dead — operator must re-login",
+      { sessionId, error: error instanceof Error ? error.message : String(error) },
+    );
   }
 
   private recordTelegramHealth(telegram: TelegramAdapter, sessionIds: Set<string>) {
