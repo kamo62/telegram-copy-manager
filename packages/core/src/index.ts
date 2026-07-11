@@ -22,7 +22,9 @@ export type QueueStatus =
   | "FAILED"
   | "IGNORED"
   | "DUPLICATE"
-  | "EXPIRED";
+  | "EXPIRED"
+  | "HELD"
+  | "DISMISSED";
 
 export interface AccountSymbolMapping {
   accountId: string;

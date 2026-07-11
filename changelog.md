@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased - 2026-07-11 (Minor)
+
+Release impact: Minor — adds held queue recovery and account-slot lifecycle controls. The canonical
+application version remains unchanged as requested.
+
+- Added HELD/DISMISSED queue states, audited held-item requeue/dismiss actions, guardian and late
+  signal recovery, stale OPEN_TRADE delivery safety, and the release-held setting.
+- Added account-slot expiry and deletion guards.
+
 ## 1.18.1 - 2026-06-27 (Patch)
 
 Release impact: Patch — fixes a virtual-TP retry loop in execution reconciliation. No API contract,

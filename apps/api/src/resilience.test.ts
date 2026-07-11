@@ -224,7 +224,7 @@ describe("manual force-push", () => {
     const dash = await json<{ signalQueue: Array<{ status: string }> }>(
       await app.request("/api/dashboard"),
     );
-    expect(dash.signalQueue.some((q) => q.status === "FAILED")).toBe(true);
+    expect(dash.signalQueue.some((q) => q.status === "HELD")).toBe(true);
     expect(dash.signalQueue.some((q) => q.status === "PENDING")).toBe(false);
   });
 

@@ -100,6 +100,7 @@ interface AppSettings {
   drawdownDangerPct: number;
   reportingCurrency: ReportingCurrency;
   usdZarRate: number;
+  releaseHeldOnGuardianUnpause: boolean;
 }
 
 interface AccountSlotInput {
@@ -147,6 +148,7 @@ const defaultAppSettings: AppSettings = {
   drawdownDangerPct: 20,
   reportingCurrency: "USD",
   usdZarRate: 16,
+  releaseHeldOnGuardianUnpause: false,
 };
 const pendingOpenMissingGraceSeconds = 10;
 
@@ -454,6 +456,19 @@ export function createApi(options: ApiOptions = {}) {
     return c.json({ signals: store.parsedSignals(), queue });
   });
 
+  app.get("/api/queue-items/held", (c) => c.json({ items: store.heldQueueItems() }));
+  app.post("/api/queue-items/:id/requeue", async (c) => {
+    const body = await c.req.json<{ mode?: string }>();
+    const result = store.requeueQueueItem(c.req.param("id"), body.mode);
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
+  app.post("/api/queue-items/:id/dismiss", (c) => {
+    const result = store.dismissQueueItem(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
+
   app.post("/api/signals/:id/approve", async (c) => {
     const body = await optionalJson<{ executionMode?: ExecutionMode }>(c.req.raw);
     const approved = store.approveSignal(c.req.param("id"), {
@@ -521,6 +536,11 @@ export function createApi(options: ApiOptions = {}) {
   app.post("/api/account-slots", async (c) => {
     const body = await c.req.json<AccountSlotInput>();
     return c.json({ slot: store.createAccountSlot(body.name) });
+  });
+  app.delete("/api/account-slots/:id", (c) => {
+    const result = store.deleteAccountSlot(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
   });
   app.post("/api/account-slots/:id/rotate", (c) =>
     c.json({ slot: store.rotateAccountSlot(c.req.param("id")) }),
@@ -2321,29 +2341,47 @@ class AppStore {
       providerId,
       signal.accountId ?? this.defaultParserAccountId(providerId),
     );
-    if (targetAccountIds.length === 0) {
-      return { statusCode: 422, error: "Provider is not copied by any MT5 account" };
-    }
-    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
     const executionMode = options.executionMode ?? "VIRTUAL_TP";
     const settings = this.appSettings();
-    const provider = this.providerDetails(providerId);
-    if (signal.commandType === "OPEN_TRADE" && openTradeSourceExpired(source, settings)) {
-      this.insertNonLeasedQueueItem(parsedSignalId, signal, "EXPIRED", {
-        accountId,
+    if (targetAccountIds.length === 0) {
+      const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "HELD", {
+        accountId: signal.accountId ?? this.defaultParserAccountId(providerId),
         executionMode,
         settings,
+        heldReason: "NO_ACCOUNT",
       });
       this.db
         .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
-        .run("EXPIRED", parsedSignalId);
+        .run("HELD", parsedSignalId);
+      this.audit("signal.no-account", "warn", "Signal held because no MT5 account is linked", {
+        parsedSignalId,
+        providerId,
+        queueItemId,
+        heldReason: "NO_ACCOUNT",
+      });
+      return { body: { queueItemId, status: "HELD" } };
+    }
+    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
+    const provider = this.providerDetails(providerId);
+    if (signal.commandType === "OPEN_TRADE" && openTradeSourceExpired(source, settings)) {
+      const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "HELD", {
+        accountId,
+        executionMode,
+        settings,
+        heldReason: "EXPIRED_LATE",
+      });
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("HELD", parsedSignalId);
       this.audit("signal.expired", "warn", "Open trade signal expired before queueing", {
         parsedSignalId,
         providerId,
+        queueItemId,
+        heldReason: "EXPIRED_LATE",
         messageDate: source?.messageDate,
         maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
       });
-      return { statusCode: 409, error: "Open trade signal is too old to queue" };
+      return { body: { queueItemId, status: "HELD" } };
     }
     // Dedup window: only collapse against APPROVED signals within the configured window
     // so a provider re-issuing the same short-form signal (e.g. "Sell BTCUSD") after the
@@ -2842,10 +2880,175 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items ORDER BY created_at DESC",
+          "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items ORDER BY created_at DESC",
         )
         .all() as Row[]
     ).map(queueRow);
+  }
+
+  heldQueueItems() {
+    const accounts = new Map(this.mt5Accounts().map((account) => [account.id, account]));
+    const rows = this.db
+      .query(
+        `SELECT queue_items.id, queue_items.account_id, queue_items.logical_trade_id,
+                queue_items.status, queue_items.payload_json, queue_items.held_reason,
+                queue_items.origin_queue_item_id, queue_items.created_at,
+                parsed_signals.provider_id, parsed_signals.result_json,
+                providers.title AS provider_title
+         FROM queue_items
+         LEFT JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
+         LEFT JOIN providers ON providers.id = parsed_signals.provider_id
+         WHERE queue_items.status = 'HELD'
+         ORDER BY queue_items.created_at DESC`,
+      )
+      .all() as Row[];
+    return rows.map((row) => {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      const accountId = String(row.account_id ?? "");
+      const currentPrice = this.freshestEaReportedPrice(accountId, payload);
+      const symbol = payload.brokerSymbol ?? payload.canonicalSymbol ?? "";
+      const signal = row.result_json ? parseJson<ParsedSignal>(String(row.result_json)) : undefined;
+      return {
+        id: String(row.id),
+        heldReason: String(row.held_reason ?? ""),
+        signalSummary: {
+          commandType: payload.commandType,
+          symbol,
+          direction: payload.direction,
+          orderType: payload.orderType,
+          originalText: signal?.originalText ?? payload.originalText,
+        },
+        provider: row.provider_id
+          ? { id: String(row.provider_id), title: String(row.provider_title ?? row.provider_id) }
+          : undefined,
+        account: {
+          id: accountId,
+          accountNumber: accounts.get(accountId)?.accountNumber ?? "",
+          server: accounts.get(accountId)?.server ?? "",
+          currency: accounts.get(accountId)?.currency ?? "",
+        },
+        originalEntryPrice: payload.entry?.from,
+        freshestEaReportedPrice: currentPrice?.price,
+        freshestEaReportedAt: currentPrice?.updatedAt,
+        currentPrice: currentPrice?.price,
+        originQueueItemId: row.origin_queue_item_id ? String(row.origin_queue_item_id) : undefined,
+        createdAt: String(row.created_at),
+      };
+    });
+  }
+
+  requeueQueueItem(id: string, mode?: string) {
+    if (mode !== "market" && mode !== "original") {
+      return {
+        statusCode: 422 as const,
+        error: 'Requeue mode must be "market" or "original"',
+      };
+    }
+    const row = this.db
+      .query(
+        `SELECT queue_items.id, queue_items.account_id, queue_items.logical_trade_id,
+                queue_items.status, queue_items.payload_json, queue_items.parsed_signal_id,
+                parsed_signals.provider_id
+         FROM queue_items
+         LEFT JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
+         WHERE queue_items.id = ?`,
+      )
+      .get(id) as Row | null;
+    if (!row) return { statusCode: 404 as const, error: "Held queue item not found" };
+    if (String(row.status) !== "HELD") {
+      return { statusCode: 409 as const, error: "Only HELD queue items can be requeued" };
+    }
+
+    const originalAccountId = String(row.account_id ?? "");
+    const providerId = String(row.provider_id ?? "");
+    const targetAccountId =
+      (providerId
+        ? this.targetAccountIdsForProvider(providerId, originalAccountId)[0]
+        : undefined) ?? originalAccountId;
+    if (this.isEquityGuardianPaused(targetAccountId)) {
+      return {
+        statusCode: 409 as const,
+        error: "Cannot requeue while the target account's Equity Guardian is paused",
+      };
+    }
+
+    const originalPayload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+    const payload =
+      mode === "market"
+        ? { ...originalPayload, orderType: "MARKET" as const, entry: undefined }
+        : originalPayload;
+    const queueItemId = `queue_${nanoid(10)}`;
+    const item: ExecutionQueueItem = {
+      id: queueItemId,
+      accountId: targetAccountId || undefined,
+      logicalTradeId: String(row.logical_trade_id ?? "") || undefined,
+      status: "PENDING",
+      payload,
+    };
+    this.insertQueueItem(item, String(row.parsed_signal_id ?? ""), { originQueueItemId: id });
+    this.db
+      .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
+      .run("DISMISSED", nowIso(), id);
+    this.audit(
+      "queue.requeue",
+      "info",
+      "Held queue item requeued by operator",
+      {
+        heldQueueItemId: id,
+        queueItemId,
+        mode,
+        accountId: targetAccountId,
+      },
+      "operator",
+    );
+    return {
+      queueItemId,
+      originQueueItemId: id,
+      accountId: targetAccountId,
+      mode,
+      status: "PENDING" as const,
+    };
+  }
+
+  dismissQueueItem(id: string) {
+    const row = this.db.query("SELECT status FROM queue_items WHERE id = ?").get(id) as Row | null;
+    if (!row) return { statusCode: 404 as const, error: "Held queue item not found" };
+    if (String(row.status) !== "HELD") {
+      return { statusCode: 409 as const, error: "Only HELD queue items can be dismissed" };
+    }
+    this.db
+      .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
+      .run("DISMISSED", nowIso(), id);
+    this.audit(
+      "queue.dismiss",
+      "info",
+      "Held queue item dismissed by operator",
+      {
+        queueItemId: id,
+      },
+      "operator",
+    );
+    return { queueItemId: id, status: "DISMISSED" as const };
+  }
+
+  private freshestEaReportedPrice(accountId: string, payload: ExecutionQueueItem["payload"]) {
+    if (!accountId) return undefined;
+    const snapshot = this.mt5SnapshotsByAccount()[accountId];
+    const targetSymbol = normalizeLockedSymbol(payload.brokerSymbol ?? payload.canonicalSymbol);
+    if (!snapshot || !targetSymbol) return undefined;
+    const record = snapshot.symbols.find((item) => {
+      if (!item || typeof item !== "object") return false;
+      const symbol = normalizeLockedSymbol(
+        String((item as Record<string, unknown>).symbol ?? (item as Record<string, unknown>).name),
+      );
+      return symbol === targetSymbol;
+    });
+    if (!record || typeof record !== "object") return undefined;
+    const quote = record as Record<string, unknown>;
+    const bid = Number(quote.bid ?? 0);
+    const ask = Number(quote.ask ?? 0);
+    const price = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid > 0 ? bid : ask > 0 ? ask : undefined;
+    return price === undefined ? undefined : { price, updatedAt: snapshot.updatedAt };
   }
 
   registerMt5Account(input: {
@@ -2859,10 +3062,13 @@ class AppStore {
     marginMode: "HEDGING" | "NETTING";
     availableSymbols?: string[];
     linkCode?: string;
-  }): { accountId: string; status: "REGISTERED" } | { statusCode: 404; error: string } {
+  }): { accountId: string; status: "REGISTERED" } | { statusCode: 404 | 409; error: string } {
     const slot = input.linkCode ? this.accountSlotByCode(input.linkCode) : undefined;
     if (input.linkCode && !slot) {
       return { statusCode: 404, error: "Account slot link code was not found" };
+    }
+    if (slot?.status === "expired") {
+      return { statusCode: 409, error: "Account slot link code has expired" };
     }
     const accountId = `mt5-${input.accountNumber}`;
     const now = nowIso();
@@ -2927,6 +3133,9 @@ class AppStore {
       if (!slot || (slot.accountId && slot.accountId !== input.accountId)) {
         return { error: "Account slot link code was not found", statusCode: 404 as const };
       }
+      if (slot.status === "expired") {
+        return { error: "Account slot link code has expired", statusCode: 409 as const };
+      }
     } else {
       const slot = this.accountSlots().find((item) => item.accountId === input.accountId);
       if (slot && slot.status !== "legacy") {
@@ -2980,12 +3189,12 @@ class AppStore {
     const rows = accountId
       ? (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE status = 'PENDING' AND account_id = ? ORDER BY created_at LIMIT 25",
+            "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items WHERE status = 'PENDING' AND account_id = ? ORDER BY created_at LIMIT 25",
           )
           .all(accountId) as Row[])
       : (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE status = 'PENDING' ORDER BY created_at LIMIT 25",
+            "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items WHERE status = 'PENDING' ORDER BY created_at LIMIT 25",
           )
           .all() as Row[]);
     const row = rows.find((candidate) => {
@@ -2994,8 +3203,10 @@ class AppStore {
       if (!this.isEquityGuardianPaused(item.accountId)) return true;
       const now = new Date().toISOString();
       this.db
-        .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?")
-        .run("FAILED", now, item.id);
+        .query(
+          "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run("HELD", "GUARDIAN", now, item.id);
       this.audit("equity-guardian.reject", "warn", "OPEN_TRADE rejected by Equity Guardian", item);
       return false;
     }) as Row | undefined;
@@ -3014,15 +3225,24 @@ class AppStore {
     const cutoff = new Date(Date.now() - settings.leaseTimeoutSeconds * 1000).toISOString();
     const stale = this.db
       .query(
-        "SELECT id, lease_count FROM queue_items WHERE status = 'LEASED' AND leased_at IS NOT NULL AND leased_at < ?",
+        "SELECT id, lease_count, payload_json FROM queue_items WHERE status = 'LEASED' AND leased_at IS NOT NULL AND leased_at < ?",
       )
       .all(cutoff) as Row[];
     for (const row of stale) {
       const leaseCount = Number(row.lease_count ?? 0);
-      const nextStatus = leaseCount >= settings.maxLeaseAttempts ? "EXPIRED" : "PENDING";
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      const openTrade = payload.commandType === "OPEN_TRADE";
+      const nextStatus = openTrade
+        ? "HELD"
+        : leaseCount >= settings.maxLeaseAttempts
+          ? "EXPIRED"
+          : "PENDING";
+      const heldReason = openTrade ? "DELIVERY_UNKNOWN" : null;
       this.db
-        .query("UPDATE queue_items SET status = ?, leased_at = NULL, updated_at = ? WHERE id = ?")
-        .run(nextStatus, new Date().toISOString(), String(row.id));
+        .query(
+          "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run(nextStatus, heldReason, new Date().toISOString(), String(row.id));
       this.audit(
         "queue.lease-recovery",
         nextStatus === "EXPIRED" ? "warn" : "info",
@@ -3062,27 +3282,21 @@ class AppStore {
       const sourceDate = trade?.source?.messageDate || String(row.created_at);
       if (!openTradeTimestampExpired(sourceDate, settings)) continue;
       this.db
-        .query("UPDATE queue_items SET status = ?, leased_at = NULL, updated_at = ? WHERE id = ?")
-        .run("EXPIRED", now, String(row.id));
+        .query(
+          "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run("HELD", "EXPIRED_LATE", now, String(row.id));
       if (row.parsed_signal_id) {
         this.db
           .query(
-            "UPDATE parsed_signals SET status = ? WHERE id = ? AND status NOT IN ('IGNORED','EXPIRED')",
+            "UPDATE parsed_signals SET status = ? WHERE id = ? AND status NOT IN ('IGNORED','HELD')",
           )
-          .run("EXPIRED", String(row.parsed_signal_id));
-      }
-      if (trade && trade.status !== "CLOSED" && trade.status !== "CANCELLED") {
-        const updated = cancelLogicalTrade(trade, {
-          evidence: "Open trade queue expired before MT5 execution",
-          lastSnapshotAt: now,
-        });
-        this.db
-          .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
-          .run(updated.status, JSON.stringify(updated), trade.id);
+          .run("HELD", String(row.parsed_signal_id));
       }
       this.audit("queue.expired-open", "warn", "Expired stale open-trade queue item", {
         queueItemId: String(row.id),
         logicalTradeId: String(row.logical_trade_id ?? ""),
+        heldReason: "EXPIRED_LATE",
         sourceDate,
         maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
       });
@@ -4201,6 +4415,22 @@ class AppStore {
   }
 
   accountSlots() {
+    const expiryCutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const waiting = this.db
+      .query("SELECT id, created_at FROM account_slots WHERE status = 'waiting'")
+      .all() as Row[];
+    for (const row of waiting) {
+      const createdAt = Date.parse(String(row.created_at));
+      if (!Number.isFinite(createdAt) || createdAt >= expiryCutoff) continue;
+      this.db
+        .query(
+          "UPDATE account_slots SET status = ?, updated_at = ? WHERE id = ? AND status = 'waiting'",
+        )
+        .run("expired", nowIso(), String(row.id));
+      this.audit("account-slot.expired", "warn", "Waiting MT5 account slot expired", {
+        slotId: String(row.id),
+      });
+    }
     return (
       this.db
         .query(
@@ -4297,6 +4527,29 @@ class AppStore {
         now,
       );
     return this.accountSlots().find((item) => item.id === slot.id);
+  }
+
+  deleteAccountSlot(id: string) {
+    const slot = this.accountSlots().find((item) => item.id === id);
+    if (!slot) return { statusCode: 404 as const, error: "Account slot not found" };
+    if (slot.status !== "waiting" && slot.status !== "expired") {
+      return {
+        statusCode: 409 as const,
+        error: "Only waiting or expired account slots can be deleted",
+      };
+    }
+    this.db.query("DELETE FROM account_slots WHERE id = ?").run(id);
+    this.audit(
+      "account-slot.delete",
+      "warn",
+      "MT5 account slot deleted",
+      {
+        slotId: id,
+        status: slot.status,
+      },
+      "operator",
+    );
+    return { slotId: id, status: "DELETED" as const };
   }
 
   rotateAccountSlot(id: string) {
@@ -6514,6 +6767,8 @@ class AppStore {
       );
     `);
     this.ensureColumn("queue_items", "lease_count", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("queue_items", "held_reason", "TEXT");
+    this.ensureColumn("queue_items", "origin_queue_item_id", "TEXT");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS mt5_accounts (
         id TEXT PRIMARY KEY,
@@ -7471,11 +7726,12 @@ class AppStore {
   private insertNonLeasedQueueItem(
     parsedSignalId: string,
     signal: ParsedSignal,
-    status: Extract<QueueStatus, "DUPLICATE" | "IGNORED" | "EXPIRED">,
+    status: Extract<QueueStatus, "DUPLICATE" | "IGNORED" | "EXPIRED" | "HELD">,
     options: {
       accountId: string;
       executionMode: ExecutionMode;
       settings: AppSettings;
+      heldReason?: string;
     },
   ) {
     const item = buildExecutionCommand(signal, {
@@ -7486,14 +7742,18 @@ class AppStore {
       riskPercent: options.settings.defaultRiskPercent,
     });
     item.status = status;
-    this.insertQueueItem(item, parsedSignalId);
+    return this.insertQueueItem(item, parsedSignalId, { heldReason: options.heldReason });
   }
 
-  private insertQueueItem(item: ExecutionQueueItem, parsedSignalId: string) {
+  private insertQueueItem(
+    item: ExecutionQueueItem,
+    parsedSignalId: string,
+    metadata: { heldReason?: string; originQueueItemId?: string } = {},
+  ) {
     const now = new Date().toISOString();
     this.db
       .query(
-        "INSERT INTO queue_items (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, lease_count, leased_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO queue_items (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, lease_count, held_reason, origin_queue_item_id, leased_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         item.id,
@@ -7503,10 +7763,13 @@ class AppStore {
         item.status,
         JSON.stringify(item.payload),
         0,
+        metadata.heldReason ?? null,
+        metadata.originQueueItemId ?? null,
         item.leasedAt ?? null,
         now,
         now,
       );
+    return item.id;
   }
 
   private mt5SnapshotsByAccount() {
@@ -9797,6 +10060,8 @@ function queueRow(row: Row) {
     status: String(row.status),
     payload: parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json)),
     leaseCount: Number(row.lease_count ?? 0),
+    heldReason: row.held_reason ? String(row.held_reason) : undefined,
+    originQueueItemId: row.origin_queue_item_id ? String(row.origin_queue_item_id) : undefined,
     leasedAt: row.leased_at ? String(row.leased_at) : undefined,
     createdAt: String(row.created_at),
   };
@@ -10073,6 +10338,7 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     drawdownDangerPct,
     reportingCurrency,
     usdZarRate: positiveNumber(input.usdZarRate, defaultAppSettings.usdZarRate),
+    releaseHeldOnGuardianUnpause: input.releaseHeldOnGuardianUnpause === true,
   };
 }
 

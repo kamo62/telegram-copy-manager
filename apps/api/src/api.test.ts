@@ -1000,7 +1000,279 @@ describe("Telegram TC API", () => {
     const dashboard = await json<{ signalQueue: Array<{ status: string }> }>(
       await app.request("/api/dashboard"),
     );
-    expect(dashboard.signalQueue.some((item) => item.status === "FAILED")).toBe(true);
+    expect(dashboard.signalQueue.some((item) => item.status === "HELD")).toBe(true);
+  });
+
+  test("holds guardian rejections as GUARDIAN and refuses requeue while paused", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [],
+        orders: [],
+        symbols: [{ symbol: "XAUUSD", bid: 4540, ask: 4540.2 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/equity-guardian/mt5-63442826", {
+      method: "PATCH",
+      body: JSON.stringify({ paused: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/poll-line?accountId=mt5-63442826");
+
+    const held = await json<{
+      items: Array<{
+        id: string;
+        heldReason: string;
+        originalEntryPrice?: number;
+        freshestEaReportedPrice?: number;
+        provider?: { id: string };
+        account: { id: string };
+      }>;
+    }>(await app.request("/api/queue-items/held"));
+    expect(held.items).toContainEqual(
+      expect.objectContaining({
+        id: approved.queueItemId,
+        heldReason: "GUARDIAN",
+        originalEntryPrice: 4541,
+        freshestEaReportedPrice: 4540.1,
+        provider: expect.objectContaining({ id: expect.any(String) }),
+        account: expect.objectContaining({ id: "mt5-63442826" }),
+      }),
+    );
+
+    const refused = await app.request(`/api/queue-items/${approved.queueItemId}/requeue`, {
+      method: "POST",
+      body: JSON.stringify({ mode: "market" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(refused.status).toBe(409);
+
+    await app.request("/api/equity-guardian/mt5-63442826/unpause", { method: "POST" });
+    const requeued = await json<{
+      queueItemId: string;
+      originQueueItemId: string;
+      status: string;
+      mode: string;
+    }>(
+      await app.request(`/api/queue-items/${approved.queueItemId}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "market" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(requeued).toMatchObject({
+      originQueueItemId: approved.queueItemId,
+      status: "PENDING",
+      mode: "market",
+    });
+
+    const queue = await json<{
+      queue: Array<{
+        id: string;
+        status: string;
+        originQueueItemId?: string;
+        payload: { orderType?: string; entry?: unknown };
+      }>;
+    }>(await app.request("/api/signals"));
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        id: approved.queueItemId,
+        status: "DISMISSED",
+      }),
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        id: requeued.queueItemId,
+        status: "PENDING",
+        originQueueItemId: approved.queueItemId,
+        payload: expect.objectContaining({ orderType: "MARKET" }),
+      }),
+    );
+  });
+
+  test("holds approval with no linked account as NO_ACCOUNT", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: false }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "Gold buy limit\n\n4541-40\n\nSL 4535\n\nTP 4546",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ queueItemId: string; status: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    expect(approval.status).toBe("HELD");
+
+    const held = await json<{ items: Array<{ id: string; heldReason: string }> }>(
+      await app.request("/api/queue-items/held"),
+    );
+    expect(held.items).toContainEqual(
+      expect.objectContaining({ id: approval.queueItemId, heldReason: "NO_ACCOUNT" }),
+    );
+  });
+
+  test("moves a stale leased OPEN_TRADE to HELD/DELIVERY_UNKNOWN without auto-requeue", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const approved = await approveGoldBuyLimit(app);
+      await app.request(`/api/mt5/poll?accountId=mt5-63442826`);
+
+      const db = new Database(databasePath);
+      db.query("UPDATE queue_items SET leased_at = ? WHERE id = ?").run(
+        new Date(0).toISOString(),
+        approved.queueItemId,
+      );
+      db.close();
+
+      const poll = await json<{ item: unknown }>(
+        await app.request("/api/mt5/poll?accountId=mt5-63442826"),
+      );
+      expect(poll.item).toBeNull();
+      const held = await json<{ items: Array<{ id: string; heldReason: string }> }>(
+        await app.request("/api/queue-items/held"),
+      );
+      expect(held.items).toContainEqual(
+        expect.objectContaining({
+          id: approved.queueItemId,
+          heldReason: "DELIVERY_UNKNOWN",
+        }),
+      );
+      const queue = await json<{
+        queue: Array<{ id: string; status: string }>;
+      }>(await app.request("/api/signals"));
+      expect(queue.queue).toContainEqual(
+        expect.objectContaining({ id: approved.queueItemId, status: "HELD" }),
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("deletes waiting and expired slots but guards linked slots", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({ databasePath, seedDemoData: false, telegramAdapter: "mock" });
+      const waiting = await json<{ slot: { id: string } }>(
+        await app.request("/api/account-slots", {
+          method: "POST",
+          body: JSON.stringify({ name: "Waiting" }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const waitingDelete = await app.request(`/api/account-slots/${waiting.slot.id}`, {
+        method: "DELETE",
+      });
+      expect(waitingDelete.status).toBe(200);
+
+      const linked = await json<{ slot: { id: string; linkCode: string } }>(
+        await app.request("/api/account-slots", {
+          method: "POST",
+          body: JSON.stringify({ name: "Linked" }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "777",
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes Ltd",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          linkCode: linked.slot.linkCode,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const linkedDelete = await app.request(`/api/account-slots/${linked.slot.id}`, {
+        method: "DELETE",
+      });
+      expect(linkedDelete.status).toBe(409);
+
+      const expired = await json<{ slot: { id: string; linkCode: string } }>(
+        await app.request("/api/account-slots", {
+          method: "POST",
+          body: JSON.stringify({ name: "Expired" }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const db = new Database(databasePath);
+      db.query("UPDATE account_slots SET created_at = ? WHERE id = ?").run(
+        new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+        expired.slot.id,
+      );
+      db.close();
+
+      const slots = await json<{ slots: Array<{ id: string; status: string }> }>(
+        await app.request("/api/account-slots"),
+      );
+      expect(slots.slots).toContainEqual(
+        expect.objectContaining({ id: expired.slot.id, status: "expired" }),
+      );
+      const expiredRegister = await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "778",
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes Ltd",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          linkCode: expired.slot.linkCode,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(expiredRegister.status).toBe(409);
+      const expiredDelete = await app.request(`/api/account-slots/${expired.slot.id}`, {
+        method: "DELETE",
+      });
+      expect(expiredDelete.status).toBe(200);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("defaults releaseHeldOnGuardianUnpause to false and allows setting it", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const initial = await json<{ settings: { releaseHeldOnGuardianUnpause: boolean } }>(
+      await app.request("/api/settings"),
+    );
+    expect(initial.settings.releaseHeldOnGuardianUnpause).toBe(false);
+    const updated = await json<{ settings: { releaseHeldOnGuardianUnpause: boolean } }>(
+      await app.request("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ releaseHeldOnGuardianUnpause: true }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(updated.settings.releaseHeldOnGuardianUnpause).toBe(true);
   });
 
   test("accepts MT5 JSON requests with trailing null bytes and rejects malformed MT5 JSON cleanly", async () => {
@@ -1267,8 +1539,8 @@ describe("Telegram TC API", () => {
     const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
       method: "POST",
     });
-    expect(approval.status).toBe(422);
-    expect((await json<{ error: string }>(approval)).error).toContain("not copied");
+    expect(approval.status).toBe(200);
+    expect((await json<{ status: string }>(approval)).status).toBe("HELD");
     expect(
       await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text(),
     ).toContain("status=NO_WORK");
@@ -2728,7 +3000,7 @@ describe("Telegram TC API", () => {
     }
   });
 
-  test("expires stale open-trade Telegram replays instead of queueing them", async () => {
+  test("holds stale open-trade Telegram replays as EXPIRED_LATE", async () => {
     const oldMessageDate = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
     const telegram = createQueuedTelegramAdapter([
       {
@@ -2756,12 +3028,16 @@ describe("Telegram TC API", () => {
       logicalTrades: Array<{ status: string }>;
     }>(await app.request("/api/dashboard"));
 
-    expect(result.queued).toBe(0);
+    expect(result.queued).toBe(1);
     expect(dashboard.signalQueue).toContainEqual(
-      expect.objectContaining({ commandType: "OPEN_TRADE", status: "EXPIRED" }),
+      expect.objectContaining({ commandType: "OPEN_TRADE", status: "HELD" }),
     );
     expect(dashboard.signalQueue.filter((item) => item.status === "PENDING")).toHaveLength(0);
     expect(dashboard.logicalTrades).toHaveLength(0);
+    const held = await json<{ items: Array<{ heldReason: string }> }>(
+      await app.request("/api/queue-items/held"),
+    );
+    expect(held.items).toContainEqual(expect.objectContaining({ heldReason: "EXPIRED_LATE" }));
   });
 
   test("expires parsed signal state when stale open-trade queue work expires", async () => {
@@ -2804,12 +3080,12 @@ describe("Telegram TC API", () => {
     }>(await app.request("/api/signals"));
 
     expect(signals.signals).toContainEqual(
-      expect.objectContaining({ id: parsedSignalId, status: "EXPIRED" }),
+      expect.objectContaining({ id: parsedSignalId, status: "HELD" }),
     );
     expect(signals.queue).toContainEqual(
       expect.objectContaining({
         payload: expect.objectContaining({ commandType: "OPEN_TRADE" }),
-        status: "EXPIRED",
+        status: "HELD",
       }),
     );
   });
@@ -3417,6 +3693,7 @@ describe("Telegram TC API", () => {
         drawdownDangerPct: number;
         reportingCurrency: string;
         usdZarRate: number;
+        releaseHeldOnGuardianUnpause: boolean;
       };
     }>(await app.request("/api/settings"));
     expect(defaults.settings).toEqual({
@@ -3435,6 +3712,7 @@ describe("Telegram TC API", () => {
       drawdownDangerPct: 20,
       reportingCurrency: "USD",
       usdZarRate: 16,
+      releaseHeldOnGuardianUnpause: false,
     });
 
     const updated = await json<{
