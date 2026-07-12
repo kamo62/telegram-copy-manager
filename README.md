@@ -17,9 +17,9 @@ enabled for the backend URL.
   configured, symbol-locked, and assigned to one or more MT5 accounts.
 - Parses open-trade and lifecycle messages, including market/limit/stop entries, SL/TP levels,
   partial closes, move-SL commands, TP-hit announcements, and trailing-stop commands.
-- Supports a KAL VIP extended parser mode for terse Gold/XAUUSD level posts, expanding short levels
-  like `41`, `56`, and `03` from a fresh EA-reported reference price when the provider is locked to
-  one symbol.
+- Supports an extended parser mode for terse single-symbol level posts (for example short
+  Gold/XAUUSD levels), expanding shorthand levels like `41`, `56`, and `03` from a fresh
+  EA-reported reference price when the provider is locked to one symbol.
 - Resolves symbols through global aliases, provider aliases, account-specific overrides, broker
   suffix/prefix rules, and EA-reported broker symbol inventories.
 - Builds logical trades and queue items for the EA while keeping parser intent separate from broker
@@ -161,7 +161,7 @@ Optional script knobs include `TELEGRAM_TC_API_URL`, `TELEGRAM_TARGET_DIALOG`,
 2. Start the API or Docker service.
 3. In the app, create a link slot from `Linked Accounts`.
 4. In MT5, open `Tools -> Options -> Expert Advisors`, enable WebRequest, and add the backend URL
-   that the EA will call, for example `http://192.168.0.100:18787`.
+   that the EA will call, for example `http://<your-server-host>:18787`.
 5. Attach `TelegramTC_EA` to a chart, enable live trading, set `BackendBaseUrl` to the API `/api`
    URL, and paste the app link code into `LinkCode`.
 6. Wait for the EA to register and heartbeat. The slot will turn into a connected account in the
