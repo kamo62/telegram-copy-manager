@@ -439,7 +439,7 @@ h3 {
 }
 
 :root[data-color-accents="on"] .sidebar-child-dot.pending {
-  color: var(--warn);
+  color: var(--warn-dim);
 }
 
 .sidebar-child-meta {
