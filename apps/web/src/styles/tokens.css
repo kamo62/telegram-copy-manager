@@ -30,7 +30,7 @@
   --accent-10: hsl(220 25% 12%);
   --accent-dim: hsl(220 25% 12%);
   --accent-soft: hsl(220 14% 92%);
-  --accent-ring: hsl(220 20% 40% / 0.25);
+  --accent-ring: hsl(220 25% 12% / 0.72);
 
   /* ── Telegram brand (sign-in chrome only) ─────────────────────────── */
   --tg-blue: hsl(220 25% 12%);
