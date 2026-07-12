@@ -17,6 +17,28 @@ interface ApiOptions extends Omit<RequestInit, "body"> {
   body?: BodyInit | object | null;
 }
 
+export interface HeldQueueItem {
+  id: string;
+  heldReason: string;
+  accountId: string;
+  providerId: string;
+  commandType: string;
+  symbol: string;
+  originalEntry: number | null;
+  currentPrice: number | null;
+  driftPct: number | null;
+  droppedLifecycleCount: number;
+  droppedLifecycle: string[];
+  createdAt: string;
+}
+
+export interface HeldQueueItemsResponse {
+  items: HeldQueueItem[];
+}
+
+export type HeldRequeueMode = "market" | "original";
+export type TradeResolutionAction = "close_from_history" | "readopt" | "archive";
+
 function randomId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();

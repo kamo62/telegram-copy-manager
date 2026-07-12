@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
+import { Area } from "@/components/dither-kit/area";
+import { AreaChart } from "@/components/dither-kit/area-chart";
+import { Grid } from "@/components/dither-kit/grid";
+import { Tooltip } from "@/components/dither-kit/tooltip";
+import { XAxis } from "@/components/dither-kit/x-axis";
+import { YAxis } from "@/components/dither-kit/y-axis";
+import { useColorAccents } from "../contexts/ColorAccentsContext";
+import { chartDitherColor } from "../lib/chartPalette";
 import { Money } from "./Money";
 import { SkeletonChart } from "./Skeleton";
 
@@ -21,103 +29,15 @@ export function GrowthChart({
   loading?: boolean;
   currency?: string;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const plotRef = useRef<{
-    destroy: () => void;
-    setSize: (s: { width: number; height: number }) => void;
-  } | null>(null);
   const [view, setView] = useState<"growth" | "drawdown">("growth");
+  const { colorAccents } = useColorAccents();
   const isTimeSeries = data.growth[0].some((value) => value > 1_000_000);
+  const [xs, ys] = view === "growth" ? data.growth : data.drawdown;
+  const rows = xs.map((x, index) => ({ x, value: ys[index] ?? 0 }));
+  const isGrowth = view === "growth";
   const sampleLabel = isTimeSeries
     ? `${data.numberOfTrades} sample${data.numberOfTrades === 1 ? "" : "s"}`
     : `${data.numberOfTrades} trade${data.numberOfTrades === 1 ? "" : "s"}`;
-
-  useEffect(() => {
-    if (loading) return;
-    let cancelled = false;
-    let observer: ResizeObserver | null = null;
-
-    async function initPlot() {
-      const container = containerRef.current;
-      if (!container) return;
-      if (!canvas2dSupported()) return;
-      // Dynamic import so uplot only touches the DOM at runtime, not at module-load.
-      const [{ default: uPlot }] = await Promise.all([
-        import("uplot"),
-        import("uplot/dist/uPlot.min.css"),
-      ]);
-      if (cancelled) return;
-
-      if (plotRef.current) {
-        plotRef.current.destroy();
-        plotRef.current = null;
-      }
-
-      const series = view === "growth" ? data.growth : data.drawdown;
-      const isGrowth = view === "growth";
-      const opts = {
-        width: container.clientWidth || 600,
-        height: 320,
-        padding: [12, 12, 4, 4] as [number, number, number, number],
-        cursor: { y: false, drag: { x: true, y: false }, points: { size: 6 } },
-        axes: [
-          {
-            stroke: "#9ca3af",
-            grid: { stroke: "rgba(225, 228, 237, 0.6)", width: 1 },
-            ticks: { stroke: "transparent" },
-            font: '11px "Inter", sans-serif',
-          },
-          {
-            stroke: "#9ca3af",
-            grid: { stroke: "rgba(225, 228, 237, 0.6)", width: 1 },
-            ticks: { stroke: "transparent" },
-            font: '11px "Inter", sans-serif',
-            values: (_self: unknown, ticks: number[]) =>
-              ticks.map((value) =>
-                isGrowth ? `$${value.toLocaleString()}` : `${value.toFixed(1)}%`,
-              ),
-          },
-        ],
-        scales: { x: { time: isTimeSeries } },
-        legend: { show: false },
-        series: [
-          { label: isTimeSeries ? "Time" : "Trades" },
-          isGrowth
-            ? {
-                label: "Account growth",
-                stroke: "#5046e5",
-                width: 2,
-                fill: "rgba(80, 70, 229, 0.12)",
-                points: { show: false },
-              }
-            : {
-                label: "Drawdown",
-                stroke: "#ef4444",
-                width: 2,
-                fill: "rgba(239, 68, 68, 0.12)",
-                points: { show: false },
-              },
-        ],
-      };
-      // biome-ignore lint/suspicious/noExplicitAny: uplot types don't expose construct signature cleanly here.
-      plotRef.current = new (uPlot as any)(opts, series, container);
-
-      observer = new ResizeObserver(([entry]) => {
-        if (!plotRef.current || !entry) return;
-        const next = Math.max(320, entry.contentRect.width);
-        plotRef.current.setSize({ width: next, height: 320 });
-      });
-      observer.observe(container);
-    }
-
-    void initPlot();
-    return () => {
-      cancelled = true;
-      observer?.disconnect();
-      plotRef.current?.destroy();
-      plotRef.current = null;
-    };
-  }, [data, isTimeSeries, view, loading]);
 
   return (
     <section className="chart-card" aria-label="Account growth chart">
@@ -162,15 +82,53 @@ export function GrowthChart({
           </button>
         </div>
       </header>
-      {loading ? <SkeletonChart /> : <div className="chart-canvas-wrap" ref={containerRef} />}
+      {loading ? (
+        <SkeletonChart />
+      ) : (
+        <div className="chart-canvas-wrap" data-color-accents={colorAccents ? "on" : "off"}>
+          <AreaChart
+            animate={false}
+            bloom="low"
+            className="h-80"
+            config={{
+              value: {
+                label: isGrowth ? "Account growth" : "Drawdown",
+                color: chartDitherColor(colorAccents, isGrowth ? "growth" : "drawdown"),
+              },
+            }}
+            data={rows}
+            margins={{ bottom: 30, left: 52 }}
+          >
+            <Grid />
+            <XAxis
+              dataKey="x"
+              tickFormatter={(value) =>
+                isTimeSeries
+                  ? new Date(Number(value) * 1_000).toLocaleDateString(undefined, {
+                      month: "short",
+                      day: "numeric",
+                    })
+                  : String(value)
+              }
+            />
+            <YAxis
+              tickFormatter={(value) =>
+                isGrowth ? `$${value.toLocaleString()}` : `${value.toFixed(1)}%`
+              }
+            />
+            <Area dataKey="value" variant="gradient" />
+            <Tooltip
+              labelKey="x"
+              valueFormatter={(value) =>
+                isGrowth ? `$${value.toLocaleString()}` : `${value.toFixed(1)}%`
+              }
+            />
+          </AreaChart>
+        </div>
+      )}
       <footer className="chart-card-foot">{isTimeSeries ? "Time" : "Number of trades"}</footer>
     </section>
   );
-}
-
-function canvas2dSupported() {
-  const canvas = document.createElement("canvas");
-  return Boolean(canvas.getContext("2d"));
 }
 
 export function buildPlaceholderGrowth(executedCount: number): GrowthSeries {

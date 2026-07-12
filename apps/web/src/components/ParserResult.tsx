@@ -1,6 +1,7 @@
-import { Check, Sparkles, X } from "lucide-react";
+import { Check, Send, Sparkles, X } from "lucide-react";
 import { useRef } from "react";
 import { Field } from "./Field";
+import type { ManualSignalSeed } from "./ManualSignalModal";
 import { Tag } from "./Tag";
 
 function defaultClassification(commandType: string): "entry" | "management" | "noise" | "unknown" {
@@ -20,6 +21,7 @@ export function ParserResult({
   onAiReview,
   onApprove,
   onIgnore,
+  onForcePush,
   aiReview,
   status,
 }: {
@@ -35,6 +37,15 @@ export function ParserResult({
     mappingStatus: string;
     confidence: number;
     reviewRequired: boolean;
+    accountId?: string;
+    providerId?: string;
+    direction?: "BUY" | "SELL";
+    orderType?: "MARKET" | "LIMIT" | "STOP";
+    entry?: { from?: number; to?: number };
+    stopLoss?: number;
+    takeProfits?: Array<{ price: number } | number>;
+    volume?: number;
+    executionMode?: "VIRTUAL_TP" | "SPLIT_ORDER";
   };
   fixtureClassification?: "entry" | "management" | "noise" | "unknown";
   onClassify: (classification: "entry" | "management" | "noise" | "unknown") => void;
@@ -44,6 +55,7 @@ export function ParserResult({
   onAiReview?: () => void;
   onApprove?: () => void;
   onIgnore?: () => void;
+  onForcePush?: (seed: ManualSignalSeed) => void;
   aiReview?: string;
   status?: string;
 }) {
@@ -98,6 +110,33 @@ export function ParserResult({
           >
             <X aria-hidden="true" size={13} />
             Ignore
+          </button>
+        ) : null}
+        {onForcePush ? (
+          <button
+            className="btn btn-ghost btn-small"
+            onClick={() =>
+              onForcePush({
+                accountId: result.accountId,
+                providerId: result.providerId,
+                rawMessageId: result.rawMessageId,
+                rawText: result.rawText,
+                brokerSymbol: result.brokerSymbol,
+                canonicalSymbol: result.canonicalSymbol,
+                direction: result.direction,
+                orderType: result.orderType,
+                entry: result.entry,
+                stopLoss: result.stopLoss,
+                takeProfits: result.takeProfits,
+                volume: result.volume,
+                executionMode: result.executionMode,
+              })
+            }
+            title="Correct the fields and force-push this trade to MT5"
+            type="button"
+          >
+            <Send aria-hidden="true" size={13} />
+            Correct &amp; push
           </button>
         ) : null}
         {aiReview ? <small className="ai-review-note">{aiReview}</small> : null}

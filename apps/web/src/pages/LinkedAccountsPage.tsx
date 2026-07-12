@@ -1,4 +1,4 @@
-import { ArrowRight, Hand, Plug, Plus, Server } from "lucide-react";
+import { ArrowRight, Hand, Plug, Plus, Server, Trash2 } from "lucide-react";
 import type { ExternalBrokerPosition } from "../App";
 import { AccountRow } from "../components/AccountRow";
 import { EmptyState } from "../components/EmptyState";
@@ -22,6 +22,8 @@ export function LinkedAccountsPage({
   providerLinks = [],
   onCreateSlot,
   onEditProviderLinks,
+  onDeleteAccount,
+  onDeleteSlot,
   variant = "page",
 }: {
   slots: Array<{
@@ -31,12 +33,15 @@ export function LinkedAccountsPage({
     status: string;
     accountNumber: string;
     server: string;
+    createdAt?: string;
   }>;
   accounts: LinkedAccount[];
   providers?: Array<{ id: string; title: string }>;
   providerLinks?: Array<{ accountId: string; providerId: string; enabled: boolean }>;
   onCreateSlot: (event: React.FormEvent<HTMLFormElement>) => void;
   onEditProviderLinks?: () => void;
+  onDeleteAccount?: (account: LinkedAccount) => void;
+  onDeleteSlot?: (slot: { id: string; name: string; status: string }) => void;
   variant?: "page" | "live";
 }) {
   const { locale } = useLocale();
@@ -79,20 +84,50 @@ export function LinkedAccountsPage({
         <section className="linked-section">
           <h3 className="linked-section-title">Pending link slots</h3>
           <ul className="linked-slot-list">
-            {pendingSlots.map((slot) => (
-              <li className="linked-slot-row" key={slot.id}>
-                <div className="linked-slot-icon" aria-hidden="true">
-                  <Server size={14} />
-                </div>
-                <div className="linked-slot-body">
-                  <strong>{slot.name}</strong>
-                  <span>
-                    Link code <code>{slot.linkCode}</code> · waiting for EA
-                  </span>
-                  <span>Open this slot from the sidebar to see EA setup steps.</span>
-                </div>
-              </li>
-            ))}
+            {pendingSlots.map((slot) => {
+              const expired = slot.status === "expired";
+              const expiresAt = slot.createdAt
+                ? Date.parse(slot.createdAt) + 24 * 60 * 60 * 1000
+                : 0;
+              const hoursLeft = expiresAt
+                ? Math.max(0, Math.ceil((expiresAt - Date.now()) / 3_600_000))
+                : null;
+              return (
+                <li
+                  className={`linked-slot-row ${expired ? "linked-slot-row-expired" : ""}`}
+                  key={slot.id}
+                >
+                  <div className="linked-slot-icon" aria-hidden="true">
+                    <Server size={14} />
+                  </div>
+                  <div className="linked-slot-body">
+                    <strong>{slot.name}</strong>
+                    <span>
+                      Link code <code>{slot.linkCode}</code> ·{" "}
+                      {expired ? "expired" : "waiting for EA"}
+                    </span>
+                    <span>
+                      {expired
+                        ? "This link code can no longer pair with an EA."
+                        : hoursLeft === null
+                          ? "Open this slot from the sidebar to see EA setup steps."
+                          : `Expires in ${hoursLeft}h`}
+                    </span>
+                  </div>
+                  {onDeleteSlot && (slot.status === "waiting" || expired) ? (
+                    <button
+                      aria-label={`Delete slot ${slot.name}`}
+                      className="icon-btn linked-slot-delete"
+                      onClick={() => onDeleteSlot(slot)}
+                      title="Delete link slot"
+                      type="button"
+                    >
+                      <Trash2 aria-hidden="true" size={13} />
+                    </button>
+                  ) : null}
+                </li>
+              );
+            })}
           </ul>
         </section>
       ) : null}
@@ -113,6 +148,18 @@ export function LinkedAccountsPage({
               return (
                 <li className="linked-account-card" key={account.id}>
                   <AccountRow account={account} />
+                  {onDeleteAccount ? (
+                    <div className="linked-account-actions">
+                      <button
+                        className="btn btn-ghost btn-small btn-danger"
+                        onClick={() => onDeleteAccount(account)}
+                        type="button"
+                      >
+                        <Trash2 aria-hidden="true" size={12} />
+                        Remove account
+                      </button>
+                    </div>
+                  ) : null}
                   {providers.length > 0 ? (
                     <div className="provider-link-block">
                       <div className="provider-link-summary">

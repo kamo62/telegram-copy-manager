@@ -1,6 +1,4 @@
-import { RefreshCw, Tag, TerminalSquare } from "lucide-react";
-import { useEffect, useState } from "react";
-import { formatUtcClock } from "../lib/format";
+import { RefreshCw, TerminalSquare } from "lucide-react";
 
 export function StatusBar({
   appVersion,
@@ -23,22 +21,12 @@ export function StatusBar({
   refreshing: boolean;
   telegramAdapter: string;
 }) {
-  const now = formatUtcClock();
-  const [errorFlash, setErrorFlash] = useState(false);
-
-  useEffect(() => {
-    if (!lastPollError) return;
-    setErrorFlash(true);
-    const timer = window.setTimeout(() => setErrorFlash(false), 4000);
-    return () => window.clearTimeout(timer);
-  }, [lastPollError]);
-
-  const liveDotClass = errorFlash
+  const liveDotClass = lastPollError
     ? "live-dot error"
     : refreshing
       ? "live-dot refreshing"
       : "live-dot";
-  const liveDotLabel = errorFlash
+  const liveDotLabel = lastPollError
     ? "Last poll failed"
     : refreshing
       ? "Refreshing dashboard"
@@ -60,46 +48,46 @@ export function StatusBar({
 
   return (
     <header className="status-bar">
-      <h1 className="brand">TG-TC · Operations</h1>
-      <div className="sync-strip">
-        <span aria-label={liveDotLabel} className={liveDotClass} role="img" title={liveDotLabel} />
-        <span className="sync-metric">
+      <h1 className="brand" title={`Version ${appVersion}`}>
+        TG-TC · Operations
+      </h1>
+      <div className="status-cluster">
+        <span
+          aria-live={lastPollError ? "polite" : undefined}
+          className="status-chip"
+          role={lastPollError ? "status" : undefined}
+        >
+          <span
+            aria-label={liveDotLabel}
+            className={liveDotClass}
+            role="img"
+            title={liveDotLabel}
+          />
           <span className="sync-label">Last sync:</span>
           <span className="sync-value">{lastSyncLabel}</span>
         </span>
-        <span className="sync-metric">
-          <Tag size={13} aria-hidden="true" />
-          <span className="sync-label">Version:</span>
-          <span className="sync-value">{appVersion}</span>
-        </span>
-      </div>
-      <div className="chips">
-        <span className="chip">
+        <span className="status-chip">
           <span className={`chip-dot ${database === "connected" ? "ok" : "warn"}`} />
           <span className="sync-label">DB</span>
           <span className="sync-value">{database}</span>
         </span>
-        <span className="chip">
+        <span className="status-chip">
           <span className={`chip-dot ${telegramAdapterStatus}`} />
           <span className="sync-label">TG</span>
           <span className="sync-value">{telegramAdapter}</span>
         </span>
-        <span className="chip">
+        <span className="status-chip">
           <span className="sync-label">Queue</span>
           <span className="sync-value">{queuePending}</span>
         </span>
-        <span className="chip">
-          <span className="sync-value">{now}</span>
-          <span className="sync-label">UTC</span>
-        </span>
         {lastPollError ? (
-          <span aria-live="polite" className="chip" role="status">
+          <span aria-live="polite" className="status-chip status-chip-error" role="status">
             <span className="chip-dot error" />
             <span className="sync-label">Poll failed</span>
           </span>
         ) : null}
       </div>
-      <div>
+      <div className="status-actions">
         <button
           aria-label="Open command palette"
           className="refresh-btn"

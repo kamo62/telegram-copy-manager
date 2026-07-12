@@ -1,10 +1,12 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, type ReactNode, useEffect, useMemo, useState } from "react";
 import { GrowthChart, type GrowthSeries } from "../components/GrowthChart";
 import { Money } from "../components/Money";
 import { Stat } from "../components/Stat";
+import { useColorAccents } from "../contexts/ColorAccentsContext";
 import { useLocale } from "../contexts/LocaleContext";
 import { apiGet } from "../lib/api";
-import { formatLot, formatNumber, formatPercent } from "../lib/format";
+import { chartCategory } from "../lib/chartPalette";
+import { formatNumber, formatPercent } from "../lib/format";
 
 type PerformanceView = "overview" | "statistics";
 type StatsRange = "today" | "7d" | "30d" | "all";
@@ -210,7 +212,6 @@ export function PerformancePage({
             loading={loading}
             currency={currency ?? (account as { currency?: string } | undefined)?.currency}
           />
-          <ExternalActivityPanel accounts={accounts} />
         </>
       ) : (
         <StatisticsView
@@ -246,6 +247,7 @@ function AttributionPanel({
   setRange: (value: StatsRange) => void;
 }) {
   const { locale } = useLocale();
+  const { colorAccents } = useColorAccents();
   const activeCurrency = attribution?.currency ?? currency;
   const totals = attribution?.totals;
   const cards: Array<{ label: string; value: number; bucket?: AttributionBucket }> = [
@@ -306,7 +308,7 @@ function AttributionPanel({
             <section className="attribution-breakdown" aria-label="P/L by attribution bucket">
               <h4>P/L by source</h4>
               <div className="attribution-bars">
-                {rows.map((row) => (
+                {rows.map((row, index) => (
                   <div className="attribution-bar-row" key={row.bucket}>
                     <div>
                       <strong>{row.label}</strong>
@@ -317,9 +319,12 @@ function AttributionPanel({
                     <div className="attribution-bar-track" aria-hidden="true">
                       <span
                         className={`attribution-bar ${attributionBucketClass(row.bucket)}`}
-                        style={{
-                          width: `${Math.max(4, (Math.abs(row.pnl) / maxAbsPnl) * 100)}%`,
-                        }}
+                        style={
+                          {
+                            "--chart-color": colorAccents ? chartCategory(index) : undefined,
+                            width: `${Math.max(4, (Math.abs(row.pnl) / maxAbsPnl) * 100)}%`,
+                          } as CSSProperties
+                        }
                       />
                     </div>
                     <Money value={row.pnl} currency={activeCurrency} locale={locale} signTone />
@@ -701,67 +706,4 @@ function formatAttributionTime(value: string | undefined, locale: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(time));
-}
-
-function ExternalActivityPanel({
-  accounts,
-}: {
-  accounts: NonNullable<Parameters<typeof PerformancePage>[0]["accounts"]>;
-}) {
-  const { locale } = useLocale();
-  const rows = accounts.flatMap((account) =>
-    (account.externalPositions ?? []).map((position) => ({
-      ...position,
-      accountNumber: account.accountNumber,
-      currency: (account as { currency?: string }).currency,
-    })),
-  );
-  const pending = accounts.reduce((sum, account) => sum + (account.externalOrders?.length ?? 0), 0);
-  if (rows.length === 0 && pending === 0) return null;
-  const floatingPnl = rows.reduce((sum, position) => sum + (position.profit ?? 0), 0);
-  const headerCurrency = rows[0]?.currency;
-  return (
-    <section className="external-performance-panel" aria-label="External broker activity">
-      <header className="external-positions-head">
-        <span className="external-positions-label">External activity</span>
-        <span className="external-positions-meta">
-          {rows.length} position{rows.length === 1 ? "" : "s"} · {pending} pending · floating P/L{" "}
-          <Money value={floatingPnl} currency={headerCurrency} locale={locale} signTone />
-        </span>
-      </header>
-      {rows.length > 0 ? (
-        <ul className="external-positions-list external-positions-list-compact">
-          {rows.map((position) => (
-            <li
-              className="external-position-row"
-              key={`${position.accountNumber}-${position.ticket}`}
-            >
-              <span className={`external-position-side ${position.type === 0 ? "buy" : "sell"}`}>
-                {position.type === 0 ? "BUY" : "SELL"}
-              </span>
-              <strong className="external-position-symbol">{position.symbol}</strong>
-              <span className="external-position-vol">{formatLot(position.volume)}</span>
-              <span className="external-position-price">
-                @ {formatNumber(position.openPrice, { locale, maximumFractionDigits: 5 })}
-              </span>
-              {position.profit !== undefined ? (
-                <Money
-                  value={position.profit}
-                  currency={position.currency}
-                  locale={locale}
-                  signTone
-                  className="external-position-profit"
-                />
-              ) : null}
-              <small className="external-position-source">
-                {position.accountNumber} · #{position.ticket}
-                {position.magic !== undefined ? ` · magic ${position.magic}` : ""}
-                {position.comment ? ` · ${position.comment}` : ""}
-              </small>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </section>
-  );
 }

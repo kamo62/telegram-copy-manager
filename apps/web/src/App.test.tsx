@@ -135,6 +135,9 @@ function clickSidebar(view: ReturnType<typeof render>, label: string) {
 
 function fixtureResponse(url: string | URL | Request, payload: unknown = snapshot) {
   const requestUrl = String(url);
+  if (requestUrl === "/api/queue-items/held") {
+    return Response.json({ items: [] });
+  }
   if (/\/api\/accounts\/[^/]+\/attribution/.test(requestUrl)) {
     return new Promise<Response>(() => {});
   }
@@ -187,6 +190,10 @@ describe("App dashboard", () => {
     expect(view.getAllByText("Linked Accounts").length).toBeGreaterThan(0);
     expect(view.getAllByText("Live").length).toBeGreaterThan(0);
     expect(view.queryByText("Get started today")).toBeNull();
+    expect(view.getByRole("tab", { name: "Summary" })).toBeTruthy();
+    expect(view.getByRole("tab", { name: "Summary" }).getAttribute("aria-selected")).toBe("true");
+    // The heavy growth chart now lives behind the Performance tab, not on the landing.
+    expect(view.queryByLabelText("Account growth chart")).toBeNull();
     expect(view.getByRole("tab", { name: "Performance" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Providers" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Logs" })).toBeTruthy();
@@ -297,6 +304,7 @@ describe("App dashboard", () => {
       />,
     );
 
+    clickTab(view, "Performance");
     const chart = within(view.getByLabelText("Account growth chart"));
     expect(chart.getByText(/\$12\.34/)).toBeTruthy();
     expect(chart.queryByText(/R\s*12\.34/)).toBeNull();
@@ -566,7 +574,9 @@ describe("App dashboard", () => {
     expect(view.queryByText("Balance")).toBeTruthy();
     expect(view.queryByText("Equity")).toBeTruthy();
     expect(view.queryByText("Trading P/L")).toBeTruthy();
-    expect(view.getAllByText(/57\.89/).length).toBeGreaterThanOrEqual(3);
+    // The windowed P/L card still shows the real (closed-trade) PnL while the
+    // stale balance/equity telemetry is suppressed.
+    expect(view.getAllByText(/57\.89/).length).toBeGreaterThanOrEqual(1);
   });
 
   test("shows an empty-state CTA on Live when no account is connected", () => {
@@ -1132,6 +1142,13 @@ describe("App dashboard", () => {
       drawdownDangerPct: 20,
       reportingCurrency: "ZAR",
       usdZarRate: 18.5,
+      alertBotToken: "",
+      alertChatId: "",
+      alertOnGuardianPause: false,
+      alertOnEaOffline: false,
+      alertOnExecFailed: false,
+      alertOnHeld: false,
+      alertOnTelegramStall: false,
     });
   });
 
@@ -1658,11 +1675,12 @@ describe("App dashboard", () => {
     });
   });
 
-  test("StatusBar shows last sync and app version", () => {
+  test("StatusBar shows last sync and keeps the app version on the brand tooltip", () => {
     const view = render(<App initialSnapshot={snapshot} />);
     expect(view.getByText("Last sync:")).toBeTruthy();
-    expect(view.getByText("Version:")).toBeTruthy();
-    expect(view.getByText(packageJson.version)).toBeTruthy();
+    expect(view.getByRole("heading", { name: "TG-TC · Operations" }).getAttribute("title")).toBe(
+      `Version ${packageJson.version}`,
+    );
   });
 
   test("shows GramJS Telegram adapter as healthy when backend health is OK", () => {
@@ -1677,12 +1695,12 @@ describe("App dashboard", () => {
 
     const telegramChip = view
       .getAllByText("gramjs")
-      .find((el) => el.closest(".chip"))
-      ?.closest(".chip");
+      .find((el) => el.closest(".status-chip"))
+      ?.closest(".status-chip");
     expect(telegramChip?.querySelector(".chip-dot")?.className).toContain("ok");
   });
 
-  test("surfaces external manual MT5 positions on the Performance view", () => {
+  test("surfaces external manual MT5 positions in the History tab", () => {
     const view = render(
       <App
         initialSnapshot={{
@@ -1712,7 +1730,7 @@ describe("App dashboard", () => {
       />,
     );
 
-    expect(view.getByText("External activity")).toBeTruthy();
+    clickTab(view, "History");
     expect(view.getByText("XAUUSD")).toBeTruthy();
     expect(view.getByText(/247564387/)).toBeTruthy();
   });
@@ -1760,6 +1778,7 @@ describe("App dashboard", () => {
     const view = render(<App initialSnapshot={snapshot} />);
 
     expect(calls.some((call) => call.url.includes("/stats"))).toBe(false);
+    clickTab(view, "Performance");
     fireEvent.click(view.getByRole("tab", { name: "Statistics" }));
 
     await view.findByText("Profit / Return");
@@ -1773,5 +1792,255 @@ describe("App dashboard", () => {
           call.init?.method === "GET",
       ),
     ).toBe(true);
+  });
+
+  test("held signals can be requeued in both modes or dismissed with lifecycle warnings", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const heldItem = {
+      id: "held-1",
+      heldReason: "GUARDIAN",
+      accountId: "mt5-demo-1",
+      providerId: "provider-alpha",
+      commandType: "OPEN_TRADE",
+      symbol: "EURUSD.raw",
+      originalEntry: 1.085,
+      currentPrice: 1.087,
+      driftPct: 0.184,
+      droppedLifecycleCount: 2,
+      droppedLifecycle: ["MARK_TP_HIT", "MOVE_SL"],
+      createdAt: "2026-07-11T08:00:00.000Z",
+    };
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url) === "/api/queue-items/held") return Response.json({ items: [heldItem] });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+    await view.findByTitle("1 held signals");
+    await clickTabAsync(view, "Logs");
+    const heldPanel = within(view.getByTestId("held-signals-panel"));
+    expect(heldPanel.getByText("GUARDIAN")).toBeTruthy();
+    expect(heldPanel.getByText("2")).toBeTruthy();
+
+    fireEvent.click(heldPanel.getByRole("button", { name: "Market" }));
+    expect(view.getByText(/2 lifecycle commands arrived while held/)).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Requeue at market" }));
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) =>
+            call.url === "/api/queue-items/held-1/requeue" &&
+            JSON.parse(String(call.init?.body)).mode === "market",
+        ),
+      ).toBe(true),
+    );
+
+    fireEvent.click(heldPanel.getByRole("button", { name: "Original" }));
+    fireEvent.click(view.getByRole("button", { name: "Requeue original" }));
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) =>
+            call.url === "/api/queue-items/held-1/requeue" &&
+            JSON.parse(String(call.init?.body)).mode === "original",
+        ),
+      ).toBe(true),
+    );
+
+    fireEvent.click(heldPanel.getByRole("button", { name: "Dismiss EURUSD.raw" }));
+    fireEvent.click(view.getByRole("button", { name: "Dismiss signal" }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/queue-items/held-1/dismiss")).toBe(true),
+    );
+  });
+
+  test("waiting account slots can be deleted after confirmation", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          accountSlots: [
+            {
+              id: "slot-retry",
+              name: "Demo retry",
+              linkCode: "ABC123",
+              status: "waiting",
+              accountNumber: "",
+              server: "",
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        }}
+      />,
+    );
+
+    clickSidebar(view, "Linked Accounts");
+    expect(await view.findByText(/Expires in 24h/)).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Delete slot Demo retry" }));
+    fireEvent.click(view.getByRole("button", { name: "Delete slot" }));
+    await waitFor(() => {
+      const call = calls.find((item) => item.url === "/api/account-slots/slot-retry");
+      expect(call?.init?.method).toBe("DELETE");
+    });
+  });
+
+  test("guardian unpause prompt can unpause and requeue guardian-held trades", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url) === "/api/queue-items/held") {
+        return Response.json({
+          items: [
+            {
+              id: "held-guardian",
+              heldReason: "GUARDIAN",
+              accountId: "mt5-demo-1",
+              providerId: "provider-alpha",
+              commandType: "OPEN_TRADE",
+              symbol: "EURUSD.raw",
+              originalEntry: 1.085,
+              currentPrice: 1.086,
+              driftPct: 0.09,
+              droppedLifecycleCount: 0,
+              droppedLifecycle: [],
+              createdAt: "2026-07-11T08:00:00.000Z",
+            },
+          ],
+        });
+      }
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          equityGuardians: [
+            {
+              accountId: "mt5-demo-1",
+              accountNumber: "100200300",
+              threshold: 10,
+              currentDrawdown: 12,
+              paused: true,
+              breaches: [],
+            },
+          ],
+        }}
+      />,
+    );
+
+    await view.findByTitle("1 held signals");
+    await clickTabAsync(view, "Equity Guardian");
+    fireEvent.click(view.getByRole("button", { name: "Unpause" }));
+    expect(view.getByRole("button", { name: "Unpause only" })).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "Unpause and requeue 1 held trade" }));
+
+    await waitFor(() => {
+      expect(calls.some((call) => call.url === "/api/equity-guardian/mt5-demo-1/unpause")).toBe(
+        true,
+      );
+      const requeue = calls.find((call) => call.url === "/api/queue-items/held-guardian/requeue");
+      expect(JSON.parse(String(requeue?.init?.body))).toEqual({ mode: "market" });
+    });
+  });
+
+  test("Correct and push threads every parsed trade field into the manual modal", async () => {
+    globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
+      fixtureResponse(url)) as typeof fetch;
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          parserResults: [
+            {
+              ...snapshot.parserResults[0]!,
+              accountId: "mt5-demo-1",
+              providerId: "provider-alpha",
+              direction: "SELL",
+              orderType: "STOP",
+              entry: { from: 1.081, to: 1.082 },
+              stopLoss: 1.09,
+              takeProfits: [{ price: 1.075 }, 1.07],
+              volume: 0.25,
+              executionMode: "SPLIT_ORDER",
+            },
+          ],
+        }}
+      />,
+    );
+
+    await clickTabAsync(view, "Logs");
+    fireEvent.click(view.getByRole("button", { name: "Correct & push" }));
+    expect((view.getByLabelText("Account") as HTMLSelectElement).value).toBe("mt5-demo-1");
+    expect((view.getByLabelText("Symbol") as HTMLInputElement).value).toBe("EURUSD.raw");
+    expect((view.getByLabelText("Direction") as HTMLSelectElement).value).toBe("SELL");
+    expect((view.getByLabelText("Order type") as HTMLSelectElement).value).toBe("STOP");
+    expect((view.getByLabelText("Entry from") as HTMLInputElement).value).toBe("1.081");
+    expect((view.getByLabelText("Entry to (optional)") as HTMLInputElement).value).toBe("1.082");
+    expect((view.getByLabelText("Stop loss") as HTMLInputElement).value).toBe("1.09");
+    expect((view.getByLabelText("Volume (lots)") as HTMLInputElement).value).toBe("0.25");
+    expect((view.getByLabelText("Execution") as HTMLSelectElement).value).toBe("SPLIT_ORDER");
+    expect((view.getByPlaceholderText("TP1 price") as HTMLInputElement).value).toBe("1.075");
+    expect((view.getByPlaceholderText("TP2 price") as HTMLInputElement).value).toBe("1.07");
+  });
+
+  test("Settings sends alert tests and shows the returned database backup filename", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      if (String(url) === "/api/admin/backup") {
+        return Response.json({ filename: "telegram-tc-2026-07-11T120000Z.db" });
+      }
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const view = render(<App initialSnapshot={snapshot} />);
+
+    clickSidebar(view, "Settings");
+    fireEvent.click(await view.findByRole("button", { name: "Send test message" }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/admin/alert-test")).toBe(true),
+    );
+    fireEvent.click(view.getByRole("button", { name: "Back up database now" }));
+    expect(await view.findByText("telegram-tc-2026-07-11T120000Z.db")).toBeTruthy();
+    const backupCall = calls.find((call) => call.url === "/api/admin/backup");
+    expect(backupCall?.init?.method).toBe("POST");
+  });
+
+  test("History resolves an out-of-sync trade through the pinned action contract", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          logicalTrades: [
+            {
+              ...snapshot.logicalTrades[0]!,
+              status: "OUT_OF_SYNC",
+              outOfSyncReason: "Candidate broker position found",
+              matchedBrokerTickets: ["70001"],
+            },
+          ],
+        }}
+      />,
+    );
+
+    await clickTabAsync(view, "History");
+    fireEvent.click(view.getByText("Resolve"));
+    fireEvent.click(view.getByRole("button", { name: "Re-adopt position" }));
+    fireEvent.click(view.getByRole("button", { name: "Re-adopt broker position" }));
+    await waitFor(() => {
+      const call = calls.find((item) => item.url === "/api/trades/trade-1/resolve");
+      expect(call?.init?.method).toBe("POST");
+      expect(JSON.parse(String(call?.init?.body))).toEqual({ action: "readopt" });
+    });
   });
 });

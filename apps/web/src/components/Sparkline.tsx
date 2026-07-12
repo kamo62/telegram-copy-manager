@@ -52,7 +52,14 @@ export function Sparkline({
       width="100%"
     >
       {areaPath ? <path d={areaPath} fill={color} opacity="0.12" /> : null}
-      <path d={linePath} fill="none" stroke={color} strokeLinejoin="round" strokeWidth="1.5" />
+      <path
+        d={linePath}
+        fill="none"
+        stroke={color}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+      />
     </svg>
   );
 }

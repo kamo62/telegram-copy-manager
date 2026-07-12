@@ -18,7 +18,8 @@
       "@telegram-tc/core": ["packages/core/src/index.ts"],
       "@telegram-tc/core/*": ["packages/core/src/*"],
       "@telegram-tc/api/*": ["apps/api/src/*"],
-      "@telegram-tc/web/*": ["apps/web/src/*"]
+      "@telegram-tc/web/*": ["apps/web/src/*"],
+      "@/*": ["apps/web/src/*"]
     }
   },
   "include": ["apps", "packages", "scripts", "mt5", "vite.config.ts"],

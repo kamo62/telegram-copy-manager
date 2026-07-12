@@ -22,7 +22,9 @@ export type QueueStatus =
   | "FAILED"
   | "IGNORED"
   | "DUPLICATE"
-  | "EXPIRED";
+  | "EXPIRED"
+  | "HELD"
+  | "DISMISSED";
 
 export interface AccountSymbolMapping {
   accountId: string;
@@ -126,7 +128,7 @@ export interface LogicalTrade {
   source?: TradeSource;
   symbol: SymbolResolution;
   direction: Direction;
-  status: "PLANNED" | "OPEN" | "PENDING" | "CLOSED" | "OUT_OF_SYNC" | "CANCELLED";
+  status: "PLANNED" | "OPEN" | "PENDING" | "CLOSED" | "OUT_OF_SYNC" | "CANCELLED" | "ARCHIVED";
   executionMode: ExecutionMode;
   entry?: PriceZone;
   stopLoss?: number;
@@ -767,6 +769,16 @@ function canonicalFromBrokerVariant(rawSymbol: string): string | undefined {
 
 function isRecognizedCanonical(symbol: string): boolean {
   return DEFAULT_CANONICAL_SYMBOLS.has(symbol) || /^[A-Z]{6}$/.test(symbol);
+}
+
+/**
+ * True when a broker-reported symbol maps to a canonical instrument the parser
+ * already understands (a known canonical or a known broker variant). Used to
+ * flag genuinely unconfigured EA symbols for operator attention.
+ */
+export function isKnownBrokerSymbol(symbol: string): boolean {
+  if (isRecognizedCanonical(canonicalKey(symbol))) return true;
+  return Boolean(canonicalFromBrokerVariant(symbol));
 }
 
 function brokerVariantCandidates(canonicalSymbol: string): string[] {
@@ -1468,4 +1480,119 @@ function stableHash(value: string): number {
     hash = (hash * 33) ^ value.charCodeAt(index);
   }
   return hash >>> 0;
+}
+
+// --- Multi-message correlation (parser pre-processing) ---------------------
+//
+// Some providers post a directional signal and then a rapid follow-up that only
+// carries SL/TP levels ("BUY GOLD" then "SL 2290 TP 2320" a few seconds later).
+// Parsing each message in isolation produces an incomplete OPEN_TRADE plus a
+// stray fragment. correlateMessages() folds short follow-up fragments into the
+// preceding directional anchor when they arrive from the same sender inside a
+// time window, so the parser sees one complete signal.
+
+const CORRELATION_DIRECTION_RE = /\b(BUY|SELL|LONG|SHORT)\b/i;
+const CORRELATION_SLTP_RE = /\b(SL|TP\d?|T\/?P|S\/?L|STOP\s*LOSS|TAKE\s*PROFIT|TARGET|ENTRY|@)\b/i;
+
+/** Minimal structural shape correlateMessages needs from a captured message. */
+export interface CorrelatableMessage {
+  telegramMessageId: string;
+  messageDate: string;
+  rawText: string;
+  senderName?: string;
+}
+
+export type CorrelatedMessage<T extends CorrelatableMessage> = T & {
+  /** Merged text the parser should run against (anchor text + folded fragments). */
+  rawText: string;
+  /** telegramMessageIds folded into this group, anchor first. Length 1 = untouched. */
+  correlatedMessageIds: string[];
+};
+
+function correlationHasDirection(text: string): boolean {
+  return CORRELATION_DIRECTION_RE.test(text);
+}
+
+/**
+ * A follow-up fragment is a short line with no direction of its own that carries
+ * SL/TP/level information meant to complete the previous directional message.
+ */
+function isCorrelationFragment(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed.length === 0 || trimmed.length >= 50) return false;
+  if (correlationHasDirection(trimmed)) return false;
+  const hasNumber = /\d/.test(trimmed);
+  if (!hasNumber) return false;
+  return CORRELATION_SLTP_RE.test(trimmed) || /^[\s\d.,/-]+$/.test(trimmed);
+}
+
+function correlationSecondsBetween(earlier: string, later: string): number {
+  const a = Date.parse(earlier);
+  const b = Date.parse(later);
+  if (Number.isNaN(a) || Number.isNaN(b)) return Number.POSITIVE_INFINITY;
+  return Math.abs(b - a) / 1000;
+}
+
+/**
+ * Group consecutive same-sender messages that form a single signal. A message
+ * with directional intent becomes an anchor; subsequent short SL/TP fragments
+ * within `windowSeconds` of the previous message in the group are folded in.
+ *
+ * ponytail: heuristic correlation. Ceiling — it only merges fragments that
+ * follow a directional anchor in arrival order; it will not reorder messages or
+ * correlate across interleaved providers. Upgrade path is per-provider quote/
+ * reply threading if a provider interleaves multiple concurrent setups.
+ */
+export function correlateMessages<T extends CorrelatableMessage>(
+  messages: T[],
+  windowSeconds = 30,
+): Array<CorrelatedMessage<T>> {
+  const out: Array<CorrelatedMessage<T>> = [];
+  let anchor: T | null = null;
+  let anchorHasDirection = false;
+  let mergedText = "";
+  let mergedIds: string[] = [];
+  let lastDate = "";
+
+  const flush = () => {
+    if (!anchor) return;
+    out.push({
+      ...anchor,
+      rawText: mergedText,
+      correlatedMessageIds: mergedIds,
+    });
+    anchor = null;
+    anchorHasDirection = false;
+    mergedText = "";
+    mergedIds = [];
+    lastDate = "";
+  };
+
+  for (const message of messages) {
+    const sameSender = anchor === null || (anchor.senderName ?? "") === (message.senderName ?? "");
+    const withinWindow =
+      anchor !== null && correlationSecondsBetween(lastDate, message.messageDate) <= windowSeconds;
+
+    if (
+      anchor !== null &&
+      anchorHasDirection &&
+      sameSender &&
+      withinWindow &&
+      isCorrelationFragment(message.rawText)
+    ) {
+      mergedText = `${mergedText}\n${message.rawText.trim()}`;
+      mergedIds.push(message.telegramMessageId);
+      lastDate = message.messageDate;
+      continue;
+    }
+
+    flush();
+    anchor = message;
+    anchorHasDirection = correlationHasDirection(message.rawText);
+    mergedText = message.rawText;
+    mergedIds = [message.telegramMessageId];
+    lastDate = message.messageDate;
+  }
+  flush();
+  return out;
 }

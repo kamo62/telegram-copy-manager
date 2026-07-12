@@ -1,18 +1,25 @@
 import { Database } from "bun:sqlite";
+import { readdirSync, unlinkSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
   type AccountSymbolMapping,
   buildExecutionCommand,
+  correlateMessages,
   createLogicalTradeFromSignal,
+  createMessageFingerprint,
+  type Direction,
   type ExecutionMode,
   type ExecutionQueueItem,
   type LogicalTrade,
   matchLifecycleCommandToTrade,
   type OrderType,
   type ParsedSignal,
+  type ParserContext,
   type ParserMode,
   parseSignalText,
   parseSignalTexts,
   type QueueStatus,
+  resolveSymbol,
   shouldRequireManualReview,
   type TakeProfitStrategy,
   type TradeSource,
@@ -20,6 +27,7 @@ import {
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
+import { streamSSE } from "hono/streaming";
 import { nanoid } from "nanoid";
 import {
   createTelegramAdapter,
@@ -28,6 +36,7 @@ import {
   type TelegramAdapter,
   type TelegramCapturedMessage,
   type TelegramDialog,
+  type TelegramSessionHealth,
   type TelegramSessionStatus,
 } from "./telegram";
 
@@ -76,6 +85,12 @@ type EquityCurveScope = "account" | "provider";
 type StatsRange = "today" | "7d" | "30d" | "90d" | "all";
 type ReportingCurrency = "USD" | "ZAR";
 type AccountAttributionBucket = "provider" | "manual_external" | "unknown_ea";
+type AlertSetting =
+  | "alertOnGuardianPause"
+  | "alertOnEaOffline"
+  | "alertOnExecFailed"
+  | "alertOnHeld"
+  | "alertOnTelegramStall";
 
 interface AppSettings {
   defaultLotSize: number;
@@ -93,6 +108,14 @@ interface AppSettings {
   drawdownDangerPct: number;
   reportingCurrency: ReportingCurrency;
   usdZarRate: number;
+  releaseHeldOnGuardianUnpause: boolean;
+  alertBotToken: string;
+  alertChatId: string;
+  alertOnGuardianPause: boolean;
+  alertOnEaOffline: boolean;
+  alertOnExecFailed: boolean;
+  alertOnHeld: boolean;
+  alertOnTelegramStall: boolean;
 }
 
 interface AccountSlotInput {
@@ -140,8 +163,18 @@ const defaultAppSettings: AppSettings = {
   drawdownDangerPct: 20,
   reportingCurrency: "USD",
   usdZarRate: 16,
+  releaseHeldOnGuardianUnpause: false,
+  alertBotToken: "",
+  alertChatId: "",
+  alertOnGuardianPause: false,
+  alertOnEaOffline: false,
+  alertOnExecFailed: false,
+  alertOnHeld: false,
+  alertOnTelegramStall: false,
 };
 const pendingOpenMissingGraceSeconds = 10;
+const EA_HEARTBEAT_SECONDS = 5;
+const ALERT_DEDUP_MS = 30 * 60 * 1000;
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
 
@@ -191,6 +224,17 @@ export function createApi(options: ApiOptions = {}) {
     const body = await c.req.json<Partial<AppSettings> & { azureOpenAIApiKey?: string }>();
     return c.json({ settings: store.updateAppSettings(body) });
   });
+  app.post("/api/admin/alert-test", async (c) => {
+    const result = await store.sendAlertTest();
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
+  app.post("/api/admin/backup", (c) => {
+    const result = store.backupDatabase();
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json({ filename: result.filename });
+  });
+  app.get("/api/admin/backups", (c) => c.json({ backups: store.backups() }));
 
   app.post("/api/telegram/start", async (c) => {
     const body = await c.req.json<{
@@ -447,6 +491,19 @@ export function createApi(options: ApiOptions = {}) {
     return c.json({ signals: store.parsedSignals(), queue });
   });
 
+  app.get("/api/queue-items/held", (c) => c.json({ items: store.heldQueueItems() }));
+  app.post("/api/queue-items/:id/requeue", async (c) => {
+    const body = await c.req.json<{ mode?: string }>();
+    const result = store.requeueQueueItem(c.req.param("id"), body.mode);
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
+  app.post("/api/queue-items/:id/dismiss", (c) => {
+    const result = store.dismissQueueItem(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
+
   app.post("/api/signals/:id/approve", async (c) => {
     const body = await optionalJson<{ executionMode?: ExecutionMode }>(c.req.raw);
     const approved = store.approveSignal(c.req.param("id"), {
@@ -462,6 +519,13 @@ export function createApi(options: ApiOptions = {}) {
   });
 
   app.post("/api/signals/:id/ignore", (c) => c.json(store.ignoreSignal(c.req.param("id"))));
+
+  app.post("/api/signals/manual", async (c) => {
+    const body = await c.req.json<ManualSignalInput>();
+    const result = store.submitManualSignal(body);
+    if ("body" in result) return c.json(result.body);
+    return c.json({ error: result.error }, result.statusCode);
+  });
 
   app.post("/api/signals/:id/ai-review", async (c) => {
     const review = await store.aiReviewSignal(c.req.param("id"));
@@ -497,11 +561,21 @@ export function createApi(options: ApiOptions = {}) {
   });
 
   app.get("/api/mt5/accounts", (c) => c.json({ accounts: store.mt5Accounts() }));
+  app.delete("/api/mt5/accounts/:accountId", (c) => {
+    const result = store.deleteMt5Account(c.req.param("accountId"));
+    if ("error" in result) return c.json(result, 404);
+    return c.json(result);
+  });
 
   app.get("/api/account-slots", (c) => c.json({ slots: store.accountSlots() }));
   app.post("/api/account-slots", async (c) => {
     const body = await c.req.json<AccountSlotInput>();
     return c.json({ slot: store.createAccountSlot(body.name) });
+  });
+  app.delete("/api/account-slots/:id", (c) => {
+    const result = store.deleteAccountSlot(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
   });
   app.post("/api/account-slots/:id/rotate", (c) =>
     c.json({ slot: store.rotateAccountSlot(c.req.param("id")) }),
@@ -577,6 +651,16 @@ export function createApi(options: ApiOptions = {}) {
     });
   });
   app.get("/api/providers/performance", (c) => c.json({ providers: store.providerPerformance() }));
+
+  app.get("/api/providers/:id/score", (c) => {
+    const score = store.providerScore(c.req.param("id"));
+    if (!score) return c.json({ error: "Provider not found" }, 404);
+    return c.json(score);
+  });
+
+  app.delete("/api/providers/:id/learning", (c) =>
+    c.json(store.resetProviderLearning(c.req.param("id"))),
+  );
 
   app.post("/api/mt5/register", async (c) => {
     const parsed = await mt5Json<{
@@ -679,6 +763,87 @@ export function createApi(options: ApiOptions = {}) {
   app.get("/api/trades/:id/broker-orders", (c) =>
     c.json({ orders: store.brokerOrders(c.req.param("id")) }),
   );
+  app.post("/api/trades/:id/resolve", async (c) => {
+    const body = await c.req.json<{ action?: string }>();
+    const result = store.resolveTrade(c.req.param("id"), body.action);
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
+
+  app.get("/api/audit-logs", (c) =>
+    c.json({
+      logs: store.listAuditLogs({
+        limit: optionalPositiveInteger(c.req.query("limit"), 500),
+        event: c.req.query("event"),
+      }),
+    }),
+  );
+
+  app.get("/api/export/trades", (c) =>
+    c.json({
+      trades: store.exportClosedTrades({
+        accountId: c.req.query("accountId"),
+        from: c.req.query("from"),
+        to: c.req.query("to"),
+      }),
+    }),
+  );
+
+  app.get("/api/accounts/:accountId/symbol-metadata", (c) =>
+    c.json({ symbols: store.symbolMetadata(c.req.param("accountId")) }),
+  );
+
+  app.get("/api/export/journal", (c) => {
+    const input = {
+      accountId: c.req.query("accountId"),
+      from: c.req.query("from"),
+      to: c.req.query("to"),
+    };
+    if ((c.req.query("format") ?? "json").toLowerCase() === "csv") {
+      const filename = `trade-journal-${new Date(Date.now()).toISOString().slice(0, 10)}.csv`;
+      return c.text(store.exportTradeJournalCsv(input), 200, {
+        "content-type": "text/csv; charset=utf-8",
+        "content-disposition": `attachment; filename="${filename}"`,
+      });
+    }
+    return c.json({ journal: store.exportTradeJournal(input) });
+  });
+
+  // Real-time dashboard push. Replaces the 15s client poll: the client opens
+  // one EventSource and the server forwards typed deltas as they happen. The
+  // client keeps /api/dashboard for initial hydration and polling fallback.
+  app.get("/api/events", (c) =>
+    streamSSE(c, async (stream) => {
+      const pending: AppStoreEvent[] = [];
+      const unsubscribe = store.subscribeEvents((event) => {
+        pending.push(event);
+      });
+      stream.onAbort(() => {
+        unsubscribe();
+      });
+      await stream.writeSSE({ event: "hello", data: JSON.stringify({ ts: Date.now() }) });
+      // ponytail: 250ms drain loop rather than a true push wakeup. Ceiling — up
+      // to ~250ms added delivery latency; upgrade path is an async notifier.
+      let sinceHeartbeatMs = 0;
+      while (!stream.aborted && !stream.closed) {
+        if (pending.length > 0) {
+          const batch = pending.splice(0, pending.length);
+          for (const event of batch) {
+            await stream.writeSSE({ event: String(event.type), data: JSON.stringify(event) });
+          }
+          sinceHeartbeatMs = 0;
+          continue;
+        }
+        await stream.sleep(250);
+        sinceHeartbeatMs += 250;
+        if (sinceHeartbeatMs >= 25_000) {
+          await stream.writeSSE({ event: "heartbeat", data: JSON.stringify({ ts: Date.now() }) });
+          sinceHeartbeatMs = 0;
+        }
+      }
+      unsubscribe();
+    }),
+  );
 
   if (options.staticRoot) {
     app.use("/*", serveStatic({ root: options.staticRoot }));
@@ -747,6 +912,40 @@ function createTelegramIngestionLoop(
       if (timer) clearInterval(timer);
     },
   };
+}
+
+interface ManualSignalInput {
+  accountId: string;
+  providerId?: string;
+  rawMessageId?: string;
+  rawText?: string;
+  commandType?: string;
+  direction: Direction;
+  orderType?: OrderType;
+  brokerSymbol: string;
+  canonicalSymbol?: string;
+  entry?: { from?: number; to?: number };
+  stopLoss?: number;
+  takeProfits?: Array<{ price: number; allocationPercent?: number }>;
+  volume?: number;
+  riskPercent?: number;
+  executionMode?: ExecutionMode;
+}
+
+function manualTicketSummary(
+  input: { direction: Direction; stopLoss?: number; takeProfits?: Array<{ price: number }> },
+  brokerSymbol: string,
+  orderType: OrderType,
+  entry: { from: number; to: number } | undefined,
+): string {
+  const parts = [`${input.direction} ${brokerSymbol} ${orderType}`];
+  if (entry) {
+    parts.push(entry.from === entry.to ? `@ ${entry.from}` : `@ ${entry.from}-${entry.to}`);
+  }
+  if (Number.isFinite(input.stopLoss)) parts.push(`SL ${input.stopLoss}`);
+  const tps = (input.takeProfits ?? []).filter((tp) => Number.isFinite(tp.price));
+  if (tps.length > 0) parts.push(`TP ${tps.map((tp) => tp.price).join("/")}`);
+  return `Manual: ${parts.join(" ")}`;
 }
 
 interface ExecutionReportInput {
@@ -854,15 +1053,56 @@ export function brokerOrderSourceForDealReason(reason: number | undefined): stri
 
 type RawMessageClassification = "entry" | "management" | "noise" | "unknown";
 
+/**
+ * A minimal real-time delta pushed over the SSE stream. `type` names the
+ * subsystem (queue, trade, snapshot, heartbeat, audit, reconciliation, score);
+ * the remaining fields are an intentionally small payload, not a full snapshot.
+ */
+export interface AppStoreEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+// Telegram RPC errors that mean the session's auth key is permanently dead and
+// the operator must log in again. Kept deliberately separate from transient
+// network/timeout errors: those must NOT disconnect a live session, or a brief
+// connectivity blip would log the operator out.
+const TELEGRAM_DEAD_SESSION_ERROR_CODES = [
+  "AUTH_KEY_UNREGISTERED",
+  "AUTH_KEY_INVALID",
+  "AUTH_KEY_DUPLICATED",
+  "SESSION_REVOKED",
+  "SESSION_EXPIRED",
+  "USER_DEACTIVATED",
+  "USER_DEACTIVATED_BAN",
+];
+
+export function isTelegramDeadSessionError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toUpperCase();
+  return TELEGRAM_DEAD_SESSION_ERROR_CODES.some((code) => message.includes(code));
+}
+
 class AppStore {
   private readonly db: Database;
+  private readonly databasePath: string;
   private readonly allowDemoData: boolean;
   // Tracks providers we've already warned about for the "no connected
   // Telegram session" state, so we log once per offline→online edge instead
   // of once per poll. Reset when a session connects.
   private readonly providersWithoutSession = new Set<string>();
+  // Last known Telegram session health per session id, recorded by the capture
+  // loop and surfaced in the dashboard so a silent stall is visible.
+  private readonly telegramHealth = new Map<string, TelegramSessionHealth>();
+  // In-memory pub/sub for the SSE stream. Subscribers are SSE connections that
+  // forward typed deltas to the dashboard so it stops polling on a timer.
+  // ponytail: single-process in-memory bus. Ceiling — events do not survive a
+  // restart and do not fan out across multiple API processes; the upgrade path
+  // is a shared broker (Redis/Postgres LISTEN) if the API is ever scaled out.
+  private readonly eventSubscribers = new Set<(event: AppStoreEvent) => void>();
+  private readonly alertSentAt = new Map<string, number>();
 
   constructor(databasePath: string, allowDemoData = false) {
+    this.databasePath = databasePath;
     this.allowDemoData = allowDemoData;
     if (databasePath !== ":memory:") {
       const dir = databasePath.split("/").slice(0, -1).join("/");
@@ -1310,6 +1550,47 @@ class AppStore {
     return { providerId, status: "DELETED" };
   }
 
+  // Hard-delete an MT5 account and every row scoped to it. account_slots is
+  // freed (unlinked) rather than dropped so the provisioning link code can be
+  // reused. Wrapped in a transaction so a failure can't leave half the rows.
+  deleteMt5Account(accountId: string) {
+    const account = this.mt5Accounts().find((item) => item.id === accountId);
+    if (!account) return { error: "Account not found" };
+    const accountScopedTables = [
+      "queue_items",
+      "logical_trades",
+      "account_provider_links",
+      "equity_guardians",
+      "account_symbol_mappings",
+      "mt5_snapshots",
+      "equity_curve_points",
+      "equity_curve_state",
+      "drawdown_events",
+      "execution_reports",
+      "broker_orders",
+      "external_closes",
+    ];
+    const now = new Date().toISOString();
+    const removeAll = this.db.transaction(() => {
+      for (const table of accountScopedTables) {
+        this.db.query(`DELETE FROM ${table} WHERE account_id = ?`).run(accountId);
+      }
+      this.db
+        .query(
+          "UPDATE account_slots SET status = ?, account_id = '', updated_at = ? WHERE account_id = ?",
+        )
+        .run("waiting", now, accountId);
+      this.db.query("DELETE FROM mt5_accounts WHERE id = ?").run(accountId);
+    });
+    removeAll();
+    this.audit("mt5-account.delete", "warn", "MT5 account hard-deleted", {
+      accountId,
+      accountNumber: account.accountNumber,
+      server: account.server,
+    });
+    return { accountId, status: "DELETED" };
+  }
+
   connectedSessionIdForProfile(profileId: string) {
     return this.connectedTelegramSession(profileId)?.id;
   }
@@ -1520,10 +1801,36 @@ class AppStore {
     };
   }
 
+  /** Per-provider correlation window in seconds (0 disables). Default 30s. */
+  private correlationWindowSeconds(providerId: string): number {
+    const row = this.db
+      .query("SELECT provider_config_json FROM providers WHERE id = ?")
+      .get(providerId) as Row | null;
+    if (!row) return 30;
+    const config =
+      parseJson<{ correlationWindowSeconds?: number }>(String(row.provider_config_json)) ?? {};
+    const value = Number(config.correlationWindowSeconds);
+    return Number.isFinite(value) && value >= 0 ? value : 30;
+  }
+
   captureMessages(providerId: string, messages: TelegramCapturedMessage[]) {
     const before = this.rawMessageCount(providerId);
-    for (const message of messages) {
-      const parserText = telegramParserText(message);
+    // Correlate same-sender follow-up fragments into their directional anchor so
+    // a "BUY GOLD" + "SL 2290 TP 2320" pair parses as one complete signal. For a
+    // lone message this is a no-op (group of one), so existing behaviour is kept.
+    // ponytail: correlation only spans a single capture batch; if the anchor and
+    // its fragment arrive in separate polls they are stored separately. Upgrade
+    // path is correlating against recently stored raw_messages.
+    const windowSeconds = this.correlationWindowSeconds(providerId);
+    const groups =
+      windowSeconds > 0
+        ? correlateMessages(messages, windowSeconds)
+        : messages.map((message) => ({
+            ...message,
+            correlatedMessageIds: [message.telegramMessageId],
+          }));
+    for (const group of groups) {
+      const parserText = telegramParserText(group);
       const context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
       const parsed = parseSignalText(parserText, context);
       const parsedSignals = parseSignalTexts(parserText, context);
@@ -1534,10 +1841,10 @@ class AppStore {
            ON CONFLICT(id) DO NOTHING`,
         )
         .run(
-          `raw_${providerId}_${message.telegramMessageId}`,
+          `raw_${providerId}_${group.telegramMessageId}`,
           providerId,
-          message.telegramMessageId,
-          message.messageDate,
+          group.telegramMessageId,
+          group.messageDate,
           parserText,
           parsed.fingerprint,
           parsedSignals.some((signal) => signal.commandType === "OPEN_TRADE")
@@ -1573,9 +1880,11 @@ class AppStore {
       reviewRequired: 0,
       errors: 0,
     };
+    const activeSessions = new Set<string>();
     for (const provider of this.providers().filter((item) => item.enabled)) {
       result.providers += 1;
       const sessionId = this.connectedSessionIdForProfile(provider.profileId);
+      if (sessionId) activeSessions.add(sessionId);
       if (!sessionId) {
         if (!this.providersWithoutSession.has(provider.id)) {
           this.providersWithoutSession.add(provider.id);
@@ -1619,6 +1928,26 @@ class AppStore {
               providerId: provider.id,
               parsedSignalId: item.parsedSignalId,
             });
+            if (isUnmatchedLifecycleError(approval.error)) {
+              const linked = this.linkDroppedLifecycle(
+                provider.id,
+                item.parsedSignalId,
+                item.result,
+              );
+              if (linked > 0) {
+                this.audit(
+                  "telegram.ingest.lifecycle-dropped",
+                  "warn",
+                  "Linked dropped lifecycle command to held open trade",
+                  {
+                    providerId: provider.id,
+                    parsedSignalId: item.parsedSignalId,
+                    commandType: item.result.commandType,
+                    linked,
+                  },
+                );
+              }
+            }
           }
         }
       } catch (error) {
@@ -1627,9 +1956,303 @@ class AppStore {
           providerId: provider.id,
           error: error instanceof Error ? error.message : "Unknown ingestion error",
         });
+        // A revoked/expired GramJS auth key keeps the DB row CONNECTED forever
+        // (gramjs just retries the dead key), so /api/telegram/status reports
+        // connected:true and the web UI stays pinned to the "connected" screen
+        // with no login form. Reconcile the row to DISCONNECTED so the operator
+        // can re-authenticate. Subsequent providers on the same dead session
+        // then resolve no connected session and are skipped, not re-polled.
+        if (isTelegramDeadSessionError(error)) {
+          await this.reconcileDeadTelegramSession(telegram, sessionId, error);
+        }
       }
     }
+    this.recordTelegramHealth(telegram, activeSessions);
     return result;
+  }
+
+  private linkDroppedLifecycle(providerId: string, parsedSignalId: string, signal: ParsedSignal) {
+    const raw = this.db
+      .query("SELECT raw_message_id FROM parsed_signals WHERE id = ?")
+      .get(parsedSignalId) as Row | null;
+    if (!raw?.raw_message_id) return 0;
+    const rows = this.db
+      .query(
+        `SELECT queue_items.id, queue_items.payload_json
+         FROM queue_items
+         JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
+         WHERE queue_items.status = 'HELD'
+           AND parsed_signals.provider_id = ?
+           AND json_extract(queue_items.payload_json, '$.commandType') = 'OPEN_TRADE'`,
+      )
+      .all(providerId) as Row[];
+    const lifecycleSymbols = [signal.brokerSymbol, signal.canonicalSymbol, signal.rawSymbol]
+      .map((value) => normalizeLockedSymbol(value))
+      .filter((value): value is string => Boolean(value));
+    let linked = 0;
+    for (const row of rows) {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      const heldSymbols = [payload.brokerSymbol, payload.canonicalSymbol]
+        .map((value) => normalizeLockedSymbol(value))
+        .filter((value): value is string => Boolean(value));
+      if (
+        lifecycleSymbols.length > 0 &&
+        !lifecycleSymbols.some((symbol) => heldSymbols.includes(symbol))
+      ) {
+        continue;
+      }
+      const inserted = this.db
+        .query(
+          `INSERT OR IGNORE INTO held_lifecycle_drops
+            (id, held_queue_item_id, raw_message_id, command_type, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `held_drop_${nanoid(10)}`,
+          String(row.id),
+          String(raw.raw_message_id),
+          signal.commandType,
+          nowIso(),
+        );
+      if (inserted.changes > 0) linked += 1;
+    }
+    return linked;
+  }
+
+  // A GramJS session's auth key can be revoked server-side (logged out from
+  // another device, session expired, account deactivated). GramJS surfaces it
+  // as AUTH_KEY_UNREGISTERED on the next RPC and then retries the dead key
+  // forever, but nothing flips the DB row off CONNECTED — so telegramStatus()
+  // keeps reporting connected:true and the login form stays hidden. Drop the
+  // dead client and mark the row DISCONNECTED so re-login becomes possible.
+  private async reconcileDeadTelegramSession(
+    telegram: TelegramAdapter,
+    sessionId: string,
+    error: unknown,
+  ) {
+    const current = this.db
+      .query("SELECT status FROM telegram_sessions WHERE id = ?")
+      .get(sessionId) as Row | null;
+    if (!current || String(current.status) === "DISCONNECTED") return;
+    // disconnect() also removes the dead session file, so the unbounded
+    // reconnect storm stops and the file can't be re-imported on next boot.
+    await telegram.disconnect(sessionId).catch(() => undefined);
+    this.updateTelegramSession(sessionId, "DISCONNECTED");
+    this.audit(
+      "telegram.session.dead",
+      "error",
+      "Telegram session auth key is dead — operator must re-login",
+      { sessionId, error: error instanceof Error ? error.message : String(error) },
+    );
+  }
+
+  private recordTelegramHealth(telegram: TelegramAdapter, sessionIds: Set<string>) {
+    if (!telegram.sessionHealth) return;
+    for (const sessionId of sessionIds) {
+      const health = telegram.sessionHealth(sessionId);
+      const previous = this.telegramHealth.get(sessionId);
+      this.telegramHealth.set(sessionId, health);
+      // Log the healthy->stalled and stalled->recovered edges once each so the
+      // condition lands in the audit log, not only the live snapshot.
+      if (health.stalled && !previous?.stalled) {
+        this.audit("telegram.session.stalled", "error", "Telegram session stalled", {
+          sessionId,
+          lastContactAt: health.lastContactAt,
+          stalledSeconds: health.stalledSeconds,
+        });
+        this.dispatchAlert(
+          "telegram-stalled",
+          sessionId,
+          `Telegram ingestion stalled for session ${sessionId}.`,
+          "alertOnTelegramStall",
+        );
+      } else if (!health.stalled && previous?.stalled) {
+        this.audit("telegram.session.recovered", "info", "Telegram session recovered", {
+          sessionId,
+        });
+      }
+    }
+  }
+
+  telegramSessionHealth(): TelegramSessionHealth[] {
+    return [...this.telegramHealth.values()];
+  }
+
+  // Operational conditions that silently block trading and should be shown
+  // prominently in the UI: a latched Equity Guardian rejecting every signal,
+  // or a Telegram session that has stopped receiving updates.
+  operationalAlerts() {
+    const alerts: Array<{
+      kind: "guardian-paused" | "telegram-stalled" | "unmapped-symbols" | "provider-health";
+      severity: "warn" | "error";
+      message: string;
+      accountId?: string;
+      detail?: Record<string, unknown>;
+    }> = [];
+    for (const guardian of this.equityGuardians()) {
+      if (!guardian.paused) continue;
+      const lastBreach = guardian.breaches.at(-1) as { at?: string; drawdown?: number } | undefined;
+      alerts.push({
+        kind: "guardian-paused",
+        severity: "error",
+        message: `Equity Guardian paused for account ${
+          guardian.accountNumber || guardian.accountId
+        } — OPEN_TRADE signals are being rejected`,
+        accountId: guardian.accountId,
+        detail: {
+          threshold: guardian.threshold,
+          breachedAt: lastBreach?.at,
+          drawdown: lastBreach?.drawdown,
+        },
+      });
+      this.dispatchAlert(
+        "guardian-paused",
+        guardian.accountId,
+        `Equity Guardian paused for account ${guardian.accountNumber || guardian.accountId}.`,
+        "alertOnGuardianPause",
+      );
+    }
+    for (const account of this.mt5Accounts()) {
+      const lastHeartbeat = Date.parse(account.lastHeartbeatAt);
+      if (
+        Number.isFinite(lastHeartbeat) &&
+        Date.now() - lastHeartbeat > EA_HEARTBEAT_SECONDS * 3 * 1000
+      ) {
+        this.dispatchAlert(
+          "ea-offline",
+          account.id,
+          `EA offline for account ${account.accountNumber || account.id}.`,
+          "alertOnEaOffline",
+        );
+      }
+    }
+    for (const health of this.telegramSessionHealth()) {
+      if (!health.stalled) continue;
+      alerts.push({
+        kind: "telegram-stalled",
+        severity: "error",
+        message:
+          "Telegram session is not receiving updates — incoming signals may be delayed or missed",
+        detail: {
+          sessionId: health.sessionId,
+          lastContactAt: health.lastContactAt,
+          stalledSeconds: health.stalledSeconds,
+        },
+      });
+    }
+    const needsMapping = this.providerSymbolsNeedingMapping();
+    if (needsMapping.length > 0) {
+      const shown = needsMapping.slice(0, 8);
+      alerts.push({
+        kind: "unmapped-symbols",
+        severity: "warn",
+        message: `${needsMapping.length} provider symbol${
+          needsMapping.length === 1 ? "" : "s"
+        } could not be mapped: ${shown.join(", ")}${
+          needsMapping.length > shown.length ? "…" : ""
+        } — add a symbol mapping.`,
+        detail: { symbols: needsMapping },
+      });
+    }
+    // Provider health: surface providers whose rolling win rate has turned red.
+    // ponytail: providerScore recomputes per provider here. Ceiling — O(providers
+    // × trades) per dashboard build; upgrade path is the provider_score_cache.
+    for (const provider of this.providers()) {
+      const score = this.providerScore(provider.id);
+      if (!score) continue;
+      const breach = providerScoreAlert(provider.title, score);
+      if (!breach) continue;
+      alerts.push({
+        kind: "provider-health",
+        severity: "warn",
+        message: breach.message,
+        detail: { providerId: provider.id, winRate: breach.winRate, badge: score.badge },
+      });
+    }
+    return alerts;
+  }
+
+  /**
+   * Symbols the operator's PROVIDERS have actually posted that do not currently
+   * resolve to a broker symbol — the actionable "configure a mapping" set.
+   * Deliberately NOT driven by the EA's reported instrument catalog: a broker
+   * advertises hundreds/thousands of CFDs the operator will never trade, so
+   * alerting on those is pure noise. Re-resolves against current mappings so the
+   * alert clears once the symbol is mapped.
+   * ponytail: re-resolves recent signals on each dashboard build. Ceiling —
+   * O(distinct provider symbols); upgrade path is caching resolution per symbol.
+   */
+  providerSymbolsNeedingMapping(): string[] {
+    const rows = this.db
+      .query(
+        "SELECT provider_id, result_json FROM parsed_signals ORDER BY created_at DESC LIMIT 300",
+      )
+      .all() as Row[];
+    const contexts = new Map<string, ParserContext>();
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const row of rows) {
+      if (out.length >= 12) break;
+      const signal = parseJson<ParsedSignal>(String(row.result_json));
+      if (!signal || signal.commandType === "NO_SIGNAL") continue;
+      const raw = signal.rawSymbol;
+      if (!raw) continue;
+      const key = raw.replace(/[^a-z0-9]/gi, "").toUpperCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const providerId = String(row.provider_id);
+      let context = contexts.get(providerId);
+      if (!context) {
+        context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
+        contexts.set(providerId, context);
+      }
+      // Only flag symbols that still do not resolve to a broker symbol.
+      if (resolveSymbol(raw, context).mappingStatus !== "mapped") out.push(raw);
+    }
+    return out;
+  }
+
+  /** Persisted broker symbol metadata (point/digits/pip) for an account. */
+  symbolMetadata(accountId: string) {
+    return (
+      this.db
+        .query(
+          "SELECT symbol, point, digits, pip_size, updated_at FROM symbol_metadata WHERE account_id = ? ORDER BY symbol",
+        )
+        .all(accountId) as Row[]
+    ).map((row) => ({
+      symbol: String(row.symbol),
+      point: nullableNumber(row.point) ?? null,
+      digits: nullableNumber(row.digits) ?? null,
+      pipSize: nullableNumber(row.pip_size) ?? null,
+      updatedAt: String(row.updated_at),
+    }));
+  }
+
+  private persistSymbolMetadata(accountId: string, symbols: unknown[]) {
+    const now = new Date().toISOString();
+    for (const entry of symbols) {
+      if (!entry || typeof entry !== "object") continue;
+      const record = entry as Record<string, unknown>;
+      const symbol = typeof record.symbol === "string" ? record.symbol : null;
+      if (!symbol) continue;
+      const point = nullableNumber(record.point);
+      const digits = nullableNumber(record.digits);
+      // 3/5-digit FX/metals quote in fractional pips, so a pip is 10 points.
+      const pipSize =
+        point !== undefined ? (digits === 3 || digits === 5 ? point * 10 : point) : undefined;
+      this.db
+        .query(
+          `INSERT INTO symbol_metadata (account_id, symbol, point, digits, pip_size, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(account_id, symbol) DO UPDATE SET
+             point = COALESCE(excluded.point, symbol_metadata.point),
+             digits = COALESCE(excluded.digits, symbol_metadata.digits),
+             pip_size = COALESCE(excluded.pip_size, symbol_metadata.pip_size),
+             updated_at = excluded.updated_at`,
+        )
+        .run(accountId, symbol, point ?? null, digits ?? null, pipSize ?? null, now);
+    }
   }
 
   backtestProviderMessages(
@@ -1856,29 +2479,49 @@ class AppStore {
       providerId,
       signal.accountId ?? this.defaultParserAccountId(providerId),
     );
-    if (targetAccountIds.length === 0) {
-      return { statusCode: 422, error: "Provider is not copied by any MT5 account" };
-    }
-    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
     const executionMode = options.executionMode ?? "VIRTUAL_TP";
     const settings = this.appSettings();
-    const provider = this.providerDetails(providerId);
-    if (signal.commandType === "OPEN_TRADE" && openTradeSourceExpired(source, settings)) {
-      this.insertNonLeasedQueueItem(parsedSignalId, signal, "EXPIRED", {
-        accountId,
+    if (targetAccountIds.length === 0) {
+      const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "HELD", {
+        accountId: signal.accountId ?? this.defaultParserAccountId(providerId),
         executionMode,
         settings,
+        heldReason: "NO_ACCOUNT",
       });
       this.db
         .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
-        .run("EXPIRED", parsedSignalId);
+        .run("HELD", parsedSignalId);
+      this.audit("signal.no-account", "warn", "Signal held because no MT5 account is linked", {
+        parsedSignalId,
+        providerId,
+        queueItemId,
+        heldReason: "NO_ACCOUNT",
+      });
+      this.alertHeldQueueItem(queueItemId, "NO_ACCOUNT");
+      return { body: { queueItemId, status: "HELD" } };
+    }
+    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
+    const provider = this.providerDetails(providerId);
+    if (signal.commandType === "OPEN_TRADE" && openTradeSourceExpired(source, settings)) {
+      const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "HELD", {
+        accountId,
+        executionMode,
+        settings,
+        heldReason: "EXPIRED_LATE",
+      });
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("HELD", parsedSignalId);
       this.audit("signal.expired", "warn", "Open trade signal expired before queueing", {
         parsedSignalId,
         providerId,
+        queueItemId,
+        heldReason: "EXPIRED_LATE",
         messageDate: source?.messageDate,
         maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
       });
-      return { statusCode: 409, error: "Open trade signal is too old to queue" };
+      this.alertHeldQueueItem(queueItemId, "EXPIRED_LATE");
+      return { body: { queueItemId, status: "HELD" } };
     }
     // Dedup window: only collapse against APPROVED signals within the configured window
     // so a provider re-issuing the same short-form signal (e.g. "Sell BTCUSD") after the
@@ -1979,11 +2622,17 @@ class AppStore {
       this.db
         .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
         .run("APPROVED", parsedSignalId);
-      this.audit("signal.approve", "info", "Signal approved for MT5 queue", {
-        parsedSignalId,
-        queueItems,
-        logicalTradeIds,
-      });
+      this.audit(
+        "signal.approve",
+        "info",
+        "Signal approved for MT5 queue",
+        {
+          parsedSignalId,
+          queueItems,
+          logicalTradeIds,
+        },
+        "operator",
+      );
       return {
         body: {
           queueItemId: queueItems[0],
@@ -2119,6 +2768,178 @@ class AppStore {
     }
   }
 
+  // Force-push a manually composed or corrected signal straight to one
+  // account's MT5 queue, bypassing the parser. Used when the parser got a
+  // Telegram signal wrong (or missed it). Operator-supplied values are used
+  // as-is — no provider TP/risk config is layered on top — and the staleness
+  // and dedup guards are skipped (the source timestamp is "now"). The Equity
+  // Guardian still gates execution at lease time, so a paused account is not
+  // silently overridden.
+  submitManualSignal(input: ManualSignalInput):
+    | {
+        body: {
+          queueItemId: string;
+          logicalTradeId: string;
+          parsedSignalId: string;
+          status: string;
+        };
+      }
+    | { statusCode: 404 | 422; error: string } {
+    const account = this.mt5Accounts().find((item) => item.id === input.accountId);
+    if (!account) return { statusCode: 404, error: "Account not found" };
+    if ((input.commandType ?? "OPEN_TRADE") !== "OPEN_TRADE") {
+      return { statusCode: 422, error: "Manual push currently supports open trades only" };
+    }
+    if (input.direction !== "BUY" && input.direction !== "SELL") {
+      return { statusCode: 422, error: "direction must be BUY or SELL" };
+    }
+    const brokerSymbol = input.brokerSymbol?.trim();
+    if (!brokerSymbol) return { statusCode: 422, error: "symbol is required" };
+
+    const settings = this.appSettings();
+    const orderType: OrderType = input.orderType ?? "MARKET";
+    if (!settings.allowedOrderTypes.includes(orderType)) {
+      return { statusCode: 422, error: `${orderType} orders are not allowed by settings` };
+    }
+    if (orderType !== "MARKET" && !Number.isFinite(input.entry?.from)) {
+      return { statusCode: 422, error: "entry price is required for limit and stop orders" };
+    }
+
+    const executionMode: ExecutionMode = input.executionMode ?? "VIRTUAL_TP";
+    const riskPercent = Number.isFinite(input.riskPercent) ? Number(input.riskPercent) : undefined;
+    const volume = Number.isFinite(input.volume)
+      ? Number(input.volume)
+      : riskPercent !== undefined
+        ? undefined
+        : settings.defaultLotSize;
+
+    const legs = (input.takeProfits ?? []).filter((tp) => Number.isFinite(tp.price));
+    const takeProfits = legs.map((tp, index) => ({
+      leg: index + 1,
+      price: Number(tp.price),
+      allocationPercent:
+        Number.isFinite(tp.allocationPercent) && Number(tp.allocationPercent) > 0
+          ? Number(tp.allocationPercent)
+          : Math.floor(100 / Math.max(legs.length, 1)),
+    }));
+
+    const entry =
+      orderType === "MARKET"
+        ? undefined
+        : { from: Number(input.entry?.from), to: Number(input.entry?.to ?? input.entry?.from) };
+    const originalText =
+      input.rawText?.trim() || manualTicketSummary(input, brokerSymbol, orderType, entry);
+    const fingerprint = createMessageFingerprint(`${originalText}:${nanoid(6)}`);
+
+    const signal: ParsedSignal = {
+      originalText,
+      commandType: "OPEN_TRADE",
+      direction: input.direction,
+      orderType,
+      rawSymbol: brokerSymbol,
+      canonicalSymbol: input.canonicalSymbol?.trim() || brokerSymbol,
+      brokerSymbol,
+      mappingStatus: "mapped",
+      mappingWarnings: [],
+      entry,
+      stopLoss: Number.isFinite(input.stopLoss) ? Number(input.stopLoss) : undefined,
+      takeProfits,
+      lotSize: volume,
+      riskPercent,
+      confidence: 1,
+      matchedPatternIds: ["manual"],
+      missingFields: [],
+      warnings: [],
+      providerId: input.providerId,
+      accountId: input.accountId,
+      fingerprint,
+    };
+
+    const now = new Date().toISOString();
+    const providerId = input.providerId ?? "";
+    // Reuse the linked raw message when correcting one; otherwise synthesize a
+    // manual raw message so the trade keeps a source and audit trail.
+    let rawMessageId = input.rawMessageId;
+    if (!rawMessageId) {
+      rawMessageId = `raw_${nanoid(10)}`;
+      this.db
+        .query(
+          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          rawMessageId,
+          providerId,
+          `manual-${Date.now()}`,
+          now,
+          originalText,
+          fingerprint,
+          "entry",
+        );
+    }
+    const parsedSignalId = `parse_${nanoid(10)}`;
+    this.db
+      .query(
+        "INSERT INTO parsed_signals (id, provider_id, raw_message_id, result_json, review_required, fingerprint, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        parsedSignalId,
+        providerId,
+        rawMessageId,
+        JSON.stringify(signal),
+        0,
+        fingerprint,
+        "APPROVED",
+        now,
+      );
+
+    const source: TradeSource = {
+      parsedSignalId,
+      rawMessageId,
+      telegramMessageId: "manual",
+      messageDate: now,
+      rawText: originalText,
+    };
+    const logicalTradeId = `trade_${nanoid(10)}`;
+    const queueItemId = `queue_${nanoid(10)}`;
+    const trade = createLogicalTradeFromSignal(signal, {
+      id: logicalTradeId,
+      providerId: input.providerId,
+      accountId: input.accountId,
+      source,
+      executionMode,
+    });
+    this.insertTrade(trade);
+    const item = buildExecutionCommand(signal, {
+      id: queueItemId,
+      accountId: input.accountId,
+      logicalTradeId,
+      executionMode,
+      volume,
+      riskPercent,
+    });
+    this.insertQueueItem(item, parsedSignalId);
+
+    this.audit(
+      "signal.manual-push",
+      "warn",
+      "Manual signal force-pushed to MT5 queue",
+      {
+        parsedSignalId,
+        queueItemId,
+        logicalTradeId,
+        accountId: input.accountId,
+        brokerSymbol,
+        direction: input.direction,
+        orderType,
+        force: true,
+      },
+      "operator",
+    );
+    // Operator force-pushing a signal teaches the parser this approved structure.
+    if (input.providerId) this.recordTrainingExample(input.providerId, originalText, signal);
+    return { body: { queueItemId, logicalTradeId, parsedSignalId, status: "PENDING" } };
+  }
+
   ignoreSignal(parsedSignalId: string) {
     const row = this.db
       .query("SELECT provider_id, result_json FROM parsed_signals WHERE id = ?")
@@ -2140,6 +2961,13 @@ class AppStore {
     this.db
       .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
       .run("IGNORED", parsedSignalId);
+    this.audit(
+      "signal.ignore",
+      "info",
+      "Signal ignored by operator",
+      { parsedSignalId },
+      "operator",
+    );
     return { parsedSignalId, status: "IGNORED" };
   }
 
@@ -2192,10 +3020,195 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items ORDER BY created_at DESC",
+          "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items ORDER BY created_at DESC",
         )
         .all() as Row[]
     ).map(queueRow);
+  }
+
+  heldQueueItems() {
+    const rows = this.db
+      .query(
+        `SELECT queue_items.id, queue_items.account_id, queue_items.logical_trade_id,
+                queue_items.status, queue_items.payload_json, queue_items.held_reason,
+                queue_items.origin_queue_item_id, queue_items.created_at,
+                parsed_signals.provider_id, parsed_signals.result_json,
+                providers.title AS provider_title
+         FROM queue_items
+         LEFT JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
+         LEFT JOIN providers ON providers.id = parsed_signals.provider_id
+         WHERE queue_items.status = 'HELD'
+         ORDER BY queue_items.created_at DESC`,
+      )
+      .all() as Row[];
+    const droppedByQueueItem = this.droppedLifecycleForQueueItems(
+      rows.map((row) => String(row.id)),
+    );
+    return rows.map((row) => {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      const accountId = String(row.account_id ?? "");
+      const currentPrice = this.freshestEaReportedPrice(accountId, payload);
+      const symbol = payload.brokerSymbol ?? payload.canonicalSymbol ?? "";
+      const originalEntry = payload.entry?.from;
+      const droppedLifecycle = droppedByQueueItem.get(String(row.id)) ?? [];
+      const driftPct =
+        originalEntry !== undefined && currentPrice?.price !== undefined && originalEntry !== 0
+          ? Number((((currentPrice.price - originalEntry) / originalEntry) * 100).toFixed(2))
+          : undefined;
+      return {
+        id: String(row.id),
+        heldReason: String(row.held_reason ?? ""),
+        accountId,
+        providerId: String(row.provider_id ?? ""),
+        providerTitle: row.provider_id ? String(row.provider_title ?? row.provider_id) : undefined,
+        commandType: payload.commandType,
+        symbol,
+        originalEntry,
+        currentPrice: currentPrice?.price,
+        driftPct,
+        droppedLifecycleCount: droppedLifecycle.length,
+        droppedLifecycle,
+        createdAt: String(row.created_at),
+      };
+    });
+  }
+
+  private droppedLifecycleForQueueItems(queueItemIds: string[]) {
+    const dropped = new Map<string, string[]>();
+    if (queueItemIds.length === 0) return dropped;
+    const placeholders = queueItemIds.map(() => "?").join(", ");
+    const rows = this.db
+      .query(
+        `SELECT held_queue_item_id, command_type
+         FROM held_lifecycle_drops
+         WHERE held_queue_item_id IN (${placeholders})
+         ORDER BY created_at ASC`,
+      )
+      .all(...queueItemIds) as Row[];
+    for (const row of rows) {
+      const id = String(row.held_queue_item_id);
+      const commands = dropped.get(id) ?? [];
+      commands.push(String(row.command_type));
+      dropped.set(id, commands);
+    }
+    return dropped;
+  }
+
+  requeueQueueItem(id: string, mode?: string) {
+    if (mode !== "market" && mode !== "original") {
+      return {
+        statusCode: 422 as const,
+        error: 'Requeue mode must be "market" or "original"',
+      };
+    }
+    const row = this.db
+      .query(
+        `SELECT queue_items.id, queue_items.account_id, queue_items.logical_trade_id,
+                queue_items.status, queue_items.payload_json, queue_items.parsed_signal_id,
+                parsed_signals.provider_id
+         FROM queue_items
+         LEFT JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
+         WHERE queue_items.id = ?`,
+      )
+      .get(id) as Row | null;
+    if (!row) return { statusCode: 404 as const, error: "Held queue item not found" };
+    if (String(row.status) !== "HELD") {
+      return { statusCode: 409 as const, error: "Only HELD queue items can be requeued" };
+    }
+
+    const originalAccountId = String(row.account_id ?? "");
+    const providerId = String(row.provider_id ?? "");
+    const targetAccountId =
+      (providerId
+        ? this.targetAccountIdsForProvider(providerId, originalAccountId)[0]
+        : undefined) ?? originalAccountId;
+    if (this.isEquityGuardianPaused(targetAccountId)) {
+      return {
+        statusCode: 409 as const,
+        error: "Cannot requeue while the target account's Equity Guardian is paused",
+      };
+    }
+
+    const originalPayload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+    const payload =
+      mode === "market"
+        ? { ...originalPayload, orderType: "MARKET" as const, entry: undefined }
+        : originalPayload;
+    const queueItemId = `queue_${nanoid(10)}`;
+    const item: ExecutionQueueItem = {
+      id: queueItemId,
+      accountId: targetAccountId || undefined,
+      logicalTradeId: String(row.logical_trade_id ?? "") || undefined,
+      status: "PENDING",
+      payload,
+    };
+    this.insertQueueItem(item, String(row.parsed_signal_id ?? ""), { originQueueItemId: id });
+    this.db
+      .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
+      .run("DISMISSED", nowIso(), id);
+    this.audit(
+      "queue.requeue",
+      "info",
+      "Held queue item requeued by operator",
+      {
+        heldQueueItemId: id,
+        queueItemId,
+        mode,
+        accountId: targetAccountId,
+      },
+      "operator",
+    );
+    const droppedLifecycle = this.droppedLifecycleForQueueItems([id]).get(id) ?? [];
+    return {
+      queueItemId,
+      originQueueItemId: id,
+      accountId: targetAccountId,
+      mode,
+      status: "PENDING" as const,
+      droppedLifecycleCount: droppedLifecycle.length,
+      droppedLifecycle,
+    };
+  }
+
+  dismissQueueItem(id: string) {
+    const row = this.db.query("SELECT status FROM queue_items WHERE id = ?").get(id) as Row | null;
+    if (!row) return { statusCode: 404 as const, error: "Held queue item not found" };
+    if (String(row.status) !== "HELD") {
+      return { statusCode: 409 as const, error: "Only HELD queue items can be dismissed" };
+    }
+    this.db
+      .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
+      .run("DISMISSED", nowIso(), id);
+    this.audit(
+      "queue.dismiss",
+      "info",
+      "Held queue item dismissed by operator",
+      {
+        queueItemId: id,
+      },
+      "operator",
+    );
+    return { queueItemId: id, status: "DISMISSED" as const };
+  }
+
+  private freshestEaReportedPrice(accountId: string, payload: ExecutionQueueItem["payload"]) {
+    if (!accountId) return undefined;
+    const snapshot = this.mt5SnapshotsByAccount()[accountId];
+    const targetSymbol = normalizeLockedSymbol(payload.brokerSymbol ?? payload.canonicalSymbol);
+    if (!snapshot || !targetSymbol) return undefined;
+    const record = snapshot.symbols.find((item) => {
+      if (!item || typeof item !== "object") return false;
+      const symbol = normalizeLockedSymbol(
+        String((item as Record<string, unknown>).symbol ?? (item as Record<string, unknown>).name),
+      );
+      return symbol === targetSymbol;
+    });
+    if (!record || typeof record !== "object") return undefined;
+    const quote = record as Record<string, unknown>;
+    const bid = Number(quote.bid ?? 0);
+    const ask = Number(quote.ask ?? 0);
+    const price = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid > 0 ? bid : ask > 0 ? ask : undefined;
+    return price === undefined ? undefined : { price, updatedAt: snapshot.updatedAt };
   }
 
   registerMt5Account(input: {
@@ -2209,10 +3222,13 @@ class AppStore {
     marginMode: "HEDGING" | "NETTING";
     availableSymbols?: string[];
     linkCode?: string;
-  }): { accountId: string; status: "REGISTERED" } | { statusCode: 404; error: string } {
+  }): { accountId: string; status: "REGISTERED" } | { statusCode: 404 | 409; error: string } {
     const slot = input.linkCode ? this.accountSlotByCode(input.linkCode) : undefined;
     if (input.linkCode && !slot) {
       return { statusCode: 404, error: "Account slot link code was not found" };
+    }
+    if (slot?.status === "expired") {
+      return { statusCode: 409, error: "Account slot link code has expired" };
     }
     const accountId = `mt5-${input.accountNumber}`;
     const now = nowIso();
@@ -2277,6 +3293,9 @@ class AppStore {
       if (!slot || (slot.accountId && slot.accountId !== input.accountId)) {
         return { error: "Account slot link code was not found", statusCode: 404 as const };
       }
+      if (slot.status === "expired") {
+        return { error: "Account slot link code has expired", statusCode: 409 as const };
+      }
     } else {
       const slot = this.accountSlots().find((item) => item.accountId === input.accountId);
       if (slot && slot.status !== "legacy") {
@@ -2320,6 +3339,7 @@ class AppStore {
       }
     }
     this.recordEquityCurveSamples(input, now);
+    this.emitEvent({ type: "heartbeat", accountId: input.accountId });
     return { accountId: input.accountId, heartbeatStatus: "online", at: now };
   }
 
@@ -2329,12 +3349,12 @@ class AppStore {
     const rows = accountId
       ? (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE status = 'PENDING' AND account_id = ? ORDER BY created_at LIMIT 25",
+            "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items WHERE status = 'PENDING' AND account_id = ? ORDER BY created_at LIMIT 25",
           )
           .all(accountId) as Row[])
       : (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, leased_at, created_at FROM queue_items WHERE status = 'PENDING' ORDER BY created_at LIMIT 25",
+            "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items WHERE status = 'PENDING' ORDER BY created_at LIMIT 25",
           )
           .all() as Row[]);
     const row = rows.find((candidate) => {
@@ -2343,9 +3363,18 @@ class AppStore {
       if (!this.isEquityGuardianPaused(item.accountId)) return true;
       const now = new Date().toISOString();
       this.db
-        .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?")
-        .run("FAILED", now, item.id);
+        .query(
+          "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run("HELD", "GUARDIAN", now, item.id);
       this.audit("equity-guardian.reject", "warn", "OPEN_TRADE rejected by Equity Guardian", item);
+      this.dispatchAlert(
+        "guardian-rejection",
+        item.id,
+        `Equity Guardian rejected OPEN_TRADE queue item ${item.id} for account ${item.accountId}.`,
+        "alertOnGuardianPause",
+      );
+      this.alertHeldQueueItem(item.id, "GUARDIAN");
       return false;
     }) as Row | undefined;
     if (!row) return null;
@@ -2363,15 +3392,24 @@ class AppStore {
     const cutoff = new Date(Date.now() - settings.leaseTimeoutSeconds * 1000).toISOString();
     const stale = this.db
       .query(
-        "SELECT id, lease_count FROM queue_items WHERE status = 'LEASED' AND leased_at IS NOT NULL AND leased_at < ?",
+        "SELECT id, lease_count, payload_json FROM queue_items WHERE status = 'LEASED' AND leased_at IS NOT NULL AND leased_at < ?",
       )
       .all(cutoff) as Row[];
     for (const row of stale) {
       const leaseCount = Number(row.lease_count ?? 0);
-      const nextStatus = leaseCount >= settings.maxLeaseAttempts ? "EXPIRED" : "PENDING";
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      const openTrade = payload.commandType === "OPEN_TRADE";
+      const nextStatus = openTrade
+        ? "HELD"
+        : leaseCount >= settings.maxLeaseAttempts
+          ? "EXPIRED"
+          : "PENDING";
+      const heldReason = openTrade ? "DELIVERY_UNKNOWN" : null;
       this.db
-        .query("UPDATE queue_items SET status = ?, leased_at = NULL, updated_at = ? WHERE id = ?")
-        .run(nextStatus, new Date().toISOString(), String(row.id));
+        .query(
+          "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run(nextStatus, heldReason, new Date().toISOString(), String(row.id));
       this.audit(
         "queue.lease-recovery",
         nextStatus === "EXPIRED" ? "warn" : "info",
@@ -2381,6 +3419,7 @@ class AppStore {
           leaseCount,
         },
       );
+      if (nextStatus === "HELD") this.alertHeldQueueItem(String(row.id), String(heldReason));
     }
   }
 
@@ -2411,30 +3450,25 @@ class AppStore {
       const sourceDate = trade?.source?.messageDate || String(row.created_at);
       if (!openTradeTimestampExpired(sourceDate, settings)) continue;
       this.db
-        .query("UPDATE queue_items SET status = ?, leased_at = NULL, updated_at = ? WHERE id = ?")
-        .run("EXPIRED", now, String(row.id));
+        .query(
+          "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
+        )
+        .run("HELD", "EXPIRED_LATE", now, String(row.id));
       if (row.parsed_signal_id) {
         this.db
           .query(
-            "UPDATE parsed_signals SET status = ? WHERE id = ? AND status NOT IN ('IGNORED','EXPIRED')",
+            "UPDATE parsed_signals SET status = ? WHERE id = ? AND status NOT IN ('IGNORED','HELD')",
           )
-          .run("EXPIRED", String(row.parsed_signal_id));
-      }
-      if (trade && trade.status !== "CLOSED" && trade.status !== "CANCELLED") {
-        const updated = cancelLogicalTrade(trade, {
-          evidence: "Open trade queue expired before MT5 execution",
-          lastSnapshotAt: now,
-        });
-        this.db
-          .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
-          .run(updated.status, JSON.stringify(updated), trade.id);
+          .run("HELD", String(row.parsed_signal_id));
       }
       this.audit("queue.expired-open", "warn", "Expired stale open-trade queue item", {
         queueItemId: String(row.id),
         logicalTradeId: String(row.logical_trade_id ?? ""),
+        heldReason: "EXPIRED_LATE",
         sourceDate,
         maxOpenTradeAgeSeconds: settings.maxOpenTradeAgeSeconds,
       });
+      this.alertHeldQueueItem(String(row.id), "EXPIRED_LATE");
     }
   }
 
@@ -2490,6 +3524,14 @@ class AppStore {
         JSON.stringify(breaches),
         new Date().toISOString(),
       );
+    if (paused && !current.paused) {
+      this.dispatchAlert(
+        "guardian-paused",
+        accountId,
+        `Equity Guardian paused for account ${current.accountNumber || accountId}.`,
+        "alertOnGuardianPause",
+      );
+    }
     return this.equityGuardian(accountId);
   }
 
@@ -2558,6 +3600,14 @@ class AppStore {
       "MT5 execution report received",
       input,
     );
+    if (input.status === "FAILED") {
+      this.dispatchAlert(
+        "execution-failed",
+        input.queueItemId,
+        `MT5 execution failed for queue item ${input.queueItemId}: ${input.brokerComment || input.errorText || "unknown error"}.`,
+        "alertOnExecFailed",
+      );
+    }
     log(input.status === "EXECUTED" ? "info" : "error", "mt5.report", {
       accountId: input.accountId,
       queueItemId: input.queueItemId,
@@ -2594,6 +3644,7 @@ class AppStore {
         JSON.stringify(input.symbols ?? []),
         now,
       );
+    this.persistSymbolMetadata(input.accountId, input.symbols ?? []);
     this.reconcileSnapshotState(input.accountId, input.positions, input.orders);
     this.reconcileManualBrokerClosures(input.accountId, input.positions, input.orders);
     this.evaluateVirtualTakeProfits({
@@ -3422,7 +4473,7 @@ class AppStore {
     positionTicket: string,
   ) {
     const trade = this.logicalTrade(tradeId);
-    if (!trade) return;
+    if (!trade || trade.status === "ARCHIVED") return;
     const evidence = [source, deal.comment, deal.dealTicket ? `deal:${deal.dealTicket}` : ""]
       .filter(Boolean)
       .join(" | ");
@@ -3549,6 +4600,22 @@ class AppStore {
   }
 
   accountSlots() {
+    const expiryCutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const waiting = this.db
+      .query("SELECT id, created_at FROM account_slots WHERE status = 'waiting'")
+      .all() as Row[];
+    for (const row of waiting) {
+      const createdAt = Date.parse(String(row.created_at));
+      if (!Number.isFinite(createdAt) || createdAt >= expiryCutoff) continue;
+      this.db
+        .query(
+          "UPDATE account_slots SET status = ?, updated_at = ? WHERE id = ? AND status = 'waiting'",
+        )
+        .run("expired", nowIso(), String(row.id));
+      this.audit("account-slot.expired", "warn", "Waiting MT5 account slot expired", {
+        slotId: String(row.id),
+      });
+    }
     return (
       this.db
         .query(
@@ -3645,6 +4712,29 @@ class AppStore {
         now,
       );
     return this.accountSlots().find((item) => item.id === slot.id);
+  }
+
+  deleteAccountSlot(id: string) {
+    const slot = this.accountSlots().find((item) => item.id === id);
+    if (!slot) return { statusCode: 404 as const, error: "Account slot not found" };
+    if (slot.status !== "waiting" && slot.status !== "expired") {
+      return {
+        statusCode: 409 as const,
+        error: "Only waiting or expired account slots can be deleted",
+      };
+    }
+    this.db.query("DELETE FROM account_slots WHERE id = ?").run(id);
+    this.audit(
+      "account-slot.delete",
+      "warn",
+      "MT5 account slot deleted",
+      {
+        slotId: id,
+        status: slot.status,
+      },
+      "operator",
+    );
+    return { slotId: id, status: "DELETED" as const };
   }
 
   rotateAccountSlot(id: string) {
@@ -3871,6 +4961,164 @@ class AppStore {
         )
         .all(logicalTradeId) as Row[]
     ).map((row) => this.brokerOrderFromRow(row));
+  }
+
+  resolveTrade(tradeId: string, action?: string) {
+    if (action !== "close_from_history" && action !== "readopt" && action !== "archive") {
+      return {
+        statusCode: 422 as const,
+        error: 'Trade resolve action must be "close_from_history", "readopt", or "archive"',
+      };
+    }
+    const trade = this.logicalTrade(tradeId);
+    if (!trade) return { statusCode: 404 as const, error: "Logical trade not found" };
+    if (trade.status !== "OUT_OF_SYNC") {
+      return { statusCode: 409 as const, error: "Only OUT_OF_SYNC trades can be resolved" };
+    }
+
+    let updated: LogicalTrade;
+    if (action === "archive") {
+      updated = {
+        ...trade,
+        status: "ARCHIVED",
+        livePositionExists: false,
+        outOfSyncReason: undefined,
+        matchedBrokerTickets: [],
+        brokerComment: undefined,
+        legs: trade.legs.map((leg) =>
+          leg.status === "CLOSED" || leg.status === "HIT"
+            ? leg
+            : { ...leg, status: "SKIPPED" as const, brokerEvidence: "Archived by operator" },
+        ),
+      };
+    } else if (action === "readopt") {
+      const candidates = this.reconcilerCandidateBrokerTickets(trade);
+      const snapshot = trade.accountId ? this.mt5SnapshotsByAccount()[trade.accountId] : undefined;
+      const position = snapshot?.positions.find((record) =>
+        candidates.includes(brokerTicketFromSnapshot(record)),
+      );
+      const positionTicket = position ? brokerTicketFromSnapshot(position) : "";
+      if (!positionTicket) {
+        return {
+          statusCode: 409 as const,
+          error: "No live broker position candidate is available for readopt",
+        };
+      }
+      updated = {
+        ...trade,
+        status: "OPEN",
+        livePositionExists: true,
+        outOfSyncReason: undefined,
+        matchedBrokerTickets: [positionTicket],
+        brokerComment: brokerCommentFromSnapshot(position),
+        lastSnapshotAt: snapshot?.updatedAt,
+        legs: trade.legs.map((leg) =>
+          leg.status === "CLOSED" || leg.status === "HIT"
+            ? leg
+            : {
+                ...leg,
+                status: "OPEN" as const,
+                brokerEvidence: `Readopted ticket ${positionTicket}`,
+              },
+        ),
+      };
+    } else {
+      const closeOrders = this.brokerOrders(tradeId).filter(
+        (order) =>
+          (order.action === "FULL_CLOSE" || order.action === "PARTIAL_CLOSE") &&
+          order.source !== "manual" &&
+          !order.source.startsWith("app-"),
+      );
+      if (closeOrders.length === 0) {
+        return {
+          statusCode: 409 as const,
+          error: "No matching broker history close deal is available",
+        };
+      }
+      const closedLegs = new Set(
+        closeOrders
+          .map((order) => parseLegIndex(order.legId))
+          .filter((leg): leg is number => leg !== undefined),
+      );
+      const matchedBrokerTickets = [
+        ...new Set(
+          closeOrders
+            .map((order) => order.positionTicket)
+            .filter((ticket): ticket is string => truthyBrokerTicket(ticket)),
+        ),
+      ];
+      updated = {
+        ...trade,
+        status: "CLOSED",
+        livePositionExists: false,
+        outOfSyncReason: undefined,
+        matchedBrokerTickets: matchedBrokerTickets.length
+          ? matchedBrokerTickets
+          : trade.matchedBrokerTickets,
+        legs: trade.legs.map((leg) =>
+          closedLegs.has(leg.leg)
+            ? { ...leg, status: "CLOSED" as const, brokerEvidence: "Resolved from broker history" }
+            : { ...leg, status: "SKIPPED" as const, brokerEvidence: "No matching history deal" },
+        ),
+      };
+    }
+    this.db
+      .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+      .run(updated.status, JSON.stringify(updated), tradeId);
+    this.audit(
+      "logical-trade.resolved",
+      "info",
+      `Logical trade resolved via ${action}`,
+      {
+        logicalTradeId: tradeId,
+        action,
+        status: updated.status,
+        matchedBrokerTickets: updated.matchedBrokerTickets,
+      },
+      "operator",
+    );
+    this.emitEvent({
+      type: "reconciliation",
+      tradeId,
+      accountId: trade.accountId,
+      to: updated.status,
+    });
+    return {
+      tradeId,
+      action,
+      status: updated.status,
+      matchedBrokerTickets: updated.matchedBrokerTickets ?? [],
+    };
+  }
+
+  private reconcilerCandidateBrokerTickets(trade: LogicalTrade) {
+    const tickets = new Set(
+      (trade.matchedBrokerTickets ?? []).filter((ticket) => truthyBrokerTicket(ticket)),
+    );
+    for (const ticket of this.brokerPositionTicketsForTrade(trade.id)) tickets.add(ticket);
+    const snapshot = trade.accountId ? this.mt5SnapshotsByAccount()[trade.accountId] : undefined;
+    const match = snapshot
+      ? matchedBrokerRecordForTrade(snapshot.positions, trade, tickets)
+      : undefined;
+    const ticket = match ? brokerTicketFromSnapshot(match) : "";
+    if (ticket) tickets.add(ticket);
+    return [...tickets];
+  }
+
+  private brokerPositionTicketsForTrade(tradeId: string) {
+    return (
+      this.db
+        .query(
+          `SELECT position_ticket FROM broker_orders
+           WHERE logical_trade_id = ?
+             AND action = 'OPEN'
+             AND position_ticket IS NOT NULL
+             AND position_ticket NOT IN ('', '0')`,
+        )
+        .all(tradeId) as Row[]
+    )
+      .map((row) => String(row.position_ticket))
+      .filter((ticket) => truthyBrokerTicket(ticket));
   }
 
   private brokerOrderFromRow(row: Row) {
@@ -5532,7 +6780,7 @@ class AppStore {
     this.db
       .query("INSERT OR REPLACE INTO app_settings (id, settings_json, updated_at) VALUES (?, ?, ?)")
       .run("default", JSON.stringify(settings), new Date().toISOString());
-    this.audit("settings.update", "info", "Application settings updated", settings);
+    this.audit("settings.update", "info", "Application settings updated", settings, "operator");
     return settings;
   }
 
@@ -5545,6 +6793,124 @@ class AppStore {
   private secret(key: string) {
     const row = this.db.query("SELECT value FROM app_secrets WHERE key = ?").get(key) as Row | null;
     return row ? String(row.value) : "";
+  }
+
+  async sendAlertTest() {
+    const settings = this.appSettings();
+    if (!settings.alertBotToken || !settings.alertChatId) {
+      return {
+        statusCode: 400 as const,
+        error: "Alert bot token and chat id must be configured",
+      };
+    }
+    const result = await this.postTelegramAlert(
+      settings.alertBotToken,
+      settings.alertChatId,
+      "Telegram TC alert test: outbound alerting is configured.",
+    );
+    if (!result.ok) {
+      this.audit("alert.delivery-failed", "error", "Telegram alert test failed", {
+        error: result.error,
+      });
+      return { statusCode: 502 as const, error: result.error };
+    }
+    this.audit("alert.test", "info", "Telegram alert test sent", {}, "operator");
+    return { status: "SENT" as const };
+  }
+
+  private dispatchAlert(event: string, key: string, text: string, setting: AlertSetting) {
+    const settings = this.appSettings();
+    if (!settings[setting] || !settings.alertBotToken || !settings.alertChatId) return;
+    const dedupKey = `${event}:${key}`;
+    const lastSentAt = this.alertSentAt.get(dedupKey) ?? 0;
+    if (Date.now() - lastSentAt < ALERT_DEDUP_MS) return;
+    this.alertSentAt.set(dedupKey, Date.now());
+    void this.postTelegramAlert(settings.alertBotToken, settings.alertChatId, text).then(
+      (result) => {
+        if (result.ok) return;
+        this.audit("alert.delivery-failed", "error", "Telegram alert delivery failed", {
+          event,
+          key,
+          error: result.error,
+        });
+      },
+    );
+  }
+
+  private async postTelegramAlert(token: string, chatId: string, text: string) {
+    try {
+      const response = await fetch(
+        `https://api.telegram.org/bot${encodeURIComponent(token)}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text }),
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+      if (!response.ok) return { ok: false as const, error: `Telegram HTTP ${response.status}` };
+      return { ok: true as const };
+    } catch (error) {
+      return {
+        ok: false as const,
+        error: error instanceof Error ? error.message : "Unknown Telegram alert error",
+      };
+    }
+  }
+
+  private alertHeldQueueItem(queueItemId: string, reason: string) {
+    this.dispatchAlert(
+      "held",
+      queueItemId,
+      `Telegram TC held queue item ${queueItemId}: ${reason}`,
+      "alertOnHeld",
+    );
+  }
+
+  backupDatabase() {
+    if (this.databasePath === ":memory:") {
+      return { statusCode: 400 as const, error: "Backups require a file-backed database" };
+    }
+    const backupDir = join(dirname(this.databasePath), "backups");
+    Bun.spawnSync(["mkdir", "-p", backupDir]);
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .replace(/\.\d{3}Z$/, "Z");
+    const filename = `telegram-tc-${timestamp}.db`;
+    const path = join(backupDir, filename);
+    try {
+      this.db.query("VACUUM INTO ?").run(path);
+      this.pruneBackups(backupDir);
+      this.audit("admin.backup", "info", "SQLite backup created", { filename }, "operator");
+      return { filename };
+    } catch (error) {
+      return {
+        statusCode: 500 as const,
+        error: error instanceof Error ? error.message : "Database backup failed",
+      };
+    }
+  }
+
+  backups() {
+    if (this.databasePath === ":memory:") return [];
+    return this.backupFiles(join(dirname(this.databasePath), "backups")).map((file) => file.name);
+  }
+
+  private pruneBackups(backupDir: string) {
+    const files = this.backupFiles(backupDir);
+    for (const file of files.slice(14)) unlinkSync(join(backupDir, file.name));
+  }
+
+  private backupFiles(backupDir: string) {
+    try {
+      return readdirSync(backupDir, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && /^telegram-tc-.+\.db$/.test(entry.name))
+        .map((entry) => ({ name: basename(entry.name) }))
+        .sort((a, b) => b.name.localeCompare(a.name));
+    } catch {
+      return [];
+    }
   }
 
   telegramSessionSummaries() {
@@ -5597,6 +6963,8 @@ class AppStore {
       accountProviderLinks: this.accountProviderLinks(),
       equityGuardians: this.equityGuardians(),
       telegramSessions: this.telegramSessionSummaries(),
+      telegramHealth: this.telegramSessionHealth(),
+      alerts: this.operationalAlerts(),
       providers: providers.map((provider) => ({
         id: provider.id,
         dialogId: provider.dialogId,
@@ -5659,6 +7027,8 @@ class AppStore {
         commandType: item.payload.commandType,
         symbol: item.payload.brokerSymbol ?? item.payload.canonicalSymbol ?? "unmapped",
         status: item.status,
+        volume: item.payload.volume ?? null,
+        riskPercent: item.payload.riskPercent ?? null,
       })),
       logicalTrades: this.logicalTradesForDashboard(),
       symbolMappings: this.symbolMappings().preview,
@@ -5858,6 +7228,18 @@ class AppStore {
       );
     `);
     this.ensureColumn("queue_items", "lease_count", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("queue_items", "held_reason", "TEXT");
+    this.ensureColumn("queue_items", "origin_queue_item_id", "TEXT");
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS held_lifecycle_drops (
+        id TEXT PRIMARY KEY,
+        held_queue_item_id TEXT NOT NULL,
+        raw_message_id TEXT NOT NULL,
+        command_type TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (held_queue_item_id, raw_message_id)
+      );
+    `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS mt5_accounts (
         id TEXT PRIMARY KEY,
@@ -6133,6 +7515,35 @@ class AppStore {
         created_at TEXT NOT NULL
       );
     `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS symbol_metadata (
+        account_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        point REAL,
+        digits INTEGER,
+        pip_size REAL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, symbol)
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS parser_training_examples (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        raw_text TEXT NOT NULL,
+        command_type TEXT NOT NULL,
+        symbol TEXT,
+        direction TEXT,
+        entry REAL,
+        stop_loss REAL,
+        take_profits_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_parser_training_provider_fingerprint ON parser_training_examples(provider_id, fingerprint)",
+    );
     const operatorStateBefore = this.operatorStateSnapshot();
     this.backfillStuckOutOfSyncTrades();
     this.assertOperatorStatePreserved(
@@ -6675,7 +8086,14 @@ class AppStore {
   }) {
     return input.results.map((result) => {
       const parsedSignalId = `parse_${nanoid(10)}`;
-      const reviewRequired = shouldRequireManualReview(result);
+      // Adaptive learning: if the operator has approved this signal structure
+      // enough times, stop flagging mapped open trades for review.
+      const reviewRequired =
+        shouldRequireManualReview(result) &&
+        !learnedOverrideApplies(
+          result,
+          this.trainingExampleCount(input.providerId, structuralFingerprint(result.originalText)),
+        );
       this.db
         .query(
           "INSERT INTO parsed_signals (id, provider_id, raw_message_id, result_json, review_required, fingerprint, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -6779,11 +8197,12 @@ class AppStore {
   private insertNonLeasedQueueItem(
     parsedSignalId: string,
     signal: ParsedSignal,
-    status: Extract<QueueStatus, "DUPLICATE" | "IGNORED" | "EXPIRED">,
+    status: Extract<QueueStatus, "DUPLICATE" | "IGNORED" | "EXPIRED" | "HELD">,
     options: {
       accountId: string;
       executionMode: ExecutionMode;
       settings: AppSettings;
+      heldReason?: string;
     },
   ) {
     const item = buildExecutionCommand(signal, {
@@ -6794,14 +8213,18 @@ class AppStore {
       riskPercent: options.settings.defaultRiskPercent,
     });
     item.status = status;
-    this.insertQueueItem(item, parsedSignalId);
+    return this.insertQueueItem(item, parsedSignalId, { heldReason: options.heldReason });
   }
 
-  private insertQueueItem(item: ExecutionQueueItem, parsedSignalId: string) {
+  private insertQueueItem(
+    item: ExecutionQueueItem,
+    parsedSignalId: string,
+    metadata: { heldReason?: string; originQueueItemId?: string } = {},
+  ) {
     const now = new Date().toISOString();
     this.db
       .query(
-        "INSERT INTO queue_items (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, lease_count, leased_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO queue_items (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, lease_count, held_reason, origin_queue_item_id, leased_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         item.id,
@@ -6811,10 +8234,13 @@ class AppStore {
         item.status,
         JSON.stringify(item.payload),
         0,
+        metadata.heldReason ?? null,
+        metadata.originQueueItemId ?? null,
         item.leasedAt ?? null,
         now,
         now,
       );
+    return item.id;
   }
 
   private mt5SnapshotsByAccount() {
@@ -6846,7 +8272,13 @@ class AppStore {
       // the next snapshot doesn't see the ticket in positions[] and overwrites
       // status back to 'OUT_OF_SYNC'. That's how we ended up with 6 stuck
       // trades on prod despite the closes being recorded correctly.
-      if (!hasBrokerState || trade.status === "CLOSED" || trade.status === "CANCELLED") continue;
+      if (
+        !hasBrokerState ||
+        trade.status === "CLOSED" ||
+        trade.status === "CANCELLED" ||
+        trade.status === "ARCHIVED"
+      )
+        continue;
       if (this.hasRecordedRealFullClose(trade.id)) continue;
 
       const match = snapshotMatchForTrade(
@@ -6872,6 +8304,29 @@ class AppStore {
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run(updated.status, JSON.stringify(updated), trade.id);
+      // Only surface an event/audit on a real status transition — snapshots
+      // arrive every ~2s and most updates only refresh lastSnapshotAt.
+      if (updated.status !== trade.status) {
+        this.emitEvent({
+          type: "reconciliation",
+          tradeId: trade.id,
+          accountId,
+          from: trade.status,
+          to: updated.status,
+        });
+        this.audit(
+          "logical-trade.reconciled",
+          updated.status === "OUT_OF_SYNC" ? "warn" : "info",
+          `Trade reconciled ${trade.status} → ${updated.status}`,
+          {
+            logicalTradeId: trade.id,
+            accountId,
+            from: trade.status,
+            to: updated.status,
+            reason: updated.outOfSyncReason,
+          },
+        );
+      }
       if (missingPendingOpen) {
         this.audit(
           "logical-trade.pending-missing",
@@ -7005,6 +8460,10 @@ class AppStore {
 
   private logicalTradesForDashboard() {
     return this.logicalTrades().map((trade) => {
+      const matchedBrokerTickets =
+        trade.status === "OUT_OF_SYNC"
+          ? this.reconcilerCandidateBrokerTickets(trade)
+          : (trade.matchedBrokerTickets ?? []);
       return {
         id: trade.id,
         symbol: trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "unmapped",
@@ -7014,7 +8473,7 @@ class AppStore {
         source: trade.source,
         outOfSyncReason: trade.outOfSyncReason,
         livePositionExists: trade.livePositionExists,
-        matchedBrokerTickets: trade.matchedBrokerTickets,
+        matchedBrokerTickets,
         brokerComment: trade.brokerComment,
         lastSnapshotAt: trade.lastSnapshotAt,
         legs: trade.legs.map((leg) => ({
@@ -7052,7 +8511,7 @@ class AppStore {
 
   private appendTradeCommand(tradeId: string, signal: ParsedSignal) {
     const trade = this.logicalTrade(tradeId);
-    if (!trade) return;
+    if (!trade || trade.status === "ARCHIVED") return;
     const updated: LogicalTrade = {
       ...trade,
       commandHistory: [
@@ -7102,7 +8561,7 @@ class AppStore {
     if (!row || !tradeId) return;
 
     const trade = this.logicalTrade(tradeId);
-    if (!trade) return;
+    if (!trade || trade.status === "ARCHIVED") return;
 
     const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
     const evidence = executionEvidence(input);
@@ -7110,14 +8569,36 @@ class AppStore {
     let updated: LogicalTrade = trade;
 
     if (input.status === "FAILED") {
-      updated = {
-        ...trade,
-        status: payload.commandType === "OPEN_TRADE" ? "OUT_OF_SYNC" : trade.status,
-        legs:
-          payload.commandType === "OPEN_TRADE"
-            ? trade.legs.map((leg) => ({ ...leg, status: "FAILED", brokerEvidence: evidence }))
-            : trade.legs,
-      };
+      if (payload.commandType === "OPEN_TRADE") {
+        updated = {
+          ...trade,
+          status: "OUT_OF_SYNC",
+          legs: trade.legs.map((leg) => ({ ...leg, status: "FAILED", brokerEvidence: evidence })),
+        };
+      } else if (isPositionGoneFailure(input)) {
+        // The targeted position is already gone, so the close/SL-modify is
+        // effectively done. Mark the targeted leg(s) terminal so nothing
+        // re-queues this command against a vanished position (the virtual-TP
+        // retry loop). A full-close / SL-modify with no specific leg retires
+        // every still-open leg; a TP-leg close retires just that leg.
+        const targetLeg =
+          virtualTpLegFromExecutionReport(payload, input) ??
+          (payload.commandType === "CLOSE_PARTIAL" && payload.partialClose?.kind === "TP_LEG"
+            ? payload.partialClose.value
+            : undefined);
+        const legs = trade.legs.map((leg) =>
+          (targetLeg === undefined || leg.leg === targetLeg) && leg.status !== "CLOSED"
+            ? {
+                ...leg,
+                status: "CLOSED" as const,
+                brokerEvidence: `position gone: ${input.brokerComment}`,
+              }
+            : leg,
+        );
+        updated = { ...trade, status: virtualTpStatusAfterLegClose(trade, legs, payload), legs };
+      }
+      // Other failures (invalid stops, no money, autotrading disabled) leave the
+      // trade unchanged so the operator can intervene.
     } else if (virtualTpLeg !== undefined) {
       const legs = trade.legs.map((leg) =>
         leg.leg === virtualTpLeg
@@ -7447,12 +8928,258 @@ class AppStore {
     };
   }
 
+  /**
+   * Record an operator-approved signal shape so the parser can learn to stop
+   * flagging that structure for review. Stored per provider, keyed by a
+   * number-stripped structural fingerprint.
+   */
+  private recordTrainingExample(providerId: string, rawText: string, signal: ParsedSignal) {
+    if (!providerId || signal.commandType !== "OPEN_TRADE" || !rawText.trim()) return;
+    this.db
+      .query(
+        `INSERT INTO parser_training_examples
+           (id, provider_id, fingerprint, raw_text, command_type, symbol, direction, entry, stop_loss, take_profits_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `train_${nanoid(10)}`,
+        providerId,
+        structuralFingerprint(rawText),
+        rawText,
+        signal.commandType,
+        signal.canonicalSymbol ?? signal.rawSymbol ?? null,
+        signal.direction ?? null,
+        signal.entry?.from ?? null,
+        signal.stopLoss ?? null,
+        JSON.stringify(signal.takeProfits.map((tp) => tp.price ?? null)),
+        nowIso(),
+      );
+  }
+
+  private trainingExampleCount(providerId: string, fingerprint: string): number {
+    const row = this.db
+      .query(
+        "SELECT COUNT(*) AS count FROM parser_training_examples WHERE provider_id = ? AND fingerprint = ?",
+      )
+      .get(providerId, fingerprint) as Row | null;
+    return Number(row?.count ?? 0);
+  }
+
+  /** Number of distinct structures the parser has learned (>=3 examples) for a provider. */
+  learnedPatternCount(providerId: string): number {
+    const row = this.db
+      .query(
+        "SELECT COUNT(*) AS count FROM (SELECT fingerprint FROM parser_training_examples WHERE provider_id = ? GROUP BY fingerprint HAVING COUNT(*) >= 3)",
+      )
+      .get(providerId) as Row | null;
+    return Number(row?.count ?? 0);
+  }
+
+  /** Clears learned examples for a provider and reverts to default review behaviour. */
+  resetProviderLearning(providerId: string): { providerId: string; cleared: number } {
+    const before = this.db
+      .query("SELECT COUNT(*) AS count FROM parser_training_examples WHERE provider_id = ?")
+      .get(providerId) as Row | null;
+    this.db.query("DELETE FROM parser_training_examples WHERE provider_id = ?").run(providerId);
+    const cleared = Number(before?.count ?? 0);
+    this.audit(
+      "provider.learning.reset",
+      "info",
+      "Parser learning reset for provider",
+      { providerId, cleared },
+      "operator",
+    );
+    return { providerId, cleared };
+  }
+
+  /**
+   * Rolling provider quality score from broker fills. Computed on demand so it
+   * always reflects the latest broker history.
+   * ponytail: recomputed per request rather than materialized in a cache table.
+   * Ceiling — O(trades) per call; upgrade path is provider_score_cache refreshed
+   * on history ingestion if a provider accumulates thousands of trades.
+   */
+  providerScore(providerId: string) {
+    const provider = this.providers().find((item) => item.id === providerId);
+    if (!provider) return null;
+    const trades = this.logicalTrades().filter((trade) => trade.providerId === providerId);
+    const scoreTrades: ScoreTrade[] = [];
+    for (const trade of trades) {
+      const orders = this.brokerOrders(trade.id);
+      const closeOrders = orders.filter(
+        (order) => order.action === "FULL_CLOSE" || order.action === "PARTIAL_CLOSE",
+      );
+      if (closeOrders.length === 0) continue;
+      const pnl = roundCurrency(
+        closeOrders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0),
+      );
+      const pips = Number(
+        closeOrders.reduce((sum, order) => sum + (order.pnlPips ?? 0), 0).toFixed(1),
+      );
+      const closeAt = closeOrders
+        .map((order) => order.createdAt)
+        .sort()
+        .at(-1) as string;
+      const openAt = orders
+        .filter((order) => order.action === "OPEN")
+        .map((order) => order.createdAt)
+        .sort()[0];
+      const signalAt = trade.source?.messageDate;
+      let latencyMs: number | undefined;
+      if (signalAt && openAt) {
+        const delta =
+          Date.parse(normalizedDateInput(openAt)) - Date.parse(normalizedDateInput(signalAt));
+        if (Number.isFinite(delta)) latencyMs = Math.max(0, delta);
+      }
+      scoreTrades.push({ pnl, pips, closeAt, latencyMs });
+    }
+    const reviewRow = this.db
+      .query(
+        "SELECT COUNT(*) AS total, COALESCE(SUM(review_required), 0) AS reviewed FROM parsed_signals WHERE provider_id = ?",
+      )
+      .get(providerId) as Row | null;
+    const cfgRow = this.db
+      .query("SELECT provider_config_json FROM providers WHERE id = ?")
+      .get(providerId) as Row | null;
+    const config = cfgRow
+      ? (parseJson<{ scoreThresholds?: { green?: number; amber?: number } }>(
+          String(cfgRow.provider_config_json),
+        ) ?? {})
+      : {};
+    const score = computeProviderScore(scoreTrades, {
+      reviewRequired: Number(reviewRow?.reviewed ?? 0),
+      reviewTotal: Number(reviewRow?.total ?? 0),
+      thresholds: config.scoreThresholds,
+    });
+    return {
+      providerId,
+      title: provider.title,
+      learnedPatterns: this.learnedPatternCount(providerId),
+      ...score,
+    };
+  }
+
+  /** Closed trades with full detail across one or all accounts, for JSON export. */
+  exportClosedTrades(input: { accountId?: string; from?: string; to?: string } = {}) {
+    const accounts = input.accountId
+      ? this.mt5Accounts().filter((account) => account.id === input.accountId)
+      : this.mt5Accounts();
+    const providerTitle = new Map(
+      this.providers().map((provider) => [provider.id, provider.title]),
+    );
+    const tradeProvider = new Map(
+      this.logicalTrades().map((trade) => [trade.id, trade.providerId]),
+    );
+    const out: Array<Record<string, unknown>> = [];
+    for (const account of accounts) {
+      for (const trade of this.closedTradesForAccount(account.id)) {
+        const closedAtIso = normalizedDateInput(trade.closedAt);
+        if (input.from && closedAtIso < input.from) continue;
+        if (input.to && closedAtIso > input.to) continue;
+        const providerId = tradeProvider.get(trade.tradeId);
+        out.push({
+          ...trade,
+          accountId: account.id,
+          accountNumber: account.accountNumber,
+          providerId: providerId ?? null,
+          provider: providerId ? (providerTitle.get(providerId) ?? null) : null,
+        });
+      }
+    }
+    return out.sort((a, b) => String(b.closedAt).localeCompare(String(a.closedAt)));
+  }
+
+  /** One flat row per closed trade, suitable for spreadsheet analysis. */
+  exportTradeJournal(input: { accountId?: string; from?: string; to?: string } = {}) {
+    return this.exportClosedTrades(input).map((trade) => ({
+      tradeId: trade.tradeId,
+      accountNumber: trade.accountNumber,
+      provider: trade.provider,
+      symbol: trade.symbol,
+      direction: trade.direction,
+      volume: trade.volume,
+      openPrice: trade.openPrice,
+      closePrice: trade.closePrice,
+      realizedPnl: trade.realizedPnl,
+      result: trade.result,
+      tpHitCount: trade.tpHitCount,
+      tpTotal: trade.tpTotal,
+      closedAt: trade.closedAt,
+    }));
+  }
+
+  exportTradeJournalCsv(input: { accountId?: string; from?: string; to?: string } = {}) {
+    const rows = this.exportTradeJournal(input);
+    const header = [
+      "trade_id",
+      "account_number",
+      "provider",
+      "symbol",
+      "direction",
+      "volume",
+      "open_price",
+      "close_price",
+      "realized_pnl",
+      "result",
+      "tp_hit_count",
+      "tp_total",
+      "closed_at",
+    ];
+    const lines = rows.map((row) =>
+      [
+        row.tradeId,
+        row.accountNumber,
+        row.provider,
+        row.symbol,
+        row.direction,
+        row.volume,
+        row.openPrice,
+        row.closePrice,
+        row.realizedPnl,
+        row.result,
+        row.tpHitCount,
+        row.tpTotal,
+        row.closedAt,
+      ]
+        .map(csvCell)
+        .join(","),
+    );
+    return `${header.join(",")}\n${lines.join("\n")}${lines.length ? "\n" : ""}`;
+  }
+
+  /** Subscribe an SSE connection to the event bus. Returns an unsubscribe fn. */
+  subscribeEvents(listener: (event: AppStoreEvent) => void): () => void {
+    this.eventSubscribers.add(listener);
+    return () => {
+      this.eventSubscribers.delete(listener);
+    };
+  }
+
+  /** Broadcast a delta to every subscriber. A broken listener never blocks a write. */
+  emitEvent(event: AppStoreEvent) {
+    for (const listener of this.eventSubscribers) {
+      try {
+        listener(event);
+      } catch {
+        // A slow or closed SSE connection must not break the write path.
+      }
+    }
+  }
+
   private audit(
     eventType: string,
     level: "info" | "warn" | "error",
     message: string,
     data: unknown,
+    actor: "operator" | "system" = "system",
   ) {
+    // actor lives inside data_json so no schema migration is needed.
+    // ponytail: a dedicated audit_logs.actor column is the upgrade path once
+    // multi-user identity exists.
+    const payload =
+      data && typeof data === "object" && !Array.isArray(data)
+        ? { ...(data as Record<string, unknown>), actor }
+        : { value: data, actor };
     this.db
       .query(
         "INSERT INTO audit_logs (id, event_type, level, message, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -7462,9 +9189,45 @@ class AppStore {
         eventType,
         level,
         message,
-        JSON.stringify(data),
+        JSON.stringify(payload),
         new Date().toISOString(),
       );
+    this.emitEvent({ type: "audit", event: eventType, level, actor });
+  }
+
+  /**
+   * Chronological operator + system action feed. Supports an `event` filter that
+   * may be an exact event type or a `prefix*` wildcard (e.g. `signal.*`).
+   */
+  listAuditLogs(opts: { limit?: number; event?: string } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
+    const event = opts.event?.trim();
+    const rows = (
+      event
+        ? this.db
+            .query(
+              "SELECT id, event_type, level, message, data_json, created_at FROM audit_logs WHERE event_type LIKE ? ORDER BY created_at DESC, id DESC LIMIT ?",
+            )
+            .all(event.endsWith("*") ? `${event.slice(0, -1)}%` : event, limit)
+        : this.db
+            .query(
+              "SELECT id, event_type, level, message, data_json, created_at FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ?",
+            )
+            .all(limit)
+    ) as Row[];
+    return rows.map((row) => {
+      const data = parseJson<Record<string, unknown>>(String(row.data_json)) ?? {};
+      const actor = typeof data.actor === "string" ? data.actor : "system";
+      return {
+        id: String(row.id),
+        eventType: String(row.event_type),
+        level: String(row.level),
+        message: String(row.message),
+        actor,
+        data,
+        createdAt: String(row.created_at),
+      };
+    });
   }
 }
 
@@ -7545,6 +9308,23 @@ function isPendingOrderAcceptance(
     !truthyBrokerTicket(input.positionTicket) &&
     !truthyBrokerTicket(input.dealTicket) &&
     Number(input.filledPrice ?? 0) <= 0
+  );
+}
+
+/**
+ * A close / SL-modify report can come back FAILED because the targeted broker
+ * position no longer exists (closed by an earlier TP, stop-out, or manual
+ * action). The close intent is therefore already satisfied, so this must be
+ * treated as terminal rather than retried — historically a virtual-TP retry
+ * loop re-issued the same command every poll and produced tens of thousands of
+ * identical "virtual TP position ticket not found" FAILED reports from a
+ * handful of stuck items.
+ */
+function isPositionGoneFailure(input: ExecutionReportInput): boolean {
+  const comment = (input.brokerComment ?? "").toLowerCase();
+  return (
+    input.retcode === 0 &&
+    (comment.includes("position ticket not found") || comment.includes("no matching position"))
   );
 }
 
@@ -7998,6 +9778,242 @@ function sumPnl(orders: Array<{ pnlCurrency?: number }>) {
   return roundCurrency(orders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0));
 }
 
+export interface ScoreTrade {
+  pnl: number;
+  pips: number;
+  closeAt: string;
+  latencyMs?: number;
+}
+
+/**
+ * Pure provider-quality scoring over a list of closed trades. Kept side-effect
+ * free so it is unit-testable without a database. Win rate / streak use the most
+ * recent 20 trades; the badge is a configurable traffic light.
+ */
+export function computeProviderScore(
+  trades: ScoreTrade[],
+  input: {
+    reviewRequired?: number;
+    reviewTotal?: number;
+    thresholds?: { green?: number; amber?: number };
+  } = {},
+) {
+  const sorted = [...trades].sort((a, b) => a.closeAt.localeCompare(b.closeAt));
+  const recent = sorted.slice(-20);
+  const wins = recent.filter((trade) => trade.pnl > 0).length;
+  const winRate = recent.length ? wins / recent.length : 0;
+
+  let streak = 0;
+  let streakKind: "win" | "loss" | "none" = "none";
+  for (let i = sorted.length - 1; i >= 0; i -= 1) {
+    const kind = (sorted[i] as ScoreTrade).pnl > 0 ? "win" : "loss";
+    if (streakKind === "none") {
+      streakKind = kind;
+      streak = 1;
+    } else if (kind === streakKind) {
+      streak += 1;
+    } else {
+      break;
+    }
+  }
+
+  const avgPips = recent.length
+    ? Number((recent.reduce((sum, trade) => sum + trade.pips, 0) / recent.length).toFixed(1))
+    : 0;
+  const bestTrade = sorted.length ? roundCurrency(Math.max(...sorted.map((t) => t.pnl))) : 0;
+  const worstTrade = sorted.length ? roundCurrency(Math.min(...sorted.map((t) => t.pnl))) : 0;
+  const latencies = sorted
+    .map((trade) => trade.latencyMs)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const avgFillLatencyMs = latencies.length
+    ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length)
+    : null;
+  const reviewTotal = input.reviewTotal ?? 0;
+  const reviewRate = reviewTotal > 0 ? (input.reviewRequired ?? 0) / reviewTotal : 0;
+
+  const green = input.thresholds?.green ?? 0.55;
+  const amber = input.thresholds?.amber ?? 0.4;
+  const badge: "green" | "amber" | "red" | "neutral" =
+    sorted.length < 5 ? "neutral" : winRate >= green ? "green" : winRate >= amber ? "amber" : "red";
+
+  return {
+    tradeCount: sorted.length,
+    sampleSize: recent.length,
+    winRate: Number(winRate.toFixed(4)),
+    wins,
+    losses: recent.length - wins,
+    streak,
+    streakKind,
+    avgPips,
+    bestTrade,
+    worstTrade,
+    avgFillLatencyMs,
+    reviewRate: Number(reviewRate.toFixed(4)),
+    badge,
+  };
+}
+
+type ProviderScoreResult = ReturnType<typeof computeProviderScore>;
+
+/**
+ * Operational alert when a provider's rolling health turns red (win rate below
+ * the danger threshold) with a meaningful sample. Null when healthy or too new.
+ */
+export function providerScoreAlert(
+  title: string,
+  score: ProviderScoreResult,
+): { message: string; winRate: number } | null {
+  if (score.badge !== "red" || score.sampleSize < 5) return null;
+  return {
+    message: `Provider ${title} win rate dropped to ${Math.round(
+      score.winRate * 100,
+    )}% (last ${score.sampleSize} trades)`,
+    winRate: score.winRate,
+  };
+}
+
+function roundToLotStep(lots: number, lotStep: number, minLot: number) {
+  const step = lotStep > 0 ? lotStep : 0.01;
+  const rounded = Math.round(lots / step) * step;
+  const clamped = Math.max(rounded, minLot > 0 ? minLot : 0);
+  return Number(clamped.toFixed(2));
+}
+
+export interface VolumePreviewInput {
+  riskMode: "fixed" | "percent";
+  /** Lots when riskMode=fixed, percent-of-balance when riskMode=percent. */
+  riskAmount: number;
+  balance?: number;
+  /** Absolute stop distance in price terms (|entry - SL|). */
+  stopLossDistancePrice?: number;
+  tickSize?: number;
+  tickValue?: number;
+  minLot?: number;
+  lotStep?: number;
+}
+
+/**
+ * App-side mirror of the EA's volume sizing so the operator can preview the lot
+ * size a signal will execute at before it is handed to MT5. Display-only.
+ * Returns null lots when percent sizing is requested but the required broker
+ * metadata (balance, SL distance, tick size/value) is not yet known.
+ */
+export function computeVolumePreview(input: VolumePreviewInput) {
+  const minLot = input.minLot ?? 0;
+  const lotStep = input.lotStep ?? 0.01;
+  const hasRiskInputs =
+    typeof input.stopLossDistancePrice === "number" &&
+    input.stopLossDistancePrice > 0 &&
+    typeof input.tickSize === "number" &&
+    input.tickSize > 0 &&
+    typeof input.tickValue === "number" &&
+    input.tickValue > 0;
+  const valuePerLot = hasRiskInputs
+    ? ((input.stopLossDistancePrice as number) / (input.tickSize as number)) *
+      (input.tickValue as number)
+    : null;
+
+  if (input.riskMode === "fixed") {
+    const lots = roundToLotStep(Math.max(input.riskAmount, 0), lotStep, minLot);
+    const riskCurrency = valuePerLot !== null ? Number((valuePerLot * lots).toFixed(2)) : null;
+    return {
+      lots,
+      riskCurrency,
+      riskPercentOfBalance:
+        riskCurrency !== null && input.balance
+          ? Number(((riskCurrency / input.balance) * 100).toFixed(2))
+          : null,
+      basis: "fixed" as const,
+    };
+  }
+
+  // percent of balance
+  if (!input.balance || valuePerLot === null || valuePerLot <= 0) {
+    return {
+      lots: null,
+      riskCurrency: null,
+      riskPercentOfBalance: input.riskAmount,
+      basis: "unavailable" as const,
+    };
+  }
+  const riskCurrency = (input.riskAmount / 100) * input.balance;
+  const lots = roundToLotStep(riskCurrency / valuePerLot, lotStep, minLot);
+  return {
+    lots,
+    riskCurrency: Number(riskCurrency.toFixed(2)),
+    riskPercentOfBalance: input.riskAmount,
+    basis: "percent" as const,
+  };
+}
+
+export interface ReconciliationInput {
+  status: string;
+  openedAtMs: number;
+  nowMs: number;
+  /** True if any matched broker ticket is present in the latest snapshot. */
+  matchedInCurrentSnapshot: boolean;
+  /** How many consecutive snapshots have missed this trade's tickets. */
+  consecutiveMissingSnapshots: number;
+  /** A close deal for the position exists in broker history. */
+  hasCloseDealInHistory: boolean;
+  /** The trade was actually executed (an OPEN broker order / EXECUTED report exists). */
+  wasExecuted: boolean;
+  /** Minimum age before a trade can be reconciled (default 60s). */
+  minAgeSeconds?: number;
+}
+
+export type ReconciliationAction = "none" | "close" | "cancel" | "out_of_sync";
+
+/**
+ * Decide how to heal a logical trade that has no matching broker position.
+ * Pure so the transition rules are unit-testable without a database.
+ * - close: broker history shows the position was closed.
+ * - cancel: the trade was never executed.
+ * - out_of_sync: executed but the position vanished with no close deal (ambiguous).
+ */
+export function classifyReconciliation(input: ReconciliationInput): {
+  action: ReconciliationAction;
+  reason?: string;
+} {
+  if (input.status !== "OPEN" && input.status !== "PENDING") return { action: "none" };
+  if (input.matchedInCurrentSnapshot) return { action: "none" };
+  const ageSeconds = (input.nowMs - input.openedAtMs) / 1000;
+  if (ageSeconds < (input.minAgeSeconds ?? 60)) return { action: "none", reason: "too-fresh" };
+  if (input.consecutiveMissingSnapshots < 2) {
+    return { action: "none", reason: "needs-confirmation" };
+  }
+  if (input.hasCloseDealInHistory) return { action: "close", reason: "broker-close-deal" };
+  if (!input.wasExecuted) return { action: "cancel", reason: "never-executed" };
+  return { action: "out_of_sync", reason: "executed-but-vanished" };
+}
+
+/**
+ * Structural fingerprint of a message: numbers collapse to `#` so signals that
+ * differ only in their price levels share a fingerprint. Used to recognise a
+ * provider's repeated signal shapes for adaptive learning.
+ */
+export function structuralFingerprint(text: string): string {
+  return text
+    .toUpperCase()
+    .replace(/\d+(\.\d+)?/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Whether enough approved examples of this signal's structure exist to skip the
+ * manual-review gate. Only relaxes confidence-based review for mapped open
+ * trades — never auto-approves an unmapped symbol.
+ */
+export function learnedOverrideApplies(
+  signal: Pick<ParsedSignal, "commandType" | "mappingStatus">,
+  exampleCount: number,
+): boolean {
+  return (
+    signal.commandType === "OPEN_TRADE" && signal.mappingStatus === "mapped" && exampleCount >= 3
+  );
+}
+
 function floatingPnlFromPositions(positions: unknown[]) {
   return roundCurrency(
     positions.reduce<number>((sum, record) => {
@@ -8144,6 +10160,10 @@ function heartbeatFreshness(iso: string) {
   if (ageMs <= 10_000) return "online";
   if (ageMs <= 30_000) return "stale";
   return "offline";
+}
+
+function isUnmatchedLifecycleError(error: string) {
+  return error.includes("No open logical trade matched this provider command");
 }
 
 function accountFreshnessScore(status: string) {
@@ -8528,6 +10548,8 @@ function queueRow(row: Row) {
     status: String(row.status),
     payload: parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json)),
     leaseCount: Number(row.lease_count ?? 0),
+    heldReason: row.held_reason ? String(row.held_reason) : undefined,
+    originQueueItemId: row.origin_queue_item_id ? String(row.origin_queue_item_id) : undefined,
     leasedAt: row.leased_at ? String(row.leased_at) : undefined,
     createdAt: String(row.created_at),
   };
@@ -8804,6 +10826,14 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     drawdownDangerPct,
     reportingCurrency,
     usdZarRate: positiveNumber(input.usdZarRate, defaultAppSettings.usdZarRate),
+    releaseHeldOnGuardianUnpause: input.releaseHeldOnGuardianUnpause === true,
+    alertBotToken: typeof input.alertBotToken === "string" ? input.alertBotToken.trim() : "",
+    alertChatId: typeof input.alertChatId === "string" ? input.alertChatId.trim() : "",
+    alertOnGuardianPause: input.alertOnGuardianPause === true,
+    alertOnEaOffline: input.alertOnEaOffline === true,
+    alertOnExecFailed: input.alertOnExecFailed === true,
+    alertOnHeld: input.alertOnHeld === true,
+    alertOnTelegramStall: input.alertOnTelegramStall === true,
   };
 }
 

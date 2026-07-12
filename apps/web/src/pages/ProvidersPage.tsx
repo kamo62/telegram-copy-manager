@@ -1,5 +1,6 @@
 import { Download } from "lucide-react";
 import { Panel } from "../components/Panel";
+import { ProviderHealthCard } from "../components/ProviderHealthCard";
 import {
   type ProviderAccountLinkOption,
   type ProviderRowData,
@@ -67,6 +68,13 @@ export function ProvidersPage({
         providerLinks={providerLinks}
         providers={providers}
       />
+      {providers.length > 0 ? (
+        <div className="provider-health-strip">
+          {providers.map((provider) => (
+            <ProviderHealthCard key={provider.id} providerId={provider.id} title={provider.title} />
+          ))}
+        </div>
+      ) : null}
     </Panel>
   );
 }

@@ -18,16 +18,7 @@ interface AccountsOverviewProps {
   onSelectAccount: (id: string) => void;
 }
 
-// Rotating slice colours — line up with the KPI badge palette so the donut
-// shares the same accents the AccountHeader cards use.
-const SLICE_COLORS = [
-  "hsl(218 85% 42%)",
-  "hsl(265 70% 50%)",
-  "var(--up-dim)",
-  "var(--warn-dim)",
-  "var(--down-dim)",
-  "var(--ink-dim)",
-];
+const SLICE_PATTERNS = [0, 1, 2, 3, 4, 5];
 
 export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverviewProps) {
   const { locale } = useLocale();
@@ -41,7 +32,7 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
       id: account.id,
       label: account.accountNumber || account.id,
       value: account.equity ?? 0,
-      color: SLICE_COLORS[index % SLICE_COLORS.length] ?? "var(--ink-dim)",
+      pattern: SLICE_PATTERNS[index % SLICE_PATTERNS.length] ?? 0,
     }));
   const totalEquity = equitySlices.reduce((sum, slice) => sum + slice.value, 0);
   // Single-account donuts read as a flat ring with no information; only
@@ -98,7 +89,7 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
 
       {showEquityDonut ? (
         <figure className="accounts-overview-donut">
-          <figcaption className="sr-only">Equity by account</figcaption>
+          <figcaption className="visually-hidden">Equity by account</figcaption>
           <Donut
             ariaLabel="Equity by account"
             centerLabel="Total"

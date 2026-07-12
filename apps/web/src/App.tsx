@@ -4,12 +4,21 @@ import { useLocation, useNavigate } from "react-router-dom";
 import packageJson from "../../../package.json";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountsOverview } from "./components/AccountsOverview";
+import { AlertsBanner } from "./components/AlertsBanner";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
+import { useConfirm } from "./components/ConfirmDialog";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ExposurePanel } from "./components/ExposurePanel";
 import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import { KeyboardShortcutsOverlay } from "./components/KeyboardShortcutsOverlay";
 import { LiveRegion } from "./components/LiveRegion";
+import {
+  ManualSignalModal,
+  type ManualSignalPayload,
+  type ManualSignalSeed,
+} from "./components/ManualSignalModal";
+import { OnboardingCard } from "./components/OnboardingCard";
 import { OutOfSyncBanner } from "./components/OutOfSyncBanner";
 import { PendingSlotView } from "./components/PendingSlotView";
 import {
@@ -23,11 +32,24 @@ import { navItems, Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { SmallViewportNotice } from "./components/SmallViewportNotice";
 import { StatusBar } from "./components/StatusBar";
+import { SummaryPanel } from "./components/SummaryPanel";
 import { SymbolMappingModal } from "./components/SymbolMappingModal";
 import { type TabId, WorkspaceTabs } from "./components/WorkspaceTabs";
+import { useToast } from "./contexts/ToastContext";
 import { useAnnouncer } from "./hooks/useAnnouncer";
 import { useHotkeys } from "./hooks/useHotkeys";
-import { apiDelete, apiFetch, apiGet, apiPatch, apiPost } from "./lib/api";
+import {
+  apiDelete,
+  apiFetch,
+  apiGet,
+  apiPatch,
+  apiPost,
+  type HeldQueueItem,
+  type HeldQueueItemsResponse,
+  type HeldRequeueMode,
+  type TradeResolutionAction,
+} from "./lib/api";
+import type { ExposurePosition } from "./lib/exposure";
 import { EquityGuardianPage } from "./pages/EquityGuardianPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { LinkedAccountsPage } from "./pages/LinkedAccountsPage";
@@ -94,6 +116,13 @@ export interface DashboardSnapshot {
     drawdownDangerPct: number;
     reportingCurrency: "USD" | "ZAR";
     usdZarRate: number;
+    alertBotToken?: string;
+    alertChatId?: string;
+    alertOnGuardianPause?: boolean;
+    alertOnEaOffline?: boolean;
+    alertOnExecFailed?: boolean;
+    alertOnHeld?: boolean;
+    alertOnTelegramStall?: boolean;
   };
   accountPerformance?: AccountPerformanceSnapshot;
   accountPerformanceByAccount?: Record<string, AccountPerformanceSnapshot>;
@@ -108,6 +137,7 @@ export interface DashboardSnapshot {
     status: string;
     accountNumber: string;
     server: string;
+    createdAt?: string;
   }>;
   accountProviderLinks?: Array<{
     accountId: string;
@@ -124,6 +154,20 @@ export interface DashboardSnapshot {
     breaches: unknown[];
   }>;
   telegramSessions: Array<{ id: string; phone: string; status: string; profileId?: string }>;
+  telegramHealth?: Array<{
+    sessionId: string;
+    connected: boolean;
+    lastContactAt?: string;
+    stalledSeconds?: number;
+    stalled: boolean;
+  }>;
+  alerts?: Array<{
+    kind: string;
+    severity: "warn" | "error";
+    message: string;
+    accountId?: string;
+    detail?: Record<string, unknown>;
+  }>;
   providers: ProviderRowData[];
   mt5Accounts: Array<{
     id: string;
@@ -131,6 +175,7 @@ export interface DashboardSnapshot {
     server: string;
     heartbeatStatus: string;
     marginMode: string;
+    availableSymbols?: string[];
     currency?: string;
     balance?: number;
     equity?: number;
@@ -168,6 +213,15 @@ export interface DashboardSnapshot {
     mappingStatus: string;
     confidence: number;
     reviewRequired: boolean;
+    accountId?: string;
+    providerId?: string;
+    direction?: "BUY" | "SELL";
+    orderType?: "MARKET" | "LIMIT" | "STOP";
+    entry?: { from?: number; to?: number };
+    stopLoss?: number;
+    takeProfits?: Array<{ price: number } | number>;
+    volume?: number;
+    executionMode?: "VIRTUAL_TP" | "SPLIT_ORDER";
   }>;
   parserFixtures?: Array<{
     id: string;
@@ -183,6 +237,8 @@ export interface DashboardSnapshot {
     commandType: string;
     symbol: string;
     status: string;
+    volume?: number | null;
+    riskPercent?: number | null;
   }>;
   logicalTrades: Array<{
     id: string;
@@ -369,6 +425,7 @@ function clearPendingAuth() {
 //   /accounts/:accountId/:tab          → dashboard scoped to one account, given tab
 //   /telegram | /linked-accounts | /settings → global views
 const TAB_IDS: TabId[] = [
+  "summary",
   "performance",
   "providers",
   "history",
@@ -389,14 +446,13 @@ function parseRoute(pathname: string): RouteState {
   if (seg[0] === "linked-accounts") return { view: "mt5", accountId: null, tab: "performance" };
   if (seg[0] === "settings") return { view: "settings", accountId: null, tab: "performance" };
   if (seg[0] === "accounts" && seg[1]) {
-    const tab =
-      seg[2] && (TAB_IDS as string[]).includes(seg[2]) ? (seg[2] as TabId) : "performance";
+    const tab = seg[2] && (TAB_IDS as string[]).includes(seg[2]) ? (seg[2] as TabId) : "summary";
     return { view: "dashboard", accountId: seg[1], tab };
   }
   if (seg[0] && (TAB_IDS as string[]).includes(seg[0])) {
     return { view: "dashboard", accountId: null, tab: seg[0] as TabId };
   }
-  return { view: "dashboard", accountId: null, tab: "performance" };
+  return { view: "dashboard", accountId: null, tab: "summary" };
 }
 
 function pathForView(viewId: string, accountId: string | null, tab: TabId): string {
@@ -404,12 +460,12 @@ function pathForView(viewId: string, accountId: string | null, tab: TabId): stri
   if (viewId === "mt5") return "/linked-accounts";
   if (viewId === "settings") return "/settings";
   if (accountId) return `/accounts/${accountId}/${tab}`;
-  return tab === "performance" ? "/" : `/${tab}`;
+  return tab === "summary" ? "/" : `/${tab}`;
 }
 
 function pathForTab(accountId: string | null, tab: TabId): string {
   if (accountId) return `/accounts/${accountId}/${tab}`;
-  return tab === "performance" ? "/" : `/${tab}`;
+  return tab === "summary" ? "/" : `/${tab}`;
 }
 
 export function App({
@@ -420,6 +476,7 @@ export function App({
   initialSnapshot?: DashboardSnapshot;
 }) {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(initialSnapshot ?? emptySnapshot);
+  const [heldItems, setHeldItems] = useState<HeldQueueItem[]>([]);
   const [availableDialogs, setAvailableDialogs] = useState<TelegramDialogSummary[]>(initialDialogs);
   const [initialLoading, setInitialLoading] = useState(!initialSnapshot);
   const [refreshing, setRefreshing] = useState(false);
@@ -454,6 +511,8 @@ export function App({
     ...initialPendingAuth,
   });
   const [mappingModalOpen, setMappingModalOpen] = useState(false);
+  const [manualSignalOpen, setManualSignalOpen] = useState(false);
+  const [manualSignalSeed, setManualSignalSeed] = useState<ManualSignalSeed | undefined>(undefined);
   const [fixtureClassifications, setFixtureClassifications] = useState<
     Record<string, "entry" | "management" | "noise" | "unknown">
   >({});
@@ -465,6 +524,10 @@ export function App({
   // Pending link-slots are transient pre-account UI state (not represented in the URL);
   // selecting one clears any focused account and vice versa.
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
+  const refreshHeldItems = useCallback(async () => {
+    const data = await apiGet<HeldQueueItemsResponse>("/api/queue-items/held");
+    setHeldItems(Array.isArray(data.items) ? data.items : []);
+  }, []);
 
   // Navigation setters — keep the original names so existing call sites are unchanged, but
   // route changes now flow through the URL instead of local state.
@@ -497,6 +560,8 @@ export function App({
     [navigate],
   );
   const announce = useAnnouncer();
+  const toast = useToast();
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [viewportTooSmall, setViewportTooSmall] = useState(() => {
     if (typeof window === "undefined") return false;
     if (window.localStorage.getItem("tg-tc.viewport-override") === "1") return false;
@@ -531,6 +596,7 @@ export function App({
           setSnapshot(data);
           setLastPollError(false);
           setLastSyncAt(new Date().toISOString());
+          void refreshHeldItems().catch(() => undefined);
         }
       } catch {
         if (active) setLastPollError(true);
@@ -542,23 +608,86 @@ export function App({
       }
     }
     void load();
-    let interval = window.setInterval(() => void load(), 15_000);
-    function handleVisibilityChange() {
-      if (document.visibilityState === "hidden") {
+
+    // Real-time refresh: subscribe to the server event stream and reload on any
+    // delta. Polling stays as a fallback — a slow safety poll while SSE is
+    // connected, reverting to the fast 15s poll if SSE is unavailable or drops.
+    // EventSource is feature-detected so non-browser/test environments (which
+    // lack it) keep the original polling behaviour.
+    let pollMs = 15_000;
+    let interval = 0;
+    const startPolling = () => {
+      if (interval === 0 && active) interval = window.setInterval(() => void load(), pollMs);
+    };
+    const stopPolling = () => {
+      if (interval !== 0) {
         window.clearInterval(interval);
         interval = 0;
-      } else if (interval === 0 && active) {
+      }
+    };
+
+    let source: EventSource | null = null;
+    let debounce = 0;
+    const scheduleLoad = () => {
+      window.clearTimeout(debounce);
+      debounce = window.setTimeout(() => void load(), 200);
+    };
+    if (typeof EventSource !== "undefined") {
+      try {
+        source = new EventSource("/api/events");
+        const onEvent = () => scheduleLoad();
+        for (const type of [
+          "queue",
+          "trade",
+          "snapshot",
+          "heartbeat",
+          "audit",
+          "reconciliation",
+          "score",
+        ]) {
+          source.addEventListener(type, onEvent);
+        }
+        source.onopen = () => {
+          pollMs = 60_000;
+          stopPolling();
+          startPolling();
+        };
+        source.onerror = () => {
+          pollMs = 15_000;
+          stopPolling();
+          startPolling();
+        };
+      } catch {
+        source = null;
+      }
+    }
+    startPolling();
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        stopPolling();
+      } else if (active) {
         void load();
-        interval = window.setInterval(() => void load(), 15_000);
+        startPolling();
       }
     }
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       active = false;
-      window.clearInterval(interval);
+      stopPolling();
+      window.clearTimeout(debounce);
+      source?.close();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [initialSnapshot]);
+  }, [initialSnapshot, refreshHeldItems]);
+
+  const telegramConnected = snapshot.telegramSessions.some(
+    (session) => session.status === "CONNECTED",
+  );
+  useEffect(() => {
+    if (!telegramConnected) return;
+    void refreshHeldItems().catch(() => undefined);
+  }, [refreshHeldItems, telegramConnected]);
 
   useEffect(() => {
     if (initialSnapshot) return;
@@ -842,6 +971,17 @@ export function App({
       .map((slot) => ({ id: slot.id, name: slot.name, linkCode: slot.linkCode }));
   }, [snapshot.accountSlots, snapshot.mt5Accounts]);
 
+  const guardianHeldCounts = useMemo(
+    () =>
+      heldItems.reduce<Record<string, number>>((counts, item) => {
+        if (item.heldReason === "GUARDIAN" && item.accountId) {
+          counts[item.accountId] = (counts[item.accountId] ?? 0) + 1;
+        }
+        return counts;
+      }, {}),
+    [heldItems],
+  );
+
   const paletteCommands = useMemo<PaletteCommand[]>(
     () => [
       {
@@ -970,6 +1110,27 @@ export function App({
     document.body.appendChild(link);
     link.click();
     link.remove();
+  }
+
+  async function exportTradeJournal() {
+    const accountId = focusedAccount?.id;
+    const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : "";
+    try {
+      const data = await apiGet<{ journal: unknown[] }>(`/api/export/journal${query}`);
+      const filename = `trade-journal-${new Date().toISOString().slice(0, 10)}.json`;
+      const link = document.createElement("a");
+      link.href = `data:application/json;charset=utf-8,${encodeURIComponent(
+        JSON.stringify(data.journal, null, 2),
+      )}`;
+      link.download = filename;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      toast.success(`Exported ${data.journal.length} closed trades`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Export failed");
+    }
   }
 
   async function startTelegramConnection(event: React.FormEvent<HTMLFormElement>) {
@@ -1104,7 +1265,15 @@ export function App({
 
   async function selectDialog(dialog: TelegramDialogSummary) {
     if (!activeProfileId) return;
-    if (!window.confirm(`Add ${dialog.title} as a signal provider?`)) return;
+    if (
+      !(await confirm({
+        title: "Add signal provider?",
+        description: `Add ${dialog.title} as a signal provider?`,
+        confirmLabel: "Add provider",
+        destructive: false,
+      }))
+    )
+      return;
     try {
       await apiPost("/api/providers", {
         profileId: activeProfileId,
@@ -1122,12 +1291,41 @@ export function App({
 
   async function toggleProvider(provider: DashboardSnapshot["providers"][number]) {
     await apiPatch(`/api/providers/${provider.id}`, { enabled: !provider.enabled });
+    toast.success(`${provider.title} ${provider.enabled ? "disabled" : "enabled"}`);
     await refreshDashboard();
   }
 
   async function deleteProvider(provider: DashboardSnapshot["providers"][number]) {
-    if (!window.confirm(`Remove ${provider.title} from configured providers?`)) return;
-    await apiDelete(`/api/providers/${provider.id}`);
+    const confirmed = await confirm({
+      title: "Remove provider?",
+      description: `${provider.title} will be removed from configured providers.`,
+      confirmLabel: "Remove provider",
+    });
+    if (!confirmed) return;
+    try {
+      await apiDelete(`/api/providers/${provider.id}`);
+      toast.success(`Removed ${provider.title}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to remove provider");
+    }
+    await refreshDashboard();
+  }
+
+  async function deleteAccount(account: { id: string; accountNumber?: string }) {
+    const label = account.accountNumber ?? account.id;
+    const confirmed = await confirm({
+      title: "Delete account?",
+      description: `Permanently delete account ${label} and all of its history, queue items, and snapshots. This cannot be undone.`,
+      confirmLabel: "Delete account",
+      typeToConfirm: account.accountNumber,
+    });
+    if (!confirmed) return;
+    try {
+      await apiDelete(`/api/mt5/accounts/${account.id}`);
+      toast.success(`Deleted account ${label}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to delete account");
+    }
     await refreshDashboard();
   }
 
@@ -1152,6 +1350,7 @@ export function App({
       });
       setConfigProvider(null);
       announce(`Saved configuration for ${provider.title} on this account`);
+      toast.success(`Saved configuration for ${provider.title}`);
       await refreshDashboard();
       return;
     }
@@ -1166,6 +1365,7 @@ export function App({
     });
     setConfigProvider(null);
     announce(`Saved configuration for ${provider.title}`);
+    toast.success(`Saved configuration for ${provider.title}`);
     await refreshDashboard();
   }
 
@@ -1239,8 +1439,36 @@ export function App({
       drawdownDangerPct: Number(formData.get("drawdownDangerPct")),
       reportingCurrency: String(formData.get("reportingCurrency") ?? "USD"),
       usdZarRate: Number(formData.get("usdZarRate")),
+      alertBotToken: String(formData.get("alertBotToken") ?? ""),
+      alertChatId: String(formData.get("alertChatId") ?? ""),
+      alertOnGuardianPause: formData.has("alertOnGuardianPause"),
+      alertOnEaOffline: formData.has("alertOnEaOffline"),
+      alertOnExecFailed: formData.has("alertOnExecFailed"),
+      alertOnHeld: formData.has("alertOnHeld"),
+      alertOnTelegramStall: formData.has("alertOnTelegramStall"),
     });
+    toast.success("Settings saved");
     await refreshDashboard();
+  }
+
+  async function sendAlertTest() {
+    try {
+      await apiPost("/api/admin/alert-test");
+      toast.success("Test alert sent");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to send test alert");
+    }
+  }
+
+  async function backupDatabase() {
+    try {
+      const data = await apiPost<{ filename: string }>("/api/admin/backup");
+      toast.success(`Database backup created: ${data.filename}`);
+      return data.filename;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Database backup failed");
+      return "";
+    }
   }
 
   async function parseRecentProviderMessages() {
@@ -1318,7 +1546,7 @@ export function App({
   }
 
   async function approveParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Approving..." }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Queued" }));
     try {
       await apiPost(`/api/signals/${result.id}/approve`);
     } catch (error) {
@@ -1326,18 +1554,44 @@ export function App({
         ...current,
         [result.id]: error instanceof Error ? error.message : "Approval failed",
       }));
+      toast.error(error instanceof Error ? error.message : "Approval failed");
+      await refreshDashboard();
       return;
     }
     setParserActionStatus((current) => ({ ...current, [result.id]: "Queued" }));
     announce("Signal approved and queued for MT5");
+    toast.success("Signal approved and queued");
     await refreshDashboard();
   }
 
   async function ignoreParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignoring..." }));
-    await apiPost(`/api/signals/${result.id}/ignore`);
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignored" }));
+    try {
+      await apiPost(`/api/signals/${result.id}/ignore`);
+    } catch (error) {
+      setParserActionStatus((current) => ({
+        ...current,
+        [result.id]: error instanceof Error ? error.message : "Ignore failed",
+      }));
+      toast.error(error instanceof Error ? error.message : "Ignore failed");
+      await refreshDashboard();
+      return;
+    }
     setParserActionStatus((current) => ({ ...current, [result.id]: "Ignored" }));
     announce("Signal ignored");
+    toast.success("Signal ignored");
+    await refreshDashboard();
+  }
+
+  function openManualSignal(seed?: ManualSignalSeed) {
+    setManualSignalSeed(seed);
+    setManualSignalOpen(true);
+  }
+
+  async function submitManualSignal(payload: ManualSignalPayload) {
+    await apiPost("/api/signals/manual", payload);
+    announce("Manual signal force-pushed to MT5");
+    toast.success("Manual signal force-pushed to MT5");
     await refreshDashboard();
   }
 
@@ -1349,6 +1603,45 @@ export function App({
     });
     event.currentTarget.reset();
     await refreshDashboard();
+  }
+
+  async function deleteAccountSlot(slot: { id: string; name: string }) {
+    const confirmed = await confirm({
+      title: "Delete link slot?",
+      description: `${slot.name || "This link slot"} and its link code will be removed.`,
+      confirmLabel: "Delete slot",
+    });
+    if (!confirmed) return;
+    try {
+      await apiDelete(`/api/account-slots/${slot.id}`);
+      if (selectedSlotId === slot.id) selectSlot(null);
+      toast.success(`Deleted ${slot.name || "link slot"}`);
+      await refreshDashboard();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to delete link slot");
+    }
+  }
+
+  async function requeueHeldItem(item: HeldQueueItem, mode: HeldRequeueMode) {
+    try {
+      await apiPost(`/api/queue-items/${item.id}/requeue`, { mode });
+      toast.success(
+        mode === "market" ? `${item.symbol} requeued at market` : `${item.symbol} requeued`,
+      );
+      await Promise.all([refreshHeldItems(), refreshDashboard()]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to requeue held signal");
+    }
+  }
+
+  async function dismissHeldItem(item: HeldQueueItem) {
+    try {
+      await apiPost(`/api/queue-items/${item.id}/dismiss`);
+      toast.success(`Dismissed held ${item.symbol} signal`);
+      await Promise.all([refreshHeldItems(), refreshDashboard()]);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to dismiss held signal");
+    }
   }
 
   async function toggleAccountProviderLink(
@@ -1371,10 +1664,28 @@ export function App({
     await refreshDashboard();
   }
 
-  async function unpauseGuardian(accountId: string) {
+  async function unpauseGuardian(accountId: string, requeueHeld: boolean) {
     await apiPost(`/api/equity-guardian/${accountId}/unpause`);
+    if (requeueHeld) {
+      for (const item of heldItems.filter(
+        (held) => held.accountId === accountId && held.heldReason === "GUARDIAN",
+      )) {
+        await apiPost(`/api/queue-items/${item.id}/requeue`, { mode: "market" });
+      }
+    }
     announce("Equity Guardian unpaused");
-    await refreshDashboard();
+    toast.success(requeueHeld ? "Guardian unpaused and held trades requeued" : "Guardian unpaused");
+    await Promise.all([refreshHeldItems(), refreshDashboard()]);
+  }
+
+  async function resolveTrade(tradeId: string, action: TradeResolutionAction) {
+    try {
+      await apiPost(`/api/trades/${tradeId}/resolve`, { action });
+      toast.success("Out-of-sync trade resolved");
+      await refreshDashboard();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to resolve trade");
+    }
   }
 
   async function saveSymbolAlias(payload: {
@@ -1445,11 +1756,12 @@ export function App({
   const showSettings = activeView === "settings";
   const showEquityGuardian = dashTab("equity-guardian");
   const showPerformance = dashTab("performance");
+  const showSummary = dashTab("summary");
 
   function navigateSidebar(viewId: string) {
     if (viewId === "dashboard") {
       setSelectedSlotId(null);
-      navigate(selectedAccountId ? `/accounts/${selectedAccountId}/performance` : "/");
+      navigate(selectedAccountId ? `/accounts/${selectedAccountId}/summary` : "/");
       return;
     }
     setActiveView(viewId);
@@ -1516,18 +1828,44 @@ export function App({
         pendingSlots={sidebarPendingSlots}
         selectedAccountId={selectedAccountId}
         selectedSlotId={selectedSlotId}
+        heldCount={heldItems.length}
       />
 
       <ErrorBoundary fallbackLabel="This view hit an unexpected error">
         <section className="workspace" id="main-content" tabIndex={-1}>
+          <AlertsBanner alerts={snapshot.alerts ?? []} onViewHeld={() => navigate("/logs#held")} />
           {showDashboard && focusedSlot ? (
             <PendingSlotView slot={focusedSlot} />
           ) : showDashboard ? (
             <>
               <AccountHeader data={accountHeaderData} loading={initialLoading} />
+              {snapshot.providers.length === 0 &&
+              snapshot.mt5Accounts.length === 0 &&
+              sidebarPendingSlots.length === 0 ? (
+                <OnboardingCard
+                  hasAccounts={snapshot.mt5Accounts.length > 0}
+                  hasProviders={snapshot.providers.length > 0}
+                  onConnectTelegram={() => setActiveView("telegram")}
+                  onLinkAccount={() => setActiveView("mt5")}
+                  telegramConnected={Boolean(
+                    snapshot.telegramSessions?.some((s) => s.status === "CONNECTED"),
+                  )}
+                />
+              ) : null}
               <OutOfSyncBanner
                 trades={snapshot.logicalTrades.filter((trade) => trade.status === "OUT_OF_SYNC")}
               />
+              {focusedAccount ? (
+                <ExposurePanel
+                  accountId={focusedAccount.id}
+                  positions={[
+                    ...((focusedAccount as { appPositions?: ExposurePosition[] }).appPositions ??
+                      []),
+                    ...((focusedAccount as { externalPositions?: ExposurePosition[] })
+                      .externalPositions ?? []),
+                  ]}
+                />
+              ) : null}
               {snapshot.mt5Accounts.length === 0 && sidebarPendingSlots.length === 0 ? (
                 <section className="live-empty">
                   <div className="live-empty-glyph" aria-hidden="true">
@@ -1567,6 +1905,10 @@ export function App({
             </>
           ) : null}
 
+          {showSummary ? (
+            <SummaryPanel data={growthData} currency={accountHeaderData.currency} />
+          ) : null}
+
           {showPerformance ? (
             <PerformancePage
               accounts={focusedAccount ? [focusedAccount] : snapshot.mt5Accounts}
@@ -1582,9 +1924,10 @@ export function App({
 
           {showEquityGuardian ? (
             <EquityGuardianPage
+              guardianHeldCounts={guardianHeldCounts}
               guardians={snapshot.equityGuardians ?? []}
               onSave={(accountId, formElement) => void saveGuardian(accountId, formElement)}
-              onUnpause={(accountId) => void unpauseGuardian(accountId)}
+              onUnpause={(accountId, requeueHeld) => void unpauseGuardian(accountId, requeueHeld)}
             />
           ) : null}
 
@@ -1678,9 +2021,13 @@ export function App({
                 onAiReview={(result) => void requestAiReview(result)}
                 onApprove={(result) => void approveParsedSignal(result)}
                 onIgnore={(result) => void ignoreParsedSignal(result)}
+                onForcePush={openManualSignal}
                 aiReviewStatus={aiReviewStatus}
                 parserActionStatus={parserActionStatus}
                 fixtureStatus={fixtureStatus}
+                heldItems={heldItems}
+                onHeldDismiss={dismissHeldItem}
+                onHeldRequeue={requeueHeldItem}
               />
             ) : null}
 
@@ -1694,6 +2041,9 @@ export function App({
                 }
                 focusedAccountId={selectedAccountId}
                 onTabChange={setHistoryTab}
+                onExportJournal={() => void exportTradeJournal()}
+                onResolveTrade={resolveTrade}
+                trades={snapshot.logicalTrades}
               />
             ) : null}
 
@@ -1702,6 +2052,8 @@ export function App({
                 accounts={snapshot.mt5Accounts}
                 slots={snapshot.accountSlots ?? []}
                 onCreateSlot={(event) => void createAccountSlot(event)}
+                onDeleteAccount={(account) => void deleteAccount(account)}
+                onDeleteSlot={(slot) => void deleteAccountSlot(slot)}
                 onEditProviderLinks={() => {
                   setActiveView("dashboard");
                   setActiveTab("providers");
@@ -1734,6 +2086,8 @@ export function App({
                 }
                 onSubmit={saveExecutionSettings}
                 onSaveForm={(formElement) => void saveExecutionSettingsForm(formElement)}
+                onAlertTest={sendAlertTest}
+                onBackup={backupDatabase}
                 settings={snapshot.appSettings}
               />
             ) : null}
@@ -1763,11 +2117,21 @@ export function App({
         open={mappingModalOpen}
       />
 
+      <ManualSignalModal
+        accounts={snapshot.mt5Accounts}
+        onClose={() => setManualSignalOpen(false)}
+        onSubmit={submitManualSignal}
+        open={manualSignalOpen}
+        seed={manualSignalSeed}
+      />
+
       <CommandPalette
         commands={paletteCommands}
         onClose={() => setCommandPaletteOpen(false)}
         open={commandPaletteOpen}
       />
+
+      {confirmDialog}
     </main>
   );
 }

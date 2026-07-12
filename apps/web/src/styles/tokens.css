@@ -5,36 +5,37 @@
   color-scheme: light;
 
   /* ── Surfaces ─────────────────────────────────────────────────────── */
-  --bg: hsl(40 35% 98%);
+  --bg: hsl(220 16% 97%);
   --bg-elevated: hsl(0 0% 100%);
   --panel: hsl(0 0% 100%);
-  --panel-2: hsl(40 25% 96%);
-  --panel-hover: hsl(40 22% 94%);
+  --panel-2: hsl(220 16% 96%);
+  --panel-hover: hsl(220 14% 94%);
+  --overlay: hsl(220 25% 12% / 0.35);
 
   /* ── Lines ────────────────────────────────────────────────────────── */
-  --line: hsl(220 18% 90%);
-  --line-strong: hsl(220 14% 82%);
-  --line-subtle: hsl(40 22% 94%);
+  --line: hsl(220 15% 90%);
+  --line-strong: hsl(220 13% 84%);
+  --line-subtle: hsl(220 16% 94%);
 
   /* ── Ink (text) ───────────────────────────────────────────────────── */
   --ink: hsl(220 28% 11%);
   --ink-2: hsl(220 14% 28%);
   --ink-dim: hsl(220 12% 38%);
   --ink-3: hsl(220 10% 46%);
-  --ink-faint: hsl(220 8% 62%);
+  --ink-faint: hsl(220 10% 46%);
 
-  /* ── Accent (deep cobalt — not Tailwind indigo, not purple-on-white) */
-  --accent: hsl(218 85% 42%);
-  --accent-9: hsl(218 85% 42%);
-  --accent-10: hsl(218 88% 36%);
-  --accent-dim: hsl(218 85% 42%);
-  --accent-soft: hsl(218 85% 42% / 0.08);
-  --accent-ring: hsl(218 85% 42% / 0.25);
+  /* ── Accent: monochrome ink ─────────────────────────────────────── */
+  --accent: hsl(220 25% 12%);
+  --accent-9: hsl(220 25% 12%);
+  --accent-10: hsl(220 25% 12%);
+  --accent-dim: hsl(220 25% 12%);
+  --accent-soft: hsl(220 14% 92%);
+  --accent-ring: hsl(220 25% 12% / 0.72);
 
   /* ── Telegram brand (sign-in chrome only) ─────────────────────────── */
-  --tg-blue: hsl(199 75% 49%);
-  --tg-blue-deep: hsl(199 80% 40%);
-  --tg-blue-dim: hsl(199 80% 40%);
+  --tg-blue: hsl(220 25% 12%);
+  --tg-blue-deep: hsl(220 25% 12%);
+  --tg-blue-dim: hsl(220 25% 12%);
 
   /* ── Direction (up / down / warn) ─────────────────────────────────── */
   --up: hsl(155 62% 32%);
@@ -49,6 +50,8 @@
   --warn-9: hsl(35 88% 46%);
   --warn-dim: hsl(35 88% 36%);
   --warn-soft: hsl(35 88% 46% / 0.14);
+  --info: hsl(214 68% 43%);
+  --info-soft: hsl(214 68% 43% / 0.12);
 
   /* ── Typography ───────────────────────────────────────────────────── */
   /* Variable font names come from @fontsource-variable/* packages imported
@@ -106,10 +109,10 @@
   --duration-3: 320ms;
 
   /* ── Shadows (HSL alpha for depth without colour cast) ────────────── */
-  --shadow-1: 0 1px 2px hsl(220 30% 12% / 0.04);
-  --shadow-2: 0 1px 2px hsl(220 30% 12% / 0.04), 0 4px 12px hsl(220 30% 12% / 0.06);
-  --shadow-3: 0 8px 24px hsl(220 30% 12% / 0.1), 0 2px 6px hsl(220 30% 12% / 0.06);
-  --shadow-glass: inset 0 1px 0 hsl(0 0% 100% / 0.8), 0 1px 2px hsl(220 30% 12% / 0.06);
+  --shadow-1: none;
+  --shadow-2: 0 8px 24px hsl(220 25% 12% / 0.08);
+  --shadow-3: 0 16px 40px hsl(220 25% 12% / 0.14), 0 2px 8px hsl(220 25% 12% / 0.08);
+  --shadow-glass: none;
   /* Legacy aliases used by existing rules */
   --shadow-sm: var(--shadow-1);
   --shadow-md: var(--shadow-2);
