@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
+import { useColorAccents } from "../contexts/ColorAccentsContext";
 import { apiDelete, apiGet } from "../lib/api";
+import { chartSparklineColor } from "../lib/chartPalette";
 import { Sparkline } from "./Sparkline";
 
 export interface ProviderScore {
@@ -37,6 +39,7 @@ export function ProviderHealthCard({
   load?: (providerId: string) => Promise<ProviderScore | null>;
   onReset?: (providerId: string) => Promise<void>;
 }) {
+  const { colorAccents } = useColorAccents();
   const [score, setScore] = useState<ProviderScore | null>(null);
 
   const refresh = useCallback(() => {
@@ -94,6 +97,7 @@ export function ProviderHealthCard({
       {score && score.sampleSize > 1 ? (
         <Sparkline
           ariaLabel="recent win/loss pattern"
+          color={chartSparklineColor(colorAccents, "growth")}
           data={Array.from({ length: score.sampleSize }, (_, i) => (i < score.wins ? 1 : 0))}
         />
       ) : null}

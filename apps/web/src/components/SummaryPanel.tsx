@@ -1,3 +1,5 @@
+import { useColorAccents } from "../contexts/ColorAccentsContext";
+import { chartSparklineColor } from "../lib/chartPalette";
 import type { GrowthSeries } from "./GrowthChart";
 import { Money } from "./Money";
 import { Sparkline } from "./Sparkline";
@@ -10,6 +12,7 @@ import { Sparkline } from "./Sparkline";
  * uncluttered.
  */
 export function SummaryPanel({ data, currency }: { data: GrowthSeries; currency?: string }) {
+  const { colorAccents } = useColorAccents();
   const equity = data.growth[1] ?? [];
   const hasTrend = equity.length >= 2 && Math.min(...equity) !== Math.max(...equity);
   const rising = hasTrend ? (equity[equity.length - 1] ?? 0) >= (equity[0] ?? 0) : true;
@@ -36,7 +39,7 @@ export function SummaryPanel({ data, currency }: { data: GrowthSeries; currency?
       {hasTrend ? (
         <Sparkline
           ariaLabel="Account equity trend"
-          color={rising ? "var(--up-dim)" : "var(--down-dim)"}
+          color={chartSparklineColor(colorAccents, rising ? "growth" : "drawdown")}
           data={equity}
           height={72}
         />

@@ -14,6 +14,15 @@ function Harness() {
   );
 }
 
+function WarningHarness() {
+  const { warn } = useToast();
+  return (
+    <button onClick={() => warn("Check provider settings")} type="button">
+      warn
+    </button>
+  );
+}
+
 describe("ToastContext", () => {
   test("a toast appears on action and auto-dismisses", async () => {
     const { getByRole, queryByText } = render(
@@ -43,5 +52,20 @@ describe("ToastContext", () => {
     expect(queryByText("Queued ✓")).not.toBeNull();
     fireEvent.click(getByRole("button", { name: "Dismiss notification" }));
     expect(queryByText("Queued ✓")).toBeNull();
+  });
+
+  test("warning toasts retain a distinct monochrome glyph", async () => {
+    const view = render(
+      <ToastProvider autoDismissMs={0}>
+        <WarningHarness />
+      </ToastProvider>,
+    );
+    fireEvent.click(view.getByRole("button", { name: "warn" }));
+    expect(view.getByText("Check provider settings").closest(".toast")?.className).toContain(
+      "toast-warn",
+    );
+
+    const css = await Bun.file(new URL("../styles/base.css", import.meta.url)).text();
+    expect(css).toMatch(/\.toast-warn::before\s*\{\s*content: "!";/);
   });
 });

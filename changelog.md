@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.21.1 - 2026-07-12 (Patch)
+
+Release impact: Patch because this fixes visual colour-toggle and status-accessibility regressions without changing public contracts.
+
+- Fixed monochrome sparkline colours, persistent narrow-layout poll-failure visibility, and warning-toast severity glyphs.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.21.1`.
+
 ## 1.21.0 - 2026-07-12 (Minor)
 
 Release impact: Minor — adds a client-side display preference without changing API, database, or EA protocol contracts.

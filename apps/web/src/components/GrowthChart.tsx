@@ -6,7 +6,7 @@ import { Tooltip } from "@/components/dither-kit/tooltip";
 import { XAxis } from "@/components/dither-kit/x-axis";
 import { YAxis } from "@/components/dither-kit/y-axis";
 import { useColorAccents } from "../contexts/ColorAccentsContext";
-import { CHART_PALETTE } from "../lib/chartPalette";
+import { chartDitherColor } from "../lib/chartPalette";
 import { Money } from "./Money";
 import { SkeletonChart } from "./Skeleton";
 
@@ -93,11 +93,7 @@ export function GrowthChart({
             config={{
               value: {
                 label: isGrowth ? "Account growth" : "Drawdown",
-                color: isGrowth
-                  ? colorAccents
-                    ? CHART_PALETTE.growth
-                    : "grey"
-                  : CHART_PALETTE.drawdown,
+                color: chartDitherColor(colorAccents, isGrowth ? "growth" : "drawdown"),
               },
             }}
             data={rows}

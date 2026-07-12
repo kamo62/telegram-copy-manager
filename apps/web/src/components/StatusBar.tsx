@@ -1,5 +1,4 @@
 import { RefreshCw, TerminalSquare } from "lucide-react";
-import { useEffect, useState } from "react";
 
 export function StatusBar({
   appVersion,
@@ -22,21 +21,12 @@ export function StatusBar({
   refreshing: boolean;
   telegramAdapter: string;
 }) {
-  const [errorFlash, setErrorFlash] = useState(false);
-
-  useEffect(() => {
-    if (!lastPollError) return;
-    setErrorFlash(true);
-    const timer = window.setTimeout(() => setErrorFlash(false), 4000);
-    return () => window.clearTimeout(timer);
-  }, [lastPollError]);
-
-  const liveDotClass = errorFlash
+  const liveDotClass = lastPollError
     ? "live-dot error"
     : refreshing
       ? "live-dot refreshing"
       : "live-dot";
-  const liveDotLabel = errorFlash
+  const liveDotLabel = lastPollError
     ? "Last poll failed"
     : refreshing
       ? "Refreshing dashboard"
@@ -62,7 +52,11 @@ export function StatusBar({
         TG-TC · Operations
       </h1>
       <div className="status-cluster">
-        <span className="status-chip">
+        <span
+          aria-live={lastPollError ? "polite" : undefined}
+          className="status-chip"
+          role={lastPollError ? "status" : undefined}
+        >
           <span
             aria-label={liveDotLabel}
             className={liveDotClass}
@@ -87,7 +81,7 @@ export function StatusBar({
           <span className="sync-value">{queuePending}</span>
         </span>
         {lastPollError ? (
-          <span aria-live="polite" className="status-chip" role="status">
+          <span aria-live="polite" className="status-chip status-chip-error" role="status">
             <span className="chip-dot error" />
             <span className="sync-label">Poll failed</span>
           </span>
