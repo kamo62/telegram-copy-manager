@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.21.2 - 2026-07-12 (Patch)
+
+Release impact: Patch because this refines visual chart and operational-status clarity without changing public contracts.
+
+- Replaced the wide Summary trend with a dithered area chart while retaining lightweight SVG strips for repeated KPI and provider cards.
+- Widened the desktop sidebar and made online, offline, and pending account states colour-gated and shape-distinct.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.21.2`.
+
 ## 1.21.1 - 2026-07-12 (Patch)
 
 Release impact: Patch because this fixes visual colour-toggle and status-accessibility regressions without changing public contracts.

@@ -53,7 +53,7 @@ h3 {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 200px minmax(0, 1fr);
+  grid-template-columns: 232px minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -350,7 +350,7 @@ h3 {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 5px 8px 5px 10px;
+  padding: 6px 8px 6px 10px;
   font-family: var(--font-ui);
   font-size: 11px;
   font-weight: 500;
@@ -382,8 +382,8 @@ h3 {
 }
 
 .sidebar-child-dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }
@@ -424,10 +424,22 @@ h3 {
 }
 
 .sidebar-child-dot.pending {
-  border-radius: 0;
-  background: var(--ink);
-  box-shadow: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ink);
   animation: pulse-soft 1.6s var(--ease-in-out) infinite;
+}
+
+:root[data-color-accents="on"] .sidebar-child-dot.ok {
+  background: var(--up);
+}
+
+:root[data-color-accents="on"] .sidebar-child-dot.off {
+  border-color: var(--down);
+}
+
+:root[data-color-accents="on"] .sidebar-child-dot.pending {
+  color: var(--warn);
 }
 
 .sidebar-child-meta {
@@ -6098,6 +6110,12 @@ select.config-strategy-input {
   overflow: visible;
 }
 
+.dither-sparkline {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+}
+
 /* Donut layout on AccountsOverview — donut on the left, legend right.
    Collapses to stacked on narrow screens via the global card grid. */
 .accounts-overview-donut {
@@ -6293,7 +6311,7 @@ select.config-strategy-input {
   color: var(--ink-dim);
 }
 
-.summary-panel .sparkline {
+.summary-panel .dither-sparkline {
   display: block;
   width: 100%;
 }

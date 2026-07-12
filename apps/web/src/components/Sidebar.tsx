@@ -1,5 +1,14 @@
 import type { LucideIcon } from "lucide-react";
-import { Activity, Bot, ChevronRight, KeyRound, Plus, Server, Settings2 } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  ChevronRight,
+  KeyRound,
+  Link2,
+  Plus,
+  Server,
+  Settings2,
+} from "lucide-react";
 
 export const navItems: Array<[string, string, LucideIcon]> = [
   ["dashboard", "Live", Activity],
@@ -131,7 +140,11 @@ export function Sidebar({
                           title={`Waiting for EA · link code ${slot.linkCode}`}
                           type="button"
                         >
-                          <span aria-hidden="true" className="sidebar-child-dot pending" />
+                          <Link2
+                            aria-hidden="true"
+                            className="sidebar-child-dot pending"
+                            size={13}
+                          />
                           <span className="sidebar-child-label">{slot.name || "Pending slot"}</span>
                           <span className="sidebar-child-meta">{slot.linkCode}</span>
                         </button>

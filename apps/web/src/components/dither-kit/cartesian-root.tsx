@@ -28,6 +28,7 @@ export type CartesianChartProps<TData extends Row> = {
   stackType?: StackType;
   margins?: Partial<Margins>;
   className?: string;
+  ariaLabel?: string;
   animate?: boolean;
   animationDuration?: number;
   replayToken?: number; // change to re-play the entrance without remounting
@@ -73,6 +74,7 @@ export function CartesianRoot<TData extends Row>({
   stackType = "default",
   margins: marginsProp,
   className,
+  ariaLabel,
   animate = true,
   animationDuration = 900,
   replayToken = 0,
@@ -135,6 +137,7 @@ export function CartesianRoot<TData extends Row>({
       <CommonChartContext value={ctx.common}>
         <div
           ref={ref}
+          aria-hidden={ariaLabel ? true : undefined}
           className={cn("relative h-full w-full", className)}
           onPointerEnter={() => ctx.setMouseInChart(true)}
           onPointerMove={interactive ? (e) => onMove(e.clientX) : undefined}
@@ -156,17 +159,28 @@ export function CartesianRoot<TData extends Row>({
             </svg>
           )}
           <Canvas />
-          {ctx.ready && (
-            <svg
-              width={size.width}
-              height={size.height}
-              className="absolute inset-0 overflow-visible"
-              role="img"
-              aria-label="Chart"
-            >
-              <g transform={`translate(${margins.left},${margins.top})`}>{svgChildren}</g>
-            </svg>
-          )}
+          {ctx.ready &&
+            (ariaLabel ? (
+              <svg
+                aria-hidden="true"
+                className="absolute inset-0 overflow-visible"
+                height={size.height}
+                role="presentation"
+                width={size.width}
+              >
+                <g transform={`translate(${margins.left},${margins.top})`}>{svgChildren}</g>
+              </svg>
+            ) : (
+              <svg
+                aria-label="Chart"
+                className="absolute inset-0 overflow-visible"
+                height={size.height}
+                role="img"
+                width={size.width}
+              >
+                <g transform={`translate(${margins.left},${margins.top})`}>{svgChildren}</g>
+              </svg>
+            ))}
           {domChildren}
         </div>
       </CommonChartContext>
