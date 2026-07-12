@@ -73,7 +73,7 @@ export function ConfirmDialog({
               <input
                 aria-label="Type to confirm"
                 autoComplete="off"
-                className="input"
+                className="settings-input"
                 onChange={(event) => setTyped(event.target.value)}
                 type="text"
                 value={typed}

@@ -48,21 +48,8 @@ export interface AccountHeaderData {
 
 type Accent = "blue" | "violet" | "emerald" | "amber" | "rose" | "muted";
 
-function accentColor(accent: Accent): string {
-  switch (accent) {
-    case "blue":
-      return "hsl(218 85% 42%)";
-    case "violet":
-      return "hsl(265 70% 50%)";
-    case "emerald":
-      return "var(--up-dim)";
-    case "amber":
-      return "var(--warn-dim)";
-    case "rose":
-      return "var(--down-dim)";
-    default:
-      return "var(--ink-faint)";
-  }
+function accentColor(): string {
+  return "var(--ink)";
 }
 
 function formatDelta(
@@ -151,7 +138,7 @@ export function AccountHeader({
       ? "var(--down-dim)"
       : windowKpi.deltaPercent !== null && windowKpi.deltaPercent > 0
         ? "var(--up-dim)"
-        : accentColor(activeWindow.accent);
+        : accentColor();
 
   return (
     <section className="account-header" aria-label="Account performance">
@@ -204,7 +191,7 @@ export function AccountHeader({
                   ? "var(--down-dim)"
                   : kpi.delta !== null && kpi.delta > 0
                     ? "var(--up-dim)"
-                    : accentColor(kpi.accent);
+                    : accentColor();
               return (
                 <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
                   <div className="kpi-head">

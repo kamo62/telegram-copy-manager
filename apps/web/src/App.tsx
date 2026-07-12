@@ -1265,7 +1265,15 @@ export function App({
 
   async function selectDialog(dialog: TelegramDialogSummary) {
     if (!activeProfileId) return;
-    if (!window.confirm(`Add ${dialog.title} as a signal provider?`)) return;
+    if (
+      !(await confirm({
+        title: "Add signal provider?",
+        description: `Add ${dialog.title} as a signal provider?`,
+        confirmLabel: "Add provider",
+        destructive: false,
+      }))
+    )
+      return;
     try {
       await apiPost("/api/providers", {
         profileId: activeProfileId,

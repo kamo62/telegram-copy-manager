@@ -1,10 +1,10 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useId } from "react";
 
 export type DonutSlice = {
   id: string;
   label: string;
   value: number;
-  color: string;
+  pattern: number;
 };
 
 type DonutProps = {
@@ -28,6 +28,7 @@ export function Donut({
   thickness = 14,
   ariaLabel,
 }: DonutProps) {
+  const id = useId().replace(/:/g, "");
   const total = slices.reduce((sum, slice) => sum + Math.max(0, slice.value), 0);
   const radius = (size - thickness) / 2;
   const circumference = 2 * Math.PI * radius;
@@ -45,6 +46,26 @@ export function Donut({
         viewBox={`0 0 ${size} ${size}`}
         width={size}
       >
+        <defs>
+          <pattern height="4" id={`${id}-0`} patternUnits="userSpaceOnUse" width="4">
+            <rect fill="var(--ink)" height="4" width="4" />
+          </pattern>
+          <pattern height="6" id={`${id}-1`} patternUnits="userSpaceOnUse" width="6">
+            <path d="M0 6L6 0" stroke="var(--ink)" strokeWidth="2" />
+          </pattern>
+          <pattern height="6" id={`${id}-2`} patternUnits="userSpaceOnUse" width="6">
+            <path d="M0 0L6 6" stroke="var(--ink)" strokeWidth="2" />
+          </pattern>
+          <pattern height="6" id={`${id}-3`} patternUnits="userSpaceOnUse" width="6">
+            <circle cx="2" cy="2" fill="var(--ink)" r="1.5" />
+          </pattern>
+          <pattern height="6" id={`${id}-4`} patternUnits="userSpaceOnUse" width="6">
+            <path d="M0 1H6M0 4H6" stroke="var(--ink)" strokeWidth="1.5" />
+          </pattern>
+          <pattern height="6" id={`${id}-5`} patternUnits="userSpaceOnUse" width="6">
+            <path d="M1 0V6M4 0V6" stroke="var(--ink)" strokeWidth="1.5" />
+          </pattern>
+        </defs>
         <circle
           cx={cx}
           cy={cy}
@@ -65,7 +86,7 @@ export function Donut({
                   fill="none"
                   key={slice.id}
                   r={radius}
-                  stroke={slice.color}
+                  stroke={`url(#${id}-${slice.pattern % 6})`}
                   strokeDasharray={dasharray}
                   strokeDashoffset={-offset}
                   strokeWidth={thickness}
@@ -92,7 +113,7 @@ type DonutLegendProps = {
   renderValue?: (slice: DonutSlice) => ReactNode;
 };
 
-// Sits beside the donut. Each row: coloured dot · label · right-aligned value.
+// Sits beside the donut. Each row: patterned marker · label · right-aligned value.
 // Render-value lets the consumer format (e.g. <Money>) without coupling the
 // donut to currency rendering.
 export function DonutLegend({ slices, renderValue }: DonutLegendProps) {
@@ -102,8 +123,7 @@ export function DonutLegend({ slices, renderValue }: DonutLegendProps) {
         <li className="donut-legend-row" key={slice.id}>
           <span
             aria-hidden="true"
-            className="donut-legend-dot"
-            style={{ backgroundColor: slice.color }}
+            className={`donut-legend-dot donut-pattern-${slice.pattern % 6}`}
           />
           <span className="donut-legend-label">{slice.label}</span>
           <span className="donut-legend-value">
