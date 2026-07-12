@@ -7588,6 +7588,131 @@ select.config-strategy-input {
   background: var(--panel-hover);
   color: var(--ink-dim);
 }
+
+/* Colour accents are meaning-only: charts, severity, and live status. */
+:root[data-color-accents="on"] .attribution-bar {
+  background: var(--chart-color, var(--line-strong));
+}
+
+:root[data-color-accents="on"] .attribution-bar.manual-external,
+:root[data-color-accents="on"] .attribution-bar.unknown-ea {
+  background: var(--chart-color, var(--line-strong));
+}
+
+:root[data-color-accents="on"] .toast {
+  border-color: var(--toast-tone, var(--info));
+  border-left-width: 3px;
+  background: var(--toast-soft, var(--info-soft));
+}
+
+:root[data-color-accents="on"] .toast::before {
+  border-color: var(--toast-tone, var(--info));
+  color: var(--toast-tone, var(--info));
+}
+
+:root[data-color-accents="on"] .toast-success {
+  --toast-tone: var(--up);
+  --toast-soft: var(--up-soft);
+}
+
+:root[data-color-accents="on"] .toast-error {
+  --toast-tone: var(--down);
+  --toast-soft: var(--down-soft);
+}
+
+:root[data-color-accents="on"] .toast-warn {
+  --toast-tone: var(--warn);
+  --toast-soft: var(--warn-soft);
+}
+
+:root[data-color-accents="on"] .alerts-banner-item {
+  --alert-tone: var(--down);
+  --alert-soft: var(--down-soft);
+  border: 1px solid var(--alert-tone);
+  border-left-width: 3px;
+  background: var(--alert-soft);
+}
+
+:root[data-color-accents="on"] .alerts-banner-warn {
+  --alert-tone: var(--warn);
+  --alert-soft: var(--warn-soft);
+  border-style: solid;
+}
+
+:root[data-color-accents="on"] .alerts-banner-icon {
+  color: var(--alert-tone);
+}
+
+:root[data-color-accents="on"] .activity-row.activity-warn {
+  border-left: 3px solid var(--warn);
+  background: var(--warn-soft);
+}
+
+:root[data-color-accents="on"] .activity-row.activity-error {
+  border-left-color: var(--down);
+  background: var(--down-soft);
+}
+
+:root[data-color-accents="on"] .status-bar .chip-dot.ok,
+:root[data-color-accents="on"] .status-bar .live-dot {
+  background: var(--up);
+}
+
+:root[data-color-accents="on"] .status-bar .chip-dot.warn {
+  background: var(--warn);
+  border: 0;
+}
+
+:root[data-color-accents="on"] .status-bar .chip-dot.error,
+:root[data-color-accents="on"] .status-bar .live-dot.error {
+  background: var(--down);
+}
+
+/* One compact row: brand, live status, then actions. */
+.status-bar {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.status-bar .status-cluster,
+.status-bar .status-actions,
+.status-bar .status-chip {
+  display: inline-flex;
+  align-items: center;
+}
+
+.status-bar .status-cluster {
+  min-width: 0;
+  justify-content: flex-end;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.status-bar .status-chip {
+  gap: 5px;
+  min-height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink-dim);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.status-bar .status-chip .sync-label {
+  color: var(--ink-dim);
+}
+
+.status-bar .status-actions {
+  gap: 2px;
+}
+
+@media (max-width: 760px) {
+  .status-bar .status-chip:not(:first-child) {
+    display: none;
+  }
+}
 .activity-event {
   font-family: var(--font-mono);
   color: var(--ink);

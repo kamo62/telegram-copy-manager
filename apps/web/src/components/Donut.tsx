@@ -1,4 +1,6 @@
 import { type ReactNode, useId } from "react";
+import { useColorAccents } from "../contexts/ColorAccentsContext";
+import { chartCategory } from "../lib/chartPalette";
 
 export type DonutSlice = {
   id: string;
@@ -28,6 +30,7 @@ export function Donut({
   thickness = 14,
   ariaLabel,
 }: DonutProps) {
+  const { colorAccents } = useColorAccents();
   const id = useId().replace(/:/g, "");
   const total = slices.reduce((sum, slice) => sum + Math.max(0, slice.value), 0);
   const radius = (size - thickness) / 2;
@@ -86,7 +89,9 @@ export function Donut({
                   fill="none"
                   key={slice.id}
                   r={radius}
-                  stroke={`url(#${id}-${slice.pattern % 6})`}
+                  stroke={
+                    colorAccents ? chartCategory(slice.pattern) : `url(#${id}-${slice.pattern % 6})`
+                  }
                   strokeDasharray={dasharray}
                   strokeDashoffset={-offset}
                   strokeWidth={thickness}
@@ -117,6 +122,7 @@ type DonutLegendProps = {
 // Render-value lets the consumer format (e.g. <Money>) without coupling the
 // donut to currency rendering.
 export function DonutLegend({ slices, renderValue }: DonutLegendProps) {
+  const { colorAccents } = useColorAccents();
   return (
     <ul className="donut-legend">
       {slices.map((slice) => (
@@ -124,6 +130,14 @@ export function DonutLegend({ slices, renderValue }: DonutLegendProps) {
           <span
             aria-hidden="true"
             className={`donut-legend-dot donut-pattern-${slice.pattern % 6}`}
+            style={
+              colorAccents
+                ? {
+                    background: chartCategory(slice.pattern),
+                    borderColor: chartCategory(slice.pattern),
+                  }
+                : undefined
+            }
           />
           <span className="donut-legend-label">{slice.label}</span>
           <span className="donut-legend-value">

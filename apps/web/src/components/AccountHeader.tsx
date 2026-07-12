@@ -10,7 +10,9 @@ import {
   Wallet,
 } from "lucide-react";
 import { useState } from "react";
+import { useColorAccents } from "../contexts/ColorAccentsContext";
 import { useLocale } from "../contexts/LocaleContext";
+import { CHART_PALETTE } from "../lib/chartPalette";
 import { formatPercent } from "../lib/format";
 import { Money } from "./Money";
 import { SkeletonStat } from "./Skeleton";
@@ -48,10 +50,6 @@ export interface AccountHeaderData {
 
 type Accent = "blue" | "violet" | "emerald" | "amber" | "rose" | "muted";
 
-function accentColor(): string {
-  return "var(--ink)";
-}
-
 function formatDelta(
   deltaPercent: number | null,
   locale: string,
@@ -75,6 +73,7 @@ export function AccountHeader({
 }) {
   const { connectedPlatform, kpis, series, currency } = data;
   const { locale } = useLocale();
+  const { colorAccents } = useColorAccents();
   // Today / This Week / This Month are the same metric over three windows, so
   // they collapse into one card with a toggle instead of three separate cards.
   const [pnlWindow, setPnlWindow] = useState<"today" | "thisWeek" | "thisMonth">("today");
@@ -133,12 +132,15 @@ export function AccountHeader({
   const WindowIcon = activeWindow.icon;
   const windowDelta = formatDelta(windowKpi.deltaPercent, locale);
   const windowSpark = series?.[pnlWindow];
-  const windowSparkColor =
-    windowKpi.deltaPercent !== null && windowKpi.deltaPercent < 0
-      ? "var(--down-dim)"
-      : windowKpi.deltaPercent !== null && windowKpi.deltaPercent > 0
-        ? "var(--up-dim)"
-        : accentColor();
+  const chartColor = (isNegative: boolean) =>
+    colorAccents
+      ? isNegative
+        ? CHART_PALETTE.drawdownCss
+        : CHART_PALETTE.growthCss
+      : "var(--ink-faint)";
+  const windowSparkColor = chartColor(
+    windowKpi.deltaPercent !== null && windowKpi.deltaPercent < 0,
+  );
 
   return (
     <section className="account-header" aria-label="Account performance">
@@ -186,12 +188,7 @@ export function AccountHeader({
               const sparkData = series?.[kpi.key];
               // Sparkline tone tracks P/L sign for the windowed cards;
               // Balance/Equity stay on their fixed accent.
-              const sparkColor =
-                kpi.delta !== null && kpi.delta < 0
-                  ? "var(--down-dim)"
-                  : kpi.delta !== null && kpi.delta > 0
-                    ? "var(--up-dim)"
-                    : accentColor();
+              const sparkColor = chartColor(kpi.delta !== null && kpi.delta < 0);
               return (
                 <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
                   <div className="kpi-head">

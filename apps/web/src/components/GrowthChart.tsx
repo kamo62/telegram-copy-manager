@@ -5,6 +5,8 @@ import { Grid } from "@/components/dither-kit/grid";
 import { Tooltip } from "@/components/dither-kit/tooltip";
 import { XAxis } from "@/components/dither-kit/x-axis";
 import { YAxis } from "@/components/dither-kit/y-axis";
+import { useColorAccents } from "../contexts/ColorAccentsContext";
+import { CHART_PALETTE } from "../lib/chartPalette";
 import { Money } from "./Money";
 import { SkeletonChart } from "./Skeleton";
 
@@ -28,6 +30,7 @@ export function GrowthChart({
   currency?: string;
 }) {
   const [view, setView] = useState<"growth" | "drawdown">("growth");
+  const { colorAccents } = useColorAccents();
   const isTimeSeries = data.growth[0].some((value) => value > 1_000_000);
   const [xs, ys] = view === "growth" ? data.growth : data.drawdown;
   const rows = xs.map((x, index) => ({ x, value: ys[index] ?? 0 }));
@@ -82,7 +85,7 @@ export function GrowthChart({
       {loading ? (
         <SkeletonChart />
       ) : (
-        <div className="chart-canvas-wrap">
+        <div className="chart-canvas-wrap" data-color-accents={colorAccents ? "on" : "off"}>
           <AreaChart
             animate={false}
             bloom="low"
@@ -90,7 +93,11 @@ export function GrowthChart({
             config={{
               value: {
                 label: isGrowth ? "Account growth" : "Drawdown",
-                color: isGrowth ? "grey" : "red",
+                color: isGrowth
+                  ? colorAccents
+                    ? CHART_PALETTE.growth
+                    : "grey"
+                  : CHART_PALETTE.drawdown,
               },
             }}
             data={rows}

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.21.0 - 2026-07-12 (Minor)
+
+Release impact: Minor — adds a client-side display preference without changing API, database, or EA protocol contracts.
+
+- Added a persisted Colour accents setting for meaningful chart, operational-status, and notification colour; monochrome remains available per browser.
+- Tightened the top bar into brand, status, and action zones; the app version is now the brand tooltip and the redundant UTC clock is removed.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.21.0`.
+
 ## 1.20.0 - 2026-07-12 (Minor)
 
 Release impact: Minor — a full visual redesign to a clean monochrome white theme plus a new

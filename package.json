@@ -1,6 +1,6 @@
 {
   "name": "telegram-tc",
-  "version": "1.20.0",
+  "version": "1.21.0",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",

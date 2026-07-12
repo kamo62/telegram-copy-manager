@@ -50,6 +50,8 @@
   --warn-9: hsl(35 88% 46%);
   --warn-dim: hsl(35 88% 36%);
   --warn-soft: hsl(35 88% 46% / 0.14);
+  --info: hsl(214 68% 43%);
+  --info-soft: hsl(214 68% 43% / 0.12);
 
   /* ── Typography ───────────────────────────────────────────────────── */
   /* Variable font names come from @fontsource-variable/* packages imported

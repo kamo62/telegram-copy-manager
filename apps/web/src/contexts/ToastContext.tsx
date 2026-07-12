@@ -1,7 +1,8 @@
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { useColorAccents } from "./ColorAccentsContext";
 
-export type ToastVariant = "success" | "error" | "info";
+export type ToastVariant = "success" | "error" | "info" | "warn";
 
 interface ToastItem {
   id: number;
@@ -13,12 +14,14 @@ interface ToastContextValue {
   toast: (message: string, variant?: ToastVariant) => void;
   success: (message: string) => void;
   error: (message: string) => void;
+  warn: (message: string) => void;
 }
 
 const ToastContext = createContext<ToastContextValue>({
   toast: () => {},
   success: () => {},
   error: () => {},
+  warn: () => {},
 });
 
 let toastSeq = 0;
@@ -34,6 +37,7 @@ export function ToastProvider({
   children: ReactNode;
   autoDismissMs?: number;
 }) {
+  const { colorAccents } = useColorAccents();
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
   const dismiss = useCallback((id: number) => {
@@ -57,6 +61,7 @@ export function ToastProvider({
       toast,
       success: (message: string) => toast(message, "success"),
       error: (message: string) => toast(message, "error"),
+      warn: (message: string) => toast(message, "warn"),
     }),
     [toast],
   );
@@ -66,7 +71,12 @@ export function ToastProvider({
       {children}
       {typeof document !== "undefined"
         ? createPortal(
-            <div aria-live="polite" className="toast-stack" role="status">
+            <div
+              aria-live="polite"
+              className="toast-stack"
+              data-color-accents={colorAccents ? "on" : "off"}
+              role="status"
+            >
               {toasts.map((item) => (
                 <div className={`toast toast-${item.variant}`} key={item.id}>
                   <span className="toast-message">{item.message}</span>

@@ -1675,11 +1675,12 @@ describe("App dashboard", () => {
     });
   });
 
-  test("StatusBar shows last sync and app version", () => {
+  test("StatusBar shows last sync and keeps the app version on the brand tooltip", () => {
     const view = render(<App initialSnapshot={snapshot} />);
     expect(view.getByText("Last sync:")).toBeTruthy();
-    expect(view.getByText("Version:")).toBeTruthy();
-    expect(view.getByText(packageJson.version)).toBeTruthy();
+    expect(view.getByRole("heading", { name: "TG-TC · Operations" }).getAttribute("title")).toBe(
+      `Version ${packageJson.version}`,
+    );
   });
 
   test("shows GramJS Telegram adapter as healthy when backend health is OK", () => {
@@ -1694,8 +1695,8 @@ describe("App dashboard", () => {
 
     const telegramChip = view
       .getAllByText("gramjs")
-      .find((el) => el.closest(".chip"))
-      ?.closest(".chip");
+      .find((el) => el.closest(".status-chip"))
+      ?.closest(".status-chip");
     expect(telegramChip?.querySelector(".chip-dot")?.className).toContain("ok");
   });
 

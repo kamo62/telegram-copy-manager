@@ -11,6 +11,7 @@ import {
 import { useEffect, useState } from "react";
 import type { DashboardSnapshot } from "../App";
 import { Panel } from "../components/Panel";
+import { useColorAccents } from "../contexts/ColorAccentsContext";
 
 interface AccountThresholdsRow {
   id: string;
@@ -86,6 +87,7 @@ export function SettingsPage({
   onAlertTest?: () => Promise<void> | void;
   onBackup?: () => Promise<string>;
 }) {
+  const { colorAccents, setColorAccents } = useColorAccents();
   const [testSending, setTestSending] = useState(false);
   const [backupRunning, setBackupRunning] = useState(false);
   const [backupFilename, setBackupFilename] = useState("");
@@ -96,6 +98,21 @@ export function SettingsPage({
         polling cadence. Per-provider overrides live in each Provider's configuration modal.
       </p>
       <form className="settings-form-layout" onSubmit={onSubmit}>
+        <SettingsSection
+          description="Show restrained colour only for charts and operational status. This preference stays in this browser."
+          icon={<Sparkles aria-hidden="true" size={18} />}
+          title="Display"
+        >
+          <label className="settings-checkbox">
+            <input
+              aria-label="Colour accents"
+              checked={colorAccents}
+              onChange={(event) => setColorAccents(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Colour accents</span>
+          </label>
+        </SettingsSection>
         <SettingsSection
           description="Used when an approved signal does not specify lot size, risk, SL, or TP."
           icon={<Sliders aria-hidden="true" size={18} />}
