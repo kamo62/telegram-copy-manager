@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.20.0 - 2026-07-12 (Minor)
+
+Release impact: Minor — a full visual redesign to a clean monochrome white theme plus a new
+charting dependency (dither-kit). No API contract, database, or EA protocol change; the EA
+`#property version` is bumped only to stay aligned with the app version.
+
+- Re-skinned the operator dashboard to a monochrome white theme: cool-white surfaces, flat
+  cards with 1px hairline borders (shadows reserved for overlays), a three-tier type system,
+  larger tabular KPI numbers, a readability floor, black-pill segmented controls, and
+  normalized radius/spacing. Near-black is the only accent; cobalt and Telegram-blue are
+  neutralized.
+- Reserved green/red strictly for signed financial deltas. Operational state that previously
+  used colour (connection, Equity Guardian meter, toasts, pending slots, source badges,
+  activity severity, alerts) now conveys meaning through shape, border weight, hollow/pulsing
+  dots, glyphs, and labels. Strengthened the focus ring for visible outlines on white.
+- Tokenized previously-unstyled surfaces (`CommandPalette`, `ConfirmDialog`) and replaced a
+  native `window.confirm` with the shared themed dialog.
+- Fixed two styling bugs: card titles (`.panel > header h2`) were rendered as tiny uppercase
+  eyebrows, and `.kpi-label-currency` referenced a nonexistent token.
+- Replaced the account-growth chart with the vendored dither-kit ordered-dither area chart
+  (monochrome grey growth, red drawdown), keeping the growth/drawdown toggle and time/trade
+  labelling; removed the now-unused `uplot` dependency.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.20.0`.
+
 ## 1.19.0 - 2026-07-11 (Minor)
 
 Release impact: Minor — adds recoverable held-signal handling, account-slot lifecycle controls,

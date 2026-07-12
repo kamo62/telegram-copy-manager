@@ -4147,14 +4147,6 @@ h3 {
   text-transform: uppercase;
 }
 
-/* uplot light-theme overrides */
-.u-wrap {
-  background: transparent;
-}
-.u-wrap .u-legend {
-  display: none;
-}
-
 /* Data table --------------------------------------------------------------- */
 
 .data-table-wrap {
