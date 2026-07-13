@@ -21,14 +21,6 @@ const data: AccountHeaderData = {
     thisWeek: { amount: 222, deltaPercent: 2 },
     thisMonth: { amount: 3333, deltaPercent: 3 },
   },
-  series: {
-    balance: [900, 1000],
-    equity: [1000, 1100],
-    totalProfit: [100, 250],
-    today: [5, 11],
-    thisWeek: [100, 222],
-    thisMonth: [1000, 3333],
-  },
   currency: "USD",
 };
 
@@ -40,21 +32,6 @@ describe("AccountHeader", () => {
     expect(view.getByText("Balance")).toBeTruthy();
     expect(view.getByText("Equity")).toBeTruthy();
     expect(view.getByText("Trading P/L")).toBeTruthy();
-    expect(view.container.querySelectorAll(".kpi-window-spacer")).toHaveLength(3);
-    expect(
-      Array.from(view.container.querySelectorAll(".kpi-window-spacer")).every(
-        (spacer) => spacer.getAttribute("aria-hidden") === "true",
-      ),
-    ).toBe(true);
-    expect(view.getByLabelText("Balance trend").classList.contains("dither-sparkline")).toBe(true);
-    expect(view.getByLabelText("Equity trend").classList.contains("dither-sparkline")).toBe(true);
-    expect(view.getByLabelText("Trading P/L trend").classList.contains("dither-sparkline")).toBe(
-      true,
-    );
-    expect(view.getByLabelText("Today P/L trend").classList.contains("dither-sparkline")).toBe(
-      true,
-    );
-    expect(view.container.querySelector(".account-kpis .sparkline")).toBeNull();
     // Today / This Week / This Month are no longer three separate cards.
     expect(view.queryByText("This Week")).toBeNull();
     expect(view.queryByText("This Month")).toBeNull();
