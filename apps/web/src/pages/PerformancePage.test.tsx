@@ -1,7 +1,7 @@
 import "../test-setup";
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, waitFor, within } from "@testing-library/react";
-import { GrowthChart, type GrowthSeries } from "../components/GrowthChart";
+import { formatGrowthChartValue, GrowthChart, type GrowthSeries } from "../components/GrowthChart";
 import { PerformancePage } from "./PerformancePage";
 
 afterEach(() => cleanup());
@@ -124,5 +124,10 @@ describe("PerformancePage", () => {
     expect(view.getByText(/3 samples/)).toBeTruthy();
     expect(view.queryByText(/3 trades/)).toBeNull();
     expect(view.getByText("Time")).toBeTruthy();
+  });
+
+  test("uses the account currency for growth axis values", () => {
+    expect(formatGrowthChartValue(100, true, "ZAR", "en-ZA")).toBe("R\u00a0100,00");
+    expect(formatGrowthChartValue(12.34, false, "ZAR", "en-ZA")).toBe("12.3%");
   });
 });

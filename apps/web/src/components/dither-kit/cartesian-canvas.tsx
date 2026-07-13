@@ -112,14 +112,6 @@ function startCartesianLoop({
     raf = requestAnimationFrame(draw);
     const s = state.current;
     if (!s.ready) return;
-    // Keep the bloom layer in sync with the crisp canvas while it's active.
-    if (bloomCtx) {
-      const on = s.bloom !== "off" && (!s.bloomOnHover || s.isMouseInChart || s.hovered);
-      if (on) {
-        bloomCtx.clearRect(0, 0, cols, rows);
-        bloomCtx.drawImage(canvas, 0, 0);
-      }
-    }
     const tgt = targets.current;
     if (s.revision !== lastRevision) {
       lastRevision = s.revision;
@@ -187,7 +179,9 @@ function startCartesianLoop({
     // Live hover wins; the controlled markerIndex (e.g. a committed point)
     // is the fallback shown when nothing is hovered.
     const marker = s.hoverIndex != null ? s.hoverIndex : s.markerIndex;
-    const winkDue = !reduce && now - last >= 100;
+    // `animate={false}` also disables sparkle motion. Previously these static
+    // charts still repainted every 100ms despite opting out of animation.
+    const winkDue = animate && !reduce && stars.current.length > 0 && now - last >= 100;
     // Repaint when a tweak-driven paint input changes (variant, stacking) so
     // the panel updates the fill live — without resetting the entrance reveal.
     const paintSig = `${s.stackType}|${s.configKeys
@@ -263,6 +257,16 @@ function startCartesianLoop({
         c.fillRect(sx + 1, sy, 1, 1);
         c.fillRect(sx, sy - 1, 1, 1);
         c.fillRect(sx, sy + 1, 1, 1);
+      }
+    }
+
+    // Bloom only needs a new copy when the crisp canvas changed. Copying it
+    // before the idle guard caused a full canvas draw on every animation frame.
+    if (bloomCtx) {
+      const on = s.bloom !== "off" && (!s.bloomOnHover || s.isMouseInChart || s.hovered);
+      if (on) {
+        bloomCtx.clearRect(0, 0, cols, rows);
+        bloomCtx.drawImage(canvas, 0, 0);
       }
     }
   };

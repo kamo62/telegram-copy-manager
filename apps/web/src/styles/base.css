@@ -2455,59 +2455,6 @@ h3 {
   padding: 1px 5px;
 }
 
-.small-viewport-notice {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: var(--bg);
-  z-index: 100;
-}
-
-.small-viewport-notice-inner {
-  display: grid;
-  gap: 14px;
-  justify-items: center;
-  max-width: 360px;
-  text-align: center;
-}
-
-.small-viewport-notice-glyph {
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  border-radius: 14px;
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.small-viewport-notice-title {
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  margin: 0;
-  color: var(--ink);
-}
-
-.small-viewport-notice-body {
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--ink-2);
-  margin: 0;
-}
-
-.small-viewport-notice-body-secondary {
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.small-viewport-notice-continue {
-  margin-top: 6px;
-}
-
 .error-boundary {
   display: grid;
   place-items: center;
@@ -6037,7 +5984,7 @@ select.config-strategy-input {
   align-items: baseline;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: var(--fs-7);
+  font-size: var(--fs-6);
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--ink);
@@ -6047,8 +5994,15 @@ select.config-strategy-input {
 
 .kpi-primary .kpi-amount {
   color: var(--ink);
-  font-size: var(--fs-8);
+  font-size: var(--fs-7);
   letter-spacing: -0.02em;
+}
+
+/* Reserve the P/L card's Today/Week/Month toggle height in the other KPI cards
+   so all four amounts + sparklines line up on the same baseline. */
+.kpi-window-spacer {
+  height: 26px;
+  margin: 2px 0;
 }
 
 .kpi-delta {
@@ -8100,4 +8054,252 @@ select.config-strategy-input {
 .resolve-menu-popover button:disabled {
   color: var(--ink-faint);
   cursor: not-allowed;
+}
+
+/* Responsive operations shell -------------------------------------------- */
+
+.status-action-label {
+  display: none;
+}
+
+.status-bar .refresh-btn {
+  width: 28px;
+  height: 28px;
+  margin-left: 2px;
+}
+
+.kpi-window-toggle button,
+.chart-toggle button {
+  min-height: 28px;
+}
+
+.exposure-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.account-thresholds-wrap {
+  max-height: none;
+}
+
+.settings-panel {
+  overflow: visible;
+}
+
+@media (max-width: 900px) {
+  .workspace {
+    padding: var(--space-4);
+    gap: var(--space-4);
+  }
+
+  .workspace-tabs {
+    position: sticky;
+    top: 32px;
+    z-index: 20;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+    background: var(--bg);
+  }
+
+  .workspace-tab {
+    flex: 0 0 auto;
+    min-height: 40px;
+    padding: 8px 11px;
+  }
+
+  .account-context-secondary {
+    display: none;
+  }
+
+  .providers-table th:nth-child(n + 3):nth-child(-n + 10),
+  .providers-table td:nth-child(n + 3):nth-child(-n + 10) {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .status-bar {
+    height: 40px;
+    gap: 8px;
+    padding-inline: 8px;
+  }
+
+  .status-bar .status-actions {
+    gap: 4px;
+  }
+
+  .status-bar .refresh-btn {
+    width: auto;
+    min-width: 32px;
+    height: 32px;
+    margin-left: 0;
+    padding-inline: 8px;
+    gap: 5px;
+  }
+
+  .status-action-label {
+    display: inline;
+    font-size: 11px;
+  }
+
+  .workspace {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .workspace-tabs {
+    top: 40px;
+    margin-inline: -12px;
+    padding-inline: 12px;
+  }
+
+  .panel > *:not(header) {
+    padding: 16px;
+  }
+
+  .account-header {
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .account-header-title {
+    font-size: 22px;
+  }
+
+  .account-kpis {
+    gap: 8px;
+  }
+
+  .kpi {
+    gap: 4px;
+    padding: 8px;
+  }
+
+  .kpi .sparkline,
+  .kpi-spark-placeholder {
+    display: none;
+  }
+
+  .kpi-window-toggle button,
+  .chart-toggle button {
+    min-height: 36px;
+  }
+
+  .exposure-panel {
+    padding: 14px;
+  }
+
+  .exposure-table {
+    min-width: 430px;
+  }
+
+  .data-table-wrap {
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+
+  .providers-table th:nth-child(2),
+  .providers-table td:nth-child(2) {
+    display: none;
+  }
+
+  .providers-table .provider-account-cell {
+    min-width: 104px;
+  }
+
+  .settings-actions {
+    position: sticky;
+    top: 44px;
+    z-index: 15;
+    padding: 8px 0 10px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-actions .btn {
+    width: 100%;
+    min-height: 42px;
+  }
+
+  .settings-section {
+    padding: 14px;
+  }
+
+  .account-thresholds-table {
+    min-width: 430px;
+  }
+}
+
+@media (max-width: 600px) {
+  .setup-provider-row {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .setup-provider-name {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .setup-provider-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .setup-provider-actions .btn {
+    min-height: 40px;
+    padding-inline: 8px;
+  }
+
+  .linked-accounts-create {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .linked-accounts-create .btn {
+    min-height: 42px;
+  }
+
+  .account-row {
+    grid-template-columns: 32px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .account-row > .tag {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .account-row-meta,
+  .account-row-stats {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .linked-slot-body {
+    min-width: 0;
+  }
+
+  .linked-slot-body span {
+    overflow-wrap: anywhere;
+  }
+
+  .linked-slot-delete {
+    width: 36px;
+    height: 36px;
+  }
+
+  .provider-link-block {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .provider-link-block > .btn,
+  .linked-account-actions .btn {
+    min-height: 40px;
+  }
 }

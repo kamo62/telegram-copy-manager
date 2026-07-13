@@ -92,12 +92,23 @@ export function SettingsPage({
   const [backupRunning, setBackupRunning] = useState(false);
   const [backupFilename, setBackupFilename] = useState("");
   return (
-    <Panel className="wide-panel" title="Settings">
+    <Panel className="wide-panel settings-panel" title="Settings">
       <p className="panel-intro">
         Defaults applied when a parsed signal is missing fields, plus integration secrets and
         polling cadence. Per-provider overrides live in each Provider's configuration modal.
       </p>
       <form className="settings-form-layout" onSubmit={onSubmit}>
+        <div className="settings-actions">
+          <button
+            className="btn btn-primary"
+            onClick={(event) => {
+              if (event.currentTarget.form) onSaveForm(event.currentTarget.form);
+            }}
+            type="button"
+          >
+            Save execution settings
+          </button>
+        </div>
         <SettingsSection
           description="Show restrained colour only for charts and operational status. This preference stays in this browser."
           icon={<Sparkles aria-hidden="true" size={18} />}
@@ -463,18 +474,6 @@ export function SettingsPage({
             />
           </Field>
         </SettingsSection>
-
-        <div className="settings-actions">
-          <button
-            className="btn btn-primary"
-            onClick={(event) => {
-              if (event.currentTarget.form) onSaveForm(event.currentTarget.form);
-            }}
-            type="button"
-          >
-            Save execution settings
-          </button>
-        </div>
       </form>
 
       {accounts.length > 0 && onAccountRiskThresholdsSave ? (
@@ -497,25 +496,27 @@ function AccountRiskThresholdsSection({
       icon={<ShieldAlert aria-hidden="true" size={18} />}
       title="Per-account risk overrides"
     >
-      <table className="data-table account-thresholds-table">
-        <thead>
-          <tr>
-            <th scope="col">Account</th>
-            <th className="num" scope="col">
-              Warn (%)
-            </th>
-            <th className="num" scope="col">
-              Danger (%)
-            </th>
-            <th scope="col" aria-label="Actions" />
-          </tr>
-        </thead>
-        <tbody>
-          {accounts.map((account) => (
-            <AccountThresholdRow account={account} key={account.id} onSave={onSave} />
-          ))}
-        </tbody>
-      </table>
+      <div className="data-table-wrap account-thresholds-wrap">
+        <table className="data-table account-thresholds-table">
+          <thead>
+            <tr>
+              <th scope="col">Account</th>
+              <th className="num" scope="col">
+                Warn (%)
+              </th>
+              <th className="num" scope="col">
+                Danger (%)
+              </th>
+              <th scope="col" aria-label="Actions" />
+            </tr>
+          </thead>
+          <tbody>
+            {accounts.map((account) => (
+              <AccountThresholdRow account={account} key={account.id} onSave={onSave} />
+            ))}
+          </tbody>
+        </table>
+      </div>
     </SettingsSection>
   );
 }

@@ -30,7 +30,6 @@ import type { ProviderRowData } from "./components/ProvidersTable";
 import type { SetupFormState, SetupStep } from "./components/SetupFlow";
 import { navItems, Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
-import { SmallViewportNotice } from "./components/SmallViewportNotice";
 import { StatusBar } from "./components/StatusBar";
 import { SummaryPanel } from "./components/SummaryPanel";
 import { SymbolMappingModal } from "./components/SymbolMappingModal";
@@ -562,29 +561,6 @@ export function App({
   const announce = useAnnouncer();
   const toast = useToast();
   const { confirm, dialog: confirmDialog } = useConfirm();
-  const [viewportTooSmall, setViewportTooSmall] = useState(() => {
-    if (typeof window === "undefined") return false;
-    if (window.localStorage.getItem("tg-tc.viewport-override") === "1") return false;
-    return window.innerWidth < 768;
-  });
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.localStorage.getItem("tg-tc.viewport-override") === "1") return;
-    let frame = 0;
-    function check() {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        setViewportTooSmall(window.innerWidth < 768);
-      });
-    }
-    window.addEventListener("resize", check);
-    return () => {
-      window.removeEventListener("resize", check);
-      window.cancelAnimationFrame(frame);
-    };
-  }, []);
-
   useEffect(() => {
     if (initialSnapshot) return;
     let active = true;
@@ -994,7 +970,24 @@ export function App({
         id: `nav-${id}`,
         label: `Go to ${label}`,
         shortcut: String(index + 1),
-        action: () => setActiveView(id),
+        action: () => {
+          if (id === "dashboard") {
+            setSelectedSlotId(null);
+            navigate("/");
+            return;
+          }
+          setActiveView(id);
+        },
+      })),
+      ...sidebarAccounts.map((account) => ({
+        id: `account-${account.id}`,
+        label: `Open account ${account.label}`,
+        action: () => setSelectedAccountId(account.id),
+      })),
+      ...sidebarPendingSlots.map((slot) => ({
+        id: `slot-${slot.id}`,
+        label: `Open pending slot ${slot.name}`,
+        action: () => selectSlot(slot.id),
       })),
       ...(snapshot.providers.length > 0
         ? [
@@ -1006,7 +999,7 @@ export function App({
           ]
         : []),
     ],
-    [snapshot.providers.length],
+    [sidebarAccounts, sidebarPendingSlots, snapshot.providers.length],
   );
 
   useHotkeys((event) => {
@@ -1767,19 +1760,6 @@ export function App({
     setActiveView(viewId);
   }
 
-  if (viewportTooSmall) {
-    return (
-      <SmallViewportNotice
-        onContinueAnyway={() => {
-          if (typeof window !== "undefined") {
-            window.localStorage.setItem("tg-tc.viewport-override", "1");
-          }
-          setViewportTooSmall(false);
-        }}
-      />
-    );
-  }
-
   const displayedSetupStep: SetupStep =
     setupStep === "connected" && initialLoading && !initialSnapshot ? "checking" : setupStep;
 
@@ -1838,7 +1818,11 @@ export function App({
             <PendingSlotView slot={focusedSlot} />
           ) : showDashboard ? (
             <>
-              <AccountHeader data={accountHeaderData} loading={initialLoading} />
+              <AccountHeader
+                className={activeTab === "summary" ? undefined : "account-context-secondary"}
+                data={accountHeaderData}
+                loading={initialLoading}
+              />
               {snapshot.providers.length === 0 &&
               snapshot.mt5Accounts.length === 0 &&
               sidebarPendingSlots.length === 0 ? (
@@ -1858,6 +1842,7 @@ export function App({
               {focusedAccount ? (
                 <ExposurePanel
                   accountId={focusedAccount.id}
+                  className={activeTab === "summary" ? undefined : "account-context-secondary"}
                   positions={[
                     ...((focusedAccount as { appPositions?: ExposurePosition[] }).appPositions ??
                       []),

@@ -473,7 +473,8 @@ describe("App dashboard", () => {
     });
 
     const header = within(view.getByLabelText("Account performance"));
-    expect(header.getAllByText(/\$45\.50/).length).toBeGreaterThanOrEqual(1);
+    // KPI amounts render without the currency symbol (currency shown in the label).
+    expect(header.getAllByText(/45\.50/).length).toBeGreaterThanOrEqual(1);
   });
 
   test("account growth chart uses the focused account performance series", () => {
@@ -1197,6 +1198,7 @@ describe("App dashboard", () => {
       "20",
     );
     expect(view.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+    expect(view.container.querySelector(".settings-panel .account-thresholds-wrap")).toBeTruthy();
   });
 
   test("lets the operator save global aliases and account symbol mappings", async () => {
@@ -1210,8 +1212,8 @@ describe("App dashboard", () => {
     await clickTabAsync(view, "Symbol Settings");
 
     fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
-    fireEvent.change(view.getByLabelText("Alias raw symbol"), { target: { value: "SILVER" } });
-    fireEvent.change(view.getByLabelText("Alias canonical symbol"), {
+    fireEvent.change(view.getByLabelText("Provider symbol"), { target: { value: "SILVER" } });
+    fireEvent.change(view.getByLabelText("Canonical symbol"), {
       target: { value: "XAGUSD" },
     });
     fireEvent.click(view.getByRole("button", { name: "Save global alias" }));
@@ -1221,10 +1223,10 @@ describe("App dashboard", () => {
     fireEvent.change(view.getByLabelText("Mapping account ID"), {
       target: { value: "mt5-demo-1" },
     });
-    fireEvent.change(view.getByLabelText("Mapping canonical symbol"), {
+    fireEvent.change(view.getByLabelText("Canonical symbol"), {
       target: { value: "XAGUSD" },
     });
-    fireEvent.change(view.getByLabelText("Mapping broker symbol"), {
+    fireEvent.change(view.getByLabelText("Broker symbol for this account"), {
       target: { value: "XAGUSD.pro" },
     });
     fireEvent.change(view.getByLabelText("Mapping prefix"), { target: { value: "m." } });
@@ -1641,26 +1643,25 @@ describe("App dashboard", () => {
     expect(view.getByText("No MT5 reports yet")).toBeTruthy();
   });
 
-  test("renders the SmallViewportNotice below 768px and continues anyway on click", () => {
+  test("renders the workspace and account navigation directly on phone widths", () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
       value: 375,
     });
-    window.localStorage.removeItem("tg-tc.viewport-override");
     try {
       const view = render(<App initialSnapshot={snapshot} />);
-      expect(view.getByText("Use a larger screen")).toBeTruthy();
-      fireEvent.click(view.getByRole("button", { name: "Continue anyway" }));
-      expect(window.localStorage.getItem("tg-tc.viewport-override")).toBe("1");
-      // After continue-anyway, the workspace renders.
+      expect(view.queryByText("Use a larger screen")).toBeNull();
       expect(view.getByRole("heading", { name: /TG-TC/ })).toBeTruthy();
+      const menu = view.getByRole("button", { name: "Open command palette" });
+      expect(menu.textContent).toContain("Menu");
+      fireEvent.click(menu);
+      expect(view.getByRole("button", { name: "Open account 100200300" })).toBeTruthy();
     } finally {
       Object.defineProperty(window, "innerWidth", {
         configurable: true,
         value: originalWidth,
       });
-      window.localStorage.removeItem("tg-tc.viewport-override");
     }
   });
 

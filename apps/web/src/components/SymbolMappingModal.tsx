@@ -140,11 +140,16 @@ export function SymbolMappingModal({
               </button>
             </div>
             <p className="config-hint config-hint-soft">
+              Flow: provider symbol → canonical (broker-agnostic) → your broker's exact symbol. The
+              canonical lets one alias serve every account; the account-specific broker symbol is
+              where you pick the right one when a broker lists several (XAUUSD.raw, XAUUSD.pro, …).
+            </p>
+            <p className="config-hint config-hint-soft">
               {scope === "global"
-                ? "Maps a raw provider symbol to the app's canonical symbol everywhere. Example: GOLD → XAUUSD."
+                ? "Global alias: maps a provider symbol to a canonical symbol everywhere. Example: GOLD → XAUUSD."
                 : scope === "provider"
-                  ? "Maps a raw symbol for one Telegram provider only."
-                  : "Overrides the broker symbol for a specific MT5 account, plus its suffix and include/exclude rules."}
+                  ? "Provider alias: maps a provider symbol to a canonical symbol for one Telegram provider only."
+                  : "Account-specific: maps a canonical symbol to this account's exact broker symbol (and optional suffix / include-exclude rules)."}
             </p>
           </section>
 
@@ -166,9 +171,9 @@ export function SymbolMappingModal({
               ) : null}
               <div className="config-row">
                 <label className="config-field config-field-grow">
-                  <span className="config-label">Alias raw symbol</span>
+                  <span className="config-label">Provider symbol</span>
                   <input
-                    aria-label="Alias raw symbol"
+                    aria-label="Provider symbol"
                     defaultValue=""
                     name="aliasRaw"
                     placeholder="GOLD"
@@ -176,9 +181,9 @@ export function SymbolMappingModal({
                   />
                 </label>
                 <label className="config-field config-field-grow">
-                  <span className="config-label">Alias canonical symbol</span>
+                  <span className="config-label">Canonical symbol (broker-agnostic)</span>
                   <input
-                    aria-label="Alias canonical symbol"
+                    aria-label="Canonical symbol"
                     defaultValue=""
                     name="aliasCanonical"
                     placeholder="XAUUSD"
@@ -206,9 +211,9 @@ export function SymbolMappingModal({
                 <h3 className="config-section-title">Symbol override</h3>
                 <div className="config-row">
                   <label className="config-field config-field-grow">
-                    <span className="config-label">Mapping canonical symbol</span>
+                    <span className="config-label">Canonical symbol</span>
                     <input
-                      aria-label="Mapping canonical symbol"
+                      aria-label="Canonical symbol"
                       defaultValue=""
                       name="accountCanonical"
                       placeholder="XAUUSD"
@@ -216,12 +221,12 @@ export function SymbolMappingModal({
                     />
                   </label>
                   <label className="config-field config-field-grow">
-                    <span className="config-label">Mapping broker symbol</span>
+                    <span className="config-label">Broker symbol (this account)</span>
                     <input
-                      aria-label="Mapping broker symbol"
+                      aria-label="Broker symbol for this account"
                       defaultValue=""
                       name="accountBroker"
-                      placeholder="XAUUSD.r"
+                      placeholder="XAUUSD.raw"
                       type="text"
                     />
                   </label>

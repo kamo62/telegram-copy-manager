@@ -6,8 +6,10 @@ import { Tooltip } from "@/components/dither-kit/tooltip";
 import { XAxis } from "@/components/dither-kit/x-axis";
 import { YAxis } from "@/components/dither-kit/y-axis";
 import { useColorAccents } from "../contexts/ColorAccentsContext";
+import { useLocale } from "../contexts/LocaleContext";
 import { chartDitherColor } from "../lib/chartPalette";
 import { downsampleIndices } from "../lib/downsample";
+import { formatMoney } from "../lib/format";
 import { Money } from "./Money";
 import { SkeletonChart } from "./Skeleton";
 
@@ -21,6 +23,15 @@ export type GrowthSeries = {
   numberOfTrades: number;
 };
 
+export function formatGrowthChartValue(
+  value: number,
+  isGrowth: boolean,
+  currency: string | undefined,
+  locale: string,
+): string {
+  return isGrowth ? formatMoney(value, currency ?? "", locale) : `${value.toFixed(1)}%`;
+}
+
 export function GrowthChart({
   data,
   loading = false,
@@ -32,6 +43,7 @@ export function GrowthChart({
 }) {
   const [view, setView] = useState<"growth" | "drawdown">("growth");
   const { colorAccents } = useColorAccents();
+  const { locale } = useLocale();
   const { isGrowth, isTimeSeries, rows } = useMemo(() => {
     const [xs, ys] = view === "growth" ? data.growth : data.drawdown;
     const indices = downsampleIndices(ys, 240);
@@ -118,16 +130,12 @@ export function GrowthChart({
               }
             />
             <YAxis
-              tickFormatter={(value) =>
-                isGrowth ? `$${value.toLocaleString()}` : `${value.toFixed(1)}%`
-              }
+              tickFormatter={(value) => formatGrowthChartValue(value, isGrowth, currency, locale)}
             />
             <Area dataKey="value" variant="gradient" />
             <Tooltip
               labelKey="x"
-              valueFormatter={(value) =>
-                isGrowth ? `$${value.toLocaleString()}` : `${value.toFixed(1)}%`
-              }
+              valueFormatter={(value) => formatGrowthChartValue(value, isGrowth, currency, locale)}
             />
           </AreaChart>
         </div>

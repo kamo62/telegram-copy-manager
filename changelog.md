@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.22.0 - 2026-07-13 (Minor)
+
+Release impact: Minor because this adds a backward-compatible phone/tablet workflow and responsive UI states without changing API, database, or EA protocol contracts.
+
+- Made the operations workspace usable below 768px without an override screen, with command-palette navigation for global pages, linked accounts, and pending slots.
+- Contained workspace tabs and wide tables, kept provider and Telegram actions reachable, compacted secondary account tabs, and moved the Settings save action to a sticky, early position on narrow screens.
+- Fixed linked-account metadata collisions, narrow-screen touch targets, and ZAR/other account currencies on the Performance growth chart axis and tooltip.
+- Stopped non-animated dither charts from repainting sparkles and bloom canvases while idle.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.22.0`.
+
 ## 1.21.4 - 2026-07-13 (Patch)
 
 Release impact: Patch — fixes an SSE reconnect loop; no API contract, DB, or EA protocol change; the EA `#property version` is bumped only to stay aligned.

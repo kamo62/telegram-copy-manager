@@ -25,7 +25,7 @@ export function SymbolMappingsTable({
       <table className="data-table symbol-mappings-table">
         <thead>
           <tr>
-            <th scope="col">Raw symbol</th>
+            <th scope="col">Provider symbol</th>
             <th scope="col">Canonical</th>
             <th scope="col">Broker symbol</th>
             <th scope="col">Scope</th>

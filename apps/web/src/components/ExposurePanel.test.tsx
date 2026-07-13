@@ -18,10 +18,11 @@ describe("ExposurePanel", () => {
       );
       await Promise.resolve();
     });
-    const { getByText } = view as ReturnType<typeof render>;
+    const { container, getByText } = view as ReturnType<typeof render>;
     expect(getByText("0.2 lots open")).toBeDefined();
     expect(getByText("XAUUSD")).toBeDefined();
     expect(getByText("100 pips")).toBeDefined();
+    expect(container.querySelector(".exposure-table-wrap .exposure-table")).toBeTruthy();
   });
 
   test("renders nothing when there are no open positions", async () => {

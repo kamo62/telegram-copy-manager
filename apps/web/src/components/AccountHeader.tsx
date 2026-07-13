@@ -67,9 +67,11 @@ function formatDelta(
 export function AccountHeader({
   data,
   loading = false,
+  className,
 }: {
   data: AccountHeaderData;
   loading?: boolean;
+  className?: string;
 }) {
   const { connectedPlatform, kpis, series, currency } = data;
   const { locale } = useLocale();
@@ -143,7 +145,10 @@ export function AccountHeader({
   );
 
   return (
-    <section className="account-header" aria-label="Account performance">
+    <section
+      className={["account-header", className].filter(Boolean).join(" ")}
+      aria-label="Account performance"
+    >
       <div className="account-header-section">
         <h2 className="account-header-title">Live</h2>
         <div className="account-platform-card">
@@ -200,11 +205,13 @@ export function AccountHeader({
                       <Icon size={13} />
                     </span>
                   </div>
+                  <div aria-hidden="true" className="kpi-window-spacer" />
                   <Money
                     value={kpi.amount}
                     currency={currency}
                     locale={locale}
                     signTone={kpi.delta !== null}
+                    symbol={false}
                     className="kpi-amount"
                   />
                   <span className={`kpi-delta kpi-delta-${delta.tone}`}>{delta.text}</span>
@@ -254,6 +261,7 @@ export function AccountHeader({
                 currency={currency}
                 locale={locale}
                 signTone={windowKpi.deltaPercent !== null}
+                symbol={false}
                 className="kpi-amount"
               />
               <span className={`kpi-delta kpi-delta-${windowDelta.tone}`}>{windowDelta.text}</span>
