@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.21.3 - 2026-07-13 (Patch)
+
+Release impact: Patch because this reduces chart rendering and static-asset reload work without changing public contracts.
+
+- Downsampled dithered account chart series while retaining bucket peaks and drawdown lows, and cached content-hashed build assets for one year.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.21.3`.
+
 ## 1.21.2 - 2026-07-12 (Patch)
 
 Release impact: Patch because this refines visual chart and operational-status clarity without changing public contracts.

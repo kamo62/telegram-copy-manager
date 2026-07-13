@@ -846,8 +846,23 @@ export function createApi(options: ApiOptions = {}) {
   );
 
   if (options.staticRoot) {
-    app.use("/*", serveStatic({ root: options.staticRoot }));
-    app.get("*", async (c) => c.html(await Bun.file(`${options.staticRoot}/index.html`).text()));
+    app.use(
+      "/*",
+      serveStatic({
+        root: options.staticRoot,
+        onFound: (path, c) => {
+          if (c.req.path.startsWith("/assets/")) {
+            c.header("Cache-Control", "public, max-age=31536000, immutable");
+          } else if (path.endsWith("/index.html")) {
+            c.header("Cache-Control", "no-cache");
+          }
+        },
+      }),
+    );
+    app.get("*", async (c) => {
+      c.header("Cache-Control", "no-cache");
+      return c.html(await Bun.file(`${options.staticRoot}/index.html`).text());
+    });
   }
 
   const ingestion = createTelegramIngestionLoop(store, telegram, {

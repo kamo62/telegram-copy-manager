@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Area } from "@/components/dither-kit/area";
 import { AreaChart } from "@/components/dither-kit/area-chart";
 import { Grid } from "@/components/dither-kit/grid";
@@ -7,6 +7,7 @@ import { XAxis } from "@/components/dither-kit/x-axis";
 import { YAxis } from "@/components/dither-kit/y-axis";
 import { useColorAccents } from "../contexts/ColorAccentsContext";
 import { chartDitherColor } from "../lib/chartPalette";
+import { downsampleIndices } from "../lib/downsample";
 import { Money } from "./Money";
 import { SkeletonChart } from "./Skeleton";
 
@@ -31,10 +32,15 @@ export function GrowthChart({
 }) {
   const [view, setView] = useState<"growth" | "drawdown">("growth");
   const { colorAccents } = useColorAccents();
-  const isTimeSeries = data.growth[0].some((value) => value > 1_000_000);
-  const [xs, ys] = view === "growth" ? data.growth : data.drawdown;
-  const rows = xs.map((x, index) => ({ x, value: ys[index] ?? 0 }));
-  const isGrowth = view === "growth";
+  const { isGrowth, isTimeSeries, rows } = useMemo(() => {
+    const [xs, ys] = view === "growth" ? data.growth : data.drawdown;
+    const indices = downsampleIndices(ys, 240);
+    return {
+      isGrowth: view === "growth",
+      isTimeSeries: data.growth[0].some((value) => value > 1_000_000),
+      rows: indices.map((index) => ({ x: xs[index] ?? index, value: ys[index] ?? 0 })),
+    };
+  }, [data.drawdown, data.growth, view]);
   const sampleLabel = isTimeSeries
     ? `${data.numberOfTrades} sample${data.numberOfTrades === 1 ? "" : "s"}`
     : `${data.numberOfTrades} trade${data.numberOfTrades === 1 ? "" : "s"}`;

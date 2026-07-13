@@ -1,3 +1,4 @@
+import { downsample } from "../lib/downsample";
 import { DitherSparkline } from "./DitherSparkline";
 import type { GrowthSeries } from "./GrowthChart";
 import { Money } from "./Money";
@@ -11,6 +12,7 @@ import { Money } from "./Money";
  */
 export function SummaryPanel({ data, currency }: { data: GrowthSeries; currency?: string }) {
   const equity = data.growth[1] ?? [];
+  const sparklineEquity = downsample(equity, 96);
   const hasTrend = equity.length >= 2 && Math.min(...equity) !== Math.max(...equity);
   const rising = hasTrend ? (equity[equity.length - 1] ?? 0) >= (equity[0] ?? 0) : true;
 
@@ -36,7 +38,7 @@ export function SummaryPanel({ data, currency }: { data: GrowthSeries; currency?
       {hasTrend ? (
         <DitherSparkline
           ariaLabel="Account equity trend"
-          data={equity}
+          data={sparklineEquity}
           tone={rising ? "growth" : "drawdown"}
         />
       ) : (

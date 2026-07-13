@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Area } from "@/components/dither-kit/area";
 import { AreaChart } from "@/components/dither-kit/area-chart";
 import { useColorAccents } from "../contexts/ColorAccentsContext";
@@ -13,7 +14,7 @@ type DitherSparklineProps = {
 /** A non-interactive, canvas-dithered area strip for prominent trends. */
 export function DitherSparkline({ data, tone, ariaLabel, height = 72 }: DitherSparklineProps) {
   const { colorAccents } = useColorAccents();
-  const rows = data.map((value, index) => ({ index, value }));
+  const rows = useMemo(() => data.map((value, index) => ({ index, value })), [data]);
 
   return (
     <div
