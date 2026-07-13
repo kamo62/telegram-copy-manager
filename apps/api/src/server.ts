@@ -13,6 +13,11 @@ const app = createApi({
 
 Bun.serve({
   port,
+  // Long-lived SSE (/api/events) must outlast Bun's default idle timeout (~10s),
+  // otherwise idle connections are closed mid-stream and the browser's
+  // EventSource reconnects in a loop (ERR_INCOMPLETE_CHUNKED_ENCODING in Chrome).
+  // 255s is Bun's max; the SSE heartbeat (every 10s) keeps the socket active.
+  idleTimeout: 255,
   fetch: app.fetch,
 });
 

@@ -836,7 +836,9 @@ export function createApi(options: ApiOptions = {}) {
         }
         await stream.sleep(250);
         sinceHeartbeatMs += 250;
-        if (sinceHeartbeatMs >= 25_000) {
+        // Heartbeat well under the server idleTimeout so idle SSE connections are
+        // never closed mid-stream (which makes EventSource reconnect in a loop).
+        if (sinceHeartbeatMs >= 10_000) {
           await stream.writeSSE({ event: "heartbeat", data: JSON.stringify({ ts: Date.now() }) });
           sinceHeartbeatMs = 0;
         }

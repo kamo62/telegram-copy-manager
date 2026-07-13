@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.21.4 - 2026-07-13 (Patch)
+
+Release impact: Patch — fixes an SSE reconnect loop; no API contract, DB, or EA protocol change; the EA `#property version` is bumped only to stay aligned.
+
+- Fixed the `/api/events` live-update stream being closed mid-connection. `Bun.serve` used the default ~10s idle timeout while the SSE heartbeat was 25s, so idle connections were dropped and the browser's `EventSource` reconnected in a loop (visible in Chrome as repeated `ERR_INCOMPLETE_CHUNKED_ENCODING` and reconnect churn/jank; Safari tolerated the silent reconnects). Set `idleTimeout: 255` and heartbeat every 10s so idle SSE connections stay alive.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.21.4`.
+
 ## 1.21.3 - 2026-07-13 (Patch)
 
 Release impact: Patch because this reduces chart rendering and static-asset reload work without changing public contracts.
