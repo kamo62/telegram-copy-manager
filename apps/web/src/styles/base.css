@@ -6028,6 +6028,11 @@ select.config-strategy-input {
   margin-top: 6px;
 }
 
+.kpi-window-spacer {
+  height: 23px;
+  margin: 2px 0;
+}
+
 .kpi-label-currency {
   color: var(--ink-3);
 }
@@ -6259,6 +6264,7 @@ select.config-strategy-input {
   padding: 2px 8px;
   font-family: var(--font-ui);
   font-size: 11px;
+  line-height: 13px;
   font-weight: 500;
   color: var(--ink-3);
   background: transparent;

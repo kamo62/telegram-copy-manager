@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.21.5 - 2026-07-13 (Patch)
+
+Release impact: Patch — visual-only; no API, DB, or EA protocol change; EA `#property version` bumped only to stay aligned.
+
+- Switched the account-header KPI sparklines (Balance/Equity/Trading P/L/P/L window) to the dithered `DitherSparkline` for visual consistency with the Summary trend.
+- Fixed KPI panel alignment: the P/L panel's Today/Week/Month toggle pushed its number and sparkline below the other three; reserved matching space in the other panels so all four align.
+
 ## 1.21.4 - 2026-07-13 (Patch)
 
 Release impact: Patch — fixes an SSE reconnect loop; no API contract, DB, or EA protocol change; the EA `#property version` is bumped only to stay aligned.

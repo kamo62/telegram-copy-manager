@@ -10,13 +10,11 @@ import {
   Wallet,
 } from "lucide-react";
 import { useState } from "react";
-import { useColorAccents } from "../contexts/ColorAccentsContext";
 import { useLocale } from "../contexts/LocaleContext";
-import { CHART_PALETTE } from "../lib/chartPalette";
 import { formatPercent } from "../lib/format";
+import { DitherSparkline } from "./DitherSparkline";
 import { Money } from "./Money";
 import { SkeletonStat } from "./Skeleton";
-import { Sparkline } from "./Sparkline";
 
 export interface AccountHeaderData {
   connectedPlatform: {
@@ -73,7 +71,6 @@ export function AccountHeader({
 }) {
   const { connectedPlatform, kpis, series, currency } = data;
   const { locale } = useLocale();
-  const { colorAccents } = useColorAccents();
   // Today / This Week / This Month are the same metric over three windows, so
   // they collapse into one card with a toggle instead of three separate cards.
   const [pnlWindow, setPnlWindow] = useState<"today" | "thisWeek" | "thisMonth">("today");
@@ -132,15 +129,6 @@ export function AccountHeader({
   const WindowIcon = activeWindow.icon;
   const windowDelta = formatDelta(windowKpi.deltaPercent, locale);
   const windowSpark = series?.[pnlWindow];
-  const chartColor = (isNegative: boolean) =>
-    colorAccents
-      ? isNegative
-        ? CHART_PALETTE.drawdownCss
-        : CHART_PALETTE.growthCss
-      : "var(--ink-faint)";
-  const windowSparkColor = chartColor(
-    windowKpi.deltaPercent !== null && windowKpi.deltaPercent < 0,
-  );
 
   return (
     <section className="account-header" aria-label="Account performance">
@@ -186,9 +174,6 @@ export function AccountHeader({
               const delta = formatDelta(kpi.delta, locale);
               const Icon = kpi.icon;
               const sparkData = series?.[kpi.key];
-              // Sparkline tone tracks P/L sign for the windowed cards;
-              // Balance/Equity stay on their fixed accent.
-              const sparkColor = chartColor(kpi.delta !== null && kpi.delta < 0);
               return (
                 <div className={`kpi ${kpi.primary ? "kpi-primary" : ""}`} key={kpi.label}>
                   <div className="kpi-head">
@@ -200,6 +185,7 @@ export function AccountHeader({
                       <Icon size={13} />
                     </span>
                   </div>
+                  <div aria-hidden="true" className="kpi-window-spacer" />
                   <Money
                     value={kpi.amount}
                     currency={currency}
@@ -211,10 +197,11 @@ export function AccountHeader({
                   {sparkData &&
                   sparkData.length >= 2 &&
                   Math.min(...sparkData) !== Math.max(...sparkData) ? (
-                    <Sparkline
+                    <DitherSparkline
                       ariaLabel={`${kpi.label} trend`}
-                      color={sparkColor}
                       data={sparkData}
+                      height={28}
+                      tone={(kpi.delta ?? 0) < 0 ? "drawdown" : "growth"}
                     />
                   ) : (
                     // Reserve the sparkline strip even when no series is
@@ -260,10 +247,11 @@ export function AccountHeader({
               {windowSpark &&
               windowSpark.length >= 2 &&
               Math.min(...windowSpark) !== Math.max(...windowSpark) ? (
-                <Sparkline
+                <DitherSparkline
                   ariaLabel={`${activeWindow.short} P/L trend`}
-                  color={windowSparkColor}
                   data={windowSpark}
+                  height={28}
+                  tone={(windowKpi.deltaPercent ?? 0) < 0 ? "drawdown" : "growth"}
                 />
               ) : (
                 <div aria-hidden="true" className="kpi-spark-placeholder" />
