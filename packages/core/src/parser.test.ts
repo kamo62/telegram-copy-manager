@@ -564,6 +564,30 @@ describe("symbol resolver", () => {
     });
   });
 
+  test("applies account safety checks to direct provider-to-broker overrides", () => {
+    const accountId = "mt5-direct-safe";
+    const direct = {
+      accountId,
+      directBrokerOverrides: { GOLD: "XAUUSD.raw" },
+      availableBrokerSymbols: ["XAUUSD.raw"],
+    };
+
+    expect(
+      resolveSymbol("GOLD", {
+        accountId,
+        accountMappings: { [accountId]: { ...direct, excludeSymbols: ["XAUUSD.raw"] } },
+      }),
+    ).toMatchObject({ mappingStatus: "excluded", mappingSource: "account_direct" });
+    expect(
+      resolveSymbol("GOLD.", {
+        accountId,
+        accountMappings: {
+          [accountId]: { ...direct, availableBrokerSymbols: ["XAUUSD.pro"] },
+        },
+      }),
+    ).toMatchObject({ mappingStatus: "unavailable", mappingSource: "account_direct" });
+  });
+
   test("marks excluded and unavailable mapped symbols distinctly", () => {
     const excluded = resolveSymbol("EURUSD", {
       ...context,

@@ -12,12 +12,12 @@ export interface AccountMappingPayload {
   accountId: string;
   direct?: boolean;
   rawSymbol?: string;
-  canonicalSymbol: string;
-  brokerSymbol: string;
-  prefix: string;
-  suffix: string;
-  includeSymbols: string[];
-  excludeSymbols: string[];
+  canonicalSymbol?: string;
+  brokerSymbol?: string;
+  prefix?: string;
+  suffix?: string;
+  includeSymbols?: string[];
+  excludeSymbols?: string[];
 }
 
 type Scope = "global" | "provider" | "account" | "account-direct";
@@ -74,12 +74,7 @@ export function SymbolMappingModal({
         accountId: String(data.get("accountId") ?? "").trim(),
         rawSymbol: String(data.get("directRaw") ?? "").trim(),
         brokerSymbol: String(data.get("directBroker") ?? "").trim(),
-        canonicalSymbol: "",
         direct: true,
-        prefix: "",
-        suffix: "",
-        includeSymbols: [],
-        excludeSymbols: [],
       });
     } else {
       await onSaveAccountMapping({
@@ -228,7 +223,8 @@ export function SymbolMappingModal({
                   <span className="config-label">Mapping account ID</span>
                   <input
                     aria-label="Mapping account ID"
-                    defaultValue={defaultAccountId}
+                    readOnly
+                    value={defaultAccountId}
                     name="accountId"
                     type="text"
                   />
@@ -244,6 +240,7 @@ export function SymbolMappingModal({
                       defaultValue=""
                       name="directRaw"
                       placeholder="GOLD"
+                      required
                       type="text"
                     />
                   </label>
@@ -279,7 +276,8 @@ export function SymbolMappingModal({
                   <span className="config-label">Mapping account ID</span>
                   <input
                     aria-label="Mapping account ID"
-                    defaultValue={defaultAccountId}
+                    readOnly
+                    value={defaultAccountId}
                     name="accountId"
                     type="text"
                   />

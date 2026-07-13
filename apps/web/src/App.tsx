@@ -489,6 +489,9 @@ export function App({
   const activeView = route.view;
   const activeTab = route.tab;
   const selectedAccountId = route.accountId;
+  const dashboardUrl = selectedAccountId
+    ? `/api/dashboard?accountId=${encodeURIComponent(selectedAccountId)}`
+    : "/api/dashboard";
   const [configProvider, setConfigProvider] = useState<ProviderRowData | null>(null);
   const [parserTab, setParserTab] = useState("Recent Parses");
   const [historyTab, setHistoryTab] = useState<"Open" | "Closed">("Open");
@@ -566,7 +569,7 @@ export function App({
     async function load() {
       setRefreshing(true);
       try {
-        const data = await apiGet<DashboardSnapshot>("/api/dashboard");
+        const data = await apiGet<DashboardSnapshot>(dashboardUrl);
         if (active) {
           setSnapshot(data);
           setLastPollError(false);
@@ -654,7 +657,7 @@ export function App({
       source?.close();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [initialSnapshot, refreshHeldItems]);
+  }, [dashboardUrl, initialSnapshot, refreshHeldItems]);
 
   const telegramConnected = snapshot.telegramSessions.some(
     (session) => session.status === "CONNECTED",
@@ -1076,7 +1079,7 @@ export function App({
   async function refreshDashboard() {
     setRefreshing(true);
     try {
-      const data = await apiGet<DashboardSnapshot>("/api/dashboard");
+      const data = await apiGet<DashboardSnapshot>(dashboardUrl);
       setSnapshot(data);
       setLastPollError(false);
       setLastSyncAt(new Date().toISOString());
@@ -1698,6 +1701,14 @@ export function App({
   }
 
   async function deleteSymbolMapping(mapping: DashboardSnapshot["symbolMappings"][number]) {
+    if (mapping.scope === "account · direct" && mapping.accountId) {
+      await apiFetch(`/api/symbol-mappings/account/${mapping.accountId}/direct`, {
+        method: "DELETE",
+        body: { rawSymbol: mapping.rawSymbol },
+      });
+      await refreshDashboard();
+      return;
+    }
     await apiFetch("/api/symbol-mappings/aliases", {
       method: "DELETE",
       body: {
@@ -1713,28 +1724,32 @@ export function App({
     accountId: string;
     direct?: boolean;
     rawSymbol?: string;
-    canonicalSymbol: string;
-    brokerSymbol: string;
-    prefix: string;
-    suffix: string;
-    includeSymbols: string[];
-    excludeSymbols: string[];
+    canonicalSymbol?: string;
+    brokerSymbol?: string;
+    prefix?: string;
+    suffix?: string;
+    includeSymbols?: string[];
+    excludeSymbols?: string[];
   }) {
     await apiFetch(`/api/symbol-mappings/account/${payload.accountId}`, {
       method: "PUT",
-      body: {
-        accountId: payload.accountId,
-        canonicalOverrides: payload.direct
-          ? undefined
-          : { [payload.canonicalSymbol.trim().toUpperCase()]: payload.brokerSymbol.trim() },
-        directBrokerOverrides: payload.direct
-          ? { [payload.rawSymbol?.trim().toUpperCase() ?? ""]: payload.brokerSymbol.trim() }
-          : undefined,
-        prefix: payload.prefix,
-        suffix: payload.suffix,
-        includeSymbols: payload.includeSymbols,
-        excludeSymbols: payload.excludeSymbols,
-      },
+      body: payload.direct
+        ? {
+            accountId: payload.accountId,
+            rawSymbol: payload.rawSymbol,
+            brokerSymbol: payload.brokerSymbol,
+            direct: true,
+          }
+        : {
+            accountId: payload.accountId,
+            canonicalOverrides: {
+              [payload.canonicalSymbol?.trim().toUpperCase() ?? ""]: payload.brokerSymbol?.trim(),
+            },
+            prefix: payload.prefix,
+            suffix: payload.suffix,
+            includeSymbols: payload.includeSymbols,
+            excludeSymbols: payload.excludeSymbols,
+          },
     });
     await refreshDashboard();
   }

@@ -4,7 +4,6 @@ import { basename, dirname, join } from "node:path";
 import {
   type AccountSymbolMapping,
   buildExecutionCommand,
-  canonicalKey,
   correlateMessages,
   createLogicalTradeFromSignal,
   createMessageFingerprint,
@@ -81,6 +80,11 @@ const EQUITY_CURVE_RETENTION_DAYS = 90;
 const MAX_EXECUTION_LOG_LIMIT = 500;
 
 type SymbolAliasScope = "global" | "provider";
+type AccountMappingInput = AccountSymbolMapping & {
+  direct?: boolean;
+  rawSymbol?: string;
+  brokerSymbol?: string;
+};
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
 type EquityCurveScope = "account" | "provider";
 type StatsRange = "today" | "7d" | "30d" | "90d" | "all";
@@ -220,7 +224,9 @@ export function createApi(options: ApiOptions = {}) {
   app.get("/health", (c) => c.json(healthPayload()));
 
   app.get("/api/telegram/status", (c) => c.json(store.telegramStatus(telegram.name)));
-  app.get("/api/dashboard", (c) => c.json(store.dashboard(telegram.name)));
+  app.get("/api/dashboard", (c) =>
+    c.json(store.dashboard(telegram.name, c.req.query("accountId"))),
+  );
   app.get("/api/settings", (c) => c.json({ settings: store.appSettings() }));
   app.patch("/api/settings", async (c) => {
     const body = await c.req.json<Partial<AppSettings> & { azureOpenAIApiKey?: string }>();
@@ -537,7 +543,7 @@ export function createApi(options: ApiOptions = {}) {
     return c.json(review);
   });
 
-  app.get("/api/symbol-mappings", (c) => c.json(store.symbolMappings()));
+  app.get("/api/symbol-mappings", (c) => c.json(store.symbolMappings(c.req.query("accountId"))));
 
   app.put("/api/symbol-mappings/aliases", async (c) => {
     const body = await c.req.json<{
@@ -558,8 +564,14 @@ export function createApi(options: ApiOptions = {}) {
   });
 
   app.put("/api/symbol-mappings/account/:accountId", async (c) => {
-    const mapping = await c.req.json<AccountSymbolMapping>();
-    return c.json(store.saveAccountMapping(c.req.param("accountId"), mapping));
+    const mapping = await c.req.json<AccountMappingInput>();
+    const saved = store.saveAccountMapping(c.req.param("accountId"), mapping);
+    if ("error" in saved) return c.json(saved, 400);
+    return c.json(saved);
+  });
+  app.delete("/api/symbol-mappings/account/:accountId/direct", async (c) => {
+    const body = await c.req.json<{ rawSymbol: string }>();
+    return c.json(store.deleteDirectBrokerOverride(c.req.param("accountId"), body.rawSymbol));
   });
 
   app.get("/api/mt5/accounts", (c) => c.json({ accounts: store.mt5Accounts() }));
@@ -6528,7 +6540,15 @@ class AppStore {
     };
   }
 
-  symbolMappings() {
+  symbolMappings(previewAccountId?: string) {
+    const accountMappings = (
+      this.db
+        .query("SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id")
+        .all() as Row[]
+    ).map((row) => parseJson<AccountSymbolMapping>(String(row.mapping_json)));
+    const accountMappingsById = Object.fromEntries(
+      accountMappings.map((mapping) => [mapping.accountId, mapping]),
+    );
     const aliases = [
       ...Object.entries(this.globalAliases()).map(([rawSymbol, canonicalSymbol]) => ({
         rawSymbol,
@@ -6557,8 +6577,14 @@ class AppStore {
               providerId: alias.providerId,
               globalAliases: this.globalAliases(),
               providerAliases: this.providerAliases(),
+              accountId: previewAccountId,
+              accountMappings: accountMappingsById,
             }
-          : { globalAliases: this.globalAliases() },
+          : {
+              globalAliases: this.globalAliases(),
+              accountId: previewAccountId,
+              accountMappings: accountMappingsById,
+            },
       );
       return {
         ...alias,
@@ -6568,11 +6594,6 @@ class AppStore {
         hint: resolution.warnings[0],
       };
     });
-    const accountMappings = (
-      this.db
-        .query("SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id")
-        .all() as Row[]
-    ).map((row) => parseJson<AccountSymbolMapping>(String(row.mapping_json)));
     const preview = [
       ...previewAliases,
       ...accountMappings.flatMap((mapping) =>
@@ -6621,6 +6642,24 @@ class AppStore {
     return this.symbolMappings();
   }
 
+  deleteDirectBrokerOverride(accountId: string, rawSymbol: string) {
+    const existing = this.storedAccountMapping(accountId);
+    if (!existing) return this.symbolMappings();
+    const directBrokerOverrides = { ...(existing.directBrokerOverrides ?? {}) };
+    const key = Object.keys(directBrokerOverrides).find(
+      (candidate) => directBrokerOverrideKey(candidate) === directBrokerOverrideKey(rawSymbol),
+    );
+    if (!key) return this.symbolMappings();
+    delete directBrokerOverrides[key];
+    const mapping = { ...existing, directBrokerOverrides };
+    this.db
+      .query(
+        "INSERT INTO account_symbol_mappings (account_id, mapping_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET mapping_json = excluded.mapping_json, updated_at = excluded.updated_at",
+      )
+      .run(accountId, JSON.stringify(mapping), new Date().toISOString());
+    return { accountId, mapping };
+  }
+
   saveSymbolAlias(input: {
     scope: SymbolAliasScope;
     providerId?: string;
@@ -6664,7 +6703,15 @@ class AppStore {
     };
   }
 
-  saveAccountMapping(accountId: string, mapping: AccountSymbolMapping) {
+  saveAccountMapping(accountId: string, mapping: AccountMappingInput) {
+    if (mapping.direct) {
+      const rawSymbol = mapping.rawSymbol?.trim();
+      const brokerSymbol = mapping.brokerSymbol?.trim();
+      if (!rawSymbol || !brokerSymbol) {
+        return { error: "Direct mapping requires provider and broker symbols" };
+      }
+      mapping = { accountId, directBrokerOverrides: { [rawSymbol]: brokerSymbol } };
+    }
     const existing = this.storedAccountMapping(accountId) ?? defaultAccountMapping(accountId);
     const incomingOverrides = normalizeCanonicalOverrides(mapping.canonicalOverrides);
     const incomingDirectOverrides = normalizeDirectBrokerOverrides(mapping.directBrokerOverrides);
@@ -7000,7 +7047,7 @@ class AppStore {
     };
   }
 
-  dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock") {
+  dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock", previewAccountId?: string) {
     const providers = this.providers();
     const queue = this.queueItems();
     const parsed = this.parsedSignals();
@@ -7093,7 +7140,7 @@ class AppStore {
         riskPercent: item.payload.riskPercent ?? null,
       })),
       logicalTrades: this.logicalTradesForDashboard(),
-      symbolMappings: this.symbolMappings().preview,
+      symbolMappings: this.symbolMappings(previewAccountId ?? accounts[0]?.id).preview,
       executionLogs: this.executionLogs(undefined, 10).map((log) => ({
         id: log.id,
         queueItemId: log.queueItemId,
@@ -10830,9 +10877,16 @@ function normalizeDirectBrokerOverrides(overrides: Record<string, string> | unde
   if (!overrides) return {};
   return Object.fromEntries(
     Object.entries(overrides)
-      .map(([rawSymbol, brokerSymbol]) => [canonicalKey(rawSymbol), brokerSymbol.trim()])
+      .map(([rawSymbol, brokerSymbol]) => [directBrokerOverrideKey(rawSymbol), brokerSymbol.trim()])
       .filter(([rawSymbol, brokerSymbol]) => rawSymbol && brokerSymbol),
   );
+}
+
+function directBrokerOverrideKey(value: string) {
+  return value
+    .toUpperCase()
+    .replace(/[\s/_.#-]/g, "")
+    .trim();
 }
 
 function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {

@@ -1221,9 +1221,7 @@ describe("App dashboard", () => {
 
     fireEvent.click(view.getByRole("button", { name: "Add mapping" }));
     fireEvent.click(view.getByRole("tab", { name: "Account-specific" }));
-    fireEvent.change(view.getByLabelText("Mapping account ID"), {
-      target: { value: "mt5-demo-1" },
-    });
+    expect(view.getByLabelText("Mapping account ID").hasAttribute("readonly")).toBe(true);
     fireEvent.change(view.getByLabelText("Canonical symbol"), {
       target: { value: "XAGUSD" },
     });
@@ -1280,12 +1278,65 @@ describe("App dashboard", () => {
     )[1];
     expect(JSON.parse(String(directMappingCall?.init?.body))).toEqual({
       accountId: "mt5-demo-1",
-      directBrokerOverrides: { GOLD: "XAUUSD.pro" },
-      prefix: "",
-      suffix: "",
-      includeSymbols: [],
-      excludeSymbols: [],
+      rawSymbol: "GOLD",
+      brokerSymbol: "XAUUSD.pro",
+      direct: true,
     });
+  });
+
+  test("requires a direct provider symbol before saving", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+    await clickTabAsync(view, "Symbol Settings");
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByRole("tab", { name: "Provider → broker" }));
+    const providerSymbol = view.getByLabelText("Direct provider symbol");
+    expect(providerSymbol.hasAttribute("required")).toBe(true);
+    fireEvent.change(view.getByLabelText("Direct broker symbol for this account"), {
+      target: { value: "XAUUSD.pro" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "Save direct mapping" }));
+
+    expect(calls.some((call) => call.url.startsWith("/api/symbol-mappings/account/"))).toBe(false);
+  });
+
+  test("deletes direct mappings through the account mapping endpoint", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const directSnapshot: DashboardSnapshot = {
+      ...snapshot,
+      symbolMappings: [
+        ...snapshot.symbolMappings,
+        {
+          rawSymbol: "GOLD DIRECT",
+          canonicalSymbol: "XAUUSD",
+          brokerSymbol: "XAUUSD.pro",
+          status: "mapped",
+          scope: "account · direct",
+          accountId: "mt5-demo-1",
+        },
+      ],
+    };
+
+    const view = render(<App initialSnapshot={directSnapshot} />);
+    await clickTabAsync(view, "Symbol Settings");
+    const row = view.getByText("GOLD DIRECT").closest("tr");
+    expect(row).toBeTruthy();
+    fireEvent.click(within(row!).getByRole("button", { name: "Delete" }));
+
+    const deleteCall = calls.find(
+      (call) => call.url === "/api/symbol-mappings/account/mt5-demo-1/direct",
+    );
+    expect(deleteCall?.init?.method).toBe("DELETE");
+    expect(JSON.parse(String(deleteCall?.init?.body))).toEqual({ rawSymbol: "GOLD DIRECT" });
   });
 
   test("lets the operator redact parser fixture text before saving", async () => {
@@ -2002,7 +2053,7 @@ describe("App dashboard", () => {
     await clickTabAsync(view, "Logs");
     fireEvent.click(view.getByRole("button", { name: "Correct & push" }));
     expect((view.getByLabelText("Account") as HTMLSelectElement).value).toBe("mt5-demo-1");
-    expect((view.getByLabelText("Symbol") as HTMLInputElement).value).toBe("EURUSD.raw");
+    expect((view.getByLabelText("Symbol") as HTMLInputElement).value).toBe("XAUUSD.raw");
     expect((view.getByLabelText("Direction") as HTMLSelectElement).value).toBe("SELL");
     expect((view.getByLabelText("Order type") as HTMLSelectElement).value).toBe("STOP");
     expect((view.getByLabelText("Entry from") as HTMLInputElement).value).toBe("1.081");

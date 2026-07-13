@@ -4575,12 +4575,18 @@ describe("Telegram TC API", () => {
       body: JSON.stringify({ scope: "global", rawSymbol: "GOLD", canonicalSymbol: "XAUUSD.RAW" }),
       headers: { "content-type": "application/json" },
     });
+    await app.request("/api/symbol-mappings/account/mt5-100200300", {
+      method: "PUT",
+      body: JSON.stringify({ availableBrokerSymbols: ["XAUUSD.raw", "XAUUSD.pro"] }),
+      headers: { "content-type": "application/json" },
+    });
     const saved = await app.request("/api/symbol-mappings/account/mt5-100200300", {
       method: "PUT",
       body: JSON.stringify({
         accountId: "mt5-100200300",
-        directBrokerOverrides: { " gold ": "XAUUSD.raw" },
-        availableBrokerSymbols: ["XAUUSD.raw", "XAUUSD.pro"],
+        rawSymbol: " gold ",
+        brokerSymbol: "XAUUSD.raw",
+        direct: true,
       }),
       headers: { "content-type": "application/json" },
     });
@@ -4637,6 +4643,89 @@ describe("Telegram TC API", () => {
         (alert) => alert.kind === "unmapped-symbols" && alert.detail?.symbols?.includes("GOLD"),
       ),
     ).toBe(false);
+  });
+
+  test("direct mapping saves preserve account safety settings and can be deleted", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const accountId = "mt5-100200300";
+
+    await app.request(`/api/symbol-mappings/account/${accountId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        accountId,
+        canonicalOverrides: { XAUUSD: "XAUUSD.raw" },
+        suffix: ".raw",
+        includeSymbols: ["XAUUSD.raw"],
+        excludeSymbols: ["US30.raw"],
+        availableBrokerSymbols: ["XAUUSD.raw"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const saved = await app.request(`/api/symbol-mappings/account/${accountId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        accountId,
+        rawSymbol: "GOLD",
+        brokerSymbol: "XAUUSD.raw",
+        direct: true,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(saved.status).toBe(200);
+    expect(
+      await json<{ mapping: { suffix: string; excludeSymbols: string[] } }>(saved),
+    ).toMatchObject({ mapping: { suffix: ".raw", excludeSymbols: ["US30.raw"] } });
+
+    const deleted = await app.request(`/api/symbol-mappings/account/${accountId}/direct`, {
+      method: "DELETE",
+      body: JSON.stringify({ rawSymbol: "GOLD" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(deleted.status).toBe(200);
+    const mappings = await json<{
+      accountMappings: Array<{ accountId: string; directBrokerOverrides: Record<string, string> }>;
+    }>(await app.request("/api/symbol-mappings"));
+    expect(
+      mappings.accountMappings.find((mapping) => mapping.accountId === accountId)
+        ?.directBrokerOverrides,
+    ).toEqual({});
+  });
+
+  test("rejects direct mappings without a provider symbol", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const response = await app.request("/api/symbol-mappings/account/mt5-100200300", {
+      method: "PUT",
+      body: JSON.stringify({ direct: true, rawSymbol: "", brokerSymbol: "XAUUSD.raw" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(response.status).toBe(400);
+    expect(await json<{ error: string }>(response)).toEqual({
+      error: "Direct mapping requires provider and broker symbols",
+    });
+  });
+
+  test("previews aliases against the selected account safety rules", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const accountId = "mt5-100200300";
+    await app.request(`/api/symbol-mappings/account/${accountId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        accountId,
+        canonicalOverrides: { XAUUSD: "XAUUSD.raw" },
+        excludeSymbols: ["XAUUSD.raw"],
+        availableBrokerSymbols: ["XAUUSD.raw"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const mappings = await json<{
+      preview: Array<{ rawSymbol: string; scope?: string; status: string; hint?: string }>;
+    }>(await app.request(`/api/symbol-mappings?accountId=${accountId}`));
+    expect(
+      mappings.preview.find(
+        (mapping) => mapping.rawSymbol === "GOLD" && mapping.scope === "global",
+      ),
+    ).toMatchObject({ status: "excluded", hint: "Symbol is excluded for this account" });
   });
 
   test("merges account symbol mapping edits with EA-reported symbols", async () => {

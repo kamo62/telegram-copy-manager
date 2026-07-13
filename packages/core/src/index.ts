@@ -315,20 +315,7 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
   const raw = rawSymbol.trim();
   const normalized = normalizeSymbolText(raw);
   const account = context.accountId ? context.accountMappings?.[context.accountId] : undefined;
-  const directBrokerSymbol = account?.directBrokerOverrides?.[canonicalKey(raw)];
-  if (directBrokerSymbol) {
-    const availableBrokerSymbols = normalizedSymbolList(account?.availableBrokerSymbols);
-    const brokerSymbol =
-      findAvailableBrokerSymbol([directBrokerSymbol], availableBrokerSymbols) ?? directBrokerSymbol;
-    return {
-      rawSymbol: raw,
-      canonicalSymbol: canonicalFromBrokerVariant(brokerSymbol) ?? brokerSymbol,
-      brokerSymbol,
-      mappingStatus: "mapped",
-      mappingSource: "account_direct",
-      warnings: [],
-    };
-  }
+  const directBrokerSymbol = findDirectBrokerOverride(raw, account?.directBrokerOverrides);
   const providerAliases = context.providerId
     ? context.providerAliases?.[context.providerId]
     : undefined;
@@ -338,16 +325,22 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
     ...(context.globalAliases ?? {}),
   };
   const globalMatch = findAliasMatch(raw, builtInOrGlobal);
-  const canonicalSymbol =
-    providerMatch ?? globalMatch ?? canonicalFromBrokerVariant(raw) ?? normalized.replace("/", "");
-  let mappingSource: SymbolResolution["mappingSource"] = providerMatch
-    ? "provider_alias"
-    : globalMatch
-      ? "global_alias"
-      : "fallback";
+  const canonicalSymbol = directBrokerSymbol
+    ? (canonicalFromBrokerVariant(directBrokerSymbol) ?? directBrokerSymbol)
+    : (providerMatch ??
+      globalMatch ??
+      canonicalFromBrokerVariant(raw) ??
+      normalized.replace("/", ""));
+  let mappingSource: SymbolResolution["mappingSource"] = directBrokerSymbol
+    ? "account_direct"
+    : providerMatch
+      ? "provider_alias"
+      : globalMatch
+        ? "global_alias"
+        : "fallback";
   const warnings: string[] = [];
 
-  if (!isRecognizedCanonical(canonicalSymbol)) {
+  if (!directBrokerSymbol && !isRecognizedCanonical(canonicalSymbol)) {
     return {
       rawSymbol: raw,
       canonicalSymbol,
@@ -358,11 +351,14 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
   }
 
   const availableBrokerSymbols = normalizedSymbolList(account?.availableBrokerSymbols);
-  let brokerSymbol = canonicalSymbol;
-  if (account?.canonicalOverrides?.[canonicalSymbol]) {
+  let brokerSymbol = directBrokerSymbol
+    ? (findAvailableBrokerSymbol([directBrokerSymbol], availableBrokerSymbols) ??
+      directBrokerSymbol)
+    : canonicalSymbol;
+  if (!directBrokerSymbol && account?.canonicalOverrides?.[canonicalSymbol]) {
     brokerSymbol = account.canonicalOverrides[canonicalSymbol];
     mappingSource = "account_override";
-  } else if (availableBrokerSymbols.length) {
+  } else if (!directBrokerSymbol && availableBrokerSymbols.length) {
     const exact = findAvailableBrokerSymbol([canonicalSymbol], availableBrokerSymbols);
     if (exact) {
       brokerSymbol = exact;
@@ -388,7 +384,7 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
         }
       }
     }
-  } else {
+  } else if (!directBrokerSymbol) {
     const prefixSuffix = prefixSuffixCandidates(canonicalSymbol, account)[0];
     if (prefixSuffix) {
       brokerSymbol = prefixSuffix;
@@ -446,6 +442,20 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
     mappingSource,
     warnings,
   };
+}
+
+function findDirectBrokerOverride(rawSymbol: string, overrides?: Record<string, string>) {
+  if (!overrides) return undefined;
+  const rawKey = canonicalKey(rawSymbol);
+  const normalizedRaw = normalizeSymbolText(rawSymbol);
+  const brokerRaw = brokerSymbolKey(rawSymbol);
+  return Object.entries(overrides).find(([alias]) => {
+    return (
+      canonicalKey(alias) === rawKey ||
+      normalizeSymbolText(alias) === normalizedRaw ||
+      brokerSymbolKey(alias) === brokerRaw
+    );
+  })?.[1];
 }
 
 export function parseSignalText(originalText: string, context: ParserContext = {}): ParsedSignal {

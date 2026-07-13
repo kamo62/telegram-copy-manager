@@ -5,6 +5,7 @@
 Release impact: Minor because this adds a backward-compatible per-account direct provider-symbol-to-broker-symbol mapping.
 
 - Added direct account broker overrides, accurate mapping previews, and broker-inventory dropdown selection for provider symbols that do not have a reusable canonical symbol.
+- Fixed direct override saves and deletes to preserve account safety rules, and made direct resolution obey account include, exclude, and broker-inventory checks.
 - Fixed attribution trade-table column sizing so Opened, Closed, and Realized P/L stay aligned.
 - Kept `package.json` and the MT5 EA `#property version` aligned at `1.23.0`.
 
