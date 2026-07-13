@@ -29,6 +29,7 @@ export type QueueStatus =
 export interface AccountSymbolMapping {
   accountId: string;
   canonicalOverrides?: Record<string, string>;
+  directBrokerOverrides?: Record<string, string>;
   prefix?: string;
   suffix?: string;
   includeSymbols?: string[];
@@ -56,6 +57,7 @@ export interface SymbolResolution {
   mappingStatus: MappingStatus;
   mappingSource:
     | "provider_alias"
+    | "account_direct"
     | "account_override"
     | "global_alias"
     | "broker_exact"
@@ -312,6 +314,21 @@ function brokerSymbolKey(value: string): string {
 export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): SymbolResolution {
   const raw = rawSymbol.trim();
   const normalized = normalizeSymbolText(raw);
+  const account = context.accountId ? context.accountMappings?.[context.accountId] : undefined;
+  const directBrokerSymbol = account?.directBrokerOverrides?.[canonicalKey(raw)];
+  if (directBrokerSymbol) {
+    const availableBrokerSymbols = normalizedSymbolList(account?.availableBrokerSymbols);
+    const brokerSymbol =
+      findAvailableBrokerSymbol([directBrokerSymbol], availableBrokerSymbols) ?? directBrokerSymbol;
+    return {
+      rawSymbol: raw,
+      canonicalSymbol: canonicalFromBrokerVariant(brokerSymbol) ?? brokerSymbol,
+      brokerSymbol,
+      mappingStatus: "mapped",
+      mappingSource: "account_direct",
+      warnings: [],
+    };
+  }
   const providerAliases = context.providerId
     ? context.providerAliases?.[context.providerId]
     : undefined;
@@ -340,7 +357,6 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
     };
   }
 
-  const account = context.accountId ? context.accountMappings?.[context.accountId] : undefined;
   const availableBrokerSymbols = normalizedSymbolList(account?.availableBrokerSymbols);
   let brokerSymbol = canonicalSymbol;
   if (account?.canonicalOverrides?.[canonicalSymbol]) {

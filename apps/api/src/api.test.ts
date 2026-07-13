@@ -4567,6 +4567,78 @@ describe("Telegram TC API", () => {
     expect(mappings.accountMappings[0]?.canonicalOverrides.XAGUSD).toBe("XAGUSD.pro");
   });
 
+  test("round-trips direct broker overrides and previews unrecognized aliases accurately", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+
+    await app.request("/api/symbol-mappings/aliases", {
+      method: "PUT",
+      body: JSON.stringify({ scope: "global", rawSymbol: "GOLD", canonicalSymbol: "XAUUSD.RAW" }),
+      headers: { "content-type": "application/json" },
+    });
+    const saved = await app.request("/api/symbol-mappings/account/mt5-100200300", {
+      method: "PUT",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        directBrokerOverrides: { " gold ": "XAUUSD.raw" },
+        availableBrokerSymbols: ["XAUUSD.raw", "XAUUSD.pro"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(saved.status).toBe(200);
+
+    const mappings = await json<{
+      accountMappings: Array<{ accountId: string; directBrokerOverrides: Record<string, string> }>;
+      preview: Array<{
+        rawSymbol: string;
+        brokerSymbol: string;
+        status: string;
+        scope?: string;
+        hint?: string;
+      }>;
+    }>(await app.request("/api/symbol-mappings"));
+    expect(
+      mappings.accountMappings.find((mapping) => mapping.accountId === "mt5-100200300")
+        ?.directBrokerOverrides,
+    ).toEqual({ GOLD: "XAUUSD.raw" });
+    expect(
+      mappings.preview.find(
+        (mapping) => mapping.rawSymbol === "GOLD" && mapping.scope === "global",
+      ),
+    ).toMatchObject({ status: "unmapped", hint: "Symbol could not be mapped to a broker symbol" });
+    expect(
+      mappings.preview.find(
+        (mapping) => mapping.rawSymbol === "GOLD" && mapping.scope === "account · direct",
+      ),
+    ).toMatchObject({ brokerSymbol: "XAUUSD.raw", status: "mapped" });
+
+    const parsed = await json<{
+      result: { canonicalSymbol: string; brokerSymbol: string; mappingStatus: string };
+    }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          accountId: "mt5-100200300",
+          rawText: "BUY GOLD @ 3300\nSL 3290\nTP1 3310",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(parsed.result).toMatchObject({
+      canonicalSymbol: "XAUUSD",
+      brokerSymbol: "XAUUSD.raw",
+      mappingStatus: "mapped",
+    });
+    const dashboard = await json<{
+      alerts?: Array<{ kind: string; detail?: { symbols?: string[] } }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.alerts?.some(
+        (alert) => alert.kind === "unmapped-symbols" && alert.detail?.symbols?.includes("GOLD"),
+      ),
+    ).toBe(false);
+  });
+
   test("merges account symbol mapping edits with EA-reported symbols", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
 

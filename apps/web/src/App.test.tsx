@@ -55,6 +55,7 @@ const snapshot: DashboardSnapshot = {
       server: "MetaQuotes-Demo",
       heartbeatStatus: "online",
       marginMode: "HEDGING",
+      availableSymbols: ["XAUUSD.raw", "XAUUSD.pro"],
       openPositionCount: 1,
       pendingOrderCount: 0,
       lastSnapshotAt: "2026-05-09T09:00:00.000Z",
@@ -1261,6 +1262,29 @@ describe("App dashboard", () => {
       suffix: ".raw",
       includeSymbols: ["XAGUSD.pro", "EURUSD.raw"],
       excludeSymbols: ["US30.raw"],
+    });
+
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByRole("tab", { name: "Provider → broker" }));
+    expect(view.getByRole("option", { name: "XAUUSD.raw" })).toBeTruthy();
+    expect(view.getByRole("option", { name: "XAUUSD.pro" })).toBeTruthy();
+    fireEvent.change(view.getByLabelText("Direct provider symbol"), { target: { value: "GOLD" } });
+    fireEvent.change(view.getByLabelText("Direct broker symbol for this account"), {
+      target: { value: "XAUUSD.pro" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "Save direct mapping" }));
+
+    await view.findByText("XAUUSD.r");
+    const directMappingCall = calls.filter(
+      (call) => call.url === "/api/symbol-mappings/account/mt5-demo-1",
+    )[1];
+    expect(JSON.parse(String(directMappingCall?.init?.body))).toEqual({
+      accountId: "mt5-demo-1",
+      directBrokerOverrides: { GOLD: "XAUUSD.pro" },
+      prefix: "",
+      suffix: "",
+      includeSymbols: [],
+      excludeSymbols: [],
     });
   });
 

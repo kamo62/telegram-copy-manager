@@ -543,6 +543,27 @@ describe("symbol resolver", () => {
     });
   });
 
+  test("maps direct provider-to-broker overrides before the canonical recognition gate", () => {
+    expect(
+      resolveSymbol("GOLD", {
+        accountId: "mt5-direct",
+        globalAliases: { GOLD: "XAUUSD.RAW" },
+        accountMappings: {
+          "mt5-direct": {
+            accountId: "mt5-direct",
+            directBrokerOverrides: { GOLD: "XAUUSD.raw" },
+            availableBrokerSymbols: ["XAUUSD.raw", "XAUUSD.pro"],
+          },
+        },
+      }),
+    ).toMatchObject({
+      canonicalSymbol: "XAUUSD",
+      brokerSymbol: "XAUUSD.raw",
+      mappingStatus: "mapped",
+      mappingSource: "account_direct",
+    });
+  });
+
   test("marks excluded and unavailable mapped symbols distinctly", () => {
     const excluded = resolveSymbol("EURUSD", {
       ...context,

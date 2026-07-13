@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import {
   type AccountSymbolMapping,
   buildExecutionCommand,
+  canonicalKey,
   correlateMessages,
   createLogicalTradeFromSignal,
   createMessageFingerprint,
@@ -182,6 +183,7 @@ function defaultAccountMapping(accountId = demoAccountId): AccountSymbolMapping 
   return {
     accountId,
     canonicalOverrides: {},
+    directBrokerOverrides: {},
     prefix: "",
     suffix: "",
     includeSymbols: [],
@@ -6534,6 +6536,7 @@ class AppStore {
         brokerSymbol: canonicalSymbol,
         status: "mapped",
         scope: "global",
+        providerId: undefined,
       })),
       ...Object.entries(this.providerAliases()).flatMap(([providerId, values]) =>
         Object.entries(values).map(([rawSymbol, canonicalSymbol]) => ({
@@ -6546,13 +6549,32 @@ class AppStore {
         })),
       ),
     ];
+    const previewAliases = aliases.map((alias) => {
+      const resolution = resolveSymbol(
+        alias.rawSymbol,
+        alias.scope === "provider"
+          ? {
+              providerId: alias.providerId,
+              globalAliases: this.globalAliases(),
+              providerAliases: this.providerAliases(),
+            }
+          : { globalAliases: this.globalAliases() },
+      );
+      return {
+        ...alias,
+        canonicalSymbol: resolution.canonicalSymbol ?? alias.canonicalSymbol,
+        brokerSymbol: resolution.brokerSymbol ?? alias.canonicalSymbol,
+        status: resolution.mappingStatus,
+        hint: resolution.warnings[0],
+      };
+    });
     const accountMappings = (
       this.db
         .query("SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id")
         .all() as Row[]
     ).map((row) => parseJson<AccountSymbolMapping>(String(row.mapping_json)));
     const preview = [
-      ...aliases,
+      ...previewAliases,
       ...accountMappings.flatMap((mapping) =>
         Object.entries(mapping.canonicalOverrides ?? {}).map(([canonicalSymbol, brokerSymbol]) => ({
           rawSymbol: canonicalSymbol,
@@ -6565,6 +6587,23 @@ class AppStore {
           scope: "account",
           accountId: mapping.accountId,
         })),
+      ),
+      ...accountMappings.flatMap((mapping) =>
+        Object.entries(mapping.directBrokerOverrides ?? {}).map(([rawSymbol, brokerSymbol]) => {
+          const resolution = resolveSymbol(rawSymbol, {
+            accountId: mapping.accountId,
+            accountMappings: { [mapping.accountId]: mapping },
+          });
+          return {
+            rawSymbol,
+            canonicalSymbol: resolution.canonicalSymbol ?? brokerSymbol,
+            brokerSymbol: resolution.brokerSymbol ?? brokerSymbol,
+            status: resolution.mappingStatus,
+            scope: "account · direct",
+            accountId: mapping.accountId,
+            hint: resolution.warnings[0],
+          };
+        }),
       ),
     ];
     return {
@@ -6628,11 +6667,16 @@ class AppStore {
   saveAccountMapping(accountId: string, mapping: AccountSymbolMapping) {
     const existing = this.storedAccountMapping(accountId) ?? defaultAccountMapping(accountId);
     const incomingOverrides = normalizeCanonicalOverrides(mapping.canonicalOverrides);
+    const incomingDirectOverrides = normalizeDirectBrokerOverrides(mapping.directBrokerOverrides);
     const merged: AccountSymbolMapping = {
       accountId,
       canonicalOverrides: {
         ...(existing.canonicalOverrides ?? {}),
         ...incomingOverrides,
+      },
+      directBrokerOverrides: {
+        ...(existing.directBrokerOverrides ?? {}),
+        ...incomingDirectOverrides,
       },
       prefix: mapping.prefix ?? existing.prefix ?? "",
       suffix: mapping.suffix ?? existing.suffix ?? "",
@@ -7009,6 +7053,7 @@ class AppStore {
         initialBalance: account.initialBalance,
         heartbeatStatus: account.heartbeatStatus,
         marginMode: account.marginMode,
+        availableSymbols: account.availableSymbols,
         openPositionCount: account.openPositionCount,
         pendingOrderCount: account.pendingOrderCount,
         externalPositionCount: account.externalPositionCount,
@@ -8040,6 +8085,7 @@ class AppStore {
       return {
         accountId,
         canonicalOverrides: {},
+        directBrokerOverrides: existing.directBrokerOverrides ?? {},
         prefix: "",
         suffix: "",
         includeSymbols: [],
@@ -10777,6 +10823,15 @@ function normalizeCanonicalOverrides(overrides: Record<string, string> | undefin
         brokerSymbol.trim(),
       ])
       .filter(([canonicalSymbol, brokerSymbol]) => canonicalSymbol && brokerSymbol),
+  );
+}
+
+function normalizeDirectBrokerOverrides(overrides: Record<string, string> | undefined) {
+  if (!overrides) return {};
+  return Object.fromEntries(
+    Object.entries(overrides)
+      .map(([rawSymbol, brokerSymbol]) => [canonicalKey(rawSymbol), brokerSymbol.trim()])
+      .filter(([rawSymbol, brokerSymbol]) => rawSymbol && brokerSymbol),
   );
 }
 

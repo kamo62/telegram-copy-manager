@@ -107,6 +107,8 @@ export function ManualSignalModal({
 
   const account = accounts.find((item) => item.id === accountId);
   const availableSymbols = account?.availableSymbols ?? [];
+  const symbolOptions =
+    symbol && !availableSymbols.includes(symbol) ? [symbol, ...availableSymbols] : availableSymbols;
 
   async function submit() {
     setError("");
@@ -209,7 +211,7 @@ export function ManualSignalModal({
 
             <label className="manual-field" htmlFor="manual-symbol">
               <span>Symbol</span>
-              {availableSymbols.length > 0 ? (
+              {symbolOptions.length > 0 ? (
                 <select
                   className="settings-input"
                   id="manual-symbol"
@@ -219,7 +221,7 @@ export function ManualSignalModal({
                   <option disabled value="">
                     Select symbol
                   </option>
-                  {availableSymbols.map((item) => (
+                  {symbolOptions.map((item) => (
                     <option key={item} value={item}>
                       {item}
                     </option>

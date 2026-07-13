@@ -10,6 +10,8 @@ export interface GlobalAliasPayload {
 
 export interface AccountMappingPayload {
   accountId: string;
+  direct?: boolean;
+  rawSymbol?: string;
   canonicalSymbol: string;
   brokerSymbol: string;
   prefix: string;
@@ -18,7 +20,7 @@ export interface AccountMappingPayload {
   excludeSymbols: string[];
 }
 
-type Scope = "global" | "provider" | "account";
+type Scope = "global" | "provider" | "account" | "account-direct";
 
 function commaList(value: string): string[] {
   return value
@@ -30,6 +32,7 @@ function commaList(value: string): string[] {
 export function SymbolMappingModal({
   open,
   defaultAccountId,
+  availableBrokerSymbols,
   defaultProviderId,
   onClose,
   onSaveGlobalAlias,
@@ -37,6 +40,7 @@ export function SymbolMappingModal({
 }: {
   open: boolean;
   defaultAccountId: string;
+  availableBrokerSymbols: string[];
   defaultProviderId?: string;
   onClose: () => void;
   onSaveGlobalAlias: (payload: GlobalAliasPayload) => Promise<void> | void;
@@ -54,18 +58,31 @@ export function SymbolMappingModal({
 
   if (!open) return null;
 
-  function performSave() {
+  async function performSave() {
     const form = formRef.current;
     if (!form) return;
+    if (!form.reportValidity()) return;
     const data = new FormData(form);
     if (scope === "global" || scope === "provider") {
-      void onSaveGlobalAlias({
+      await onSaveGlobalAlias({
         rawSymbol: String(data.get("aliasRaw") ?? "").trim(),
         canonicalSymbol: String(data.get("aliasCanonical") ?? "").trim(),
         providerId: scope === "provider" ? String(data.get("providerId") ?? "").trim() : undefined,
       });
+    } else if (scope === "account-direct") {
+      await onSaveAccountMapping({
+        accountId: String(data.get("accountId") ?? "").trim(),
+        rawSymbol: String(data.get("directRaw") ?? "").trim(),
+        brokerSymbol: String(data.get("directBroker") ?? "").trim(),
+        canonicalSymbol: "",
+        direct: true,
+        prefix: "",
+        suffix: "",
+        includeSymbols: [],
+        excludeSymbols: [],
+      });
     } else {
-      void onSaveAccountMapping({
+      await onSaveAccountMapping({
         accountId: String(data.get("accountId") ?? "").trim(),
         canonicalSymbol: String(data.get("accountCanonical") ?? "").trim(),
         brokerSymbol: String(data.get("accountBroker") ?? "").trim(),
@@ -104,7 +121,7 @@ export function SymbolMappingModal({
           noValidate
           onSubmit={(event) => {
             event.preventDefault();
-            performSave();
+            void performSave();
           }}
           ref={formRef}
         >
@@ -138,6 +155,15 @@ export function SymbolMappingModal({
               >
                 Account-specific
               </button>
+              <button
+                aria-selected={scope === "account-direct"}
+                className={scope === "account-direct" ? "active" : ""}
+                onClick={() => setScope("account-direct")}
+                role="tab"
+                type="button"
+              >
+                Provider → broker
+              </button>
             </div>
             <p className="config-hint config-hint-soft">
               Flow: provider symbol → canonical (broker-agnostic) → your broker's exact symbol. The
@@ -149,7 +175,9 @@ export function SymbolMappingModal({
                 ? "Global alias: maps a provider symbol to a canonical symbol everywhere. Example: GOLD → XAUUSD."
                 : scope === "provider"
                   ? "Provider alias: maps a provider symbol to a canonical symbol for one Telegram provider only."
-                  : "Account-specific: maps a canonical symbol to this account's exact broker symbol (and optional suffix / include-exclude rules)."}
+                  : scope === "account-direct"
+                    ? "Provider → broker: maps one provider symbol directly to an exact broker symbol for this account."
+                    : "Account-specific: maps a canonical symbol to this account's exact broker symbol (and optional suffix / include-exclude rules)."}
             </p>
           </section>
 
@@ -192,6 +220,57 @@ export function SymbolMappingModal({
                 </label>
               </div>
             </section>
+          ) : scope === "account-direct" ? (
+            <>
+              <section className="config-section">
+                <h3 className="config-section-title">Target account</h3>
+                <label className="config-field">
+                  <span className="config-label">Mapping account ID</span>
+                  <input
+                    aria-label="Mapping account ID"
+                    defaultValue={defaultAccountId}
+                    name="accountId"
+                    type="text"
+                  />
+                </label>
+              </section>
+              <section className="config-section">
+                <h3 className="config-section-title">Direct broker mapping</h3>
+                <div className="config-row">
+                  <label className="config-field config-field-grow">
+                    <span className="config-label">Provider symbol</span>
+                    <input
+                      aria-label="Direct provider symbol"
+                      defaultValue=""
+                      name="directRaw"
+                      placeholder="GOLD"
+                      type="text"
+                    />
+                  </label>
+                  <label className="config-field config-field-grow">
+                    <span className="config-label">Broker symbol (this account)</span>
+                    <select
+                      aria-label="Direct broker symbol for this account"
+                      defaultValue=""
+                      disabled={availableBrokerSymbols.length === 0}
+                      name="directBroker"
+                      required
+                    >
+                      <option disabled value="">
+                        {availableBrokerSymbols.length
+                          ? "Select a broker symbol"
+                          : "No broker symbols reported"}
+                      </option>
+                      {availableBrokerSymbols.map((symbol) => (
+                        <option key={symbol} value={symbol}>
+                          {symbol}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              </section>
+            </>
           ) : (
             <>
               <section className="config-section">
@@ -290,12 +369,22 @@ export function SymbolMappingModal({
               Close
             </button>
             <button
-              aria-label={scope === "global" ? "Save global alias" : "Save account mapping"}
+              aria-label={
+                scope === "global"
+                  ? "Save global alias"
+                  : scope === "account-direct"
+                    ? "Save direct mapping"
+                    : "Save account mapping"
+              }
               className="btn btn-primary"
-              onClick={performSave}
+              onClick={() => void performSave()}
               type="button"
             >
-              {scope === "global" ? "Save global alias" : "Save account mapping"}
+              {scope === "global"
+                ? "Save global alias"
+                : scope === "account-direct"
+                  ? "Save direct mapping"
+                  : "Save account mapping"}
             </button>
           </div>
         </form>

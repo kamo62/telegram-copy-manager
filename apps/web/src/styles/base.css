@@ -3657,6 +3657,28 @@ h3 {
   box-shadow: none;
 }
 
+.attribution-trades-table {
+  min-width: 880px;
+  table-layout: fixed;
+}
+
+.attribution-trades-table th:nth-child(1) {
+  width: 22%;
+}
+.attribution-trades-table th:nth-child(2) {
+  width: 14%;
+}
+.attribution-trades-table th:nth-child(3) {
+  width: 12%;
+}
+.attribution-trades-table th:nth-child(4),
+.attribution-trades-table th:nth-child(5) {
+  width: 17%;
+}
+.attribution-trades-table th:nth-child(6) {
+  width: 18%;
+}
+
 .attribution-source-chip {
   display: inline-flex;
   align-items: center;

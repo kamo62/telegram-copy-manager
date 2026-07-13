@@ -32,7 +32,6 @@ import { navItems, Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { StatusBar } from "./components/StatusBar";
 import { SummaryPanel } from "./components/SummaryPanel";
-import { SymbolMappingModal } from "./components/SymbolMappingModal";
 import { type TabId, WorkspaceTabs } from "./components/WorkspaceTabs";
 import { useToast } from "./contexts/ToastContext";
 import { useAnnouncer } from "./hooks/useAnnouncer";
@@ -265,6 +264,7 @@ export interface DashboardSnapshot {
     brokerSymbol: string;
     status: string;
     scope?: string;
+    hint?: string;
     providerId?: string;
     accountId?: string;
   }>;
@@ -509,7 +509,6 @@ export function App({
     ...emptySetupForm(),
     ...initialPendingAuth,
   });
-  const [mappingModalOpen, setMappingModalOpen] = useState(false);
   const [manualSignalOpen, setManualSignalOpen] = useState(false);
   const [manualSignalSeed, setManualSignalSeed] = useState<ManualSignalSeed | undefined>(undefined);
   const [fixtureClassifications, setFixtureClassifications] = useState<
@@ -1695,7 +1694,6 @@ export function App({
         canonicalSymbol: payload.canonicalSymbol,
       },
     });
-    setMappingModalOpen(false);
     await refreshDashboard();
   }
 
@@ -1713,6 +1711,8 @@ export function App({
 
   async function saveAccountMapping(payload: {
     accountId: string;
+    direct?: boolean;
+    rawSymbol?: string;
     canonicalSymbol: string;
     brokerSymbol: string;
     prefix: string;
@@ -1724,16 +1724,18 @@ export function App({
       method: "PUT",
       body: {
         accountId: payload.accountId,
-        canonicalOverrides: {
-          [payload.canonicalSymbol.trim().toUpperCase()]: payload.brokerSymbol.trim(),
-        },
+        canonicalOverrides: payload.direct
+          ? undefined
+          : { [payload.canonicalSymbol.trim().toUpperCase()]: payload.brokerSymbol.trim() },
+        directBrokerOverrides: payload.direct
+          ? { [payload.rawSymbol?.trim().toUpperCase() ?? ""]: payload.brokerSymbol.trim() }
+          : undefined,
         prefix: payload.prefix,
         suffix: payload.suffix,
         includeSymbols: payload.includeSymbols,
         excludeSymbols: payload.excludeSymbols,
       },
     });
-    setMappingModalOpen(false);
     await refreshDashboard();
   }
 
@@ -2050,10 +2052,18 @@ export function App({
 
             {showMapping ? (
               <SymbolSettingsPage
+                availableBrokerSymbols={
+                  focusedAccount?.availableSymbols ??
+                  snapshot.mt5Accounts[0]?.availableSymbols ??
+                  []
+                }
+                defaultAccountId={focusedAccount?.id ?? snapshot.mt5Accounts[0]?.id ?? ""}
+                defaultProviderId={snapshot.providers[0]?.id}
                 loading={initialLoading}
                 mappings={snapshot.symbolMappings}
-                onAdd={() => setMappingModalOpen(true)}
                 onDelete={deleteSymbolMapping}
+                onSaveAccountMapping={saveAccountMapping}
+                onSaveGlobalAlias={saveSymbolAlias}
               />
             ) : null}
 
@@ -2091,15 +2101,6 @@ export function App({
         onTest={testProviderSettings}
         open={configProvider !== null}
         provider={configProvider}
-      />
-
-      <SymbolMappingModal
-        defaultAccountId={snapshot.mt5Accounts[0]?.id ?? ""}
-        defaultProviderId={snapshot.providers[0]?.id}
-        onClose={() => setMappingModalOpen(false)}
-        onSaveAccountMapping={saveAccountMapping}
-        onSaveGlobalAlias={saveSymbolAlias}
-        open={mappingModalOpen}
       />
 
       <ManualSignalModal
