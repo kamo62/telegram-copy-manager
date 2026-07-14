@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.24.0 - 2026-07-14 (Minor)
+
+Release impact: Minor because this adds backward-compatible ParseLab and execution-log diagnostics without changing MT5 execution contracts.
+
+- Surfaced parsed trade fields, parser diagnostics, symbol-resolution details, lifecycle state, held reasons, and full execution-report detail in the operator dashboard.
+- Made Parse recent process newest unparsed messages first and report each provider's capture, parse, and error outcome.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.24.0`.
+- Corrected ParseLab corrective-push account/mode projection, lifecycle state transitions, and action-race handling so operator UI state cannot create or mislabel live queue work.
+- Added the parsed-signal queue lookup index and limited held-reason lookups to visible dashboard rows.
+
 ## 1.23.0 - 2026-07-13 (Minor)
 
 Release impact: Minor because this adds a backward-compatible per-account direct provider-symbol-to-broker-symbol mapping.

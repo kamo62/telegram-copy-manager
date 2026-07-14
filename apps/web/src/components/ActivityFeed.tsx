@@ -22,6 +22,7 @@ const defaultLoad = () =>
 export function ActivityFeed({ load = defaultLoad }: { load?: () => Promise<AuditLogEntry[]> }) {
   const [logs, setLogs] = useState<AuditLogEntry[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -29,18 +30,25 @@ export function ActivityFeed({ load = defaultLoad }: { load?: () => Promise<Audi
       .then((rows) => {
         if (active) {
           setLogs(Array.isArray(rows) ? rows : []);
+          setError("");
           setLoaded(true);
         }
       })
-      .catch(() => {
-        if (active) setLoaded(true);
+      .catch((loadError) => {
+        if (active) {
+          setError(loadError instanceof Error ? loadError.message : "Activity could not be loaded");
+          setLoaded(true);
+        }
       });
     return () => {
       active = false;
     };
   }, [load]);
 
-  if (loaded && logs.length === 0) {
+  if (!loaded) return <p className="load-state">Loading activity…</p>;
+  if (error)
+    return <p className="load-state load-state-error">Activity could not be loaded: {error}</p>;
+  if (logs.length === 0) {
     return (
       <EmptyState
         body="Operator actions and system events (approvals, settings changes, reconciliations) appear here."

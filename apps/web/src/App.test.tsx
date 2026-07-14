@@ -60,6 +60,16 @@ const snapshot: DashboardSnapshot = {
       pendingOrderCount: 0,
       lastSnapshotAt: "2026-05-09T09:00:00.000Z",
     },
+    {
+      id: "mt5-live-2",
+      accountNumber: "200300400",
+      server: "MetaQuotes-Live",
+      heartbeatStatus: "online",
+      marginMode: "HEDGING",
+      availableSymbols: ["XAUUSD.raw"],
+      openPositionCount: 0,
+      pendingOrderCount: 0,
+    },
   ],
   parserResults: [
     {
@@ -69,6 +79,15 @@ const snapshot: DashboardSnapshot = {
       providerTitle: "Alpha FX Signals",
       rawText: "BUY EURUSD @ 1.0850",
       commandType: "OPEN_TRADE",
+      accountId: "mt5-live-2",
+      providerId: "provider-alpha",
+      direction: "SELL",
+      orderType: "STOP",
+      entry: { from: 1.081, to: 1.082 },
+      stopLoss: 1.09,
+      takeProfits: [{ price: 1.075 }, 1.07],
+      volume: 0.25,
+      executionMode: "SPLIT_ORDER",
       canonicalSymbol: "EURUSD",
       brokerSymbol: "EURUSD.raw",
       mappingStatus: "mapped",
@@ -2028,31 +2047,12 @@ describe("App dashboard", () => {
   test("Correct and push threads every parsed trade field into the manual modal", async () => {
     globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
       fixtureResponse(url)) as typeof fetch;
-    const view = render(
-      <App
-        initialSnapshot={{
-          ...snapshot,
-          parserResults: [
-            {
-              ...snapshot.parserResults[0]!,
-              accountId: "mt5-demo-1",
-              providerId: "provider-alpha",
-              direction: "SELL",
-              orderType: "STOP",
-              entry: { from: 1.081, to: 1.082 },
-              stopLoss: 1.09,
-              takeProfits: [{ price: 1.075 }, 1.07],
-              volume: 0.25,
-              executionMode: "SPLIT_ORDER",
-            },
-          ],
-        }}
-      />,
-    );
+    const view = render(<App initialSnapshot={snapshot} />);
 
     await clickTabAsync(view, "Logs");
     fireEvent.click(view.getByRole("button", { name: "Correct & push" }));
-    expect((view.getByLabelText("Account") as HTMLSelectElement).value).toBe("mt5-demo-1");
+    expect((view.getByLabelText("Account") as HTMLSelectElement).value).toBe("mt5-live-2");
+    expect((view.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(true);
     expect((view.getByLabelText("Symbol") as HTMLInputElement).value).toBe("XAUUSD.raw");
     expect((view.getByLabelText("Direction") as HTMLSelectElement).value).toBe("SELL");
     expect((view.getByLabelText("Order type") as HTMLSelectElement).value).toBe("STOP");
@@ -2063,6 +2063,63 @@ describe("App dashboard", () => {
     expect((view.getByLabelText("Execution") as HTMLSelectElement).value).toBe("SPLIT_ORDER");
     expect((view.getByPlaceholderText("TP1 price") as HTMLInputElement).value).toBe("1.075");
     expect((view.getByPlaceholderText("TP2 price") as HTMLInputElement).value).toBe("1.07");
+  });
+
+  test("disables conflicting parser actions while approval is in flight and reflects approval", async () => {
+    let resolveApproval: (response: Response) => void = () => {};
+    const approval = new Promise<Response>((resolve) => {
+      resolveApproval = resolve;
+    });
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      calls.push(requestUrl);
+      if (requestUrl === "/api/signals/parse-1/approve") return approval;
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const view = render(<App initialSnapshot={snapshot} />);
+
+    await clickTabAsync(view, "Logs");
+    fireEvent.click(view.getByRole("button", { name: "Approve" }));
+    expect(view.getByRole("button", { name: "Approve" }).hasAttribute("disabled")).toBe(true);
+    expect(view.getByRole("button", { name: "Ignore" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(view.getByRole("button", { name: "Ignore" }));
+    expect(calls).not.toContain("/api/signals/parse-1/ignore");
+
+    resolveApproval(Response.json({ status: "PENDING" }));
+    expect(await view.findByText("APPROVED")).toBeTruthy();
+    expect(view.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Ignore" })).toBeNull();
+  });
+
+  test("keeps Parse recent busy and surfaces a provider parse failure", async () => {
+    let resolveParse: (response: Response) => void = () => {};
+    const parseResponse = new Promise<Response>((resolve) => {
+      resolveParse = resolve;
+    });
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("/parse-recent?limit=5")) return parseResponse;
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const view = render(<App initialSnapshot={snapshot} />);
+
+    await clickTabAsync(view, "Logs");
+    fireEvent.click(view.getByRole("button", { name: "Parse recent" }));
+    expect(view.getByRole("button", { name: "Parsing…" }).hasAttribute("disabled")).toBe(true);
+
+    resolveParse(
+      Response.json({
+        parsed: [],
+        provider: {
+          providerId: "provider-alpha",
+          captured: 0,
+          inserted: 0,
+          parsed: 0,
+          error: "Telegram fetch failed",
+        },
+      }),
+    );
+    expect(await view.findByText(/Telegram fetch failed/)).toBeTruthy();
   });
 
   test("Settings sends alert tests and shows the returned database backup filename", async () => {

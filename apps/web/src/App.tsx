@@ -206,11 +206,19 @@ export interface DashboardSnapshot {
     providerTitle: string;
     rawText: string;
     commandType: string;
+    rawSymbol?: string;
     canonicalSymbol: string;
     brokerSymbol: string;
     mappingStatus: string;
+    mappingSource?: string;
+    mappingWarnings?: string[];
     confidence: number;
+    matchedPatternIds?: string[];
+    missingFields?: string[];
+    warnings?: string[];
     reviewRequired: boolean;
+    status?: string;
+    heldReason?: string;
     accountId?: string;
     providerId?: string;
     direction?: "BUY" | "SELL";
@@ -272,7 +280,15 @@ export interface DashboardSnapshot {
     id: string;
     queueItemId: string;
     retcode: number;
+    retcodeExternal?: number;
     brokerComment: string;
+    errorText?: string;
+    orderTicket?: string;
+    positionTicket?: string;
+    dealTicket?: string;
+    requestedPrice?: number;
+    filledPrice?: number;
+    volume?: number;
     status: string;
     timestamp?: string;
   }>;
@@ -521,6 +537,17 @@ export function App({
   const [fixtureStatus, setFixtureStatus] = useState<Record<string, string>>({});
   const [aiReviewStatus, setAiReviewStatus] = useState<Record<string, string>>({});
   const [parserActionStatus, setParserActionStatus] = useState<Record<string, string>>({});
+  const [parserActionPending, setParserActionPending] = useState<Record<string, boolean>>({});
+  const [parseRecentBusy, setParseRecentBusy] = useState(false);
+  const [parseRecentResults, setParseRecentResults] = useState<
+    Array<{
+      providerId: string;
+      captured: number;
+      inserted: number;
+      parsed: number;
+      error?: string;
+    }>
+  >([]);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   // Pending link-slots are transient pre-account UI state (not represented in the URL);
   // selecting one clears any focused account and vice versa.
@@ -1472,10 +1499,39 @@ export function App({
       (provider) => provider.id,
     );
     if (providerIds.length === 0) return;
-    await Promise.all(
-      providerIds.map((providerId) => apiPost(`/api/providers/${providerId}/parse-recent?limit=5`)),
-    );
-    await refreshDashboard();
+    setParseRecentBusy(true);
+    try {
+      const results = await Promise.all(
+        providerIds.map(async (providerId) => {
+          try {
+            const data = await apiPost<{
+              provider?: {
+                providerId: string;
+                captured: number;
+                inserted: number;
+                parsed: number;
+                error?: string;
+              };
+            }>(`/api/providers/${providerId}/parse-recent?limit=5`);
+            return data.provider ?? { providerId, captured: 0, inserted: 0, parsed: 0 };
+          } catch (error) {
+            return {
+              providerId,
+              captured: 0,
+              inserted: 0,
+              parsed: 0,
+              error: error instanceof Error ? error.message : "Parse request failed",
+            };
+          }
+        }),
+      );
+      setParseRecentResults(results);
+      if (results.some((result) => result.error))
+        toast.error("Some provider messages could not be parsed");
+      await refreshDashboard();
+    } finally {
+      setParseRecentBusy(false);
+    }
   }
 
   async function saveParserFixture(
@@ -1541,38 +1597,38 @@ export function App({
   }
 
   async function approveParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Queued" }));
+    setParserActionPending((current) => ({ ...current, [result.id]: true }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Approving…" }));
     try {
       await apiPost(`/api/signals/${result.id}/approve`);
     } catch (error) {
-      setParserActionStatus((current) => ({
-        ...current,
-        [result.id]: error instanceof Error ? error.message : "Approval failed",
-      }));
+      setParserActionStatus(({ [result.id]: _status, ...current }) => current);
       toast.error(error instanceof Error ? error.message : "Approval failed");
       await refreshDashboard();
       return;
+    } finally {
+      setParserActionPending((current) => ({ ...current, [result.id]: false }));
     }
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Queued" }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "APPROVED" }));
     announce("Signal approved and queued for MT5");
     toast.success("Signal approved and queued");
     await refreshDashboard();
   }
 
   async function ignoreParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignored" }));
+    setParserActionPending((current) => ({ ...current, [result.id]: true }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignoring…" }));
     try {
       await apiPost(`/api/signals/${result.id}/ignore`);
     } catch (error) {
-      setParserActionStatus((current) => ({
-        ...current,
-        [result.id]: error instanceof Error ? error.message : "Ignore failed",
-      }));
+      setParserActionStatus(({ [result.id]: _status, ...current }) => current);
       toast.error(error instanceof Error ? error.message : "Ignore failed");
       await refreshDashboard();
       return;
+    } finally {
+      setParserActionPending((current) => ({ ...current, [result.id]: false }));
     }
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignored" }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "IGNORED" }));
     announce("Signal ignored");
     toast.success("Signal ignored");
     await refreshDashboard();
@@ -2005,6 +2061,10 @@ export function App({
                 onParserTabChange={setParserTab}
                 providersLength={snapshot.providers.length}
                 onParseRecent={() => void parseRecentProviderMessages()}
+                parseRecentBusy={parseRecentBusy}
+                parseRecentResults={parseRecentResults}
+                parserLoading={initialLoading}
+                parserLoadError={lastPollError}
                 snapshot={snapshot}
                 fixtureClassifications={fixtureClassifications}
                 onClassify={(rawMessageId, classification) =>
@@ -2026,6 +2086,7 @@ export function App({
                 onForcePush={openManualSignal}
                 aiReviewStatus={aiReviewStatus}
                 parserActionStatus={parserActionStatus}
+                parserActionPending={parserActionPending}
                 fixtureStatus={fixtureStatus}
                 heldItems={heldItems}
                 onHeldDismiss={dismissHeldItem}

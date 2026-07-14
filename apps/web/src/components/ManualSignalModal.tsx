@@ -81,10 +81,13 @@ export function ManualSignalModal({
   const [executionMode, setExecutionMode] = useState<"VIRTUAL_TP" | "SPLIT_ORDER">("VIRTUAL_TP");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const seededAccountId = accounts.some((account) => account.id === seed?.accountId)
+    ? seed?.accountId
+    : undefined;
 
   useEffect(() => {
     if (!open) return;
-    setAccountId(seed?.accountId ?? accounts[0]?.id ?? "");
+    setAccountId(seededAccountId ?? accounts[0]?.id ?? "");
     setSymbol(seed?.brokerSymbol ?? "");
     setDirection(seed?.direction ?? "BUY");
     setOrderType(seed?.orderType ?? "LIMIT");
@@ -100,7 +103,7 @@ export function ManualSignalModal({
     setExecutionMode(seed?.executionMode ?? "VIRTUAL_TP");
     setError("");
     setSubmitting(false);
-  }, [open, seed, accounts]);
+  }, [open, seed, accounts, seededAccountId]);
 
   useFocusTrap(dialogRef, open, onClose);
   if (!open) return null;
@@ -189,6 +192,7 @@ export function ManualSignalModal({
               <span>Account</span>
               <select
                 className="settings-input"
+                disabled={Boolean(seededAccountId)}
                 onChange={(event) => {
                   setAccountId(event.target.value);
                   setSymbol("");

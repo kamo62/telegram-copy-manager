@@ -3198,6 +3198,13 @@ describe("Telegram TC API", () => {
     }>(await app.request(`/api/providers/${provider.provider.id}/messages?limit=1`));
     const parsedRecent = await json<{
       parsed: Array<{ result: { commandType: string; brokerSymbol: string } }>;
+      provider: {
+        providerId: string;
+        captured: number;
+        inserted: number;
+        parsed: number;
+        error?: string;
+      };
     }>(
       await app.request(`/api/providers/${provider.provider.id}/parse-recent?limit=1`, {
         method: "POST",
@@ -3210,6 +3217,12 @@ describe("Telegram TC API", () => {
       commandType: "OPEN_TRADE",
       brokerSymbol: "XAUUSD",
     });
+    expect(parsedRecent.provider).toMatchObject({
+      providerId: provider.provider.id,
+      captured: 1,
+      parsed: 1,
+    });
+    expect(parsedRecent.provider.error).toBeUndefined();
     expect(calls).toContain(`messages:${started.sessionId}:real-dialog-1:1`);
   });
 
@@ -9325,5 +9338,283 @@ describe("Telegram TC API", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test("projects ParseLab diagnostics, trade fields, lifecycle state, and execution detail", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: "queue-demo-1",
+        status: "FAILED",
+        retcode: 10016,
+        retcodeExternal: 4756,
+        brokerComment: "Invalid stops",
+        orderTicket: "order-1",
+        positionTicket: "position-1",
+        dealTicket: "deal-1",
+        requestedPrice: 1.085,
+        filledPrice: 1.0849,
+        volume: 0.1,
+        errorText: "Stops are too close",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const dashboard = await json<{
+      parserResults: Array<Record<string, unknown>>;
+      executionLogs: Array<Record<string, unknown>>;
+    }>(await app.request("/api/dashboard"));
+
+    expect(dashboard.parserResults[0]).toMatchObject({
+      direction: "BUY",
+      orderType: "MARKET",
+      entry: { from: 1.085 },
+      stopLoss: 1.081,
+      status: "PARSED",
+      rawSymbol: "EURUSD",
+      canonicalSymbol: "EURUSD",
+      brokerSymbol: "EURUSD.raw",
+      mappingStatus: "mapped",
+      mappingSource: "broker_variant",
+    });
+    expect(dashboard.parserResults[0]?.matchedPatternIds).toBeInstanceOf(Array);
+    expect(dashboard.parserResults[0]?.missingFields).toBeInstanceOf(Array);
+    expect(dashboard.executionLogs[0]).toMatchObject({
+      retcodeExternal: 4756,
+      errorText: "Stops are too close",
+      orderTicket: "order-1",
+      positionTicket: "position-1",
+      dealTicket: "deal-1",
+      requestedPrice: 1.085,
+      filledPrice: 1.0849,
+      volume: 0.1,
+    });
+  });
+
+  test("projects a corrected manual signal with its actual account, provider, and execution mode", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const pushed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/signals/manual", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-100200300",
+          providerId: "provider-alpha",
+          rawText: "SELL XAUUSD STOP @ 3360",
+          brokerSymbol: "XAUUSD.raw",
+          canonicalSymbol: "XAUUSD",
+          direction: "SELL",
+          orderType: "STOP",
+          entry: { from: 3360 },
+          stopLoss: 3370,
+          takeProfits: [{ price: 3345 }],
+          volume: 0.2,
+          executionMode: "SPLIT_ORDER",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const dashboard = await json<{
+      parserResults: Array<{
+        id: string;
+        accountId?: string;
+        providerId?: string;
+        executionMode?: string;
+        mappingSource?: string;
+      }>;
+    }>(await app.request("/api/dashboard"));
+
+    expect(
+      dashboard.parserResults.find((signal) => signal.id === pushed.parsedSignalId),
+    ).toMatchObject({
+      accountId: "mt5-100200300",
+      providerId: "provider-alpha",
+      executionMode: "SPLIT_ORDER",
+      mappingSource: "manual",
+    });
+  });
+
+  test("keeps ParseLab status aligned after held requeue or dismissal", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: false }),
+      headers: { "content-type": "application/json" },
+    });
+    const parseHeld = async (rawText: string) =>
+      json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({ providerId, accountId: "mt5-63442826", rawText }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+    const requeuedSignal = await parseHeld("BUY XAUUSD @ 4500\nSL 4490\nTP 4520");
+    const heldForRequeue = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${requeuedSignal.parsedSignalId}/approve`, {
+        method: "POST",
+      }),
+    );
+    expect(
+      await app.request(`/api/queue-items/${heldForRequeue.queueItemId}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "original" }),
+        headers: { "content-type": "application/json" },
+      }),
+    ).toHaveProperty("status", 200);
+
+    const dismissedSignal = await parseHeld("SELL XAUUSD @ 4510\nSL 4520\nTP 4490");
+    const heldForDismiss = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${dismissedSignal.parsedSignalId}/approve`, {
+        method: "POST",
+      }),
+    );
+    expect(
+      await app.request(`/api/queue-items/${heldForDismiss.queueItemId}/dismiss`, {
+        method: "POST",
+      }),
+    ).toHaveProperty("status", 200);
+
+    const dashboard = await json<{ parserResults: Array<{ id: string; status: string }> }>(
+      await app.request("/api/dashboard"),
+    );
+    expect(
+      dashboard.parserResults.find((signal) => signal.id === requeuedSignal.parsedSignalId)?.status,
+    ).toBe("PENDING");
+    expect(
+      dashboard.parserResults.find((signal) => signal.id === dismissedSignal.parsedSignalId)
+        ?.status,
+    ).toBe("DISMISSED");
+  });
+
+  test("refuses ignore after approval so it cannot overwrite queued signal state", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          accountId: "mt5-100200300",
+          rawText: "BUY EURUSD @ 1.0865\nSL 1.081\nTP 1.09",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    ).toHaveProperty("status", 200);
+    const ignored = await app.request(`/api/signals/${parsed.parsedSignalId}/ignore`, {
+      method: "POST",
+    });
+    expect(ignored.status).toBe(409);
+    const dashboard = await json<{ parserResults: Array<{ id: string; status: string }> }>(
+      await app.request("/api/dashboard"),
+    );
+    expect(
+      dashboard.parserResults.find((signal) => signal.id === parsed.parsedSignalId)?.status,
+    ).toBe("APPROVED");
+  });
+
+  test("parses newest local backlog first for Parse recent while automated ingestion stays oldest-first", async () => {
+    const messages: TelegramCapturedMessage[] = [
+      {
+        telegramMessageId: "order-old",
+        messageDate: "2026-07-14T08:00:00.000Z",
+        rawText: "BUY EURUSD",
+      },
+      {
+        telegramMessageId: "order-mid",
+        messageDate: "2026-07-14T08:01:00.000Z",
+        rawText: "SELL EURUSD",
+      },
+      {
+        telegramMessageId: "order-new",
+        messageDate: "2026-07-14T08:02:00.000Z",
+        rawText: "BUY XAUUSD",
+      },
+    ];
+    const operator = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter(messages),
+      telegramPollingEnabled: false,
+    });
+    const operatorProviderId = await configureProviderWithAccount(operator, {
+      availableSymbols: ["EURUSD", "XAUUSD"],
+    });
+    const recent = await json<{ parsed: Array<{ result: { originalText: string } }> }>(
+      await operator.request(`/api/providers/${operatorProviderId}/parse-recent?limit=1`, {
+        method: "POST",
+      }),
+    );
+    expect(recent.parsed[0]?.result.originalText).toBe("BUY XAUUSD");
+
+    const automated = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter([
+        {
+          telegramMessageId: "automated-old",
+          messageDate: "2026-07-14T08:00:00.000Z",
+          rawText: "SELL BTCUSD",
+        },
+        {
+          telegramMessageId: "automated-new",
+          messageDate: "2026-07-14T08:01:00.000Z",
+          rawText: "Trail stop BTCUSD by 50 pips",
+        },
+      ]),
+      telegramPollingEnabled: false,
+    });
+    await configureProviderWithAccount(automated, { availableSymbols: ["BTCUSD"] });
+    expect(await automated.runTelegramIngestionOnce()).toMatchObject({ parsed: 2, queued: 2 });
+    expect(
+      await (await automated.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+    ).toContain("commandType=OPEN_TRADE");
+    expect(
+      await (await automated.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+    ).toContain("commandType=TRAILING_STOP");
+  });
+
+  test("parses local backlog even when Parse recent Telegram fetch fails", async () => {
+    let failFetch = false;
+    const telegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([
+        {
+          telegramMessageId: "backlog-1",
+          messageDate: "2026-07-14T08:00:00.000Z",
+          rawText: "BUY XAUUSD",
+        },
+      ]),
+      name: "gramjs",
+      async fetchRecentMessages() {
+        if (failFetch) throw new Error("Telegram unavailable");
+        return [
+          {
+            telegramMessageId: "backlog-1",
+            messageDate: "2026-07-14T08:00:00.000Z",
+            rawText: "BUY XAUUSD",
+          },
+        ];
+      },
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram,
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/providers/${providerId}/messages?limit=1`);
+    failFetch = true;
+    const recent = await json<{
+      parsed: Array<{ result: { originalText: string } }>;
+      provider: { error?: string };
+    }>(await app.request(`/api/providers/${providerId}/parse-recent?limit=1`, { method: "POST" }));
+    expect(recent.parsed[0]?.result.originalText).toBe("BUY XAUUSD");
+    expect(recent.provider.error).toBe("Telegram unavailable");
   });
 });

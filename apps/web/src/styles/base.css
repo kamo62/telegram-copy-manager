@@ -1334,6 +1334,24 @@ h3 {
   gap: 8px;
 }
 
+.parser-diagnostics,
+.parse-recent-results,
+.log-details {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+.parser-diagnostics ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.fixture-classification-hint {
+  color: var(--ink-3);
+}
+
 .fixture-controls {
   display: flex;
   flex-wrap: wrap;
@@ -1657,6 +1675,25 @@ h3 {
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+}
+
+.log-error {
+  color: hsl(0 70% 38%);
+  font-size: 12px;
+}
+
+.log-details {
+  padding-top: 4px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.load-state {
+  margin: 0;
+  color: var(--ink-3);
+}
+
+.load-state-error {
+  color: hsl(0 70% 38%);
 }
 
 .log-queue-id {
@@ -7707,6 +7744,11 @@ select.config-strategy-input {
 }
 
 @media (max-width: 760px) {
+  .activity-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
   .status-bar .status-chip:not(:first-child):not(.status-chip-error) {
     display: none;
   }

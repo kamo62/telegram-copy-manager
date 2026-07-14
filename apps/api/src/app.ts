@@ -436,19 +436,46 @@ export function createApi(options: ApiOptions = {}) {
     const limit = Number(c.req.query("limit") ?? 10);
     const provider = store.providerDetails(providerId);
     const sessionId = provider ? store.connectedSessionIdForProfile(provider.profileId) : undefined;
+    let captured = 0;
+    let inserted = 0;
+    let fetchError: string | undefined;
     if (provider && sessionId) {
       try {
-        const captured = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit);
-        if (captured.length > 0) {
-          store.captureMessages(provider.id, captured);
+        const messages = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit);
+        captured = messages.length;
+        if (messages.length > 0) {
+          inserted = store.captureMessages(provider.id, messages).inserted;
         }
-      } catch {
+      } catch (error) {
         if (telegram.name !== "mock") {
-          return c.json({ parsed: [] });
+          fetchError = error instanceof Error ? error.message : "Telegram fetch failed";
         }
       }
     }
-    return c.json({ parsed: store.parseRecentProviderMessages(providerId, limit) });
+    try {
+      const parsed = store.parseRecentProviderMessages(providerId, limit);
+      return c.json({
+        parsed,
+        provider: {
+          providerId,
+          captured,
+          inserted,
+          parsed: parsed.length,
+          ...(fetchError ? { error: fetchError } : {}),
+        },
+      });
+    } catch (error) {
+      return c.json({
+        parsed: [],
+        provider: {
+          providerId,
+          captured,
+          inserted,
+          parsed: 0,
+          error: error instanceof Error ? error.message : "Parser failed",
+        },
+      });
+    }
   });
 
   app.patch("/api/messages/:id/classification", async (c) => {
@@ -526,7 +553,11 @@ export function createApi(options: ApiOptions = {}) {
     return c.json({ error: approved.error }, 422);
   });
 
-  app.post("/api/signals/:id/ignore", (c) => c.json(store.ignoreSignal(c.req.param("id"))));
+  app.post("/api/signals/:id/ignore", (c) => {
+    const ignored = store.ignoreSignal(c.req.param("id"));
+    if ("error" in ignored) return c.json({ error: ignored.error }, ignored.statusCode);
+    return c.json(ignored);
+  });
 
   app.post("/api/signals/manual", async (c) => {
     const body = await c.req.json<ManualSignalInput>();
@@ -2426,11 +2457,12 @@ class AppStore {
       providerId,
       limit,
       accountId ?? this.defaultParserAccountId(providerId),
+      true,
     );
   }
 
-  parsedSignals() {
-    return (
+  parsedSignals(limit?: number) {
+    const rows = (
       this.db
         .query(
           `SELECT parsed_signals.id, parsed_signals.provider_id, parsed_signals.raw_message_id, raw_messages.classification,
@@ -2440,7 +2472,24 @@ class AppStore {
            ORDER BY parsed_signals.created_at DESC`,
         )
         .all() as Row[]
-    ).map((row) => ({
+    ).slice(0, limit);
+    const ids = rows.map((row) => String(row.id));
+    const heldReasons = new Map<string, string>();
+    if (ids.length > 0) {
+      const placeholders = ids.map(() => "?").join(", ");
+      const heldRows = this.db
+        .query(
+          `SELECT parsed_signal_id, held_reason FROM queue_items
+           WHERE parsed_signal_id IN (${placeholders})
+           ORDER BY parsed_signal_id, created_at DESC`,
+        )
+        .all(...ids) as Row[];
+      for (const row of heldRows) {
+        const id = String(row.parsed_signal_id);
+        if (!heldReasons.has(id)) heldReasons.set(id, String(row.held_reason ?? ""));
+      }
+    }
+    return rows.map((row) => ({
       id: String(row.id),
       providerId: String(row.provider_id),
       rawMessageId: String(row.raw_message_id),
@@ -2448,6 +2497,7 @@ class AppStore {
       result: parseJson<ParsedSignal>(String(row.result_json)),
       reviewRequired: Boolean(row.review_required),
       status: String(row.status),
+      heldReason: heldReasons.get(String(row.id)) ?? "",
       createdAt: String(row.created_at),
     }));
   }
@@ -2871,6 +2921,7 @@ class AppStore {
       canonicalSymbol: input.canonicalSymbol?.trim() || brokerSymbol,
       brokerSymbol,
       mappingStatus: "mapped",
+      mappingSource: "manual",
       mappingWarnings: [],
       entry,
       stopLoss: Number.isFinite(input.stopLoss) ? Number(input.stopLoss) : undefined,
@@ -2883,6 +2934,7 @@ class AppStore {
       warnings: [],
       providerId: input.providerId,
       accountId: input.accountId,
+      executionMode,
       fingerprint,
     };
 
@@ -2971,24 +3023,26 @@ class AppStore {
     return { body: { queueItemId, logicalTradeId, parsedSignalId, status: "PENDING" } };
   }
 
-  ignoreSignal(parsedSignalId: string) {
+  ignoreSignal(
+    parsedSignalId: string,
+  ): { parsedSignalId: string; status: "IGNORED" } | { statusCode: 404 | 409; error: string } {
     const row = this.db
       .query("SELECT provider_id, result_json FROM parsed_signals WHERE id = ?")
       .get(parsedSignalId) as Row | null;
-    if (row) {
-      const existing = this.db
-        .query("SELECT id FROM queue_items WHERE parsed_signal_id = ?")
-        .get(parsedSignalId) as Row | null;
-      if (!existing) {
-        const signal = parseJson<ParsedSignal>(String(row.result_json));
-        const providerId = String(row.provider_id);
-        this.insertNonLeasedQueueItem(parsedSignalId, signal, "IGNORED", {
-          accountId: signal.accountId ?? this.defaultParserAccountId(providerId),
-          executionMode: "VIRTUAL_TP",
-          settings: this.appSettings(),
-        });
-      }
+    if (!row) return { statusCode: 404, error: "Parsed signal not found" };
+    const existing = this.db
+      .query("SELECT id FROM queue_items WHERE parsed_signal_id = ?")
+      .get(parsedSignalId) as Row | null;
+    if (existing) {
+      return { statusCode: 409, error: "Signal has already been approved or queued" };
     }
+    const signal = parseJson<ParsedSignal>(String(row.result_json));
+    const providerId = String(row.provider_id);
+    this.insertNonLeasedQueueItem(parsedSignalId, signal, "IGNORED", {
+      accountId: signal.accountId ?? this.defaultParserAccountId(providerId),
+      executionMode: "VIRTUAL_TP",
+      settings: this.appSettings(),
+    });
     this.db
       .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
       .run("IGNORED", parsedSignalId);
@@ -3177,6 +3231,11 @@ class AppStore {
     this.db
       .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
       .run("DISMISSED", nowIso(), id);
+    if (row.parsed_signal_id) {
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("PENDING", String(row.parsed_signal_id));
+    }
     this.audit(
       "queue.requeue",
       "info",
@@ -3202,7 +3261,9 @@ class AppStore {
   }
 
   dismissQueueItem(id: string) {
-    const row = this.db.query("SELECT status FROM queue_items WHERE id = ?").get(id) as Row | null;
+    const row = this.db
+      .query("SELECT status, parsed_signal_id FROM queue_items WHERE id = ?")
+      .get(id) as Row | null;
     if (!row) return { statusCode: 404 as const, error: "Held queue item not found" };
     if (String(row.status) !== "HELD") {
       return { statusCode: 409 as const, error: "Only HELD queue items can be dismissed" };
@@ -3210,6 +3271,11 @@ class AppStore {
     this.db
       .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
       .run("DISMISSED", nowIso(), id);
+    if (row.parsed_signal_id) {
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("DISMISSED", String(row.parsed_signal_id));
+    }
     this.audit(
       "queue.dismiss",
       "info",
@@ -7050,7 +7116,7 @@ class AppStore {
   dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock", previewAccountId?: string) {
     const providers = this.providers();
     const queue = this.queueItems();
-    const parsed = this.parsedSignals();
+    const parsed = this.parsedSignals(8);
     const accounts = this.mt5Accounts();
     return {
       health: {
@@ -7115,8 +7181,10 @@ class AppStore {
         lastHeartbeatAt: account.lastHeartbeatAt,
         lastSnapshotAt: account.lastSnapshotAt,
       })),
-      parserResults: parsed.slice(0, 8).map((signal) => ({
+      parserResults: parsed.map((signal) => ({
         id: signal.id,
+        accountId: signal.result.accountId,
+        providerId: signal.result.providerId ?? signal.providerId,
         rawMessageId: signal.rawMessageId,
         classification: signal.classification,
         providerTitle:
@@ -7124,11 +7192,26 @@ class AppStore {
           signal.providerId,
         rawText: signal.result.originalText,
         commandType: signal.result.commandType,
+        direction: signal.result.direction,
+        orderType: signal.result.orderType,
+        entry: signal.result.entry,
+        stopLoss: signal.result.stopLoss,
+        takeProfits: signal.result.takeProfits,
+        volume: signal.result.lotSize,
+        executionMode: signal.result.executionMode,
+        rawSymbol: signal.result.rawSymbol ?? "",
         canonicalSymbol: signal.result.canonicalSymbol ?? "",
         brokerSymbol: signal.result.brokerSymbol ?? "",
         mappingStatus: signal.result.mappingStatus,
+        mappingSource: signal.result.mappingSource,
+        mappingWarnings: signal.result.mappingWarnings,
         confidence: signal.result.confidence,
+        matchedPatternIds: signal.result.matchedPatternIds,
+        missingFields: signal.result.missingFields,
+        warnings: signal.result.warnings,
         reviewRequired: signal.reviewRequired,
+        status: signal.status,
+        heldReason: signal.heldReason || undefined,
       })),
       parserFixtures: this.fixtures().slice(0, 20),
       signalQueue: queue.map((item) => ({
@@ -7145,7 +7228,15 @@ class AppStore {
         id: log.id,
         queueItemId: log.queueItemId,
         retcode: log.retcode,
+        retcodeExternal: log.retcodeExternal,
         brokerComment: log.brokerComment,
+        errorText: log.errorText,
+        orderTicket: log.orderTicket,
+        positionTicket: log.positionTicket,
+        dealTicket: log.dealTicket,
+        requestedPrice: log.requestedPrice,
+        filledPrice: log.filledPrice,
+        volume: log.volume,
         status: log.status,
         timestamp: log.createdAt,
       })),
@@ -7339,6 +7430,9 @@ class AppStore {
     this.ensureColumn("queue_items", "lease_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("queue_items", "held_reason", "TEXT");
     this.ensureColumn("queue_items", "origin_queue_item_id", "TEXT");
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_queue_items_parsed_signal_created ON queue_items(parsed_signal_id, created_at)",
+    );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS held_lifecycle_drops (
         id TEXT PRIMARY KEY,
@@ -8147,7 +8241,12 @@ class AppStore {
     };
   }
 
-  private parseUnparsedProviderMessages(providerId: string, limit: number, accountId: string) {
+  private parseUnparsedProviderMessages(
+    providerId: string,
+    limit: number,
+    accountId: string,
+    newestFirst = false,
+  ) {
     const rows = this.db
       .query(
         `SELECT id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification
@@ -8156,7 +8255,7 @@ class AppStore {
            AND NOT EXISTS (
              SELECT 1 FROM parsed_signals WHERE parsed_signals.raw_message_id = raw_messages.id
            )
-         ORDER BY message_date ASC
+         ORDER BY message_date ${newestFirst ? "DESC" : "ASC"}
          LIMIT ?`,
       )
       .all(providerId, limit) as Row[];

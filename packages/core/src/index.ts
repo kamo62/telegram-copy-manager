@@ -56,6 +56,7 @@ export interface SymbolResolution {
   brokerSymbol?: string;
   mappingStatus: MappingStatus;
   mappingSource:
+    | "manual"
     | "provider_alias"
     | "account_direct"
     | "account_override"
@@ -103,6 +104,7 @@ export interface ParsedSignal {
   canonicalSymbol?: string;
   brokerSymbol?: string;
   mappingStatus: MappingStatus;
+  mappingSource: SymbolResolution["mappingSource"];
   mappingWarnings: string[];
   entry?: PriceZone;
   stopLoss?: number;
@@ -120,6 +122,7 @@ export interface ParsedSignal {
   warnings: string[];
   providerId?: string;
   accountId?: string;
+  executionMode?: ExecutionMode;
   fingerprint: string;
 }
 
@@ -501,6 +504,9 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const effectiveMappingWarnings = rawSymbol
     ? symbol.warnings
     : (inheritedSymbol?.mappingWarnings ?? symbol.warnings);
+  const effectiveMappingSource = rawSymbol
+    ? symbol.mappingSource
+    : (inheritedSymbol?.mappingSource ?? symbol.mappingSource);
   const defaultStopLoss =
     commandType === "OPEN_TRADE" && stopLoss === undefined ? context.defaultStopLoss : undefined;
   const defaultTakeProfit =
@@ -563,6 +569,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     canonicalSymbol: effectiveCanonicalSymbol,
     brokerSymbol: effectiveBrokerSymbol,
     mappingStatus: effectiveMappingStatus,
+    mappingSource: effectiveMappingSource,
     mappingWarnings: effectiveMappingWarnings,
     entry,
     stopLoss,
