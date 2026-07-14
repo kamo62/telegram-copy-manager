@@ -36,8 +36,10 @@ import {
   type TelegramAdapter,
   type TelegramCapturedMessage,
   type TelegramDialog,
+  TelegramRpcTimeoutError,
   type TelegramSessionHealth,
   type TelegramSessionStatus,
+  withTelegramRpcTimeout,
 } from "./telegram";
 
 export interface ApiOptions {
@@ -48,6 +50,17 @@ export interface ApiOptions {
   telegramAdapter?: "mock" | "gramjs";
   telegramPollingEnabled?: boolean;
   telegramPollingIntervalMs?: number;
+  telegramRpcTimeoutMs?: number;
+}
+
+const DEFAULT_TELEGRAM_RPC_TIMEOUT_MS = 5_000;
+const MAX_TELEGRAM_RPC_TIMEOUT_MS = 30_000;
+
+function telegramRpcTimeoutMs(value?: number) {
+  const configured = value ?? Number(process.env.TELEGRAM_RPC_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.min(Math.floor(configured), MAX_TELEGRAM_RPC_TIMEOUT_MS)
+    : DEFAULT_TELEGRAM_RPC_TIMEOUT_MS;
 }
 
 const demoAccountId = "mt5-100200300";
@@ -930,6 +943,7 @@ export function createApi(options: ApiOptions = {}) {
   const ingestion = createTelegramIngestionLoop(store, telegram, {
     enabled: options.telegramPollingEnabled ?? options.databasePath !== ":memory:",
     intervalMs: options.telegramPollingIntervalMs,
+    rpcTimeoutMs: options.telegramRpcTimeoutMs,
   });
 
   return Object.assign(app, ingestion);
@@ -946,10 +960,28 @@ interface TelegramIngestionResult {
   skipped?: boolean;
 }
 
+interface TelegramProviderHealth {
+  providerId: string;
+  sessionId: string;
+  healthy: boolean;
+  stalled: boolean;
+  checkedAt: string;
+  error?: string;
+}
+
+type TelegramProvider = {
+  id: string;
+  profileId: string;
+  dialogId: string;
+  title: string;
+  enabled: boolean;
+  lastMessageAt: string;
+};
+
 function createTelegramIngestionLoop(
   store: AppStore,
   telegram: TelegramAdapter,
-  options: { enabled: boolean; intervalMs?: number },
+  options: { enabled: boolean; intervalMs?: number; rpcTimeoutMs?: number },
 ) {
   let running = false;
   const runTelegramIngestionOnce = async (): Promise<TelegramIngestionResult> => {
@@ -967,7 +999,11 @@ function createTelegramIngestionLoop(
     }
     running = true;
     try {
-      return await store.ingestEnabledProviders(telegram);
+      return await store.ingestEnabledProviders(
+        telegram,
+        50,
+        telegramRpcTimeoutMs(options.rpcTimeoutMs),
+      );
     } finally {
       running = false;
     }
@@ -1170,6 +1206,9 @@ class AppStore {
   // Last known Telegram session health per session id, recorded by the capture
   // loop and surfaced in the dashboard so a silent stall is visible.
   private readonly telegramHealth = new Map<string, TelegramSessionHealth>();
+  // Per-provider state is kept separately because one stalled dialog RPC must
+  // not wait for another provider before becoming visible to the operator.
+  private readonly telegramProviderHealth = new Map<string, TelegramProviderHealth>();
   // In-memory pub/sub for the SSE stream. Subscribers are SSE connections that
   // forward typed deltas to the dashboard so it stops polling on a timer.
   // ponytail: single-process in-memory bus. Ceiling — events do not survive a
@@ -1947,9 +1986,42 @@ class AppStore {
   async ingestEnabledProviders(
     telegram: TelegramAdapter,
     limit = 50,
+    rpcTimeoutMs = telegramRpcTimeoutMs(),
+  ): Promise<TelegramIngestionResult> {
+    const providers = this.providers().filter((provider) => provider.enabled);
+    const results = await Promise.all(
+      providers.map((provider) => this.ingestProvider(telegram, provider, limit, rpcTimeoutMs)),
+    );
+    return results.reduce(
+      (total, result) => ({
+        providers: total.providers + result.providers,
+        captured: total.captured + result.captured,
+        inserted: total.inserted + result.inserted,
+        parsed: total.parsed + result.parsed,
+        queued: total.queued + result.queued,
+        reviewRequired: total.reviewRequired + result.reviewRequired,
+        errors: total.errors + result.errors,
+      }),
+      {
+        providers: 0,
+        captured: 0,
+        inserted: 0,
+        parsed: 0,
+        queued: 0,
+        reviewRequired: 0,
+        errors: 0,
+      },
+    );
+  }
+
+  private async ingestProvider(
+    telegram: TelegramAdapter,
+    provider: TelegramProvider,
+    limit: number,
+    rpcTimeoutMs: number,
   ): Promise<TelegramIngestionResult> {
     const result: TelegramIngestionResult = {
-      providers: 0,
+      providers: 1,
       captured: 0,
       inserted: 0,
       parsed: 0,
@@ -1957,94 +2029,90 @@ class AppStore {
       reviewRequired: 0,
       errors: 0,
     };
-    const activeSessions = new Set<string>();
-    for (const provider of this.providers().filter((item) => item.enabled)) {
-      result.providers += 1;
-      const sessionId = this.connectedSessionIdForProfile(provider.profileId);
-      if (sessionId) activeSessions.add(sessionId);
-      if (!sessionId) {
-        if (!this.providersWithoutSession.has(provider.id)) {
-          this.providersWithoutSession.add(provider.id);
-          this.audit(
-            "telegram.ingest.skip",
-            "warn",
-            "Enabled provider has no connected Telegram session",
-            { providerId: provider.id },
-          );
-          log("warn", "telegram.ingest.skip", { providerId: provider.id });
-        }
-        continue;
-      }
-      // Provider reconnected — clear the warned flag so we re-log if it drops again.
-      this.providersWithoutSession.delete(provider.id);
-      try {
-        const captured = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit, {
-          dateFrom: provider.lastMessageAt,
-        });
-        const captureResult = this.captureMessages(provider.id, captured);
-        result.captured += captureResult.captured;
-        result.inserted += captureResult.inserted;
-        const parsed = this.parseUnparsedProviderMessages(
-          provider.id,
-          Math.max(limit, captured.length),
-          this.defaultParserAccountId(provider.id),
+    const sessionId = this.connectedSessionIdForProfile(provider.profileId);
+    if (!sessionId) {
+      if (!this.providersWithoutSession.has(provider.id)) {
+        this.providersWithoutSession.add(provider.id);
+        this.audit(
+          "telegram.ingest.skip",
+          "warn",
+          "Enabled provider has no connected Telegram session",
+          {
+            providerId: provider.id,
+          },
         );
-        result.parsed += parsed.length;
-        for (const item of parsed) {
-          if (item.reviewRequired) result.reviewRequired += 1;
-          if (!isAutoQueueableIngestionCommand(item.result.commandType) || item.reviewRequired) {
-            continue;
-          }
-          const approval = this.approveSignal(item.parsedSignalId);
-          if ("body" in approval) {
-            result.queued +=
-              approval.body.queueItems?.length ?? (approval.body.queueItemId ? 1 : 0);
-          } else if (approval.statusCode !== 409) {
-            result.errors += 1;
-            this.audit("telegram.ingest.queue-failed", "warn", approval.error, {
-              providerId: provider.id,
-              parsedSignalId: item.parsedSignalId,
-            });
-            if (isUnmatchedLifecycleError(approval.error)) {
-              const linked = this.linkDroppedLifecycle(
-                provider.id,
-                item.parsedSignalId,
-                item.result,
+        log("warn", "telegram.ingest.skip", { providerId: provider.id });
+      }
+      return result;
+    }
+
+    this.providersWithoutSession.delete(provider.id);
+    let recordedHealth = false;
+    try {
+      const captured = await withTelegramRpcTimeout(
+        telegram.fetchRecentMessages(sessionId, provider.dialogId, limit, {
+          dateFrom: provider.lastMessageAt,
+        }),
+        rpcTimeoutMs,
+      );
+      const captureResult = this.captureMessages(provider.id, captured);
+      result.captured += captureResult.captured;
+      result.inserted += captureResult.inserted;
+      const parsed = this.parseUnparsedProviderMessages(
+        provider.id,
+        Math.max(limit, captured.length),
+        this.defaultParserAccountId(provider.id),
+      );
+      result.parsed += parsed.length;
+      for (const item of parsed) {
+        if (item.reviewRequired) result.reviewRequired += 1;
+        if (!isAutoQueueableIngestionCommand(item.result.commandType) || item.reviewRequired) {
+          continue;
+        }
+        const approval = this.approveSignal(item.parsedSignalId);
+        if ("body" in approval) {
+          result.queued += approval.body.queueItems?.length ?? (approval.body.queueItemId ? 1 : 0);
+        } else if (approval.statusCode !== 409) {
+          result.errors += 1;
+          this.audit("telegram.ingest.queue-failed", "warn", approval.error, {
+            providerId: provider.id,
+            parsedSignalId: item.parsedSignalId,
+          });
+          if (isUnmatchedLifecycleError(approval.error)) {
+            const linked = this.linkDroppedLifecycle(provider.id, item.parsedSignalId, item.result);
+            if (linked > 0) {
+              this.audit(
+                "telegram.ingest.lifecycle-dropped",
+                "warn",
+                "Linked dropped lifecycle command to held open trade",
+                {
+                  providerId: provider.id,
+                  parsedSignalId: item.parsedSignalId,
+                  commandType: item.result.commandType,
+                  linked,
+                },
               );
-              if (linked > 0) {
-                this.audit(
-                  "telegram.ingest.lifecycle-dropped",
-                  "warn",
-                  "Linked dropped lifecycle command to held open trade",
-                  {
-                    providerId: provider.id,
-                    parsedSignalId: item.parsedSignalId,
-                    commandType: item.result.commandType,
-                    linked,
-                  },
-                );
-              }
             }
           }
         }
-      } catch (error) {
-        result.errors += 1;
-        this.audit("telegram.ingest.error", "error", "Telegram provider ingestion failed", {
-          providerId: provider.id,
-          error: error instanceof Error ? error.message : "Unknown ingestion error",
-        });
-        // A revoked/expired GramJS auth key keeps the DB row CONNECTED forever
-        // (gramjs just retries the dead key), so /api/telegram/status reports
-        // connected:true and the web UI stays pinned to the "connected" screen
-        // with no login form. Reconcile the row to DISCONNECTED so the operator
-        // can re-authenticate. Subsequent providers on the same dead session
-        // then resolve no connected session and are skipped, not re-polled.
-        if (isTelegramDeadSessionError(error)) {
-          await this.reconcileDeadTelegramSession(telegram, sessionId, error);
-        }
       }
+    } catch (error) {
+      result.errors += 1;
+      this.audit("telegram.ingest.error", "error", "Telegram provider ingestion failed", {
+        providerId: provider.id,
+        error: error instanceof Error ? error.message : "Unknown ingestion error",
+      });
+      this.recordProviderHealth(telegram, provider, sessionId, error);
+      recordedHealth = true;
+      // A revoked/expired GramJS auth key keeps the DB row CONNECTED forever
+      // (gramjs just retries the dead key), so reconcile it without letting a
+      // stuck disconnect hold the provider health record or the ingestion pass.
+      if (isTelegramDeadSessionError(error)) {
+        await this.reconcileDeadTelegramSession(telegram, sessionId, error, rpcTimeoutMs);
+      }
+    } finally {
+      if (!recordedHealth) this.recordProviderHealth(telegram, provider, sessionId);
     }
-    this.recordTelegramHealth(telegram, activeSessions);
     return result;
   }
 
@@ -2106,14 +2174,17 @@ class AppStore {
     telegram: TelegramAdapter,
     sessionId: string,
     error: unknown,
+    rpcTimeoutMs: number,
   ) {
     const current = this.db
       .query("SELECT status FROM telegram_sessions WHERE id = ?")
       .get(sessionId) as Row | null;
     if (!current || String(current.status) === "DISCONNECTED") return;
-    // disconnect() also removes the dead session file, so the unbounded
-    // reconnect storm stops and the file can't be re-imported on next boot.
-    await telegram.disconnect(sessionId).catch(() => undefined);
+    // disconnect() also removes the dead session file, so reconnect attempts
+    // stop and the file can't be re-imported on next boot.
+    await withTelegramRpcTimeout(telegram.disconnect(sessionId), rpcTimeoutMs).catch(
+      () => undefined,
+    );
     this.updateTelegramSession(sessionId, "DISCONNECTED");
     this.audit(
       "telegram.session.dead",
@@ -2151,8 +2222,53 @@ class AppStore {
     }
   }
 
+  private recordProviderHealth(
+    telegram: TelegramAdapter,
+    provider: TelegramProvider,
+    sessionId: string,
+    error?: unknown,
+  ) {
+    const sessionHealth = telegram.sessionHealth?.(sessionId);
+    const timeout = error instanceof TelegramRpcTimeoutError;
+    const stalled = timeout || Boolean(sessionHealth?.stalled);
+    const healthy = !error && !sessionHealth?.stalled;
+    const previous = this.telegramProviderHealth.get(provider.id);
+    const health: TelegramProviderHealth = {
+      providerId: provider.id,
+      sessionId,
+      healthy,
+      stalled,
+      checkedAt: nowIso(),
+      error: error instanceof Error ? error.message : error ? String(error) : undefined,
+    };
+    this.telegramProviderHealth.set(provider.id, health);
+    this.recordTelegramHealth(telegram, new Set([sessionId]));
+    if (stalled && !previous?.stalled) {
+      this.audit("telegram.provider.stalled", "error", "Telegram provider ingestion stalled", {
+        providerId: provider.id,
+        sessionId,
+        error: health.error,
+      });
+      this.dispatchAlert(
+        "telegram-provider-stalled",
+        provider.id,
+        `Telegram ingestion stalled for provider ${provider.title}.`,
+        "alertOnTelegramStall",
+      );
+    } else if (healthy && previous?.stalled) {
+      this.audit("telegram.provider.recovered", "info", "Telegram provider ingestion recovered", {
+        providerId: provider.id,
+        sessionId,
+      });
+    }
+  }
+
   telegramSessionHealth(): TelegramSessionHealth[] {
     return [...this.telegramHealth.values()];
+  }
+
+  telegramProviderHealthSnapshot(): TelegramProviderHealth[] {
+    return [...this.telegramProviderHealth.values()];
   }
 
   // Operational conditions that silently block trading and should be shown
@@ -2160,7 +2276,12 @@ class AppStore {
   // or a Telegram session that has stopped receiving updates.
   operationalAlerts() {
     const alerts: Array<{
-      kind: "guardian-paused" | "telegram-stalled" | "unmapped-symbols" | "provider-health";
+      kind:
+        | "guardian-paused"
+        | "telegram-stalled"
+        | "telegram-provider-stalled"
+        | "unmapped-symbols"
+        | "provider-health";
       severity: "warn" | "error";
       message: string;
       accountId?: string;
@@ -2215,6 +2336,17 @@ class AppStore {
           lastContactAt: health.lastContactAt,
           stalledSeconds: health.stalledSeconds,
         },
+      });
+    }
+    for (const health of this.telegramProviderHealthSnapshot()) {
+      if (!health.stalled) continue;
+      const provider = this.providerDetails(health.providerId);
+      if (!provider?.enabled) continue;
+      alerts.push({
+        kind: "telegram-provider-stalled",
+        severity: "error",
+        message: `Telegram provider ${provider?.title ?? health.providerId} is stalled — incoming signals may be delayed or missed`,
+        detail: { ...health },
       });
     }
     const needsMapping = this.providerSymbolsNeedingMapping();
@@ -7273,6 +7405,7 @@ class AppStore {
       equityGuardians: this.equityGuardians(),
       telegramSessions: this.telegramSessionSummaries(),
       telegramHealth: this.telegramSessionHealth(),
+      telegramProviderHealth: this.telegramProviderHealthSnapshot(),
       alerts: this.operationalAlerts(),
       providers: providers.map((provider) => ({
         id: provider.id,

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createApi } from "./app";
-import { parseConnectionRetries } from "./telegram";
+import { parseConnectionRetries, parseReconnectRetryDelay } from "./telegram";
 
 const json = async <T>(response: Response) => (await response.json()) as T;
 
@@ -76,7 +76,7 @@ async function setupAccountWithQueuedSignal(app: ReturnType<typeof createApi>) {
 }
 
 describe("telegram reconnect resilience helpers", () => {
-  test("parseConnectionRetries restores the gramjs Infinity default when unset or invalid", () => {
+  test("parseConnectionRetries keeps auto-reconnect attempts unbounded by default", () => {
     expect(parseConnectionRetries(undefined)).toBe(Number.POSITIVE_INFINITY);
     expect(parseConnectionRetries("")).toBe(Number.POSITIVE_INFINITY);
     expect(parseConnectionRetries("0")).toBe(Number.POSITIVE_INFINITY);
@@ -85,8 +85,15 @@ describe("telegram reconnect resilience helpers", () => {
   });
 
   test("parseConnectionRetries honours an explicit positive override", () => {
-    expect(parseConnectionRetries("5")).toBe(5);
     expect(parseConnectionRetries("20")).toBe(20);
+    expect(parseConnectionRetries("2")).toBe(2);
+  });
+
+  test("reconnect delay has a ceiling", () => {
+    expect(parseReconnectRetryDelay(undefined)).toBe(2000);
+    expect(parseReconnectRetryDelay("250")).toBe(250);
+    expect(parseReconnectRetryDelay("60000")).toBe(10000);
+    expect(parseReconnectRetryDelay("invalid")).toBe(2000);
   });
 });
 

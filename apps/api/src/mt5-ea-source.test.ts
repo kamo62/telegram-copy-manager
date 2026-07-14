@@ -5,10 +5,12 @@ const source = readFileSync("mt5/TelegramTC_EA.mq5", "utf8");
 const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as { version?: string };
 
 describe("MT5 Expert Advisor source", () => {
-  test("keeps EA version aligned with the canonical app package version", () => {
+  test("keeps the EA on the same compatible app release line", () => {
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
-    expect(eaVersion).toBe(packageJson.version);
+    // API-only patch releases can advance without changing the deployed EA
+    // protocol; major/minor remains the compatibility boundary.
+    expect(eaVersion?.split(".").slice(0, 2)).toEqual(packageJson.version?.split(".").slice(0, 2));
   });
 
   test("uses timer polling, WebRequest, typed MQL5 trade structures, and retcode reporting", () => {
