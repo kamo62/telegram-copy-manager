@@ -179,7 +179,10 @@ const defaultAppSettings: AppSettings = {
 };
 const pendingOpenMissingGraceSeconds = 10;
 const EA_HEARTBEAT_SECONDS = 5;
+const EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS = 30;
+const GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS = 60 * 60;
 const ALERT_DEDUP_MS = 30 * 60 * 1000;
+const MANUAL_PUSH_DEDUP_SECONDS = 10;
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
 
@@ -660,11 +663,23 @@ export function createApi(options: ApiOptions = {}) {
   app.get("/api/equity-guardian", (c) => c.json({ guardians: store.equityGuardians() }));
   app.patch("/api/equity-guardian/:accountId", async (c) => {
     const body = await c.req.json<{ threshold?: number; paused?: boolean }>();
-    return c.json({ guardian: store.updateEquityGuardian(c.req.param("accountId"), body) });
+    const accountId = c.req.param("accountId");
+    const guardian = store.updateEquityGuardian(accountId, {
+      threshold: body.threshold,
+      paused: body.paused,
+    });
+    if (body.paused !== false) return c.json({ guardian });
+    const result = store.unpauseEquityGuardian(accountId);
+    if ("error" in result)
+      return c.json({ error: result.error, guardian: result.guardian }, result.statusCode);
+    return c.json(result);
   });
-  app.post("/api/equity-guardian/:accountId/unpause", (c) =>
-    c.json({ guardian: store.unpauseEquityGuardian(c.req.param("accountId")) }),
-  );
+  app.post("/api/equity-guardian/:accountId/unpause", (c) => {
+    const result = store.unpauseEquityGuardian(c.req.param("accountId"));
+    if ("error" in result)
+      return c.json({ error: result.error, guardian: result.guardian }, result.statusCode);
+    return c.json(result);
+  });
 
   app.get("/api/account/performance", (c) => c.json(store.accountPerformance()));
   app.get("/api/accounts/:accountId/attribution", (c) =>
@@ -2686,10 +2701,7 @@ class AppStore {
           accountId: target.accountId,
           logicalTradeId: targetLogicalTradeId,
           executionMode,
-          volume:
-            target.config.riskMode === "fixed"
-              ? target.config.riskAmount
-              : (provider?.lotSize ?? settings.defaultLotSize),
+          volume: target.config.riskMode === "fixed" ? target.config.riskAmount : 0,
           riskPercent:
             target.config.riskMode === "percent"
               ? target.config.riskAmount
@@ -2865,7 +2877,7 @@ class AppStore {
           status: string;
         };
       }
-    | { statusCode: 404 | 422; error: string } {
+    | { statusCode: 404 | 409 | 422; error: string } {
     const account = this.mt5Accounts().find((item) => item.id === input.accountId);
     if (!account) return { statusCode: 404, error: "Account not found" };
     if ((input.commandType ?? "OPEN_TRADE") !== "OPEN_TRADE") {
@@ -2910,7 +2922,30 @@ class AppStore {
         : { from: Number(input.entry?.from), to: Number(input.entry?.to ?? input.entry?.from) };
     const originalText =
       input.rawText?.trim() || manualTicketSummary(input, brokerSymbol, orderType, entry);
-    const fingerprint = createMessageFingerprint(`${originalText}:${nanoid(6)}`);
+    const fingerprint = createMessageFingerprint(
+      JSON.stringify({
+        accountId: input.accountId,
+        providerId: input.providerId ?? "",
+        rawMessageIdentity: input.rawMessageId ?? input.rawText?.trim() ?? "",
+        brokerSymbol,
+        direction: input.direction,
+        orderType,
+        entry,
+        stopLoss: input.stopLoss,
+        takeProfits: input.takeProfits,
+        volume,
+        riskPercent,
+        executionMode,
+      }),
+    );
+    const duplicate = this.db
+      .query(
+        "SELECT id FROM parsed_signals WHERE fingerprint = ? AND unixepoch(created_at) >= unixepoch('now') - ? LIMIT 1",
+      )
+      .get(fingerprint, MANUAL_PUSH_DEDUP_SECONDS) as Row | null;
+    if (duplicate) {
+      return { statusCode: 409, error: "Duplicate manual push rejected; retry after 10 seconds" };
+    }
 
     const signal: ParsedSignal = {
       originalText,
@@ -3202,11 +3237,7 @@ class AppStore {
     }
 
     const originalAccountId = String(row.account_id ?? "");
-    const providerId = String(row.provider_id ?? "");
-    const targetAccountId =
-      (providerId
-        ? this.targetAccountIdsForProvider(providerId, originalAccountId)[0]
-        : undefined) ?? originalAccountId;
+    const targetAccountId = originalAccountId;
     if (this.isEquityGuardianPaused(targetAccountId)) {
       return {
         statusCode: 409 as const,
@@ -3604,7 +3635,7 @@ class AppStore {
       ? Number(input.currentDrawdown)
       : current.currentDrawdown;
     const breached = currentDrawdown >= threshold;
-    const paused = input.paused ?? (current.paused || breached);
+    const paused = input.paused === true || current.paused || breached;
     const breaches = [...current.breaches];
     if (breached && !current.paused) {
       breaches.push({ at: new Date().toISOString(), drawdown: currentDrawdown, action: "paused" });
@@ -3634,6 +3665,46 @@ class AppStore {
 
   unpauseEquityGuardian(accountId: string) {
     const current = this.equityGuardian(accountId);
+    const blocked = this.equityGuardianUnpauseBlocker(accountId, current);
+    if (blocked) {
+      const breaches = [
+        ...current.breaches,
+        {
+          at: new Date().toISOString(),
+          drawdown: current.currentDrawdown,
+          action: "manual_unpause_rejected",
+        },
+      ];
+      this.db
+        .query(
+          "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
+        )
+        .run(
+          accountId,
+          current.threshold,
+          current.currentDrawdown,
+          1,
+          JSON.stringify(breaches),
+          new Date().toISOString(),
+        );
+      const guardian = this.equityGuardian(accountId);
+      this.audit(
+        "equity-guardian.unpause-rejected",
+        "warn",
+        "Equity Guardian remains paused because the safety check failed",
+        {
+          accountId,
+          currentDrawdown: current.currentDrawdown,
+          threshold: current.threshold,
+          blocked,
+        },
+      );
+      return {
+        statusCode: 409 as const,
+        error: `Equity Guardian remains paused because ${blocked}`,
+        guardian,
+      };
+    }
     const breaches = [
       ...current.breaches,
       { at: new Date().toISOString(), drawdown: current.currentDrawdown, action: "manual_unpause" },
@@ -3650,10 +3721,74 @@ class AppStore {
         JSON.stringify(breaches),
         new Date().toISOString(),
       );
+    const releasedQueueItemIds = this.appSettings().releaseHeldOnGuardianUnpause
+      ? this.releaseGuardianHeldQueueItems(accountId)
+      : [];
     this.audit("equity-guardian.unpause", "info", "Equity Guardian manually unpaused", {
       accountId,
+      releasedQueueItemIds,
     });
-    return this.equityGuardian(accountId);
+    return { guardian: this.equityGuardian(accountId), releasedQueueItemIds };
+  }
+
+  private releaseGuardianHeldQueueItems(accountId: string): string[] {
+    const held = this.db
+      .query(
+        `SELECT queue_items.id, queue_items.created_at, logical_trades.data_json
+         FROM queue_items
+         LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
+         WHERE queue_items.account_id = ? AND queue_items.status = 'HELD' AND queue_items.held_reason = 'GUARDIAN'`,
+      )
+      .all(accountId) as Row[];
+    return held.flatMap((row) => {
+      const trade = row.data_json ? parseJson<LogicalTrade>(String(row.data_json)) : undefined;
+      const sourceDate = trade?.source?.messageDate || String(row.created_at);
+      if (this.guardianReleaseExpired(sourceDate)) {
+        this.audit(
+          "equity-guardian.release-skipped",
+          "warn",
+          "Guardian-held trade was too old to release",
+          {
+            accountId,
+            queueItemId: String(row.id),
+            sourceDate,
+          },
+        );
+        return [];
+      }
+      const result = this.requeueQueueItem(String(row.id), "market");
+      return "queueItemId" in result && result.queueItemId ? [result.queueItemId] : [];
+    });
+  }
+
+  private equityGuardianUnpauseBlocker(
+    accountId: string,
+    current: ReturnType<AppStore["equityGuardian"]>,
+  ): string | undefined {
+    const row = this.db
+      .query("SELECT last_heartbeat_at FROM mt5_accounts WHERE id = ?")
+      .get(accountId) as Row | null;
+    const heartbeatAt = Date.parse(String(row?.last_heartbeat_at ?? ""));
+    if (
+      !Number.isFinite(heartbeatAt) ||
+      Date.now() - heartbeatAt > EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS * 1000
+    ) {
+      return "the latest equity heartbeat is stale or unavailable";
+    }
+    if (current.currentDrawdown >= current.threshold) {
+      return "current drawdown is still at or above its threshold";
+    }
+    return undefined;
+  }
+
+  private guardianReleaseExpired(sourceDate: string) {
+    const settings = this.appSettings();
+    if (openTradeTimestampExpired(sourceDate, settings)) return true;
+    const timestamp = Date.parse(normalizedDateInput(sourceDate));
+    return (
+      Number.isFinite(timestamp) &&
+      Date.now() - timestamp > GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS * 1000
+    );
   }
 
   private isEquityGuardianPaused(accountId?: string) {

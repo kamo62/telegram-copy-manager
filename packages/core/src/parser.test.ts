@@ -109,6 +109,61 @@ describe("deterministic signal parser", () => {
     });
   });
 
+  test("disambiguates STOP order tokens from stop-loss labels without using an SL price as entry", () => {
+    const stopLoss = parseSignalText("BUY GOLD STOP LOSS 2290 TP 2320", context);
+    expect(stopLoss).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      orderType: "MARKET",
+      entry: undefined,
+      stopLoss: 2290,
+    });
+    expect(shouldRequireManualReview(stopLoss)).toBe(false);
+
+    for (const [text, entry] of [
+      ["BUY GOLD LIMIT SL 2290 TP 2320 ENTRY 2310", { from: 2310 }],
+      ["BUY GOLD LIMIT SL 2290 TP 2320 ENTRY 2310-2312", { from: 2310, to: 2312 }],
+      ["BUY GOLD LIMIT SL 2290 TP 2320 @2310", { from: 2310 }],
+    ] as const) {
+      const signal = parseSignalText(text, context);
+      expect(signal).toMatchObject({ orderType: "LIMIT", entry });
+      expect(signal.missingFields).not.toContain("entry");
+      expect(shouldRequireManualReview(signal)).toBe(false);
+    }
+
+    for (const orderType of ["LIMIT", "STOP"] as const) {
+      const missingPendingEntry = parseSignalText(`BUY GOLD ${orderType} SL 2290 TP 2320`, context);
+      expect(missingPendingEntry).toMatchObject({ orderType, entry: undefined });
+      expect(missingPendingEntry.missingFields).toContain("entry");
+      expect(shouldRequireManualReview(missingPendingEntry)).toBe(true);
+    }
+
+    for (const [text, entry] of [
+      ["BUY STOP 2290", 2290],
+      ["SELL STOP @1.2345", 1.2345],
+      ["BUY GOLD STOP 2310 SL 2290", 2310],
+      ["BUY GOLD @ 2310 ORDER TYPE: STOP SL 2290", 2310],
+    ] as const) {
+      expect(parseSignalText(text, context)).toMatchObject({
+        orderType: "STOP",
+        entry: { from: entry },
+      });
+    }
+    expect(parseSignalText("BUY STOP LIMIT", context).orderType).toBe("LIMIT");
+    expect(parseSignalText("BUY STOPLOSSUSD 2290", context).orderType).toBe("MARKET");
+
+    for (const text of ["SL 2290", "S/L: 2290", "StopLoss 2290", "STOP-LOSS 2290"]) {
+      expect(parseSignalText(`BUY GOLD ${text} TP 2320`, context)).toMatchObject({
+        entry: undefined,
+        stopLoss: 2290,
+      });
+    }
+
+    const conflicting = parseSignalText("BUY GOLD STOP LOSS 2290 SL 2280 TP 2320", context);
+    expect(conflicting.stopLoss).toBe(2290);
+    expect(shouldRequireManualReview(conflicting)).toBe(true);
+  });
+
   test("extracts optional lot size and risk percent from open trade text", () => {
     const result = parseSignalText(
       "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900\nLot 0.25\nRisk 0.75%",

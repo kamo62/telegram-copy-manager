@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.25.0 - 2026-07-14 (Minor)
+
+Release impact: Minor because this adds backward-compatible execution-safety behaviour across the API queue and MT5 EA.
+
+- Parsed `STOP LOSS`, `STOPLOSS`, `STOP-LOSS`, and `S/L` as protective stop-loss wording without consuming their price as an entry; standalone pending `STOP` tokens remain supported, and conflicting stop-loss labels require review.
+- Reject duplicate manual force-push retries for exactly 10 seconds using comparable timestamps and provider/raw-message identity, without suppressing later or genuinely distinct signals.
+- Keep Equity Guardian latched while a drawdown is breached or the latest equity heartbeat is stale; automatic guardian-held requeues preserve the original account and logical trade, and skip stale open-trade signals.
+- Ignore client-supplied guardian drawdown values on PATCH, require an entry for pending orders, and retain explicit entries that appear after SL/TP labels.
+- Require the EA to heartbeat before polling and abort execution when no fresh symbol tick arrives, preventing a naked market order.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.25.0`.
+
 ## 1.24.0 - 2026-07-14 (Minor)
 
 Release impact: Minor because this adds backward-compatible ParseLab and execution-log diagnostics without changing MT5 execution contracts.

@@ -1003,7 +1003,7 @@ describe("Telegram TC API", () => {
     expect(dashboard.signalQueue.some((item) => item.status === "HELD")).toBe(true);
   });
 
-  test("holds guardian rejections as GUARDIAN and refuses requeue while paused", async () => {
+  test("releases guardian-held work at market on safe unpause when configured", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const approved = await approveGoldBuyLimit(app);
 
@@ -1062,24 +1062,16 @@ describe("Telegram TC API", () => {
     });
     expect(refused.status).toBe(409);
 
-    await app.request("/api/equity-guardian/mt5-63442826/unpause", { method: "POST" });
-    const requeued = await json<{
-      queueItemId: string;
-      originQueueItemId: string;
-      status: string;
-      mode: string;
-    }>(
-      await app.request(`/api/queue-items/${approved.queueItemId}/requeue`, {
-        method: "POST",
-        body: JSON.stringify({ mode: "market" }),
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    expect(requeued).toMatchObject({
-      originQueueItemId: approved.queueItemId,
-      status: "PENDING",
-      mode: "market",
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ releaseHeldOnGuardianUnpause: true }),
+      headers: { "content-type": "application/json" },
     });
+    const unpaused = await json<{ guardian: { paused: boolean }; releasedQueueItemIds: string[] }>(
+      await app.request("/api/equity-guardian/mt5-63442826/unpause", { method: "POST" }),
+    );
+    expect(unpaused.guardian.paused).toBe(false);
+    expect(unpaused.releasedQueueItemIds).toHaveLength(1);
 
     const queue = await json<{
       queue: Array<{
@@ -1097,12 +1089,263 @@ describe("Telegram TC API", () => {
     );
     expect(queue.queue).toContainEqual(
       expect.objectContaining({
-        id: requeued.queueItemId,
+        id: unpaused.releasedQueueItemIds[0],
         status: "PENDING",
         originQueueItemId: approved.queueItemId,
         payload: expect.objectContaining({ orderType: "MARKET" }),
       }),
     );
+  });
+
+  test("rejects PATCH unpause drawdown spoofing and allows safe guardian updates", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await app.request("/api/equity-guardian/mt5-63442826", {
+      method: "PATCH",
+      body: JSON.stringify({ threshold: 10, paused: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/poll?accountId=mt5-63442826");
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ releaseHeldOnGuardianUnpause: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({ accountId: "mt5-63442826", balance: 10000, equity: 8000 }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const patchUnpause = await app.request("/api/equity-guardian/mt5-63442826", {
+      method: "PATCH",
+      body: JSON.stringify({ paused: false, currentDrawdown: 0 }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(patchUnpause.status).toBe(409);
+    expect(
+      await json<{ error: string; guardian: { paused: boolean; currentDrawdown: number } }>(
+        patchUnpause,
+      ),
+    ).toMatchObject({
+      error: expect.stringContaining("remains paused"),
+      guardian: { paused: true, currentDrawdown: 20 },
+    });
+    const blockedQueue = await json<{ queue: Array<{ id: string; status: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(blockedQueue.queue.find((item) => item.id === approved.queueItemId)?.status).toBe(
+      "HELD",
+    );
+
+    const thresholdPatch = await app.request("/api/equity-guardian/mt5-63442826", {
+      method: "PATCH",
+      body: JSON.stringify({ threshold: 12 }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(thresholdPatch.status).toBe(200);
+    expect(
+      await json<{ guardian: { paused: boolean; threshold: number } }>(thresholdPatch),
+    ).toMatchObject({
+      guardian: { paused: true, threshold: 12 },
+    });
+
+    await app.request("/api/mt5/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({ accountId: "mt5-63442826", balance: 10000, equity: 10000 }),
+      headers: { "content-type": "application/json" },
+    });
+    const unpause = await app.request("/api/equity-guardian/mt5-63442826/unpause", {
+      method: "POST",
+    });
+    expect(unpause.status).toBe(200);
+    expect(await json<{ guardian: { paused: boolean } }>(unpause)).toMatchObject({
+      guardian: { paused: false },
+    });
+  });
+
+  test("refuses guardian unpause when the latest equity heartbeat is stale", async () => {
+    const originalDateNow = Date.now;
+    const now = Date.UTC(2026, 6, 14, 10, 0, 0);
+    Date.now = () => now;
+    try {
+      const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+      await app.request("/api/mt5/heartbeat", {
+        method: "POST",
+        body: JSON.stringify({ accountId: "mt5-100200300", balance: 10000, equity: 10000 }),
+        headers: { "content-type": "application/json" },
+      });
+      Date.now = () => now + 31_000;
+      const unpause = await app.request("/api/equity-guardian/mt5-100200300/unpause", {
+        method: "POST",
+      });
+      expect(unpause.status).toBe(409);
+      expect(await json<{ error: string; guardian: { paused: boolean } }>(unpause)).toMatchObject({
+        error: expect.stringContaining("heartbeat is stale"),
+        guardian: { paused: true },
+      });
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("releases guardian-held work only to its original account", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "100200300",
+        server: "MetaQuotes-Demo",
+        company: "MetaQuotes Ltd",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols: ["XAUUSD"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    for (const accountId of ["mt5-100200300", "mt5-63442826"]) {
+      await app.request(`/api/account-provider-links/${accountId}/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+    }
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY XAUUSD @ 4541\nSL 4535\nTP 4546",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" });
+    const before = await json<{
+      queue: Array<{ id: string; accountId: string; logicalTradeId: string; status: string }>;
+    }>(await app.request("/api/signals"));
+    const held = before.queue.find((item) => item.accountId === "mt5-63442826");
+    expect(held).toBeDefined();
+    await app.request("/api/equity-guardian/mt5-63442826", {
+      method: "PATCH",
+      body: JSON.stringify({ paused: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/poll?accountId=mt5-63442826");
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ releaseHeldOnGuardianUnpause: true }),
+      headers: { "content-type": "application/json" },
+    });
+    const unpaused = await json<{ releasedQueueItemIds: string[] }>(
+      await app.request("/api/equity-guardian/mt5-63442826/unpause", { method: "POST" }),
+    );
+    const after = await json<{
+      queue: Array<{
+        id: string;
+        accountId: string;
+        logicalTradeId: string;
+        originQueueItemId?: string;
+        status: string;
+      }>;
+    }>(await app.request("/api/signals"));
+    const released = after.queue.find((item) => item.id === unpaused.releasedQueueItemIds[0]);
+    expect(released).toMatchObject({
+      accountId: "mt5-63442826",
+      logicalTradeId: held?.logicalTradeId,
+      originQueueItemId: held?.id,
+      status: "PENDING",
+    });
+    expect(
+      after.queue.some(
+        (item) => item.originQueueItemId === held?.id && item.accountId === "mt5-100200300",
+      ),
+    ).toBe(false);
+  });
+
+  test("does not auto-release stale guardian-held open trades", async () => {
+    const originalDateNow = Date.now;
+    const now = originalDateNow();
+    try {
+      const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+      const approved = await approveGoldBuyLimit(app);
+      await app.request("/api/equity-guardian/mt5-63442826", {
+        method: "PATCH",
+        body: JSON.stringify({ paused: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/poll?accountId=mt5-63442826");
+      Date.now = () => now + 61_000;
+      await app.request("/api/mt5/heartbeat", {
+        method: "POST",
+        body: JSON.stringify({ accountId: "mt5-63442826", balance: 10000, equity: 10000 }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ releaseHeldOnGuardianUnpause: true, maxOpenTradeAgeSeconds: 60 }),
+        headers: { "content-type": "application/json" },
+      });
+      const unpaused = await json<{ releasedQueueItemIds: string[] }>(
+        await app.request("/api/equity-guardian/mt5-63442826/unpause", { method: "POST" }),
+      );
+      expect(unpaused.releasedQueueItemIds).toEqual([]);
+      const queue = await json<{ queue: Array<{ id: string; status: string }> }>(
+        await app.request("/api/signals"),
+      );
+      expect(queue.queue.find((item) => item.id === approved.queueItemId)?.status).toBe("HELD");
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("allows the same manual force-push after its 10-second dedup window", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-manual-dedup-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({ databasePath, seedDemoData: false });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442826",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const body = {
+        accountId: "mt5-63442826",
+        direction: "BUY",
+        orderType: "MARKET",
+        brokerSymbol: "GOLD",
+        stopLoss: 4100,
+        takeProfits: [{ price: 4200 }],
+        volume: 0.01,
+      };
+      const push = () =>
+        app.request("/api/signals/manual", {
+          method: "POST",
+          body: JSON.stringify(body),
+          headers: { "content-type": "application/json" },
+        });
+      expect((await push()).status).toBe(200);
+      const db = new Database(databasePath);
+      db.query("UPDATE parsed_signals SET created_at = ?").run(
+        new Date(Date.now() - 30_000).toISOString(),
+      );
+      db.close();
+      expect((await push()).status).toBe(200);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("holds approval with no linked account as NO_ACCOUNT", async () => {
@@ -4420,6 +4663,35 @@ describe("Telegram TC API", () => {
     expect(payload).toContain("tp2Volume=0.05");
     expect(payload).toContain("tp3Volume=0.05");
     expect(payload).toContain("tp4Volume=0.05");
+  });
+
+  test("sends zero fixed volume when provider sizing uses risk percent", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+    await app.request("/api/providers/provider-alpha", {
+      method: "PATCH",
+      body: JSON.stringify({ riskMode: "percent", riskAmount: 1.25, lotSize: 0.2 }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(
+      (await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }))
+        .status,
+    ).toBe(200);
+
+    const payload = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+    expect(payload).toContain("volume=0");
+    expect(payload).toContain("riskPercent=1.25");
+    expect(payload).not.toContain("volume=0.2");
   });
 
   test("passes configured MT5 polling interval through work and no-work line payloads", async () => {

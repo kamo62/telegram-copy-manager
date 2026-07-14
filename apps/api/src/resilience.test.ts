@@ -190,6 +190,75 @@ describe("manual force-push", () => {
     expect(pending?.symbol).toBe("GOLD");
   });
 
+  test("rejects a duplicate manual force-push within the retry window", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegramPollingEnabled: false,
+    });
+    const accountId = await registerAccount(app);
+    const body = {
+      accountId,
+      direction: "BUY",
+      orderType: "MARKET",
+      brokerSymbol: "GOLD",
+      stopLoss: 4100,
+      takeProfits: [{ price: 4200 }],
+      volume: 0.01,
+    };
+    expect(
+      (
+        await app.request("/api/signals/manual", {
+          method: "POST",
+          body: JSON.stringify(body),
+          headers: { "content-type": "application/json" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app.request("/api/signals/manual", {
+          method: "POST",
+          body: JSON.stringify(body),
+          headers: { "content-type": "application/json" },
+        })
+      ).status,
+    ).toBe(409);
+    const dashboard = await json<{ signalQueue: unknown[] }>(await app.request("/api/dashboard"));
+    expect(dashboard.signalQueue).toHaveLength(1);
+  });
+
+  test("deduplicates manual force-pushes for 10 seconds by provider and raw-message identity", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegramPollingEnabled: false,
+    });
+    const accountId = await registerAccount(app);
+    const body = {
+      accountId,
+      direction: "BUY" as const,
+      orderType: "MARKET" as const,
+      brokerSymbol: "GOLD",
+      stopLoss: 4100,
+      takeProfits: [{ price: 4200 }],
+      volume: 0.01,
+      providerId: "provider-one",
+      rawMessageId: "message-one",
+    };
+    const push = (input = body) =>
+      app.request("/api/signals/manual", {
+        method: "POST",
+        body: JSON.stringify(input),
+        headers: { "content-type": "application/json" },
+      });
+    expect((await push()).status).toBe(200);
+    expect((await push()).status).toBe(409);
+    expect(
+      (await push({ ...body, providerId: "provider-two", rawMessageId: "message-two" })).status,
+    ).toBe(200);
+  });
+
   test("a paused Equity Guardian still blocks a manual push at lease time", async () => {
     const app = createApi({
       databasePath: ":memory:",

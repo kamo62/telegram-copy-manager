@@ -33,6 +33,7 @@
       "!apps/web/dist",
       "!data",
       "!apps/api/data",
+      "!.claude",
       "!*.mq5",
       "!apps/web/src/styles/tailwind.css"
     ]

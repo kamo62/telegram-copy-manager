@@ -49,6 +49,14 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain('\\"profit\\":%.2f');
   });
 
+  test("refreshes the guardian heartbeat before polling and refuses opens without a fresh quote", () => {
+    const onTimer = source.match(/void OnTimer\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const ensureSymbol = source.match(/bool EnsureSymbol\(string symbol\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(onTimer.indexOf("SendHeartbeat()")).toBeLessThan(onTimer.indexOf("PollAndExecute()"));
+    expect(ensureSymbol).toContain("no fresh tick after 2s — aborting execution");
+    expect(ensureSymbol).toMatch(/no fresh tick after 2s[\s\S]*return false/);
+  });
+
   test("reports external manual history deals so account PnL can realize after close", () => {
     const historyDealsJson = source.match(
       /string HistoryDealsJson\(\)[\s\S]*?\n}\n\nbool IsTelegramTcHistoryDeal/,

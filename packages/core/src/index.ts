@@ -473,7 +473,8 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   let direction = detectDirection(upper);
   const orderType = detectOrderType(upper);
   const entry = commandType === "OPEN_TRADE" ? extractEntry(text, direction, orderType) : undefined;
-  const stopLoss = extractStopLoss(text);
+  const stopLossResult = extractStopLoss(text);
+  const stopLoss = stopLossResult.value;
   const takeProfits = extractTakeProfits(text);
   const lotSize = commandType === "OPEN_TRADE" ? extractLotSize(text) : undefined;
   const riskPercent = commandType === "OPEN_TRADE" ? extractRiskPercent(text) : undefined;
@@ -526,11 +527,15 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   if (stopLoss !== undefined) {
     matchedPatternIds.push("risk.stop-loss");
   }
+  if (stopLossResult.conflict) {
+    warnings.push("Conflicting stop-loss values found; using the explicit STOP LOSS value");
+  }
 
   if (commandType === "OPEN_TRADE") {
     if (!direction) missingFields.push("direction");
     if (!effectiveRawSymbol) missingFields.push("symbol");
     if (effectiveMappingStatus !== "mapped") missingFields.push("brokerSymbol");
+    if ((orderType === "LIMIT" || orderType === "STOP") && !entry) missingFields.push("entry");
     if (stopLoss === undefined && !defaultStopLoss) missingFields.push("stopLoss");
     if (takeProfits.length === 0 && !defaultTakeProfit) missingFields.push("takeProfit");
   } else if (commandType !== "NO_SIGNAL" && !rawSymbol && commandType !== "CLOSE_TRADE") {
@@ -621,6 +626,7 @@ export function shouldRequireManualReview(signal: ParsedSignal): boolean {
       signal.missingFields.some((field) => field !== "symbol")) ||
     signal.commandType === "TRADE_SETUP" ||
     signal.commandType === "NO_SIGNAL" ||
+    signal.warnings.some((warning) => warning.startsWith("Conflicting stop-loss values")) ||
     (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol"))
   );
 }
@@ -1057,8 +1063,7 @@ function inferDirectionFromPrices(
 function detectOrderType(upper: string): OrderType {
   if (isDirectionalZoneSignal(upper)) return "LIMIT";
   if (/\bLIMIT\b/.test(upper)) return "LIMIT";
-  if (/\bSTOP\b/.test(upper)) return "STOP";
-  return "MARKET";
+  return hasPendingStopToken(upper) ? "STOP" : "MARKET";
 }
 
 function extractRawSymbol(
@@ -1118,7 +1123,17 @@ function extractEntry(
     return { from: Number(singleEntry[1]) };
   }
 
-  const standaloneZone = text.match(/(?:^|\n)\s*(\d+(?:\.\d+)?)\s*(?:-|TO)\s*(\d+(?:\.\d+)?)/i);
+  const atPrice = text.match(/@\s*(\d+(?:\.\d+)?)/);
+  if (atPrice?.[1]) {
+    return { from: Number(atPrice[1]) };
+  }
+
+  const riskOrTarget = text.search(/\b(?:SL|S\s*\/\s*L|STOP[\s-]*LOSS|TP\d*|TAKE\s+PROFIT)\b/i);
+  const entryText = riskOrTarget === -1 ? text : text.slice(0, riskOrTarget);
+
+  const standaloneZone = entryText.match(
+    /(?:^|\n)\s*(\d+(?:\.\d+)?)\s*(?:-|TO)\s*(\d+(?:\.\d+)?)/i,
+  );
   if (standaloneZone?.[1] && standaloneZone[2]) {
     return {
       from: Number(standaloneZone[1]),
@@ -1126,12 +1141,7 @@ function extractEntry(
     };
   }
 
-  const atPrice = text.match(/@\s*(\d+(?:\.\d+)?)/);
-  if (atPrice?.[1]) {
-    return { from: Number(atPrice[1]) };
-  }
-
-  const orderZone = text.match(
+  const orderZone = entryText.match(
     /\b(?:BUY|SELL)\s+(?:LIMIT|STOP)?\s*(\d+(?:\.\d+)?)\s*(?:-|TO)\s*(\d+(?:\.\d+)?)/i,
   );
   if (orderZone?.[1] && orderZone[2]) {
@@ -1139,13 +1149,15 @@ function extractEntry(
   }
 
   if (!direction) return undefined;
-  const directionLine = text.match(new RegExp(`\\b${direction}\\b[^\\n]*?(\\d+(?:\\.\\d+)?)`, "i"));
+  const directionLine = entryText.match(
+    new RegExp(`\\b${direction}\\b[^\\n]*?(\\d+(?:\\.\\d+)?)`, "i"),
+  );
   if (directionLine?.[1] && !/\bNOW\b/i.test(directionLine[0])) {
     return { from: Number(directionLine[1]) };
   }
 
   if (orderType && orderType !== "MARKET") {
-    const firstPrice = text.match(/\b(\d+(?:\.\d+)?)\b/);
+    const firstPrice = entryText.match(/\b(\d+(?:\.\d+)?)\b/);
     if (firstPrice?.[1]) return { from: Number(firstPrice[1]) };
   }
 
@@ -1268,8 +1280,30 @@ function expandShortLevel(levelText: string, referencePrice: number): number | u
   return Math.floor(referencePrice / 100) * 100 + numeric;
 }
 
-function extractStopLoss(text: string): number | undefined {
-  return extractPriceNearToken(text, "SL");
+function extractStopLoss(text: string): { value?: number; conflict: boolean } {
+  const labels = ["STOP[\\s-]*LOSS", "S\\s*\\/\\s*L", "SL"];
+  const values = labels.flatMap((label) => {
+    const regex = new RegExp(
+      `\\b${label}\\b\\s*(?:[:@]|TO|BELOW|ABOVE)?\\s*(\\d+(?:\\.\\d+)?)`,
+      "gi",
+    );
+    return [...text.matchAll(regex)].map((match) => Number(match[1]));
+  });
+  const value = values[0];
+  return {
+    value,
+    conflict: value !== undefined && values.some((candidate) => candidate !== value),
+  };
+}
+
+function hasPendingStopToken(text: string): boolean {
+  const stop = /\bSTOP\b/g;
+  let match = stop.exec(text);
+  while (match) {
+    if (!/^\s*-?\s*LOSS\b/.test(text.slice(match.index + match[0].length))) return true;
+    match = stop.exec(text);
+  }
+  return false;
 }
 
 function normalizeZoneEnd(start: string, end: string): number {
