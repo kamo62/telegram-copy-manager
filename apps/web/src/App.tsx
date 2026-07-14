@@ -1744,7 +1744,7 @@ export function App({
     canonicalSymbol: string;
     providerId?: string;
   }) {
-    await apiFetch("/api/symbol-mappings/aliases", {
+    const saved = await apiFetch<{ error?: string }>("/api/symbol-mappings/aliases", {
       method: "PUT",
       body: {
         scope: payload.providerId ? "provider" : "global",
@@ -1753,6 +1753,7 @@ export function App({
         canonicalSymbol: payload.canonicalSymbol,
       },
     });
+    if (saved.error) throw new Error(saved.error);
     await refreshDashboard();
   }
 
@@ -1787,6 +1788,8 @@ export function App({
     includeSymbols?: string[];
     excludeSymbols?: string[];
   }) {
+    const canonicalSymbol = payload.canonicalSymbol?.trim().toUpperCase();
+    const brokerSymbol = payload.brokerSymbol?.trim();
     await apiFetch(`/api/symbol-mappings/account/${payload.accountId}`, {
       method: "PUT",
       body: payload.direct
@@ -1798,13 +1801,17 @@ export function App({
           }
         : {
             accountId: payload.accountId,
-            canonicalOverrides: {
-              [payload.canonicalSymbol?.trim().toUpperCase() ?? ""]: payload.brokerSymbol?.trim(),
-            },
-            prefix: payload.prefix,
-            suffix: payload.suffix,
-            includeSymbols: payload.includeSymbols,
-            excludeSymbols: payload.excludeSymbols,
+            ...(canonicalSymbol && brokerSymbol
+              ? { canonicalOverrides: { [canonicalSymbol]: brokerSymbol } }
+              : {}),
+            ...(payload.prefix !== undefined ? { prefix: payload.prefix } : {}),
+            ...(payload.suffix !== undefined ? { suffix: payload.suffix } : {}),
+            ...(payload.includeSymbols !== undefined
+              ? { includeSymbols: payload.includeSymbols }
+              : {}),
+            ...(payload.excludeSymbols !== undefined
+              ? { excludeSymbols: payload.excludeSymbols }
+              : {}),
           },
     });
     await refreshDashboard();
@@ -2128,12 +2135,8 @@ export function App({
 
             {showMapping ? (
               <SymbolSettingsPage
-                availableBrokerSymbols={
-                  focusedAccount?.availableSymbols ??
-                  snapshot.mt5Accounts[0]?.availableSymbols ??
-                  []
-                }
-                defaultAccountId={focusedAccount?.id ?? snapshot.mt5Accounts[0]?.id ?? ""}
+                availableBrokerSymbols={focusedAccount?.availableSymbols ?? []}
+                defaultAccountId={focusedAccount?.id ?? ""}
                 defaultProviderId={snapshot.providers[0]?.id}
                 loading={initialLoading}
                 mappings={snapshot.symbolMappings}

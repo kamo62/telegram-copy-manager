@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export interface GlobalAliasPayload {
@@ -20,13 +20,19 @@ export interface AccountMappingPayload {
   excludeSymbols?: string[];
 }
 
-type Scope = "global" | "provider" | "account" | "account-direct";
+type Tab = "global" | "account";
+type Source = "provider" | "canonical";
+type AdvancedField = "prefix" | "suffix" | "includeSymbols" | "excludeSymbols";
 
 function commaList(value: string): string[] {
   return value
     .split(",")
-    .map((v) => v.trim())
+    .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Failed to save symbol mapping";
 }
 
 export function SymbolMappingModal({
@@ -48,44 +54,89 @@ export function SymbolMappingModal({
 }) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
-  const [scope, setScope] = useState<Scope>("global");
+  const [tab, setTab] = useState<Tab>("global");
+  const [onlyProvider, setOnlyProvider] = useState(false);
+  const [source, setSource] = useState<Source>("canonical");
+  const advancedDirty = useRef<Partial<Record<AdvancedField, true>>>({});
+  const [saveError, setSaveError] = useState("");
+  const hasFocusedAccount = Boolean(defaultAccountId);
 
-  useEffect(() => {
-    if (open) setScope("global");
+  useLayoutEffect(() => {
+    if (!open) return;
+    setTab("global");
+    setOnlyProvider(false);
+    setSource("canonical");
+    advancedDirty.current = {};
+    setSaveError("");
   }, [open]);
 
   useFocusTrap(dialogRef, open, onClose);
 
   if (!open) return null;
 
+  function selectTab(nextTab: Tab) {
+    if (nextTab === "account" && !hasFocusedAccount) return;
+    setTab(nextTab);
+    advancedDirty.current = {};
+    setSaveError("");
+  }
+
+  function markAdvancedDirty(field: AdvancedField) {
+    advancedDirty.current[field] = true;
+  }
+
   async function performSave() {
     const form = formRef.current;
-    if (!form) return;
-    if (!form.reportValidity()) return;
+    if (!form?.reportValidity()) return;
     const data = new FormData(form);
-    if (scope === "global" || scope === "provider") {
-      await onSaveGlobalAlias({
-        rawSymbol: String(data.get("aliasRaw") ?? "").trim(),
-        canonicalSymbol: String(data.get("aliasCanonical") ?? "").trim(),
-        providerId: scope === "provider" ? String(data.get("providerId") ?? "").trim() : undefined,
-      });
-    } else if (scope === "account-direct") {
+    setSaveError("");
+
+    try {
+      if (tab === "global") {
+        await onSaveGlobalAlias({
+          rawSymbol: String(data.get("aliasRaw") ?? "").trim(),
+          canonicalSymbol: String(data.get("aliasCanonical") ?? "").trim(),
+          providerId: onlyProvider ? String(data.get("providerId") ?? "").trim() : undefined,
+        });
+        return;
+      }
+
+      if (!defaultAccountId) {
+        setSaveError("Choose a focused account before adding an account mapping");
+        return;
+      }
+
+      const sourceSymbol = String(data.get("accountSource") ?? "").trim();
+      const brokerSymbol = String(data.get("accountBroker") ?? "").trim();
+      if (source === "provider") {
+        await onSaveAccountMapping({
+          accountId: defaultAccountId,
+          rawSymbol: sourceSymbol,
+          brokerSymbol,
+          direct: true,
+        });
+        return;
+      }
+
       await onSaveAccountMapping({
-        accountId: String(data.get("accountId") ?? "").trim(),
-        rawSymbol: String(data.get("directRaw") ?? "").trim(),
-        brokerSymbol: String(data.get("directBroker") ?? "").trim(),
-        direct: true,
+        accountId: defaultAccountId,
+        canonicalSymbol: sourceSymbol,
+        ...(brokerSymbol ? { brokerSymbol } : {}),
+        ...(advancedDirty.current.prefix
+          ? { prefix: String(data.get("accountPrefix") ?? "").trim() }
+          : {}),
+        ...(advancedDirty.current.suffix
+          ? { suffix: String(data.get("accountSuffix") ?? "").trim() }
+          : {}),
+        ...(advancedDirty.current.includeSymbols
+          ? { includeSymbols: commaList(String(data.get("accountInclude") ?? "")) }
+          : {}),
+        ...(advancedDirty.current.excludeSymbols
+          ? { excludeSymbols: commaList(String(data.get("accountExclude") ?? "")) }
+          : {}),
       });
-    } else {
-      await onSaveAccountMapping({
-        accountId: String(data.get("accountId") ?? "").trim(),
-        canonicalSymbol: String(data.get("accountCanonical") ?? "").trim(),
-        brokerSymbol: String(data.get("accountBroker") ?? "").trim(),
-        prefix: String(data.get("accountPrefix") ?? "").trim(),
-        suffix: String(data.get("accountSuffix") ?? "").trim(),
-        includeSymbols: commaList(String(data.get("accountInclude") ?? "")),
-        excludeSymbols: commaList(String(data.get("accountExclude") ?? "")),
-      });
+    } catch (error) {
+      setSaveError(errorMessage(error));
     }
   }
 
@@ -106,13 +157,13 @@ export function SymbolMappingModal({
             </span>
           </div>
           <button aria-label="Close mapping" className="icon-btn" onClick={onClose} type="button">
-            <X size={14} aria-hidden="true" />
+            <X aria-hidden="true" size={14} />
           </button>
         </header>
 
         <form
           className="modal-form"
-          key={scope}
+          key={tab}
           noValidate
           onSubmit={(event) => {
             event.preventDefault();
@@ -121,198 +172,185 @@ export function SymbolMappingModal({
           ref={formRef}
         >
           <section className="config-section">
-            <h3 className="config-section-title">Scope</h3>
             <div className="segmented-control" role="tablist" aria-label="Mapping scope">
               <button
-                aria-selected={scope === "global"}
-                className={scope === "global" ? "active" : ""}
-                onClick={() => setScope("global")}
+                aria-selected={tab === "global"}
+                className={tab === "global" ? "active" : ""}
+                onClick={() => selectTab("global")}
                 role="tab"
                 type="button"
               >
-                Global alias
+                Global
               </button>
               <button
-                aria-selected={scope === "provider"}
-                className={scope === "provider" ? "active" : ""}
-                onClick={() => setScope("provider")}
+                aria-selected={tab === "account"}
+                className={tab === "account" ? "active" : ""}
+                disabled={!hasFocusedAccount}
+                onClick={() => selectTab("account")}
                 role="tab"
                 type="button"
               >
-                Provider alias
-              </button>
-              <button
-                aria-selected={scope === "account"}
-                className={scope === "account" ? "active" : ""}
-                onClick={() => setScope("account")}
-                role="tab"
-                type="button"
-              >
-                Account-specific
-              </button>
-              <button
-                aria-selected={scope === "account-direct"}
-                className={scope === "account-direct" ? "active" : ""}
-                onClick={() => setScope("account-direct")}
-                role="tab"
-                type="button"
-              >
-                Provider → broker
+                Account
               </button>
             </div>
-            <p className="config-hint config-hint-soft">
-              Flow: provider symbol → canonical (broker-agnostic) → your broker's exact symbol. The
-              canonical lets one alias serve every account; the account-specific broker symbol is
-              where you pick the right one when a broker lists several (XAUUSD.raw, XAUUSD.pro, …).
-            </p>
-            <p className="config-hint config-hint-soft">
-              {scope === "global"
-                ? "Global alias: maps a provider symbol to a canonical symbol everywhere. Example: GOLD → XAUUSD."
-                : scope === "provider"
-                  ? "Provider alias: maps a provider symbol to a canonical symbol for one Telegram provider only."
-                  : scope === "account-direct"
-                    ? "Provider → broker: maps one provider symbol directly to an exact broker symbol for this account."
-                    : "Account-specific: maps a canonical symbol to this account's exact broker symbol (and optional suffix / include-exclude rules)."}
-            </p>
+            {!hasFocusedAccount ? (
+              <p className="config-hint config-hint-soft">
+                Open Symbol Settings from an account to add an account mapping.
+              </p>
+            ) : null}
           </section>
 
-          {scope === "global" || scope === "provider" ? (
+          {tab === "global" ? (
             <section className="config-section">
-              <h3 className="config-section-title">
-                {scope === "provider" ? "Provider alias" : "Global alias"}
-              </h3>
-              {scope === "provider" ? (
-                <label className="config-field">
-                  <span className="config-label">Provider ID</span>
-                  <input
-                    aria-label="Provider alias provider ID"
-                    defaultValue={defaultProviderId ?? ""}
-                    name="providerId"
-                    type="text"
-                  />
-                </label>
-              ) : null}
               <div className="config-row">
                 <label className="config-field config-field-grow">
                   <span className="config-label">Provider symbol</span>
                   <input
                     aria-label="Provider symbol"
-                    defaultValue=""
                     name="aliasRaw"
                     placeholder="GOLD"
+                    required
                     type="text"
                   />
                 </label>
                 <label className="config-field config-field-grow">
-                  <span className="config-label">Canonical symbol (broker-agnostic)</span>
+                  <span className="config-label">Canonical symbol</span>
                   <input
                     aria-label="Canonical symbol"
-                    defaultValue=""
                     name="aliasCanonical"
                     placeholder="XAUUSD"
+                    required
                     type="text"
                   />
                 </label>
               </div>
-            </section>
-          ) : scope === "account-direct" ? (
-            <>
-              <section className="config-section">
-                <h3 className="config-section-title">Target account</h3>
+              <label className="config-check">
+                <input
+                  checked={onlyProvider}
+                  onChange={(event) => setOnlyProvider(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Only for one provider</span>
+              </label>
+              {onlyProvider ? (
                 <label className="config-field">
-                  <span className="config-label">Mapping account ID</span>
+                  <span className="config-label">Provider ID</span>
                   <input
-                    aria-label="Mapping account ID"
-                    readOnly
-                    value={defaultAccountId}
-                    name="accountId"
+                    aria-label="Provider ID"
+                    defaultValue={defaultProviderId ?? ""}
+                    name="providerId"
+                    required
                     type="text"
                   />
                 </label>
-              </section>
-              <section className="config-section">
-                <h3 className="config-section-title">Direct broker mapping</h3>
-                <div className="config-row">
-                  <label className="config-field config-field-grow">
-                    <span className="config-label">Provider symbol</span>
-                    <input
-                      aria-label="Direct provider symbol"
-                      defaultValue=""
-                      name="directRaw"
-                      placeholder="GOLD"
-                      required
-                      type="text"
-                    />
-                  </label>
-                  <label className="config-field config-field-grow">
-                    <span className="config-label">Broker symbol (this account)</span>
-                    <select
-                      aria-label="Direct broker symbol for this account"
-                      defaultValue=""
-                      disabled={availableBrokerSymbols.length === 0}
-                      name="directBroker"
-                      required
-                    >
-                      <option disabled value="">
-                        {availableBrokerSymbols.length
-                          ? "Select a broker symbol"
-                          : "No broker symbols reported"}
-                      </option>
-                      {availableBrokerSymbols.map((symbol) => (
-                        <option key={symbol} value={symbol}>
-                          {symbol}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-              </section>
-            </>
+              ) : null}
+            </section>
           ) : (
             <>
               <section className="config-section">
-                <h3 className="config-section-title">Target account</h3>
                 <label className="config-field">
                   <span className="config-label">Mapping account ID</span>
                   <input
                     aria-label="Mapping account ID"
                     readOnly
-                    value={defaultAccountId}
-                    name="accountId"
                     type="text"
+                    value={defaultAccountId}
                   />
                 </label>
               </section>
 
               <section className="config-section">
-                <h3 className="config-section-title">Symbol override</h3>
+                <fieldset className="config-fieldset">
+                  <legend className="config-label">Map from</legend>
+                  <label className="config-check">
+                    <input
+                      aria-label="Map from provider symbol"
+                      checked={source === "provider"}
+                      name="mapSource"
+                      onChange={() => setSource("provider")}
+                      type="radio"
+                    />
+                    <span>Provider symbol</span>
+                  </label>
+                  <label className="config-check">
+                    <input
+                      aria-label="Map from canonical symbol"
+                      checked={source === "canonical"}
+                      name="mapSource"
+                      onChange={() => setSource("canonical")}
+                      type="radio"
+                    />
+                    <span>Canonical symbol</span>
+                  </label>
+                </fieldset>
                 <div className="config-row">
                   <label className="config-field config-field-grow">
-                    <span className="config-label">Canonical symbol</span>
+                    <span className="config-label">
+                      {source === "provider" ? "Provider symbol" : "Canonical symbol"}
+                    </span>
                     <input
-                      aria-label="Canonical symbol"
-                      defaultValue=""
-                      name="accountCanonical"
-                      placeholder="XAUUSD"
+                      aria-label="Account source symbol"
+                      name="accountSource"
+                      placeholder={source === "provider" ? "GOLD" : "XAUUSD"}
+                      required
                       type="text"
                     />
                   </label>
-                  <label className="config-field config-field-grow">
-                    <span className="config-label">Broker symbol (this account)</span>
-                    <input
-                      aria-label="Broker symbol for this account"
-                      defaultValue=""
-                      name="accountBroker"
-                      placeholder="XAUUSD.raw"
-                      type="text"
-                    />
-                  </label>
+                  {source === "provider" ? (
+                    <label className="config-field config-field-grow">
+                      <span className="config-label">Broker symbol (this account)</span>
+                      <select
+                        aria-label="Broker symbol for this account"
+                        disabled={availableBrokerSymbols.length === 0}
+                        name="accountBroker"
+                        required
+                      >
+                        <option disabled value="">
+                          {availableBrokerSymbols.length
+                            ? "Select a broker symbol"
+                            : "No broker symbols reported"}
+                        </option>
+                        {availableBrokerSymbols.map((symbol) => (
+                          <option key={symbol} value={symbol}>
+                            {symbol}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    <label className="config-field config-field-grow">
+                      <span className="config-label">Broker symbol (this account)</span>
+                      <input
+                        aria-label="Broker symbol for this account"
+                        list="available-broker-symbols"
+                        name="accountBroker"
+                        placeholder="XAUUSD.raw"
+                        type="text"
+                      />
+                      <datalist id="available-broker-symbols">
+                        {availableBrokerSymbols.map((symbol) => (
+                          <option key={symbol} value={symbol} />
+                        ))}
+                      </datalist>
+                    </label>
+                  )}
+                </div>
+              </section>
+
+              <details className="config-section">
+                <summary>Advanced: account symbol rules</summary>
+                <p className="config-hint config-hint-soft">
+                  Leave rules untouched to preserve the account's existing settings. Comma-separated
+                  lists intentionally replace the saved list when edited.
+                </p>
+                <div className="config-row">
                   <label className="config-field config-field-narrow">
                     <span className="config-label">Mapping prefix</span>
                     <input
                       aria-label="Mapping prefix"
-                      defaultValue=""
                       name="accountPrefix"
+                      onBlur={() => markAdvancedDirty("prefix")}
+                      onChange={() => markAdvancedDirty("prefix")}
                       placeholder="m."
                       type="text"
                     />
@@ -321,28 +359,20 @@ export function SymbolMappingModal({
                     <span className="config-label">Mapping suffix</span>
                     <input
                       aria-label="Mapping suffix"
-                      defaultValue=""
                       name="accountSuffix"
+                      onBlur={() => markAdvancedDirty("suffix")}
+                      onChange={() => markAdvancedDirty("suffix")}
                       placeholder=".raw or r"
                       type="text"
                     />
                   </label>
-                </div>
-              </section>
-
-              <section className="config-section">
-                <h3 className="config-section-title">Filters</h3>
-                <p className="config-hint config-hint-soft">
-                  Comma-separated lists. Include = only allow these symbols on the account; Exclude
-                  = block these even if the parser resolves to them.
-                </p>
-                <div className="config-row">
                   <label className="config-field config-field-grow">
                     <span className="config-label">Mapping include symbols</span>
                     <input
                       aria-label="Mapping include symbols"
-                      defaultValue=""
                       name="accountInclude"
+                      onBlur={() => markAdvancedDirty("includeSymbols")}
+                      onChange={() => markAdvancedDirty("includeSymbols")}
                       placeholder="XAUUSD.r, EURUSD.raw"
                       type="text"
                     />
@@ -351,38 +381,35 @@ export function SymbolMappingModal({
                     <span className="config-label">Mapping exclude symbols</span>
                     <input
                       aria-label="Mapping exclude symbols"
-                      defaultValue=""
                       name="accountExclude"
+                      onBlur={() => markAdvancedDirty("excludeSymbols")}
+                      onChange={() => markAdvancedDirty("excludeSymbols")}
                       placeholder="US30.raw"
                       type="text"
                     />
                   </label>
                 </div>
-              </section>
+              </details>
             </>
           )}
+
+          {saveError ? (
+            <p className="setup-form-error" role="alert">
+              {saveError}
+            </p>
+          ) : null}
 
           <div className="modal-foot">
             <button className="btn btn-ghost" onClick={onClose} type="button">
               Close
             </button>
             <button
-              aria-label={
-                scope === "global"
-                  ? "Save global alias"
-                  : scope === "account-direct"
-                    ? "Save direct mapping"
-                    : "Save account mapping"
-              }
+              aria-label={tab === "global" ? "Save global alias" : "Save account mapping"}
               className="btn btn-primary"
               onClick={() => void performSave()}
               type="button"
             >
-              {scope === "global"
-                ? "Save global alias"
-                : scope === "account-direct"
-                  ? "Save direct mapping"
-                  : "Save account mapping"}
+              {tab === "global" ? "Save global alias" : "Save account mapping"}
             </button>
           </div>
         </form>

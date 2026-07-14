@@ -2,11 +2,12 @@
 
 ## 1.25.1 - 2026-07-14 (Patch)
 
-Release impact: Patch because this bounds Telegram retry delay and provider RPC work without changing the MT5 or public API contracts.
+Release impact: Patch because this bounds Telegram retry delay and reorganizes existing mapping inputs without changing MT5 or public API contracts.
 
 - Restored unbounded GramJS reconnect attempts after the prior capped-retry permanent-disconnect incident; retry delay remains capped, and provider ingestion is timeout-bounded and concurrent so Telegram outages cannot serially hold the polling pass.
 - Recorded provider-level timeout/stall state immediately, with operational alerts independent of other providers completing.
-- Kept `package.json` at `1.25.1`; the EA version remains unchanged because no EA files were modified.
+- Reorganized symbol mapping into Global and focused Account tabs while preserving existing mapping payloads and account-rule safety.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.25.1`.
 
 ## 1.25.0 - 2026-07-14 (Minor)
 

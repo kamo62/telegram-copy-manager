@@ -1221,7 +1221,7 @@ describe("App dashboard", () => {
     expect(view.container.querySelector(".settings-panel .account-thresholds-wrap")).toBeTruthy();
   });
 
-  test("lets the operator save global aliases and account symbol mappings", async () => {
+  test("saves global and provider aliases and guards account mappings without a focused account", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
@@ -1232,70 +1232,147 @@ describe("App dashboard", () => {
     await clickTabAsync(view, "Symbol Settings");
 
     fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    expect(view.getByRole("tab", { name: "Account" }).hasAttribute("disabled")).toBe(true);
     fireEvent.change(view.getByLabelText("Provider symbol"), { target: { value: "SILVER" } });
     fireEvent.change(view.getByLabelText("Canonical symbol"), {
       target: { value: "XAGUSD" },
     });
     fireEvent.click(view.getByRole("button", { name: "Save global alias" }));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.url === "/api/symbol-mappings/aliases")).toHaveLength(1),
+    );
 
-    fireEvent.click(view.getByRole("button", { name: "Add mapping" }));
-    fireEvent.click(view.getByRole("tab", { name: "Account-specific" }));
-    expect(view.getByLabelText("Mapping account ID").hasAttribute("readonly")).toBe(true);
-    fireEvent.change(view.getByLabelText("Canonical symbol"), {
-      target: { value: "XAGUSD" },
-    });
-    fireEvent.change(view.getByLabelText("Broker symbol for this account"), {
-      target: { value: "XAGUSD.pro" },
-    });
-    fireEvent.change(view.getByLabelText("Mapping prefix"), { target: { value: "m." } });
-    fireEvent.change(view.getByLabelText("Mapping suffix"), { target: { value: ".raw" } });
-    fireEvent.change(view.getByLabelText("Mapping include symbols"), {
-      target: { value: "XAGUSD.pro,EURUSD.raw" },
-    });
-    fireEvent.change(view.getByLabelText("Mapping exclude symbols"), {
-      target: { value: "US30.raw" },
-    });
-    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByLabelText("Only for one provider"));
+    fireEvent.change(view.getByLabelText("Provider symbol"), { target: { value: "METAL" } });
+    fireEvent.change(view.getByLabelText("Canonical symbol"), { target: { value: "XAUUSD" } });
+    fireEvent.click(view.getByRole("button", { name: "Save global alias" }));
 
-    await view.findByText("XAUUSD.r");
-    const aliasCall = calls.find((call) => call.url === "/api/symbol-mappings/aliases");
-    expect(aliasCall?.init?.method).toBe("PUT");
-    expect(JSON.parse(String(aliasCall?.init?.body))).toEqual({
+    await waitFor(() =>
+      expect(calls.filter((call) => call.url === "/api/symbol-mappings/aliases")).toHaveLength(2),
+    );
+    const aliasCalls = calls.filter((call) => call.url === "/api/symbol-mappings/aliases");
+    expect(JSON.parse(String(aliasCalls[0]?.init?.body))).toEqual({
       scope: "global",
       rawSymbol: "SILVER",
       canonicalSymbol: "XAGUSD",
     });
+    expect(JSON.parse(String(aliasCalls[1]?.init?.body))).toEqual({
+      scope: "provider",
+      providerId: "provider-alpha",
+      rawSymbol: "METAL",
+      canonicalSymbol: "XAUUSD",
+    });
+  });
 
+  test("saves canonical free text and omits untouched account rules", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = rtlRender(
+      <MemoryRouter initialEntries={["/accounts/mt5-demo-1/symbols"]}>
+        <App initialSnapshot={snapshot} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByRole("tab", { name: "Account" }));
+    expect(view.getByLabelText("Mapping account ID").hasAttribute("readonly")).toBe(true);
+    fireEvent.change(view.getByLabelText("Account source symbol"), {
+      target: { value: "XAGUSD" },
+    });
+    fireEvent.change(view.getByLabelText("Broker symbol for this account"), {
+      target: { value: "XAGUSD.offline" },
+    });
+    fireEvent.input(view.getByLabelText("Mapping prefix"), { target: { value: "m." } });
+    fireEvent.blur(view.getByLabelText("Mapping prefix"));
+    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/symbol-mappings/account/mt5-demo-1")).toBe(
+        true,
+      ),
+    );
     const mappingCall = calls.find(
       (call) => call.url === "/api/symbol-mappings/account/mt5-demo-1",
     );
-    expect(mappingCall?.init?.method).toBe("PUT");
     expect(JSON.parse(String(mappingCall?.init?.body))).toEqual({
       accountId: "mt5-demo-1",
-      canonicalOverrides: {
-        XAGUSD: "XAGUSD.pro",
-      },
+      canonicalOverrides: { XAGUSD: "XAGUSD.offline" },
       prefix: "m.",
-      suffix: ".raw",
-      includeSymbols: ["XAGUSD.pro", "EURUSD.raw"],
+    });
+  });
+
+  test("saves account rules without creating a symbol override", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = rtlRender(
+      <MemoryRouter initialEntries={["/accounts/mt5-demo-1/symbols"]}>
+        <App initialSnapshot={snapshot} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByRole("tab", { name: "Account" }));
+    fireEvent.change(view.getByLabelText("Account source symbol"), {
+      target: { value: "XAUUSD" },
+    });
+    fireEvent.input(view.getByLabelText("Mapping exclude symbols"), {
+      target: { value: "US30.raw" },
+    });
+    fireEvent.blur(view.getByLabelText("Mapping exclude symbols"));
+    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/symbol-mappings/account/mt5-demo-1")).toBe(
+        true,
+      ),
+    );
+    const mappingCall = calls.find(
+      (call) => call.url === "/api/symbol-mappings/account/mt5-demo-1",
+    );
+    expect(JSON.parse(String(mappingCall?.init?.body))).toEqual({
+      accountId: "mt5-demo-1",
       excludeSymbols: ["US30.raw"],
     });
+  });
 
+  test("saves direct provider-to-broker mappings from the account tab", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = rtlRender(
+      <MemoryRouter initialEntries={["/accounts/mt5-demo-1/symbols"]}>
+        <App initialSnapshot={snapshot} />
+      </MemoryRouter>,
+    );
     fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
-    fireEvent.click(view.getByRole("tab", { name: "Provider → broker" }));
+    fireEvent.click(view.getByRole("tab", { name: "Account" }));
+    fireEvent.click(view.getByLabelText("Map from provider symbol"));
     expect(view.getByRole("option", { name: "XAUUSD.raw" })).toBeTruthy();
-    expect(view.getByRole("option", { name: "XAUUSD.pro" })).toBeTruthy();
-    fireEvent.change(view.getByLabelText("Direct provider symbol"), { target: { value: "GOLD" } });
-    fireEvent.change(view.getByLabelText("Direct broker symbol for this account"), {
+    fireEvent.change(view.getByLabelText("Account source symbol"), { target: { value: "GOLD" } });
+    fireEvent.change(view.getByLabelText("Broker symbol for this account"), {
       target: { value: "XAUUSD.pro" },
     });
-    fireEvent.click(view.getByRole("button", { name: "Save direct mapping" }));
+    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
 
-    await view.findByText("XAUUSD.r");
-    const directMappingCall = calls.filter(
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/symbol-mappings/account/mt5-demo-1")).toBe(
+        true,
+      ),
+    );
+    const mappingCall = calls.find(
       (call) => call.url === "/api/symbol-mappings/account/mt5-demo-1",
-    )[1];
-    expect(JSON.parse(String(directMappingCall?.init?.body))).toEqual({
+    );
+    expect(JSON.parse(String(mappingCall?.init?.body))).toEqual({
       accountId: "mt5-demo-1",
       rawSymbol: "GOLD",
       brokerSymbol: "XAUUSD.pro",
@@ -1303,25 +1380,36 @@ describe("App dashboard", () => {
     });
   });
 
-  test("requires a direct provider symbol before saving", async () => {
+  test("validates required mapping fields before saving", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
       return fixtureResponse(url);
     }) as typeof fetch;
 
-    const view = render(<App initialSnapshot={snapshot} />);
-    await clickTabAsync(view, "Symbol Settings");
-    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
-    fireEvent.click(view.getByRole("tab", { name: "Provider → broker" }));
-    const providerSymbol = view.getByLabelText("Direct provider symbol");
-    expect(providerSymbol.hasAttribute("required")).toBe(true);
-    fireEvent.change(view.getByLabelText("Direct broker symbol for this account"), {
+    const globalView = render(<App initialSnapshot={snapshot} />);
+    await clickTabAsync(globalView, "Symbol Settings");
+    fireEvent.click(await globalView.findByRole("button", { name: "Add mapping" }));
+    expect(globalView.getByLabelText("Provider symbol").hasAttribute("required")).toBe(true);
+    expect(globalView.getByLabelText("Canonical symbol").hasAttribute("required")).toBe(true);
+    fireEvent.click(globalView.getByRole("button", { name: "Save global alias" }));
+    globalView.unmount();
+
+    const accountView = rtlRender(
+      <MemoryRouter initialEntries={["/accounts/mt5-demo-1/symbols"]}>
+        <App initialSnapshot={snapshot} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await accountView.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(accountView.getByRole("tab", { name: "Account" }));
+    fireEvent.click(accountView.getByLabelText("Map from provider symbol"));
+    expect(accountView.getByLabelText("Account source symbol").hasAttribute("required")).toBe(true);
+    fireEvent.change(accountView.getByLabelText("Broker symbol for this account"), {
       target: { value: "XAUUSD.pro" },
     });
-    fireEvent.click(view.getByRole("button", { name: "Save direct mapping" }));
+    fireEvent.click(accountView.getByRole("button", { name: "Save account mapping" }));
 
-    expect(calls.some((call) => call.url.startsWith("/api/symbol-mappings/account/"))).toBe(false);
+    expect(calls.some((call) => call.url.startsWith("/api/symbol-mappings/"))).toBe(false);
   });
 
   test("deletes direct mappings through the account mapping endpoint", async () => {
