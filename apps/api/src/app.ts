@@ -243,10 +243,11 @@ export function createApi(options: ApiOptions = {}) {
   app.get("/api/dashboard", (c) =>
     c.json(store.dashboard(telegram.name, c.req.query("accountId"))),
   );
-  app.get("/api/settings", (c) => c.json({ settings: store.appSettings() }));
+  app.get("/api/settings", (c) => c.json({ settings: store.settingsProjection() }));
   app.patch("/api/settings", async (c) => {
     const body = await c.req.json<Partial<AppSettings> & { azureOpenAIApiKey?: string }>();
-    return c.json({ settings: store.updateAppSettings(body) });
+    store.updateAppSettings(body);
+    return c.json({ settings: store.settingsProjection() });
   });
   app.post("/api/admin/alert-test", async (c) => {
     const result = await store.sendAlertTest();
@@ -7213,6 +7214,11 @@ class AppStore {
     };
   }
 
+  settingsProjection() {
+    const { alertBotToken, ...settings } = this.appSettings();
+    return { ...settings, alertBotConfigured: Boolean(alertBotToken) };
+  }
+
   updateAppSettings(input: Partial<AppSettings> & { azureOpenAIApiKey?: string }) {
     if (input.azureOpenAIApiKey?.trim()) {
       this.saveSecret("azureOpenAIApiKey", input.azureOpenAIApiKey.trim());
@@ -7391,7 +7397,7 @@ class AppStore {
         database: "connected",
         telegramAdapter,
       },
-      appSettings: this.appSettings(),
+      appSettings: this.settingsProjection(),
       accountPerformance: this.accountPerformance(accounts),
       accountPerformanceByAccount: Object.fromEntries(
         accounts.map((account) => [account.id, this.accountPerformance([account])]),

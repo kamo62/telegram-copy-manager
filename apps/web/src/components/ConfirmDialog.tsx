@@ -48,6 +48,7 @@ export function ConfirmDialog({
 
   return (
     <div
+      aria-describedby={description ? "confirm-dialog-description" : undefined}
       aria-labelledby="confirm-dialog-title"
       aria-modal="true"
       className="modal-overlay"
@@ -63,42 +64,58 @@ export function ConfirmDialog({
         <header className="modal-head">
           <h2 id="confirm-dialog-title">{title}</h2>
         </header>
-        <div className="modal-body">
-          {description ? <p className="confirm-dialog-description">{description}</p> : null}
-          {typeToConfirm ? (
-            <label className="confirm-dialog-type-to-confirm">
-              <span>
-                Type <strong>{typeToConfirm}</strong> to confirm
-              </span>
-              <input
-                aria-label="Type to confirm"
-                autoComplete="off"
-                className="settings-input"
-                onChange={(event) => setTyped(event.target.value)}
-                type="text"
-                value={typed}
-              />
-            </label>
-          ) : null}
-        </div>
-        <footer className="modal-foot">
-          <button className="btn btn-ghost" onClick={onCancel} type="button">
-            {cancelLabel}
-          </button>
-          {secondaryLabel && onSecondary ? (
-            <button className="btn btn-ghost" onClick={onSecondary} type="button">
-              {secondaryLabel}
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!confirmDisabled) onConfirm();
+          }}
+        >
+          <div className="modal-body">
+            {description ? (
+              <p className="confirm-dialog-description" id="confirm-dialog-description">
+                {description}
+              </p>
+            ) : null}
+            {typeToConfirm ? (
+              <label className="confirm-dialog-type-to-confirm">
+                <span>
+                  Type <strong>{typeToConfirm}</strong> to confirm
+                </span>
+                <input
+                  aria-label="Type to confirm"
+                  autoComplete="off"
+                  className="settings-input"
+                  onChange={(event) => setTyped(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !confirmDisabled) {
+                      event.preventDefault();
+                      onConfirm();
+                    }
+                  }}
+                  type="text"
+                  value={typed}
+                />
+              </label>
+            ) : null}
+          </div>
+          <footer className="modal-foot">
+            <button className="btn btn-ghost" onClick={onCancel} type="button">
+              {cancelLabel}
             </button>
-          ) : null}
-          <button
-            className={destructive ? "btn btn-destructive-subtle" : "btn btn-primary"}
-            disabled={confirmDisabled}
-            onClick={onConfirm}
-            type="button"
-          >
-            {confirmLabel}
-          </button>
-        </footer>
+            {secondaryLabel && onSecondary ? (
+              <button className="btn btn-ghost" onClick={onSecondary} type="button">
+                {secondaryLabel}
+              </button>
+            ) : null}
+            <button
+              className={destructive ? "btn btn-destructive-subtle" : "btn btn-primary"}
+              disabled={confirmDisabled}
+              type="submit"
+            >
+              {confirmLabel}
+            </button>
+          </footer>
+        </form>
       </div>
     </div>
   );

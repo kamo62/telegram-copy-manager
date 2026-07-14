@@ -44,6 +44,7 @@ export function GrowthChart({
   const [view, setView] = useState<"growth" | "drawdown">("growth");
   const { colorAccents } = useColorAccents();
   const { locale } = useLocale();
+  const hasEquityHistory = data.growth[1].length > 0;
   const { isGrowth, isTimeSeries, rows } = useMemo(() => {
     const [xs, ys] = view === "growth" ? data.growth : data.drawdown;
     const indices = downsampleIndices(ys, 240);
@@ -102,6 +103,8 @@ export function GrowthChart({
       </header>
       {loading ? (
         <SkeletonChart />
+      ) : !hasEquityHistory ? (
+        <div className="chart-canvas-wrap">No equity history yet</div>
       ) : (
         <div className="chart-canvas-wrap" data-color-accents={colorAccents ? "on" : "off"}>
           <AreaChart
@@ -140,31 +143,9 @@ export function GrowthChart({
           </AreaChart>
         </div>
       )}
-      <footer className="chart-card-foot">{isTimeSeries ? "Time" : "Number of trades"}</footer>
+      {hasEquityHistory ? (
+        <footer className="chart-card-foot">{isTimeSeries ? "Time" : "Number of trades"}</footer>
+      ) : null}
     </section>
   );
-}
-
-export function buildPlaceholderGrowth(executedCount: number): GrowthSeries {
-  const numberOfTrades = Math.max(50, Math.min(executedCount * 12 || 297, 600));
-  const xs = Array.from({ length: numberOfTrades }, (_v, i) => i);
-  let balance = 9500;
-  const growthValues: number[] = [];
-  const drawdownValues: number[] = [];
-  let peak = balance;
-  for (let i = 0; i < numberOfTrades; i += 1) {
-    const noise = Math.sin(i * 0.31) * 35 + Math.sin(i * 0.07) * 22;
-    const drift = 12 + Math.sin(i * 0.018) * 6;
-    balance += drift + noise;
-    if (balance < 9000) balance = 9000;
-    if (balance > peak) peak = balance;
-    growthValues.push(Math.round(balance));
-    drawdownValues.push(Math.round(((peak - balance) / peak) * 100 * 10) / 10);
-  }
-  return {
-    growth: [xs, growthValues],
-    drawdown: [xs, drawdownValues],
-    totalProfit: Math.round(balance - 9500),
-    numberOfTrades,
-  };
 }

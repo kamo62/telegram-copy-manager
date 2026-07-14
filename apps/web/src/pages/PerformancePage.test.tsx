@@ -130,4 +130,14 @@ describe("PerformancePage", () => {
     expect(formatGrowthChartValue(100, true, "ZAR", "en-ZA")).toBe("R\u00a0100,00");
     expect(formatGrowthChartValue(12.34, false, "ZAR", "en-ZA")).toBe("12.3%");
   });
+
+  test("shows an empty state instead of fabricated growth without equity history", () => {
+    const view = render(
+      <GrowthChart
+        data={{ ...growthData, growth: [[], []], drawdown: [[], []], numberOfTrades: 0 }}
+      />,
+    );
+
+    expect(view.getByText("No equity history yet")).toBeTruthy();
+  });
 });

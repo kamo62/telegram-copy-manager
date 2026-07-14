@@ -87,11 +87,12 @@ export function ProvidersTable({
     <th
       aria-sort={sortAria(key)}
       className={`data-table-th-sortable ${numeric ? "num" : ""}`}
-      onClick={() => toggle(key)}
       scope="col"
     >
-      {label}
-      <span className="sort-indicator" aria-hidden="true" />
+      <button className="table-sort" onClick={() => toggle(key)} type="button">
+        {label}
+        <span className="sort-indicator" aria-hidden="true" />
+      </button>
     </th>
   );
 

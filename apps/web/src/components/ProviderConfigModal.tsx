@@ -513,33 +513,33 @@ export function ProviderConfigModal({
           }}
           ref={formRef}
         >
-          <section className="config-section">
-            <h3 className="config-section-title">Message template</h3>
-            <div className="config-row">
-              <label className="config-field config-field-grow">
-                <span className="config-label">Template</span>
-                <select
-                  aria-label={`Parser mode for ${provider.title}`}
-                  defaultValue={provider.parserMode}
-                  name="parserMode"
+          {!accountLabel ? (
+            <section className="config-section">
+              <h3 className="config-section-title">Message template</h3>
+              <div className="config-row">
+                <label className="config-field config-field-grow">
+                  <span className="config-label">Template</span>
+                  <select
+                    aria-label={`Parser mode for ${provider.title}`}
+                    defaultValue={provider.parserMode}
+                    name="parserMode"
+                  >
+                    <option value="deterministic">Automatic</option>
+                    <option value="kal-vip">KAL VIP tuned</option>
+                    <option value="kal-vip-extended">KAL VIP extended</option>
+                  </select>
+                </label>
+                <button
+                  aria-label={`Test provider config for ${provider.title}`}
+                  className="btn btn-ghost btn-small"
+                  disabled={!onTest || testBusy || !testRawText.trim() || !validation.valid}
+                  onClick={performTest}
+                  type="button"
                 >
-                  <option value="deterministic">Automatic</option>
-                  <option value="kal-vip">KAL VIP tuned</option>
-                  <option value="kal-vip-extended">KAL VIP extended</option>
-                </select>
-              </label>
-              <button
-                aria-label={`Test provider config for ${provider.title}`}
-                className="btn btn-ghost btn-small"
-                disabled={!onTest || testBusy || !testRawText.trim() || !validation.valid}
-                onClick={performTest}
-                type="button"
-              >
-                <Play aria-hidden="true" size={13} />
-                Test message
-              </button>
-            </div>
-            {!accountLabel ? (
+                  <Play aria-hidden="true" size={13} />
+                  Test message
+                </button>
+              </div>
               <label className="config-field">
                 <span className="config-label">Locked symbol</span>
                 <input
@@ -549,23 +549,23 @@ export function ProviderConfigModal({
                   placeholder="XAUUSD"
                 />
               </label>
-            ) : null}
-            <label className="config-field">
-              <span className="config-label">Test message</span>
-              <textarea
-                aria-label={`Provider test message for ${provider.title}`}
-                className="config-test-message"
-                onInput={(event) => setTestRawText(event.currentTarget.value)}
-                rows={4}
-                value={testRawText}
-              />
-            </label>
-            {testResult ? (
-              <p className={testResult.ok ? "config-test-result ok" : "config-test-result error"}>
-                {testResult.summary}
-              </p>
-            ) : null}
-          </section>
+              <label className="config-field">
+                <span className="config-label">Test message</span>
+                <textarea
+                  aria-label={`Provider test message for ${provider.title}`}
+                  className="config-test-message"
+                  onInput={(event) => setTestRawText(event.currentTarget.value)}
+                  rows={4}
+                  value={testRawText}
+                />
+              </label>
+              {testResult ? (
+                <p className={testResult.ok ? "config-test-result ok" : "config-test-result error"}>
+                  {testResult.summary}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
 
           <section className="config-section">
             <h3 className="config-section-title">Risk management</h3>

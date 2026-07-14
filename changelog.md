@@ -2,12 +2,14 @@
 
 ## 1.25.1 - 2026-07-14 (Patch)
 
-Release impact: Patch because this bounds Telegram retry delay and reorganizes existing mapping inputs without changing MT5 or public API contracts.
+Release impact: Patch because this fixes Telegram retry behavior, settings data loss, and UI validation/rendering defects without changing MT5 or public API contracts.
 
 - Restored unbounded GramJS reconnect attempts after the prior capped-retry permanent-disconnect incident; retry delay remains capped, and provider ingestion is timeout-bounded and concurrent so Telegram outages cannot serially hold the polling pass.
 - Recorded provider-level timeout/stall state immediately, with operational alerts independent of other providers completing.
 - Reorganized symbol mapping into Global and focused Account tabs while preserving existing mapping payloads and account-rule safety.
 - Kept `package.json` and the MT5 EA `#property version` aligned at `1.25.1`.
+- Prevented unrelated Settings saves from clearing a configured alert bot token, while making the dashboard report configuration state without returning the token.
+- Rejected invalid manual force-push prices and volumes, removed fabricated equity-chart growth, and hardened empty command-palette navigation.
 
 ## 1.25.0 - 2026-07-14 (Minor)
 

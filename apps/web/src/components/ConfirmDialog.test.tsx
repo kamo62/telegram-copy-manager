@@ -25,6 +25,7 @@ describe("ConfirmDialog", () => {
 
     expect(getByText("Remove provider?")).toBeDefined();
     expect(getByText("Provider KAL VIP will be removed.")).toBeDefined();
+    expect(getByRole("dialog").getAttribute("aria-describedby")).toBe("confirm-dialog-description");
 
     fireEvent.click(getByRole("button", { name: "Cancel" }));
     expect(cancelled).toBe(1);
@@ -64,5 +65,24 @@ describe("ConfirmDialog", () => {
     expect((open.getByRole("button", { name: "Delete" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
+  });
+
+  test("submits once through the enabled confirmation form", () => {
+    let confirmed = 0;
+    const view = render(
+      <ConfirmDialog
+        onCancel={() => {}}
+        onConfirm={() => {
+          confirmed += 1;
+        }}
+        title="Delete account?"
+      />,
+    );
+
+    const form = view.container.querySelector("form");
+    if (!form) throw new Error("Confirmation form not found");
+    fireEvent.submit(form);
+
+    expect(confirmed).toBe(1);
   });
 });

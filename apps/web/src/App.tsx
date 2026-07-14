@@ -10,7 +10,6 @@ import { useConfirm } from "./components/ConfirmDialog";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ExposurePanel } from "./components/ExposurePanel";
-import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import { KeyboardShortcutsOverlay } from "./components/KeyboardShortcutsOverlay";
 import { LiveRegion } from "./components/LiveRegion";
 import {
@@ -114,7 +113,7 @@ export interface DashboardSnapshot {
     drawdownDangerPct: number;
     reportingCurrency: "USD" | "ZAR";
     usdZarRate: number;
-    alertBotToken?: string;
+    alertBotConfigured?: boolean;
     alertChatId?: string;
     alertOnGuardianPause?: boolean;
     alertOnEaOffline?: boolean;
@@ -1077,9 +1076,12 @@ export function App({
       : snapshot.accountPerformance;
     const series = performance?.equityCurve;
     if (!series?.length) {
-      return buildPlaceholderGrowth(
-        snapshot.executionLogs.filter((log) => log.status === "EXECUTED").length,
-      );
+      return {
+        growth: [[], []] as [number[], number[]],
+        drawdown: [[], []] as [number[], number[]],
+        totalProfit: performance?.totalProfit ?? 0,
+        numberOfTrades: 0,
+      };
     }
     return {
       growth: [series.map((point) => point.x), series.map((point) => point.equity)] as [
@@ -1096,12 +1098,7 @@ export function App({
       netDeposits: performance?.netDeposits ?? undefined,
       numberOfTrades: series.length,
     };
-  }, [
-    focusedAccount,
-    snapshot.accountPerformance,
-    snapshot.accountPerformanceByAccount,
-    snapshot.executionLogs,
-  ]);
+  }, [focusedAccount, snapshot.accountPerformance, snapshot.accountPerformanceByAccount]);
 
   async function refreshDashboard() {
     setRefreshing(true);
@@ -1447,6 +1444,7 @@ export function App({
 
   async function saveExecutionSettingsForm(formElement: HTMLFormElement) {
     const formData = new FormData(formElement);
+    const alertBotToken = String(formData.get("alertBotToken") ?? "").trim();
     await apiPatch("/api/settings", {
       defaultLotSize: Number(formData.get("defaultLotSize")),
       defaultRiskPercent: Number(formData.get("defaultRiskPercent")),
@@ -1461,7 +1459,7 @@ export function App({
       drawdownDangerPct: Number(formData.get("drawdownDangerPct")),
       reportingCurrency: String(formData.get("reportingCurrency") ?? "USD"),
       usdZarRate: Number(formData.get("usdZarRate")),
-      alertBotToken: String(formData.get("alertBotToken") ?? ""),
+      ...(alertBotToken ? { alertBotToken } : {}),
       alertChatId: String(formData.get("alertChatId") ?? ""),
       alertOnGuardianPause: formData.has("alertOnGuardianPause"),
       alertOnEaOffline: formData.has("alertOnEaOffline"),

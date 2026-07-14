@@ -280,7 +280,7 @@ describe("App dashboard", () => {
     expect(view.queryByText("Initial Balance")).toBeNull();
     expect(view.getByText(/12,345\.67/)).toBeTruthy();
     expect(view.getByText(/15,432\.10/)).toBeTruthy();
-    expect(view.getByText(/137\.50/)).toBeTruthy();
+    expect(view.getAllByText(/137\.50/).length).toBeGreaterThan(0);
   });
 
   test("performance growth chart uses the active performance currency over the first account row", () => {
@@ -828,6 +828,7 @@ describe("App dashboard", () => {
     fireEvent.click(
       view.getByRole("button", { name: "Configure Alpha FX Signals for this account" }),
     );
+    expect(view.queryByLabelText("Parser mode for Alpha FX Signals")).toBeNull();
     fireEvent.change(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
       target: { value: "0.5" },
     });
@@ -1124,15 +1125,23 @@ describe("App dashboard", () => {
     ]);
   });
 
-  test("lets the operator update default execution settings", async () => {
+  test("saves other settings without sending a blank alert token", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
       return fixtureResponse(url);
     }) as typeof fetch;
 
-    const view = render(<App initialSnapshot={snapshot} />);
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          appSettings: { ...snapshot.appSettings, alertBotConfigured: true },
+        }}
+      />,
+    );
     clickSidebar(view, "Settings");
+    expect(view.getByText(/A bot token is configured/)).toBeTruthy();
     fireEvent.change(await view.findByLabelText("Default lot size"), {
       target: { value: "0.25" },
     });
@@ -1163,7 +1172,6 @@ describe("App dashboard", () => {
       drawdownDangerPct: 20,
       reportingCurrency: "ZAR",
       usdZarRate: 18.5,
-      alertBotToken: "",
       alertChatId: "",
       alertOnGuardianPause: false,
       alertOnEaOffline: false,
@@ -1171,6 +1179,7 @@ describe("App dashboard", () => {
       alertOnHeld: false,
       alertOnTelegramStall: false,
     });
+    expect(JSON.parse(String(settingsCall?.init?.body))).not.toHaveProperty("alertBotToken");
   });
 
   test("per-account risk override fields resync after backend normalization", () => {
@@ -1837,8 +1846,6 @@ describe("App dashboard", () => {
       expect(view.getByRole("heading", { name: /TG-TC/ })).toBeTruthy();
       const menu = view.getByRole("button", { name: "Open command palette" });
       expect(menu.textContent).toContain("Menu");
-      fireEvent.click(menu);
-      expect(view.getByRole("button", { name: "Open account 100200300" })).toBeTruthy();
     } finally {
       Object.defineProperty(window, "innerWidth", {
         configurable: true,

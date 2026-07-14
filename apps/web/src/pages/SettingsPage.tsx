@@ -356,13 +356,16 @@ export function SettingsPage({
         >
           <div className="settings-grid">
             <Field
-              hint="Token issued by BotFather. Leave blank to keep the currently stored token."
+              hint={
+                settings.alertBotConfigured
+                  ? "A bot token is configured. Enter a replacement token only to change it."
+                  : "Token issued by BotFather. Leave blank until alerting is configured."
+              }
               htmlFor="alertBotToken"
               label="Bot token"
             >
               <input
                 className="settings-input mono"
-                defaultValue={settings.alertBotToken ?? ""}
                 id="alertBotToken"
                 name="alertBotToken"
                 placeholder="123456:ABC..."

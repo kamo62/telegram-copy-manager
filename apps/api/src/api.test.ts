@@ -3960,7 +3960,7 @@ describe("Telegram TC API", () => {
         reportingCurrency: string;
         usdZarRate: number;
         releaseHeldOnGuardianUnpause: boolean;
-        alertBotToken: string;
+        alertBotConfigured: boolean;
         alertChatId: string;
         alertOnGuardianPause: boolean;
         alertOnEaOffline: boolean;
@@ -3986,7 +3986,7 @@ describe("Telegram TC API", () => {
       reportingCurrency: "USD",
       usdZarRate: 16,
       releaseHeldOnGuardianUnpause: false,
-      alertBotToken: "",
+      alertBotConfigured: false,
       alertChatId: "",
       alertOnGuardianPause: false,
       alertOnEaOffline: false,
@@ -4023,6 +4023,7 @@ describe("Telegram TC API", () => {
     }>(await app.request("/api/dashboard"));
     expect(dashboard.appSettings.defaultLotSize).toBe(0.25);
     expect(dashboard.appSettings.allowedOrderTypes).toEqual(["LIMIT", "STOP"]);
+    expect(dashboard.appSettings).not.toHaveProperty("alertBotToken");
 
     const parsed = await json<{ parsedSignalId: string; result: { orderType: string } }>(
       await app.request("/api/parser/parse", {
@@ -4041,6 +4042,34 @@ describe("Telegram TC API", () => {
     });
     expect(approve.status).toBe(422);
     expect((await json<{ error: string }>(approve)).error).toContain("not allowed");
+  });
+
+  test("preserves the stored alert token when an unrelated settings save omits it", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const headers = { "content-type": "application/json" };
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ alertBotToken: "bot-token", alertChatId: "chat-1" }),
+      headers,
+    });
+    const saved = await json<{ settings: { alertBotConfigured: boolean } }>(
+      await app.request("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ defaultLotSize: 0.25 }),
+        headers,
+      }),
+    );
+
+    expect(saved.settings.alertBotConfigured).toBe(true);
+    expect(saved.settings).not.toHaveProperty("alertBotToken");
+
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = (async () => Response.json({ ok: true })) as unknown as typeof fetch;
+    try {
+      expect((await app.request("/api/admin/alert-test", { method: "POST" })).status).toBe(200);
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
   });
 
   test("reports mixed USD and ZAR account performance in the configured reporting currency", async () => {
