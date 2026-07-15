@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.26.0 - 2026-07-15 (Minor)
+
+Release impact: Minor because this adds backward-compatible parser inference and queue dedup for single-symbol providers without changing MT5 or public API contracts.
+
+- Inferred direction and symbol for directionless signals from providers with an explicitly configured locked symbol: a message carrying an entry zone, stop loss, and take profits promotes to an open trade only when the SL and every TP sit on consistent sides of the entry (the KAL VIP "limits here 4023-22, Sl 4017, Tp 4028/4035/4041" miss).
+- Matched plural "limits"/"stops" order-type keywords; "And limits here" previously fell through to MARKET, which would have filled immediately instead of resting at the zone.
+- Resolved order type for inferred signals from keywords first, then entry versus reference price; no reference price and no keyword routes to operator review, never MARKET.
+- Forced operator review when an inferred signal also references short-level pending stops ("stops for 60" expands to 4060), so both legs reach the operator instead of one being silently dropped.
+- Skipped geometry inference on quoted signal bodies, pips recaps, and restatement wording so forwarded or recapped trades cannot re-open.
+- Deduplicated re-worded open signals at the approval layer by provider, symbol, direction, order type, digits-rounded entry, and stop loss against pending, active, or 24-hour-recent queue items; duplicates land as DUPLICATE queue entries with a 409.
+- Expanded short levels to the nearest hundred block so boundary cases resolve correctly (reference 4005 with "95" gives 3995, not 4095).
+
 ## 1.25.1 - 2026-07-14 (Patch)
 
 Release impact: Patch because this fixes Telegram retry behavior, settings data loss, and UI validation/rendering defects without changing MT5 or public API contracts.

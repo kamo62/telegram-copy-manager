@@ -44,6 +44,7 @@ export interface ParserContext {
   globalAliases?: Record<string, string>;
   providerAliases?: Record<string, Record<string, string>>;
   providerDefaultSymbols?: Record<string, string>;
+  geometryInferenceSymbol?: string;
   referencePrices?: Record<string, number>;
   accountMappings?: Record<string, AccountSymbolMapping>;
   defaultStopLoss?: DistanceInstruction;
@@ -469,17 +470,96 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const matchedPatternIds: string[] = [...candidate.matchedPatternIds];
   const warnings: string[] = [];
   const missingFields: string[] = [];
-  const commandType = detectCommandType(upper, matchedPatternIds);
+  let commandType = detectCommandType(upper, matchedPatternIds);
   let direction = detectDirection(upper);
-  const orderType = detectOrderType(upper);
-  const entry = commandType === "OPEN_TRADE" ? extractEntry(text, direction, orderType) : undefined;
+  let orderType: OrderType | undefined = detectOrderType(upper);
+  let entry = commandType === "OPEN_TRADE" ? extractEntry(text, direction, orderType) : undefined;
   const stopLossResult = extractStopLoss(text);
   const stopLoss = stopLossResult.value;
   const takeProfits = extractTakeProfits(text);
+  let geometryInferred = false;
+  if (
+    commandType === "NO_SIGNAL" &&
+    context.geometryInferenceSymbol &&
+    (!candidate.quotedText || candidate.commentText === text) &&
+    !/Quoted signal:/i.test(text) &&
+    !/\b\d+\s*PIPS?\b/i.test(text) &&
+    !/\b(still valid|as posted|from earlier|reminder|recap|already)\b/i.test(text) &&
+    stopLoss !== undefined &&
+    takeProfits.length > 0
+  ) {
+    const inferredEntry = extractEntry(text, undefined, orderType);
+    const inferredDirection = inferDirectionFromPrices(inferredEntry, stopLoss, takeProfits);
+    const entryValues = inferredEntry
+      ? [inferredEntry.from, ...(inferredEntry.to === undefined ? [] : [inferredEntry.to])]
+      : [];
+    const exitValues = [
+      stopLoss,
+      ...takeProfits.flatMap((target) => (target.price === undefined ? [] : [target.price])),
+    ];
+    if (
+      inferredEntry &&
+      inferredDirection &&
+      entryValues.every((value) => !exitValues.includes(value))
+    ) {
+      commandType = "OPEN_TRADE";
+      direction = inferredDirection;
+      entry = inferredEntry;
+      geometryInferred = true;
+      const noisePattern = matchedPatternIds.indexOf("noise.no-signal");
+      if (noisePattern !== -1) matchedPatternIds.splice(noisePattern, 1);
+      matchedPatternIds.push("open.geometry-inferred");
+
+      const referencePrice = referencePriceForSymbol(context.geometryInferenceSymbol, context);
+      const entryLow = Math.min(entry.from, entry.to ?? entry.from);
+      const entryHigh = Math.max(entry.from, entry.to ?? entry.from);
+      if (/\bLIMITS?\b/.test(upper)) {
+        orderType = "LIMIT";
+      } else if (hasPendingStopToken(upper)) {
+        orderType = "STOP";
+      } else if (referencePrice !== undefined) {
+        if (direction === "BUY") {
+          orderType =
+            entryHigh < referencePrice ? "LIMIT" : entryLow > referencePrice ? "STOP" : undefined;
+        } else {
+          orderType =
+            entryLow > referencePrice ? "LIMIT" : entryHigh < referencePrice ? "STOP" : undefined;
+        }
+      } else {
+        orderType = undefined;
+      }
+
+      const referenceGeometryValid =
+        referencePrice === undefined ||
+        orderType === undefined ||
+        (direction === "BUY" && orderType === "LIMIT" && entryHigh < referencePrice) ||
+        (direction === "BUY" && orderType === "STOP" && entryLow > referencePrice) ||
+        (direction === "SELL" && orderType === "LIMIT" && entryLow > referencePrice) ||
+        (direction === "SELL" && orderType === "STOP" && entryHigh < referencePrice);
+      if (orderType === undefined) {
+        warnings.push("Geometry-inferred order type requires operator review");
+      } else if (!referenceGeometryValid) {
+        warnings.push("Geometry-inferred order type conflicts with the reference price");
+      }
+
+      const pendingStop = text.match(/\bSTOPS?\s+(?:FOR|AT)\s+(\d{1,2})\b/i);
+      if (pendingStop?.[1]) {
+        const expanded =
+          referencePrice === undefined
+            ? undefined
+            : expandShortLevel(pendingStop[1], referencePrice);
+        warnings.push(
+          `Geometry-inferred signal also references pending stops at ${expanded ?? pendingStop[1]}`,
+        );
+      }
+    }
+  }
   const lotSize = commandType === "OPEN_TRADE" ? extractLotSize(text) : undefined;
   const riskPercent = commandType === "OPEN_TRADE" ? extractRiskPercent(text) : undefined;
   direction ??= inferDirectionFromPrices(entry, stopLoss, takeProfits);
-  const rawSymbol = extractRawSymbol(text, context, commandType);
+  const rawSymbol = geometryInferred
+    ? context.geometryInferenceSymbol
+    : extractRawSymbol(text, context, commandType);
   const symbol = rawSymbol
     ? resolveSymbol(rawSymbol, context)
     : {
@@ -493,7 +573,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const partialClose = commandType === "CLOSE_PARTIAL" ? extractPartialClose(upper) : undefined;
   const quotedSignal =
     candidate.quotedText && commandType !== "OPEN_TRADE" && commandType !== "NO_SIGNAL"
-      ? parseSignalText(candidate.quotedText, context)
+      ? parseSignalText(candidate.quotedText, { ...context, geometryInferenceSymbol: undefined })
       : undefined;
   const inheritedSymbol = quotedSignal?.canonicalSymbol ? quotedSignal : undefined;
   const effectiveRawSymbol = rawSymbol ?? inheritedSymbol?.rawSymbol;
@@ -533,6 +613,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
 
   if (commandType === "OPEN_TRADE") {
     if (!direction) missingFields.push("direction");
+    if (geometryInferred && !orderType) missingFields.push("orderType");
     if (!effectiveRawSymbol) missingFields.push("symbol");
     if (effectiveMappingStatus !== "mapped") missingFields.push("brokerSymbol");
     if ((orderType === "LIMIT" || orderType === "STOP") && !entry) missingFields.push("entry");
@@ -627,6 +708,7 @@ export function shouldRequireManualReview(signal: ParsedSignal): boolean {
     signal.commandType === "TRADE_SETUP" ||
     signal.commandType === "NO_SIGNAL" ||
     signal.warnings.some((warning) => warning.startsWith("Conflicting stop-loss values")) ||
+    signal.warnings.some((warning) => warning.startsWith("Geometry-inferred")) ||
     (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol"))
   );
 }
@@ -940,6 +1022,14 @@ function detectCommandType(upper: string, matchedPatternIds: string[]): CommandT
     matchedPatternIds.push("lifecycle.modify-tp");
     return "MODIFY_TP";
   }
+  if (
+    !/\b(BUY|SELL)\b/.test(upper) &&
+    (/\b\d+\s*PIPS?\b/.test(upper) ||
+      /\b(STILL VALID|AS POSTED|FROM EARLIER|REMINDER|RECAP|ALREADY)\b/.test(upper))
+  ) {
+    matchedPatternIds.push("noise.result-update");
+    return "NO_SIGNAL";
+  }
   if (hasOpenTradeIntent(upper)) return "OPEN_TRADE";
   matchedPatternIds.push("noise.no-signal");
   return "NO_SIGNAL";
@@ -1052,17 +1142,19 @@ function inferDirectionFromPrices(
   stopLoss?: number,
   takeProfits: TakeProfitTarget[] = [],
 ): Direction | undefined {
-  if (!entry || stopLoss === undefined || !takeProfits[0]?.price) return undefined;
-  const entryMid = entry.to === undefined ? entry.from : (entry.from + entry.to) / 2;
-  const firstTarget = takeProfits[0].price;
-  if (firstTarget > entryMid && stopLoss < entryMid) return "BUY";
-  if (firstTarget < entryMid && stopLoss > entryMid) return "SELL";
+  if (!entry || stopLoss === undefined || takeProfits.length === 0) return undefined;
+  const targets = takeProfits.map((target) => target.price);
+  if (targets.some((target) => target === undefined)) return undefined;
+  const entryLow = Math.min(entry.from, entry.to ?? entry.from);
+  const entryHigh = Math.max(entry.from, entry.to ?? entry.from);
+  if (stopLoss < entryLow && targets.every((target) => target! > entryHigh)) return "BUY";
+  if (stopLoss > entryHigh && targets.every((target) => target! < entryLow)) return "SELL";
   return undefined;
 }
 
 function detectOrderType(upper: string): OrderType {
   if (isDirectionalZoneSignal(upper)) return "LIMIT";
-  if (/\bLIMIT\b/.test(upper)) return "LIMIT";
+  if (/\bLIMITS?\b/.test(upper)) return "LIMIT";
   return hasPendingStopToken(upper) ? "STOP" : "MARKET";
 }
 
@@ -1277,7 +1369,13 @@ function expandShortLevel(levelText: string, referencePrice: number): number | u
   if (!Number.isFinite(referencePrice) || referencePrice <= 0) return undefined;
   const numeric = Number(levelText);
   if (!Number.isFinite(numeric) || numeric < 0 || numeric > 99) return undefined;
-  return Math.floor(referencePrice / 100) * 100 + numeric;
+  const base = Math.floor(referencePrice / 100) * 100;
+  return [base - 100 + numeric, base + numeric, base + 100 + numeric].reduce(
+    (nearest, candidate) =>
+      Math.abs(candidate - referencePrice) < Math.abs(nearest - referencePrice)
+        ? candidate
+        : nearest,
+  );
 }
 
 function extractStopLoss(text: string): { value?: number; conflict: boolean } {
@@ -1297,7 +1395,7 @@ function extractStopLoss(text: string): { value?: number; conflict: boolean } {
 }
 
 function hasPendingStopToken(text: string): boolean {
-  const stop = /\bSTOP\b/g;
+  const stop = /\bSTOPS?\b/g;
   let match = stop.exec(text);
   while (match) {
     if (!/^\s*-?\s*LOSS\b/.test(text.slice(match.index + match[0].length))) return true;

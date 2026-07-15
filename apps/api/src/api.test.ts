@@ -664,7 +664,10 @@ describe("Telegram TC API", () => {
 
     const parse = await app.request("/api/parser/parse", {
       method: "POST",
-      body: JSON.stringify({ providerId, rawText: recent.messages[0]!.rawText }),
+      body: JSON.stringify({
+        providerId,
+        rawText: recent.messages[0]!.rawText.replace("@ 1.0850", "@ 1.0860"),
+      }),
       headers: { "content-type": "application/json" },
     });
     const parsed = await json<{ parsedSignalId: string; result: { commandType: string } }>(parse);
@@ -4792,6 +4795,47 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
     const noWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
     expect(noWork).toContain("status=NO_WORK");
+  });
+
+  test("deduplicates reworded open signals by execution parameters", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+
+    const first = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          rawText: "BUY EURUSD LIMIT @ 1.0860\nSL 1.0810\nTP1 1.0910",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(
+      (await app.request(`/api/signals/${first.parsedSignalId}/approve`, { method: "POST" }))
+        .status,
+    ).toBe(200);
+
+    const restated = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          rawText: "EURUSD BUY LIMIT ENTRY 1.08604\nSTOP LOSS 1.0810\nTP 1.0920",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(
+      (await app.request(`/api/signals/${restated.parsedSignalId}/approve`, { method: "POST" }))
+        .status,
+    ).toBe(409);
+
+    const dashboard = await json<{ signalQueue: Array<{ status: string }> }>(
+      await app.request("/api/dashboard"),
+    );
+    expect(dashboard.signalQueue.filter((item) => item.status === "PENDING")).toHaveLength(1);
+    expect(dashboard.signalQueue.some((item) => item.status === "DUPLICATE")).toBe(true);
   });
 
   test("records ignored parsed signals as non-leaseable queue items", async () => {

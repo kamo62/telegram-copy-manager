@@ -196,6 +196,7 @@ const EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS = 30;
 const GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS = 60 * 60;
 const ALERT_DEDUP_MS = 30 * 60 * 1000;
 const MANUAL_PUSH_DEDUP_SECONDS = 10;
+const OPEN_SIGNAL_DEDUP_SECONDS = 24 * 60 * 60;
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
 
@@ -2815,6 +2816,20 @@ class AppStore {
             error: "Runner mode is only supported for VIRTUAL_TP execution today",
           };
         }
+      }
+      const parameterDuplicate = targetSignals.find((target) =>
+        this.hasDuplicateOpenSignal(providerId, target.accountId, target.signal),
+      );
+      if (parameterDuplicate) {
+        this.insertNonLeasedQueueItem(parsedSignalId, parameterDuplicate.signal, "DUPLICATE", {
+          accountId: parameterDuplicate.accountId,
+          executionMode,
+          settings,
+        });
+        this.db
+          .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+          .run("DUPLICATE", parsedSignalId);
+        return { statusCode: 409, error: "Matching open signal has already been queued" };
       }
       const queueItems: string[] = [];
       const logicalTradeIds: string[] = [];
@@ -8358,6 +8373,7 @@ class AppStore {
       globalAliases: this.globalAliases(),
       providerAliases: this.providerAliases(),
       providerDefaultSymbols,
+      geometryInferenceSymbol: lockedSymbol,
       referencePrices: this.referencePricesForAccount(accountId),
       accountMappings: this.accountMappings(accountId),
       defaultStopLoss: { value: settings.defaultStopLossPips, unit: "PIPS" as const },
@@ -8724,6 +8740,60 @@ class AppStore {
         now,
       );
     return item.id;
+  }
+
+  private hasDuplicateOpenSignal(providerId: string, accountId: string, signal: ParsedSignal) {
+    const symbol = normalizeLockedSymbol(
+      signal.brokerSymbol ?? signal.canonicalSymbol ?? signal.rawSymbol,
+    );
+    if (
+      signal.commandType !== "OPEN_TRADE" ||
+      !symbol ||
+      !signal.direction ||
+      !signal.orderType ||
+      !signal.entry
+    ) {
+      return false;
+    }
+    const metadata = this.db
+      .query(
+        "SELECT digits FROM symbol_metadata WHERE account_id = ? AND upper(symbol) = upper(?) LIMIT 1",
+      )
+      .get(accountId, symbol) as Row | null;
+    const fallbackDigits = Math.max(0, Math.ceil(-Math.log10(brokerPipSize(symbol))));
+    const digits = Math.min(
+      8,
+      Math.max(0, Math.round(nullableNumber(metadata?.digits) ?? fallbackDigits)),
+    );
+    const entry = Number(signal.entry.from.toFixed(digits));
+    const rows = this.db
+      .query(
+        `SELECT queue_items.payload_json
+         FROM queue_items
+         JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
+         LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
+         WHERE parsed_signals.provider_id = ?
+           AND json_extract(queue_items.payload_json, '$.commandType') = 'OPEN_TRADE'
+           AND queue_items.status IN ('PENDING','LEASED','EXECUTED','HELD')
+           AND (
+             queue_items.status IN ('PENDING','LEASED','HELD')
+             OR logical_trades.status IN ('OPEN','PENDING','OUT_OF_SYNC')
+             OR unixepoch(queue_items.created_at) >= unixepoch('now') - ?
+           )`,
+      )
+      .all(providerId, OPEN_SIGNAL_DEDUP_SECONDS) as Row[];
+    return rows.some((row) => {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      const payloadSymbol = normalizeLockedSymbol(payload.brokerSymbol ?? payload.canonicalSymbol);
+      return (
+        payloadSymbol === symbol &&
+        payload.direction === signal.direction &&
+        payload.orderType === signal.orderType &&
+        payload.entry !== undefined &&
+        Number(payload.entry.from.toFixed(digits)) === entry &&
+        (payload.stopLoss ?? null) === (signal.stopLoss ?? null)
+      );
+    });
   }
 
   private mt5SnapshotsByAccount() {
@@ -11070,6 +11140,9 @@ function reviewReasons(signal: ParsedSignal) {
   if (signal.confidence < 0.75) reasons.push("low-confidence");
   if (signal.mappingStatus !== "mapped") reasons.push(`mapping-${signal.mappingStatus}`);
   for (const field of signal.missingFields) reasons.push(`missing-${field}`);
+  for (const warning of signal.warnings) {
+    if (warning.startsWith("Geometry-inferred")) reasons.push(warning);
+  }
   if (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol")) {
     reasons.push("lifecycle-missing-symbol");
   }

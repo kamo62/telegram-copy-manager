@@ -580,6 +580,139 @@ describe("deterministic signal parser", () => {
     expect(result.warnings).toContain("Symbol could not be mapped to a broker symbol");
     expect(shouldRequireManualReview(result)).toBe(true);
   });
+
+  test("infers locked-symbol geometry and holds the incident when it also references stops", () => {
+    const incident = [
+      "You can still place stops for 60 ",
+      "",
+      "And limits here ",
+      "",
+      "4023-22",
+      "",
+      "Sl 4017",
+      "",
+      "Tp 4028",
+      "Tp 4035",
+      "Tp 4041",
+    ].join("\n");
+    const geometryContext: ParserContext = {
+      ...context,
+      providerId: "kal-vip",
+      geometryInferenceSymbol: "XAUUSD",
+      referencePrices: { XAUUSD: 4050 },
+    };
+    const held = parseSignalText(incident, geometryContext);
+    const clean = parseSignalText(
+      incident.replace("You can still place stops for 60 \n\n", ""),
+      geometryContext,
+    );
+
+    expect(held).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      orderType: "LIMIT",
+      entry: { from: 4023, to: 4022 },
+      stopLoss: 4017,
+      canonicalSymbol: "XAUUSD",
+    });
+    expect(held.takeProfits.map((target) => target.price)).toEqual([4028, 4035, 4041]);
+    expect(held.matchedPatternIds).toContain("open.geometry-inferred");
+    expect(held.warnings).toContain(
+      "Geometry-inferred signal also references pending stops at 4060",
+    );
+    expect(shouldRequireManualReview(held)).toBe(true);
+    expect(clean).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      orderType: "LIMIT",
+    });
+    expect(shouldRequireManualReview(clean)).toBe(false);
+  });
+
+  test("fails closed around geometry inference ambiguity and quoted or recap text", () => {
+    const geometryContext: ParserContext = {
+      ...context,
+      providerId: "kal-vip",
+      providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+      geometryInferenceSymbol: "XAUUSD",
+      referencePrices: { XAUUSD: 4050 },
+    };
+    const sell = parseSignalText(
+      "And limits here\n\n4077-78\n\nSL 4083\n\nTP 4072\nTP 4065\nTP 4058",
+      geometryContext,
+    );
+    const inconsistent = parseSignalText(
+      "And limits here\n\n4023-22\n\nSL 4025\n\nTP 4028\nTP 4019",
+      geometryContext,
+    );
+    const unlocked = parseSignalText("And limits here\n\n4023-22\n\nSL 4017\n\nTP 4028", {
+      ...geometryContext,
+      geometryInferenceSymbol: undefined,
+    });
+    const quoted = parseSignalText(
+      "Quoted signal:\nAnd limits here\n\n4023-22\n\nSL 4017\n\nTP 4028\n\nComment:\n",
+      geometryContext,
+    );
+    const recap = parseSignalText("we got 50 pips… entry 4023 sl 4017 tp 4028", geometryContext);
+
+    expect(sell).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      orderType: "LIMIT",
+      entry: { from: 4077, to: 4078 },
+      stopLoss: 4083,
+    });
+    expect(sell.takeProfits.map((target) => target.price)).toEqual([4072, 4065, 4058]);
+    expect(shouldRequireManualReview(sell)).toBe(false);
+    expect(inconsistent.commandType).toBe("NO_SIGNAL");
+    expect(unlocked.commandType).toBe("NO_SIGNAL");
+    expect(quoted.commandType).toBe("NO_SIGNAL");
+    expect(recap.commandType).toBe("NO_SIGNAL");
+  });
+
+  test("keeps stop-loss distinct from plural pending stops and infers missing order types safely", () => {
+    const geometryContext: ParserContext = {
+      ...context,
+      providerId: "kal-vip",
+      geometryInferenceSymbol: "XAUUSD",
+      referencePrices: { XAUUSD: 4050 },
+    };
+    const stopLoss = parseSignalText("4023-22\nSTOP LOSS 4017\nTP 4028", geometryContext);
+    const pluralStop = parseSignalText("STOPS FOR 60\n4023-22\nSL 4017\nTP 4028", geometryContext);
+    const noReference = parseSignalText("4023-22\nSL 4017\nTP 4028", {
+      ...geometryContext,
+      referencePrices: {},
+    });
+    const conflictingLimit = parseSignalText(
+      "LIMITS HERE\n4060-61\nSL 4055\nTP 4068",
+      geometryContext,
+    );
+
+    expect(stopLoss.orderType).toBe("LIMIT");
+    expect(pluralStop.orderType).toBe("STOP");
+    expect(shouldRequireManualReview(pluralStop)).toBe(true);
+    expect(noReference.orderType).toBeUndefined();
+    expect(noReference.missingFields).toContain("orderType");
+    expect(shouldRequireManualReview(noReference)).toBe(true);
+    expect(conflictingLimit.orderType).toBe("LIMIT");
+    expect(shouldRequireManualReview(conflictingLimit)).toBe(true);
+  });
+
+  test("expands short levels to the nearest hundred block", () => {
+    for (const [referencePrice, level, expected] of [
+      [4050, "60", 4060],
+      [4095, "5", 4105],
+      [4005, "95", 3995],
+    ] as const) {
+      const [signal] = parseSignalTexts(`Buy is at ${level}`, {
+        providerId: "kal-vip",
+        parserMode: "kal-vip-extended",
+        providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+        referencePrices: { XAUUSD: referencePrice },
+      });
+      expect(signal?.entry?.from).toBe(expected);
+    }
+  });
 });
 
 describe("symbol resolver", () => {
