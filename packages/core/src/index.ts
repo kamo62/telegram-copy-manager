@@ -1217,7 +1217,11 @@ function isResultSummary(upper: string): boolean {
     /\b\d+\s*PIPS?\b/.test(upper) &&
     !/\bSL\b/.test(upper) &&
     !/\bTP\b/.test(upper) &&
-    !/\bENTRY\b/.test(upper)
+    !/\bENTRY\b/.test(upper) &&
+    // Spelled-out levels ("Stoploss : 4048", "Take Profit : 4037 ( 70pips )") mean
+    // this is a real signal with a pip annotation, not a bare "+250 pips" recap.
+    !/\bSTOP\s*-?\s*LOSS\b/.test(upper) &&
+    !/\bTAKE\s*-?\s*PROFIT\b/.test(upper)
   );
 }
 

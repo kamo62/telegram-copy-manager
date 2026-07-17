@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.36.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this recovers signals that were misclassified as result recaps, without changing genuine recap handling.
+
+- A signal that spells out "Stoploss"/"Take Profit" and annotates a target with pips ("Take Profit : 4037 ( 70pips )") no longer trips the pip-based results-recap filter. Bare pip recaps ("XAUUSD +250 pips") are still ignored. Recovered ~113 signals on the Premium (Gold + Forex) channel; its remaining unresolved signals are symbol-less gold posts that resolve once the provider's traded symbol is set to XAUUSD.
+
 ## 1.35.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because this recovers FX-cross symbols the parser previously missed without affecting other resolution paths.

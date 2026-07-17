@@ -1102,3 +1102,26 @@ describe("currency-cross on its own line (Elliott Wave format)", () => {
     expect(parseSignalText("MISSED the entry\nTP 4070", context).canonicalSymbol).toBeUndefined();
   });
 });
+
+describe("spelled-out stop/target with a pip annotation", () => {
+  test("parses a signal whose take-profit carries a pip note", () => {
+    const result = parseSignalText(
+      "🧑‍💻 XAU/USD Sell 4042 - 4045\n📌 Stoploss : 4048\n- Take Profit : 4037 ( 70pips )\n- Take Profit : 4015 ( 350pips )",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "XAUUSD",
+      entry: { from: 4042, to: 4045 },
+      stopLoss: 4048,
+    });
+  });
+
+  test("still ignores a bare pip results recap", () => {
+    expect(parseSignalText("XAUUSD sell 150 pips this week", context).commandType).toBe("NO_SIGNAL");
+    expect(parseSignalText("GBPCAD +50 pips / CHFJPY +200 pips", context).commandType).toBe(
+      "NO_SIGNAL",
+    );
+  });
+});
