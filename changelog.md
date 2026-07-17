@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.28.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this extends the parser to recognise French-language signals without changing behaviour for existing English providers.
+
+- Added gated French vocabulary normalization: ACHAT/VENTE/VENDRE map to BUY/SELL, French articles and prepositions (LE/L'/MAINTENANT/À) are stripped, and comma decimals convert to points. Only fires when a French buy/sell verb is present, so English text (and every current live provider) parses byte-identically.
+- French market commentary without price levels stays classified as non-signal.
+
 ## 1.27.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because this adds backward-compatible, forward-only signal-correlation persistence without changing parsing, queueing, or execution behaviour.

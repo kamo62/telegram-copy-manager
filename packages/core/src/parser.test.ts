@@ -900,3 +900,51 @@ describe("symbol resolver", () => {
     });
   });
 });
+
+describe("French vocabulary normalization", () => {
+  test("parses a symbol-first French buy signal", () => {
+    const result = parseSignalText("XAUUSD ACHAT 5062 SL 5048 TP 5073 TP 5080 TP 5110", context);
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      canonicalSymbol: "XAUUSD",
+      entry: { from: 5062 },
+      stopLoss: 5048,
+    });
+  });
+
+  test("parses a verb-first French sell signal with article, filler and comma decimals", () => {
+    const result = parseSignalText(
+      "VENDRE L'EURNZD MAINTENANT À 1,99190 SL À 1,99700 TP À 1,98600 TP À 1,98000",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "EURNZD",
+      entry: { from: 1.9919 },
+      stopLoss: 1.997,
+    });
+  });
+
+  test("does not open a trade on French market commentary with no levels", () => {
+    expect(parseSignalText("GOLD Je patiente pour une vente", context).commandType).not.toBe(
+      "OPEN_TRADE",
+    );
+    expect(parseSignalText("Ne chercher pas d'achat privilègier les ventes", context).commandType).toBe(
+      "NO_SIGNAL",
+    );
+  });
+
+  test("leaves English signals byte-identical (no French tokens present)", () => {
+    const english = "SELL EURUSD 1.0850\nSL 1.0900\nTP1 1.0800";
+    const before = parseSignalText(english, context);
+    expect(before).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "EURUSD",
+      entry: { from: 1.085 },
+      stopLoss: 1.09,
+    });
+  });
+});

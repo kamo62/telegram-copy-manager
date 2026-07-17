@@ -933,7 +933,31 @@ function uniqueSymbols(values: string[]) {
   return [...new Set(values.filter(Boolean))];
 }
 
+// Some providers post in French. Map their trading vocabulary onto the English
+// tokens the parser already understands, but only when a French buy/sell verb is
+// actually present, so English text (and every current live provider) parses
+// byte-identically and cannot regress.
+const FRENCH_DIRECTION_RE =
+  /\b(ACHAT|ACHATS|ACHETER|ACH[EÉÈ]TE|ACH[EÉÈ]TENT|VENTE|VENTES|VENDRE|VENDS|VEND|VENDEZ|VENDENT)\b/i;
+
+function normalizeFrenchVocabulary(text: string): string {
+  if (!FRENCH_DIRECTION_RE.test(text)) return text;
+  return text
+    .replace(/\b(ACHAT|ACHATS|ACHETER|ACH[EÉÈ]TE|ACH[EÉÈ]TENT)\b/gi, "BUY")
+    .replace(/\b(VENTE|VENTES|VENDRE|VENDS|VENDEZ|VENDENT|VEND)\b/gi, "SELL")
+    // French writes decimals with a comma; convert only inside a French message.
+    .replace(/(\d),(\d{2,})/g, "$1.$2")
+    // Drop the article/preposition/filler that sits between verb, symbol and price
+    // ("VENDRE L'EURNZD MAINTENANT À 1.99" -> "SELL EURNZD 1.99").
+    .replace(/\bL['’]\s*/gi, " ")
+    .replace(/\b(LES|LE|LA|DES|DU|AUX|AU|MAINTENANT)\b/gi, " ")
+    .replace(/[àÀ]/g, " ")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 function extractSignalCandidate(text: string) {
+  text = normalizeFrenchVocabulary(text);
   const quoted = text.match(/Quoted signal:\n([\s\S]*?)(?:\n\nComment:\n([\s\S]*))?$/i);
   if (
     quoted?.[1] &&
