@@ -1,10 +1,42 @@
 # Handoff
 
-Updated: 2026-07-17
+Updated: 2026-07-17 (session 2)
+
+## Session progress (2026-07-17) — all on branch, NOTHING deployed
+
+Commits this session (oldest first):
+- `b8fa3a48` v1.27.0 Phase 1: reply-link capture + alias/origin persistence (forward-only).
+- `587093e8` v1.28.0 French vocabulary normalization (gated; English byte-identical).
+- `2542132a` v1.29.0 WTI crude oil -> USOIL recognition.
+- `73cf5d60` v1.30.0 VIP Gold order lifecycle (Deleted->cancel, Closed->close, order id) + stock index coverage (US30/NAS100/SPX500/GER40/UK100/JP225 + aliases).
+- `f24ab4c7` v1.31.0 Phase 2a shadow-only lifecycle correlation logging (per-provider `correlationMode`, default off; audit-only; diff reviewed for shadow-only safety).
+- `a043bdde` v1.32.0 non-adjacent ticker extraction (symbol on its own line / SYM/SYM / tagged).
+
+All suites green at head: core 56, api 240 (296 total). Not deployed.
+
+### Providers created this session (live DB, DISABLED)
+- Metabear `provider_n8jb90` — enabled=0, multi-symbol (no lock), parserMode deterministic.
+- VIP Gold `provider_15k9j3v` — enabled=0, lockedSymbol=XAUUSD.
+- Both disabled => no ingest, no execution. KAL VIP `provider_1gfxfwd` still the only enabled provider. Enable VIP Gold only AFTER Phase 2a shadow validation (lifecycle-heavy).
+
+### Channel analysis (read-only, no DB writes) — real vs reported win rates
+- Verified real win rates (reply-linked opens->outcomes) are far below advertised:
+  VIP Gold 82% (verified, signed closes), Metabear ~65-92%, French 77%, THE 1% TRADING
+  58% (they admit "63% from 92%" in-channel), Forex Manipulation 2 clean parse but
+  73% of trades go silent, Prime FX/Olinvest never post losses (marketing).
+- Add candidates: Metabear + Forex Manipulation 2 (clean parse); VIP Gold + French
+  (shadow first). Skip: Olinvest, Premium (Gold+Forex), Gold Signal, Elliott Wave.
+
+### Remaining parser-coverage gaps (Phase 4)
+- Symbol-less gold signals (Premium, Olinvest: "Sell 4042/4045") -> need per-provider
+  `lockedSymbol=XAUUSD`, not parser code.
+- LONG/SHORT direction vocab + header-only opens with levels in follow-ups
+  (gold_signal) -> needs LONG/SHORT support AND multi-message correlation; low priority.
 
 ## Active thread: signal correlation and lifecycle alignment
 
-Phase 1 implemented and committed. Nothing deployed. No behaviour change yet.
+Phase 1, Phase 2a (shadow), Phase 3 (VIP Gold lifecycle parse) implemented and committed.
+Nothing deployed. No execution behaviour change (Phase 2a is shadow/audit-only, off by default).
 
 ### State
 
