@@ -9964,6 +9964,225 @@ describe("Telegram TC API", () => {
   });
 });
 
+describe("provider traded symbols", () => {
+  test("round-trips normalized traded symbols and fills symbol-less signals from the first symbol", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["XAUUSD", "EURUSD"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        lockedSymbol: "BTCUSD",
+        tradedSymbols: [" xauusd ", "EUR/USD", "XAUUSD", ""],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const config = await json<{ config: { lockedSymbol?: string; tradedSymbols?: string[] } }>(
+      await app.request(`/api/providers/${providerId}/config`),
+    );
+    expect(config.config).toEqual(
+      expect.objectContaining({
+        lockedSymbol: "BTCUSD",
+        tradedSymbols: ["XAUUSD", "EURUSD"],
+      }),
+    );
+    const parsed = await json<{ result: { canonicalSymbol?: string } }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId, rawText: "BUY NOW" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(parsed.result.canonicalSymbol).toBe("XAUUSD");
+  });
+
+  test("holds off-list opens during ingestion while queuing in-list opens", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter([
+        {
+          telegramMessageId: "off-list",
+          messageDate: "2026-07-17T10:00:00.000Z",
+          rawText: "BUY BTCUSD",
+        },
+        {
+          telegramMessageId: "in-list",
+          messageDate: "2026-07-17T10:01:00.000Z",
+          rawText: "BUY XAUUSD",
+        },
+      ]),
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["BTCUSD", "XAUUSD"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ tradedSymbols: ["XAUUSD"] }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(await app.runTelegramIngestionOnce()).toMatchObject({ queued: 1, reviewRequired: 1 });
+    const signals = await json<{
+      signals: Array<{ result: { canonicalSymbol?: string }; status: string }>;
+      queue: Array<{ status: string; heldReason?: string; payload: { canonicalSymbol?: string } }>;
+    }>(await app.request("/api/signals"));
+    expect(
+      signals.signals.find((signal) => signal.result.canonicalSymbol === "BTCUSD")?.status,
+    ).toBe("HELD");
+    expect(signals.queue).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "HELD",
+          heldReason: "SYMBOL_NOT_TRADED",
+          payload: expect.objectContaining({ canonicalSymbol: "BTCUSD" }),
+        }),
+        expect.objectContaining({
+          status: "PENDING",
+          payload: expect.objectContaining({ canonicalSymbol: "XAUUSD" }),
+        }),
+      ]),
+    );
+  });
+
+  test("rejects manual approval of an off-list symbol and leaves empty traded symbols unchanged", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["BTCUSD"] });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ tradedSymbols: ["XAUUSD"] }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId, rawText: "BUY BTCUSD" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const rejected = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(rejected.status).toBe(422);
+    expect((await json<{ error: string }>(rejected)).error).toBe(
+      "Symbol BTCUSD is not in this provider's traded symbols",
+    );
+
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ tradedSymbols: [] }),
+      headers: { "content-type": "application/json" },
+    });
+    const unrestricted = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId, rawText: "BUY BTCUSD" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approved = await app.request(`/api/signals/${unrestricted.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approved.status).toBe(200);
+  });
+
+  test("scans connected Telegram messages without persisting them", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-detected-symbols-"));
+    const databasePath = join(tempDir, "app.db");
+    const calls: string[] = [];
+    const telegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([
+        {
+          telegramMessageId: "scan-1",
+          messageDate: "2026-07-17T10:00:00.000Z",
+          rawText: "BUY XAUUSD",
+        },
+        {
+          telegramMessageId: "scan-2",
+          messageDate: "2026-07-17T10:01:00.000Z",
+          rawText: "SELL XAUUSD",
+        },
+        {
+          telegramMessageId: "scan-3",
+          messageDate: "2026-07-17T10:02:00.000Z",
+          rawText: "BUY EURUSD",
+        },
+      ]),
+      async listDialogs(sessionId) {
+        calls.push(`dialogs:${sessionId}`);
+        return [{ id: "dialog-btc", title: "Test Forex Group", type: "group", unreadCount: 3 }];
+      },
+      async fetchRecentMessages(sessionId, dialogId, limit) {
+        calls.push(`messages:${sessionId}:${dialogId}:${limit}`);
+        return [
+          {
+            telegramMessageId: "scan-1",
+            messageDate: "2026-07-17T10:00:00.000Z",
+            rawText: "BUY XAUUSD",
+          },
+          {
+            telegramMessageId: "scan-2",
+            messageDate: "2026-07-17T10:01:00.000Z",
+            rawText: "SELL XAUUSD",
+          },
+          {
+            telegramMessageId: "scan-3",
+            messageDate: "2026-07-17T10:02:00.000Z",
+            rawText: "BUY EURUSD",
+          },
+        ];
+      },
+    };
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram,
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD", "EURUSD"],
+      });
+      const before = new Database(databasePath, { readonly: true });
+      const rawMessageCount = Number(
+        (before.query("SELECT COUNT(*) AS count FROM raw_messages").get() as { count: number })
+          .count,
+      );
+      before.close();
+      const response = await json<{ symbols: Array<{ symbol: string; count: number }> }>(
+        await app.request(`/api/providers/${providerId}/detected-symbols?limit=3`),
+      );
+      expect(response).toEqual({
+        symbols: [
+          { symbol: "XAUUSD", count: 2 },
+          { symbol: "EURUSD", count: 1 },
+        ],
+      });
+      expect(calls.some((call) => call.startsWith("dialogs:"))).toBe(true);
+      expect(calls.some((call) => call.endsWith(":dialog-btc:3"))).toBe(true);
+      const after = new Database(databasePath, { readonly: true });
+      expect(
+        Number(
+          (after.query("SELECT COUNT(*) AS count FROM raw_messages").get() as { count: number })
+            .count,
+        ),
+      ).toBe(rawMessageCount);
+      after.close();
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("signal correlation Phase 1 persistence", () => {
   test("migrates reply correlation storage idempotently on fresh and legacy databases", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-signal-correlation-"));

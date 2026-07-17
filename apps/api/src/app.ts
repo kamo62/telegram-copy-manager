@@ -143,6 +143,7 @@ interface AccountSlotInput {
 interface ProviderExecutionConfig {
   parserMode?: ParserMode | string;
   lockedSymbol?: string;
+  tradedSymbols?: string[];
   riskMode: "fixed" | "percent";
   riskAmount: number;
   takeProfitLevels: ProviderTakeProfitLevel[];
@@ -384,6 +385,7 @@ export function createApi(options: ApiOptions = {}) {
       enabled?: boolean;
       parserMode?: string;
       lockedSymbol?: string | null;
+      tradedSymbols?: string[] | null;
       riskProfile?: string;
       lotSize?: number;
       riskMode?: "fixed" | "percent";
@@ -414,6 +416,26 @@ export function createApi(options: ApiOptions = {}) {
       }
     }
     return c.json({ messages: store.recentMessages(c.req.param("id"), limit) });
+  });
+
+  app.get("/api/providers/:id/detected-symbols", async (c) => {
+    const providerId = c.req.param("id");
+    const provider = store.providerDetails(providerId);
+    if (!provider) return c.json({ error: "Provider not found" }, 404);
+    const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 1000), 1), 50_000);
+    const sessionId = store.connectedSessionIdForProfile(provider.profileId);
+    let messages: TelegramCapturedMessage[];
+    if (sessionId) {
+      try {
+        await telegram.listDialogs(sessionId);
+        messages = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit);
+      } catch {
+        messages = store.recentMessages(providerId, limit, false);
+      }
+    } else {
+      messages = store.recentMessages(providerId, limit, false);
+    }
+    return c.json({ symbols: store.detectedSymbols(providerId, messages) });
   });
 
   app.post("/api/providers/:id/import-messages", async (c) => {
@@ -1360,6 +1382,7 @@ class AppStore {
           enabled: Boolean(row.enabled),
           parserMode: String(row.parser_mode),
           lockedSymbol: normalizeLockedSymbol(config?.lockedSymbol),
+          tradedSymbols: normalizeTradedSymbols(config?.tradedSymbols),
           riskProfile: String(row.risk_profile),
           lotSize: Number(row.lot_size),
           riskMode: config?.riskMode,
@@ -1491,6 +1514,7 @@ class AppStore {
       enabled?: boolean;
       parserMode?: string;
       lockedSymbol?: string | null;
+      tradedSymbols?: string[] | null;
       riskProfile?: string;
       lotSize?: number;
       riskMode?: "fixed" | "percent";
@@ -1514,6 +1538,7 @@ class AppStore {
       );
     const hasProviderConfigPatch =
       "lockedSymbol" in input ||
+      "tradedSymbols" in input ||
       input.riskMode !== undefined ||
       input.riskAmount !== undefined ||
       "takeProfitLevels" in input ||
@@ -1532,6 +1557,10 @@ class AppStore {
           "lockedSymbol" in input
             ? normalizeLockedSymbol(input.lockedSymbol)
             : existingConfig.lockedSymbol,
+        tradedSymbols:
+          "tradedSymbols" in input
+            ? normalizeTradedSymbols(input.tradedSymbols)
+            : existingConfig.tradedSymbols,
       });
     }
     this.audit("provider.update", "info", "Provider settings updated", {
@@ -1553,6 +1582,7 @@ class AppStore {
     const providerLevelConfig: ProviderExecutionConfig = {
       parserMode: normalizeParserMode(provider?.parserMode),
       lockedSymbol: normalizeLockedSymbol(config.lockedSymbol),
+      tradedSymbols: normalizeTradedSymbols(config.tradedSymbols),
       riskMode: config.riskMode === "percent" ? "percent" : "fixed",
       riskAmount: positiveNumber(config.riskAmount, fallbackAmount),
       takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
@@ -1572,6 +1602,7 @@ class AppStore {
         return {
           parserMode: providerLevelConfig.parserMode,
           lockedSymbol: providerLevelConfig.lockedSymbol,
+          tradedSymbols: providerLevelConfig.tradedSymbols,
           riskMode: override.riskMode === "percent" ? "percent" : "fixed",
           riskAmount: positiveNumber(override.riskAmount, fallbackAmount),
           takeProfitLevels: normalizeProviderTpLevels(override.takeProfitLevels),
@@ -1610,6 +1641,10 @@ class AppStore {
             "lockedSymbol" in input.config
               ? normalizeLockedSymbol(input.config.lockedSymbol)
               : currentConfig.lockedSymbol,
+          tradedSymbols:
+            "tradedSymbols" in input.config
+              ? normalizeTradedSymbols(input.config.tradedSymbols)
+              : currentConfig.tradedSymbols,
           riskMode: input.config.riskMode === "percent" ? "percent" : currentConfig.riskMode,
           riskAmount: positiveNumber(input.config.riskAmount, currentConfig.riskAmount),
           takeProfitLevels:
@@ -1642,6 +1677,11 @@ class AppStore {
     config: ProviderExecutionConfig,
     accountId?: string,
   ) {
+    const normalizedConfig: ProviderExecutionConfig = {
+      ...config,
+      lockedSymbol: normalizeLockedSymbol(config.lockedSymbol),
+      tradedSymbols: normalizeTradedSymbols(config.tradedSymbols),
+    };
     const now = new Date().toISOString();
     if (accountId) {
       // Per-account override stored on the link row. Preserves the existing `enabled`
@@ -1650,25 +1690,25 @@ class AppStore {
         .query(
           "INSERT INTO account_provider_links (account_id, provider_id, enabled, updated_at, config_json) VALUES (?, ?, 0, ?, ?) ON CONFLICT(account_id, provider_id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at",
         )
-        .run(accountId, providerId, now, JSON.stringify(config));
+        .run(accountId, providerId, now, JSON.stringify(normalizedConfig));
       this.audit("provider.config.update", "info", "Per-account provider config updated", {
         providerId,
         accountId,
-        config,
+        config: normalizedConfig,
       });
       return;
     }
     this.db
       .query("UPDATE providers SET provider_config_json = ? WHERE id = ?")
-      .run(JSON.stringify(config), providerId);
+      .run(JSON.stringify(normalizedConfig), providerId);
     this.db
       .query(
         "INSERT INTO provider_config_history (id, provider_id, config_json, created_at) VALUES (?, ?, ?, ?)",
       )
-      .run(`provider_config_${nanoid(10)}`, providerId, JSON.stringify(config), now);
+      .run(`provider_config_${nanoid(10)}`, providerId, JSON.stringify(normalizedConfig), now);
     this.audit("provider.config.update", "info", "Provider execution config updated", {
       providerId,
-      config,
+      config: normalizedConfig,
     });
   }
 
@@ -1950,6 +1990,20 @@ class AppStore {
       fingerprint: String(row.fingerprint),
       classification: String(row.classification),
     }));
+  }
+
+  detectedSymbols(providerId: string, messages: TelegramCapturedMessage[]) {
+    const context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
+    const counts = new Map<string, number>();
+    for (const message of messages) {
+      for (const signal of parseSignalTexts(telegramParserText(message), context)) {
+        if (signal.commandType !== "OPEN_TRADE" || !signal.canonicalSymbol) continue;
+        counts.set(signal.canonicalSymbol, (counts.get(signal.canonicalSymbol) ?? 0) + 1);
+      }
+    }
+    return [...counts]
+      .map(([symbol, count]) => ({ symbol, count }))
+      .sort((left, right) => right.count - left.count || left.symbol.localeCompare(right.symbol));
   }
 
   classifyMessage(messageId: string, classification: RawMessageClassification) {
@@ -2251,6 +2305,12 @@ class AppStore {
       );
       result.parsed += parsed.length;
       for (const item of parsed) {
+        const tradedSymbolHoldReason = this.tradedSymbolHoldReason(provider.id, item.result);
+        if (tradedSymbolHoldReason) {
+          this.holdSignalForTradedSymbol(item.parsedSignalId, item.result, tradedSymbolHoldReason);
+          result.reviewRequired += 1;
+          continue;
+        }
         if (item.reviewRequired) result.reviewRequired += 1;
         if (
           item.result.commandType !== "OPEN_TRADE" &&
@@ -2914,6 +2974,10 @@ class AppStore {
     const signal = parseJson<ParsedSignal>(String(row.result_json));
     const source = this.sourceForParsedSignal(parsedSignalId, signal);
     const providerId = String(row.provider_id);
+    const tradedSymbolHoldReason = this.tradedSymbolHoldReason(providerId, signal);
+    if (tradedSymbolHoldReason) {
+      return { statusCode: 422, error: tradedSymbolHoldReason };
+    }
     const targetAccountIds = this.targetAccountIdsForProvider(
       providerId,
       signal.accountId ?? this.defaultParserAccountId(providerId),
@@ -3005,6 +3069,14 @@ class AppStore {
         };
       });
       for (const target of targetSignals) {
+        const targetTradedSymbolHoldReason = this.tradedSymbolHoldReason(
+          providerId,
+          target.signal,
+          target.config,
+        );
+        if (targetTradedSymbolHoldReason) {
+          return { statusCode: 422, error: targetTradedSymbolHoldReason };
+        }
         if (
           target.signal.commandType !== "OPEN_TRADE" ||
           shouldRequireManualReview(target.signal)
@@ -3216,6 +3288,51 @@ class AppStore {
         },
       };
     }
+  }
+
+  private tradedSymbolHoldReason(
+    providerId: string,
+    signal: ParsedSignal,
+    config = this.providerConfig(providerId),
+  ) {
+    const tradedSymbols = normalizeTradedSymbols(config.tradedSymbols);
+    if (signal.commandType !== "OPEN_TRADE" || !tradedSymbols?.length) return undefined;
+    const symbol = normalizeLockedSymbol(signal.canonicalSymbol);
+    if (symbol && tradedSymbols.includes(symbol)) return undefined;
+    return `Symbol ${symbol ?? "unavailable"} is not in this provider's traded symbols`;
+  }
+
+  private holdSignalForTradedSymbol(
+    parsedSignalId: string,
+    signal: ParsedSignal,
+    heldReason: string,
+  ) {
+    const providerIdRow = this.db
+      .query("SELECT provider_id FROM parsed_signals WHERE id = ?")
+      .get(parsedSignalId) as Row | null;
+    if (!providerIdRow) return;
+    const providerId = String(providerIdRow.provider_id);
+    const accountId =
+      this.targetAccountIdsForProvider(
+        providerId,
+        signal.accountId ?? this.defaultParserAccountId(providerId),
+      )[0] ??
+      signal.accountId ??
+      this.defaultParserAccountId(providerId);
+    const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "HELD", {
+      accountId,
+      executionMode: "VIRTUAL_TP",
+      settings: this.appSettings(),
+      heldReason: "SYMBOL_NOT_TRADED",
+    });
+    this.db.query("UPDATE parsed_signals SET status = ? WHERE id = ?").run("HELD", parsedSignalId);
+    this.audit("signal.symbol-not-traded", "warn", heldReason, {
+      parsedSignalId,
+      providerId,
+      queueItemId,
+      heldReason: "SYMBOL_NOT_TRADED",
+    });
+    this.alertHeldQueueItem(queueItemId, "SYMBOL_NOT_TRADED");
   }
 
   // Force-push a manually composed or corrected signal straight to one
@@ -8597,15 +8714,19 @@ class AppStore {
   private parserContext(
     providerId: string,
     accountId: string,
-    overrides?: Pick<ProviderExecutionConfig, "parserMode" | "lockedSymbol">,
+    overrides?: Pick<ProviderExecutionConfig, "parserMode" | "lockedSymbol" | "tradedSymbols">,
   ) {
     const settings = this.appSettings();
     const providerConfig = this.providerConfig(providerId);
     const lockedSymbol = normalizeLockedSymbol(
       overrides?.lockedSymbol ?? providerConfig.lockedSymbol,
     );
+    const tradedSymbols = normalizeTradedSymbols(
+      overrides?.tradedSymbols ?? providerConfig.tradedSymbols,
+    );
+    const fallbackSymbol = tradedSymbols?.[0] ?? lockedSymbol;
     const providerDefaultSymbols = this.providerDefaultSymbols();
-    if (lockedSymbol) providerDefaultSymbols[providerId] = lockedSymbol;
+    if (fallbackSymbol) providerDefaultSymbols[providerId] = fallbackSymbol;
     return {
       providerId,
       accountId,
@@ -8613,7 +8734,7 @@ class AppStore {
       globalAliases: this.globalAliases(),
       providerAliases: this.providerAliases(),
       providerDefaultSymbols,
-      geometryInferenceSymbol: lockedSymbol,
+      geometryInferenceSymbol: fallbackSymbol,
       referencePrices: this.referencePricesForAccount(accountId),
       accountMappings: this.accountMappings(accountId),
       defaultStopLoss: { value: settings.defaultStopLossPips, unit: "PIPS" as const },
@@ -8661,6 +8782,8 @@ class AppStore {
     return Object.fromEntries(
       this.providers()
         .map((provider) => {
+          const tradedSymbol = normalizeTradedSymbols(provider.tradedSymbols)?.[0];
+          if (tradedSymbol) return [provider.id, tradedSymbol] as const;
           const lockedSymbol = normalizeLockedSymbol(provider.lockedSymbol);
           if (lockedSymbol) return [provider.id, lockedSymbol] as const;
           if (provider.title.toLowerCase().includes("kal")) return [provider.id, "XAUUSD"] as const;
@@ -8823,12 +8946,22 @@ class AppStore {
     results: ParsedSignal[];
     createdAt: string;
   }) {
-    return input.results.map((result) => {
+    return input.results.map((unfilteredResult) => {
+      const tradedSymbolHoldReason = this.tradedSymbolHoldReason(
+        input.providerId,
+        unfilteredResult,
+      );
+      const result = tradedSymbolHoldReason
+        ? {
+            ...unfilteredResult,
+            warnings: [...unfilteredResult.warnings, tradedSymbolHoldReason],
+          }
+        : unfilteredResult;
       const parsedSignalId = `parse_${nanoid(10)}`;
       // Adaptive learning: if the operator has approved this signal structure
       // enough times, stop flagging mapped open trades for review.
       const reviewRequired =
-        shouldRequireManualReview(result) &&
+        (Boolean(tradedSymbolHoldReason) || shouldRequireManualReview(result)) &&
         !learnedOverrideApplies(
           result,
           this.trainingExampleCount(input.providerId, structuralFingerprint(result.originalText)),
@@ -11024,6 +11157,18 @@ function normalizeLockedSymbol(value: unknown): string | undefined {
   if (typeof value !== "string" && typeof value !== "number") return undefined;
   const normalized = String(value).trim().toUpperCase().replace(/\s+/g, "");
   return normalized ? normalized : undefined;
+}
+
+function normalizeTradedSymbols(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const symbols = [
+    ...new Set(
+      value
+        .map((symbol) => normalizeLockedSymbol(symbol)?.replace(/[/-]/g, ""))
+        .filter(Boolean) as string[],
+    ),
+  ];
+  return symbols.length > 0 ? symbols : undefined;
 }
 
 function normalizeTakeProfitStrategy(

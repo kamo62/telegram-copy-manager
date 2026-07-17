@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.33.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because the traded-symbols filter is opt-in per provider and off by default; providers with no traded symbols are unaffected.
+
+- Per-provider "traded symbols" (backend): optional `tradedSymbols` list. When set, symbol-less signals fill from the first symbol and open trades whose symbol is not in the list are HELD for review (SYMBOL_NOT_TRADED), never auto-executed; manual approval of an off-list symbol returns 422. Empty/absent = trade everything (unchanged); `lockedSymbol` still works as the fallback when no traded symbols are set.
+- New read-only endpoint `GET /api/providers/:id/detected-symbols` returns the symbols a channel actually posts (with counts) via the connected session without persisting messages, for the config picker.
+
 ## 1.32.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because this recovers symbols the parser previously missed without changing behaviour for signals that already resolved.
