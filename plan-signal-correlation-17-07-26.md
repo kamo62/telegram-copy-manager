@@ -236,17 +236,42 @@ folded into the sections above. What changed:
 9. Rollout is enforceable: reply-aware replay fixtures, a per-provider shadow
    phase, feature-gated lifecycle execution, and VIP regression gates (sequencing).
 
-Open questions to settle before or within implementation:
+### Resolved review questions (2026-07-17)
 
-- Do unresolved lifecycle commands stay retryable, or become permanent review
-  holds?
-- Which target states are valid for each lifecycle action (cancel vs close vs
-  modify)?
-- Confirm multi-account lifecycle is all-or-hold.
-- What source and freshness bound produces an Aggressive guessed entry?
+Decided from the fuller channel data.
+
+- Unresolved lifecycle commands are retryable within a bounded window, then expire
+  to a terminal review-hold. A command re-resolves as opens execute and report, up
+  to a TTL that covers the open's fill and report latency. Past the TTL it holds
+  for the operator and is not retried further. This catches the open-then-cancel
+  race without unbounded queue growth.
+- Action versus state compatibility:
+  - `CANCEL_PENDING` acts only when our order is still PENDING. If it already
+    filled (OPEN), hold for review rather than auto-closing a live position on a
+    cancel. If already gone, no-op.
+  - `CLOSE` (full or partial) acts when OPEN. On a still-PENDING order it cancels;
+    on an already-CLOSED trade it is a no-op.
+  - `MODIFY_SL`, `MODIFY_TP`, `MOVE_SL_TO_BE`, `TRAILING_STOP` act when OPEN or
+    PENDING; no-op when CLOSED.
+  - `MARK_TP_HIT` records on any active state. Closing our still-open position on a
+    provider TP-hit is an opt-in per-provider policy, default off.
+  - Any incompatible state that is not a clean no-op holds for review.
+- Multi-account lifecycle resolves and executes per account, not all-or-hold. Each
+  account's command is its own idempotent unit keyed by provider, command ordinal
+  (the lifecycle message id), account, trade, and action, with transactional writes
+  within that account. Accounts that resolve act; accounts that do not defer and
+  surface. Closing or aligning the accounts that resolved reduces risk, so holding
+  every account because one cannot resolve would leave the others exposed. This
+  refines the earlier all-or-hold note, keeping atomicity per account.
+- Aggressive guessed entry applies only to MARKET-intent signals. It fills from the
+  account's current quote for that symbol on the correct side (buy at ask, sell at
+  bid), and only when the quote is fresh within a bound (default 60 seconds). A
+  pending-order signal (limit or stop) missing its level cannot have that level
+  invented, so it holds. A stale quote holds. This keeps MARKET intent distinct
+  from a guessed pending entry.
 - The opening `telegram_message_id` already exists in `TradeSource` and the
-  persisted trade JSON. The missing piece is a queryable, indexed,
-  provider/account-scoped origin mapping, not a new field on the trade.
+  persisted trade JSON. The origin work is a queryable, indexed,
+  provider/account-scoped mapping, not a new field on the trade.
 
 ## Out of scope
 
