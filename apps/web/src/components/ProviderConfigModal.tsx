@@ -521,12 +521,12 @@ export function ProviderConfigModal({
                   <span className="config-label">Template</span>
                   <select
                     aria-label={`Parser mode for ${provider.title}`}
-                    defaultValue={provider.parserMode}
+                    defaultValue={provider.parserMode === "aggressive" ? "aggressive" : "automatic"}
                     name="parserMode"
+                    title="Aggressive: signals missing a stop, target, or exact entry are still executed using this provider's default settings (for example a 60-pip SL). Lifecycle commands that cannot be tied to one specific open trade are still skipped for safety."
                   >
-                    <option value="deterministic">Automatic</option>
-                    <option value="kal-vip">KAL VIP tuned</option>
-                    <option value="kal-vip-extended">KAL VIP extended</option>
+                    <option value="automatic">Automatic</option>
+                    <option value="aggressive">Aggressive</option>
                   </select>
                 </label>
                 <button

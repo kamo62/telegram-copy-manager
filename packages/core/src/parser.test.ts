@@ -344,7 +344,7 @@ describe("deterministic signal parser", () => {
       globalAliases: { GOLD: "XAUUSD" },
       providerDefaultSymbols: { "kal-vip": "XAUUSD" },
       accountMappings: context.accountMappings,
-      parserMode: "kal-vip-extended",
+      shorthandLevels: true,
       referencePrices: { XAUUSD: 4444.2 },
       defaultStopLoss: { value: 50, unit: "PIPS" },
       defaultTakeProfit: { value: 200, unit: "PIPS" },
@@ -379,7 +379,7 @@ describe("deterministic signal parser", () => {
     }
   });
 
-  test("keeps KAL VIP short level commentary gated to extended mode with a reference price", () => {
+  test("keeps KAL VIP short level commentary gated to the shorthand-levels capability", () => {
     const baseContext: ParserContext = {
       providerId: "kal-vip",
       accountId: "mt5-demo-1",
@@ -399,17 +399,18 @@ describe("deterministic signal parser", () => {
       "The 03 level can be a buy",
     ].join("\n");
 
+    // Capability off + reference price present -> still gated (no phantom opens).
     expect(
       parseSignalTexts(rawText, {
         ...baseContext,
-        parserMode: "deterministic",
         referencePrices: { XAUUSD: 4444.2 },
       }),
     ).toMatchObject([{ commandType: "NO_SIGNAL" }]);
+    // Capability on but no reference price -> nothing to expand from.
     expect(
       parseSignalTexts(rawText, {
         ...baseContext,
-        parserMode: "kal-vip-extended",
+        shorthandLevels: true,
       }),
     ).toMatchObject([{ commandType: "NO_SIGNAL" }]);
   });
@@ -706,7 +707,7 @@ describe("deterministic signal parser", () => {
     ] as const) {
       const [signal] = parseSignalTexts(`Buy is at ${level}`, {
         providerId: "kal-vip",
-        parserMode: "kal-vip-extended",
+        shorthandLevels: true,
         providerDefaultSymbols: { "kal-vip": "XAUUSD" },
         referencePrices: { XAUUSD: referencePrice },
       });
@@ -1123,5 +1124,41 @@ describe("spelled-out stop/target with a pip annotation", () => {
     expect(parseSignalText("GBPCAD +50 pips / CHFJPY +200 pips", context).commandType).toBe(
       "NO_SIGNAL",
     );
+  });
+});
+
+describe("Automatic vs Aggressive review policy", () => {
+  const guessedOpen = {
+    commandType: "OPEN_TRADE" as const,
+    mappingStatus: "mapped" as const,
+    confidence: 0.6,
+    missingFields: [] as string[],
+    warnings: ["Geometry-inferred direction from price levels"],
+  };
+
+  test("Aggressive executes a guessed (geometry-inferred, low-confidence) open that Automatic holds", () => {
+    expect(shouldRequireManualReview(guessedOpen as never, false)).toBe(true);
+    expect(shouldRequireManualReview(guessedOpen as never, true)).toBe(false);
+  });
+
+  test("Aggressive still holds on the real safety reasons", () => {
+    // Unmapped symbol holds in both modes.
+    expect(
+      shouldRequireManualReview({ ...guessedOpen, mappingStatus: "unmapped" } as never, true),
+    ).toBe(true);
+    // A pending order missing its entry level holds in both modes.
+    expect(
+      shouldRequireManualReview(
+        { ...guessedOpen, confidence: 0.9, warnings: [], missingFields: ["entry"] } as never,
+        true,
+      ),
+    ).toBe(true);
+    // Conflicting stop geometry holds in both modes.
+    expect(
+      shouldRequireManualReview(
+        { ...guessedOpen, warnings: ["Conflicting stop-loss values"] } as never,
+        true,
+      ),
+    ).toBe(true);
   });
 });

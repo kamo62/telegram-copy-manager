@@ -1,6 +1,6 @@
 export type Direction = "BUY" | "SELL";
 export type OrderType = "MARKET" | "LIMIT" | "STOP";
-export type ParserMode = "deterministic" | "kal-vip" | "kal-vip-extended";
+export type ParserMode = "automatic" | "aggressive";
 export type CommandType =
   | "NO_SIGNAL"
   | "OPEN_TRADE"
@@ -49,6 +49,10 @@ export interface ParserContext {
   accountMappings?: Record<string, AccountSymbolMapping>;
   defaultStopLoss?: DistanceInstruction;
   defaultTakeProfit?: DistanceInstruction;
+  /** Per-provider opt-in for terse shorthand-level posts ("41 / 56 / 03" expanded
+   * from a live reference price). Off by default: the grammar is loose enough to
+   * read prose as levels, so it only runs for providers that explicitly enable it. */
+  shorthandLevels?: boolean;
 }
 
 export interface SymbolResolution {
@@ -727,30 +731,55 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   };
 }
 
+/** Cap on how many entries one message may expand into (ladder or zone), so a
+ * false positive or an oversized post can never spray unbounded orders. */
+const MAX_ENTRIES_PER_SIGNAL = 5;
+
 export function parseSignalTexts(
   originalText: string,
   context: ParserContext = {},
 ): ParsedSignal[] {
   const candidate = extractSignalCandidate(originalText.replace(/\r\n/g, "\n").trim());
-  if (context.parserMode === "kal-vip-extended") {
-    const extendedSignals = parseKalVipExtendedLevelSignals(originalText, candidate.text, context);
-    if (extendedSignals.length > 0) return extendedSignals;
+
+  // Shorthand ladder levels (e.g. "41 / 56 / 03" expanded from a live reference
+  // price) are part of the default path now, gated by an explicit per-provider
+  // capability that is off by default (the grammar is loose enough to read prose as
+  // levels). Never runs on a quoted reply, and only when a provider default symbol
+  // plus a reference price make the levels resolvable. Runs before the base parse so
+  // a terse level post expands instead of being read as one literal entry, and is
+  // capped so a false positive cannot spray orders.
+  if (
+    context.shorthandLevels &&
+    !candidate.quotedText &&
+    !/Quoted signal:/i.test(candidate.text)
+  ) {
+    const ladder = parseKalVipExtendedLevelSignals(originalText, candidate.text, context);
+    if (ladder.length > 0) return ladder.slice(0, MAX_ENTRIES_PER_SIGNAL);
   }
 
   const base = parseSignalText(originalText, context);
   const prices = extractDirectionalZonePrices(candidate.text);
   if (base.commandType !== "OPEN_TRADE" || prices.length <= 1) return [base];
 
-  return prices.map((price, index) => ({
-    ...base,
-    entry: { from: price },
-    fingerprint: createMessageFingerprint(`${base.originalText}\nzone-entry:${index + 1}:${price}`),
-  }));
+  return prices
+    .slice(0, MAX_ENTRIES_PER_SIGNAL)
+    .map((price, index) => ({
+      ...base,
+      entry: { from: price },
+      fingerprint: createMessageFingerprint(
+        `${base.originalText}\nzone-entry:${index + 1}:${price}`,
+      ),
+    }));
 }
 
-export function shouldRequireManualReview(signal: ParsedSignal): boolean {
+export function shouldRequireManualReview(signal: ParsedSignal, aggressive = false): boolean {
+  // Aggressive mode executes the parser's "guessed" opens (low confidence and
+  // direction/entry inferred from price geometry) instead of holding them. It does
+  // NOT waive the genuine safety holds below: an unmapped symbol, a missing field
+  // (including a pending order with no level), conflicting stop geometry, or a
+  // non-signal all still hold in both modes.
   return (
-    signal.confidence < 0.75 ||
+    (!aggressive && signal.confidence < 0.75) ||
     signal.mappingStatus !== "mapped" ||
     (signal.commandType === "OPEN_TRADE" && signal.missingFields.length > 0) ||
     (signal.commandType !== "OPEN_TRADE" &&
@@ -758,7 +787,7 @@ export function shouldRequireManualReview(signal: ParsedSignal): boolean {
     signal.commandType === "TRADE_SETUP" ||
     signal.commandType === "NO_SIGNAL" ||
     signal.warnings.some((warning) => warning.startsWith("Conflicting stop-loss values")) ||
-    signal.warnings.some((warning) => warning.startsWith("Geometry-inferred")) ||
+    (!aggressive && signal.warnings.some((warning) => warning.startsWith("Geometry-inferred"))) ||
     (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol"))
   );
 }
@@ -1321,7 +1350,7 @@ function extractRawSymbol(
         new RegExp(`(^|[^A-Z0-9])(${escapeRegExp(symbol)})(?=$|[^A-Z0-9])`, "i"),
       );
       if (match?.index !== undefined && match[2]) {
-        const idx = match.index + match[1].length;
+        const idx = match.index + (match[1]?.length ?? 0);
         if (!earliest || idx < earliest.idx) earliest = { sym: match[2], idx };
       }
     }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.37.0 - 2026-07-17 (Minor)
+
+Release impact: Minor. Consolidates the parser template to two modes and folds the shorthand-level parser into the default path behind an opt-in capability; existing providers map to Automatic and behave as before.
+
+- Template modes reduced to Automatic (default) and Aggressive. The old deterministic / kal-vip / kal-vip-extended values normalize to Automatic; the menu drops the KAL VIP names and adds an Aggressive tooltip.
+- Aggressive executes the parser's "guessed" opens (low-confidence and geometry-inferred direction/entry) that Automatic holds for review. Both modes still hold on an unmapped symbol, a missing pending-order level, conflicting stop geometry, and lifecycle commands that cannot be tied to one open trade.
+- The shorthand-level ("ladder") parser is folded into the default path but gated by a per-provider `shorthandLevels` capability (off by default) plus a live reference price, and never runs on quoted replies. Ladder and zone expansions are capped at 5 entries per message.
+
 ## 1.36.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because this recovers signals that were misclassified as result recaps, without changing genuine recap handling.

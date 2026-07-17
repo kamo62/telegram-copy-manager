@@ -3843,7 +3843,7 @@ describe("Telegram TC API", () => {
       await app.request(`/api/providers/${providerId}`, {
         method: "PATCH",
         body: JSON.stringify({
-          parserMode: "kal-vip-extended",
+          parserMode: "aggressive",
           lockedSymbol: "XAUUSD",
           riskProfile: "conservative",
           lotSize: 0.2,
@@ -3854,7 +3854,7 @@ describe("Telegram TC API", () => {
 
     expect(update.provider).toMatchObject({
       id: providerId,
-      parserMode: "kal-vip-extended",
+      parserMode: "aggressive",
       lockedSymbol: "XAUUSD",
       riskProfile: "conservative",
       lotSize: 0.2,
@@ -3868,7 +3868,7 @@ describe("Telegram TC API", () => {
         lotSize: number;
       }>;
     }>(await app.request("/api/providers"));
-    expect(refreshed.providers[0]!.parserMode).toBe("kal-vip-extended");
+    expect(refreshed.providers[0]!.parserMode).toBe("aggressive");
     expect(refreshed.providers[0]!.lockedSymbol).toBe("XAUUSD");
     expect(refreshed.providers[0]!.riskProfile).toBe("conservative");
     expect(refreshed.providers[0]!.lotSize).toBe(0.2);
@@ -3919,7 +3919,8 @@ describe("Telegram TC API", () => {
           ].join("\n"),
           accountId: "mt5-100200300",
           config: {
-            parserMode: "kal-vip-extended",
+            parserMode: "automatic",
+            shorthandLevels: true,
             lockedSymbol: "XAUUSD",
             riskMode: "fixed",
             riskAmount: 0.02,
@@ -3937,7 +3938,7 @@ describe("Telegram TC API", () => {
       entry: { from: 4441 },
     });
     expect(result.config).toMatchObject({
-      parserMode: "kal-vip-extended",
+      shorthandLevels: true,
       lockedSymbol: "XAUUSD",
     });
   });
@@ -4577,7 +4578,8 @@ describe("Telegram TC API", () => {
     await app.request("/api/providers/provider-alpha", {
       method: "PATCH",
       body: JSON.stringify({
-        parserMode: "kal-vip-extended",
+        parserMode: "automatic",
+        shorthandLevels: true,
         lockedSymbol: "XAUUSD",
         riskMode: "fixed",
         riskAmount: 0.02,

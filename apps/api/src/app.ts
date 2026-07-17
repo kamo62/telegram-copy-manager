@@ -144,6 +144,7 @@ interface ProviderExecutionConfig {
   parserMode?: ParserMode | string;
   lockedSymbol?: string;
   tradedSymbols?: string[];
+  shorthandLevels?: boolean;
   riskMode: "fixed" | "percent";
   riskAmount: number;
   takeProfitLevels: ProviderTakeProfitLevel[];
@@ -1450,7 +1451,7 @@ class AppStore {
         input.title ?? dialog?.title ?? input.dialogId,
         dialog?.type ?? "channel",
         0,
-        "deterministic",
+        "automatic",
         "balanced",
         defaultAppSettings.defaultLotSize,
         now,
@@ -1515,6 +1516,7 @@ class AppStore {
       parserMode?: string;
       lockedSymbol?: string | null;
       tradedSymbols?: string[] | null;
+      shorthandLevels?: boolean;
       riskProfile?: string;
       lotSize?: number;
       riskMode?: "fixed" | "percent";
@@ -1539,6 +1541,7 @@ class AppStore {
     const hasProviderConfigPatch =
       "lockedSymbol" in input ||
       "tradedSymbols" in input ||
+      "shorthandLevels" in input ||
       input.riskMode !== undefined ||
       input.riskAmount !== undefined ||
       "takeProfitLevels" in input ||
@@ -1561,6 +1564,10 @@ class AppStore {
           "tradedSymbols" in input
             ? normalizeTradedSymbols(input.tradedSymbols)
             : existingConfig.tradedSymbols,
+        shorthandLevels:
+          "shorthandLevels" in input
+            ? Boolean(input.shorthandLevels)
+            : existingConfig.shorthandLevels,
       });
     }
     this.audit("provider.update", "info", "Provider settings updated", {
@@ -1583,6 +1590,7 @@ class AppStore {
       parserMode: normalizeParserMode(provider?.parserMode),
       lockedSymbol: normalizeLockedSymbol(config.lockedSymbol),
       tradedSymbols: normalizeTradedSymbols(config.tradedSymbols),
+      shorthandLevels: config.shorthandLevels === true,
       riskMode: config.riskMode === "percent" ? "percent" : "fixed",
       riskAmount: positiveNumber(config.riskAmount, fallbackAmount),
       takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
@@ -1603,6 +1611,7 @@ class AppStore {
           parserMode: providerLevelConfig.parserMode,
           lockedSymbol: providerLevelConfig.lockedSymbol,
           tradedSymbols: providerLevelConfig.tradedSymbols,
+          shorthandLevels: providerLevelConfig.shorthandLevels,
           riskMode: override.riskMode === "percent" ? "percent" : "fixed",
           riskAmount: positiveNumber(override.riskAmount, fallbackAmount),
           takeProfitLevels: normalizeProviderTpLevels(override.takeProfitLevels),
@@ -1645,6 +1654,10 @@ class AppStore {
             "tradedSymbols" in input.config
               ? normalizeTradedSymbols(input.config.tradedSymbols)
               : currentConfig.tradedSymbols,
+          shorthandLevels:
+            "shorthandLevels" in input.config
+              ? Boolean(input.config.shorthandLevels)
+              : currentConfig.shorthandLevels,
           riskMode: input.config.riskMode === "percent" ? "percent" : currentConfig.riskMode,
           riskAmount: positiveNumber(input.config.riskAmount, currentConfig.riskAmount),
           takeProfitLevels:
@@ -2733,6 +2746,8 @@ class AppStore {
     input: { accountId?: string; dateFrom?: string; dateTo?: string } = {},
   ) {
     const accountId = input.accountId ?? this.defaultParserAccountId(providerId);
+    const aggressive =
+      normalizeParserMode(this.providerConfig(providerId).parserMode) === "aggressive";
     const rows = this.rawMessagesForBacktest(providerId, input);
     const commandCounts: Record<string, number> = {};
     const mappingStatusCounts: Record<string, number> = {};
@@ -2776,7 +2791,7 @@ class AppStore {
       if (parsed.commandType === "OPEN_TRADE") openSignals += 1;
       else if (parsed.commandType !== "NO_SIGNAL") lifecycleCommands += 1;
       if (parsed.commandType !== "NO_SIGNAL") actionableMessages += 1;
-      const needsReview = shouldRequireManualReview(parsed);
+      const needsReview = shouldRequireManualReview(parsed, aggressive);
       if (needsReview) reviewRequired += 1;
       if (needsReview && parsed.commandType !== "NO_SIGNAL") actionableReviewRequired += 1;
       if (needsReview && parsed.commandType !== "NO_SIGNAL") {
@@ -3079,7 +3094,7 @@ class AppStore {
         }
         if (
           target.signal.commandType !== "OPEN_TRADE" ||
-          shouldRequireManualReview(target.signal)
+          shouldRequireManualReview(target.signal, target.config.parserMode === "aggressive")
         ) {
           return {
             statusCode: 422,
@@ -8677,7 +8692,7 @@ class AppStore {
         "Alpha FX Signals",
         "channel",
         0,
-        "deterministic",
+        "automatic",
         "balanced",
         defaultAppSettings.defaultLotSize,
         new Date().toISOString(),
@@ -8714,7 +8729,10 @@ class AppStore {
   private parserContext(
     providerId: string,
     accountId: string,
-    overrides?: Pick<ProviderExecutionConfig, "parserMode" | "lockedSymbol" | "tradedSymbols">,
+    overrides?: Pick<
+      ProviderExecutionConfig,
+      "parserMode" | "lockedSymbol" | "tradedSymbols" | "shorthandLevels"
+    >,
   ) {
     const settings = this.appSettings();
     const providerConfig = this.providerConfig(providerId);
@@ -8727,6 +8745,7 @@ class AppStore {
     const fallbackSymbol = tradedSymbols?.[0] ?? lockedSymbol;
     const providerDefaultSymbols = this.providerDefaultSymbols();
     if (fallbackSymbol) providerDefaultSymbols[providerId] = fallbackSymbol;
+    const shorthandLevels = overrides?.shorthandLevels ?? providerConfig.shorthandLevels === true;
     return {
       providerId,
       accountId,
@@ -8739,6 +8758,7 @@ class AppStore {
       accountMappings: this.accountMappings(accountId),
       defaultStopLoss: { value: settings.defaultStopLossPips, unit: "PIPS" as const },
       defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" as const },
+      shorthandLevels,
     };
   }
 
@@ -8946,6 +8966,8 @@ class AppStore {
     results: ParsedSignal[];
     createdAt: string;
   }) {
+    const aggressive =
+      normalizeParserMode(this.providerConfig(input.providerId).parserMode) === "aggressive";
     return input.results.map((unfilteredResult) => {
       const tradedSymbolHoldReason = this.tradedSymbolHoldReason(
         input.providerId,
@@ -8961,7 +8983,7 @@ class AppStore {
       // Adaptive learning: if the operator has approved this signal structure
       // enough times, stop flagging mapped open trades for review.
       const reviewRequired =
-        (Boolean(tradedSymbolHoldReason) || shouldRequireManualReview(result)) &&
+        (Boolean(tradedSymbolHoldReason) || shouldRequireManualReview(result, aggressive)) &&
         !learnedOverrideApplies(
           result,
           this.trainingExampleCount(input.providerId, structuralFingerprint(result.originalText)),
@@ -11150,7 +11172,7 @@ function normalizeProviderTpLevels(
 }
 
 function normalizeParserMode(value: unknown): ParserMode {
-  return value === "kal-vip" || value === "kal-vip-extended" ? value : "deterministic";
+  return value === "aggressive" ? "aggressive" : "automatic";
 }
 
 function normalizeLockedSymbol(value: unknown): string | undefined {
