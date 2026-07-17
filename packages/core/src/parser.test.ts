@@ -1080,3 +1080,25 @@ describe("stop-loss label variations", () => {
     );
   });
 });
+
+describe("currency-cross on its own line (Elliott Wave format)", () => {
+  test("resolves an FX cross that is not adjacent to the direction", () => {
+    const result = parseSignalText(
+      "🧑‍💻 CHFJPY 4H\n👉 Buy @ 199.280\n🔺 SL @ 198.576\n🔹 Tp 1 @ 201.923\n🔹 Tp 2 @ 207.036",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      canonicalSymbol: "CHFJPY",
+      entry: { from: 199.28 },
+      stopLoss: 198.576,
+    });
+    expect(result.takeProfits.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("does not treat a six-letter non-currency word as a pair", () => {
+    // "MISSED" is six letters but not two currency codes; it must not resolve.
+    expect(parseSignalText("MISSED the entry\nTP 4070", context).canonicalSymbol).toBeUndefined();
+  });
+});

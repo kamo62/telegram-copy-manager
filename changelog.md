@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.35.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this recovers FX-cross symbols the parser previously missed without affecting other resolution paths.
+
+- Recognise a currency cross that sits on its own line, away from the direction word (Elliott Wave: "CHFJPY 4H" then "Buy @ ..."). A 6-letter token is only treated as a pair when it is two known ISO currency codes, so commentary words like "SHOULD"/"MISSED" are not mistaken for tickers. Cut this channel's unparsed signals from 188 to 42 (the remainder are results summaries and non-tradeable synthetics).
+
 ## 1.34.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because this recovers stop-loss values the parser previously dropped without changing correctly-parsed signals.

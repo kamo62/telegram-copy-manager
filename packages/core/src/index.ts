@@ -1248,6 +1248,13 @@ function detectOrderType(upper: string): OrderType {
   return hasPendingStopToken(upper) ? "STOP" : "MARKET";
 }
 
+// A 6-letter token made of two known ISO currency codes is an FX pair even when it
+// sits on its own line (Elliott Wave: "CHFJPY 4H" then "Buy @ ..."). Matching the
+// currency set instead of a bare [A-Z]{6} avoids false hits like "SHOULD"/"MISSED".
+const FX_CURRENCY =
+  "USD|EUR|GBP|JPY|CHF|CAD|AUD|NZD|XAU|XAG|ZAR|SGD|HKD|NOK|SEK|DKK|MXN|TRY|CNH|PLN|CZK";
+const FX_PAIR_RE = new RegExp(`\\b(?:${FX_CURRENCY})/?(?:${FX_CURRENCY})\\b`, "i");
+
 function extractRawSymbol(
   text: string,
   context: ParserContext,
@@ -1313,6 +1320,10 @@ function extractRawSymbol(
         const idx = match.index + match[1].length;
         if (!earliest || idx < earliest.idx) earliest = { sym: match[2], idx };
       }
+    }
+    const fxPair = text.match(FX_PAIR_RE);
+    if (fxPair?.index !== undefined && (!earliest || fxPair.index < earliest.idx)) {
+      earliest = { sym: fxPair[0].replace(/\//g, ""), idx: fxPair.index };
     }
     if (earliest) return earliest.sym;
   }
