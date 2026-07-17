@@ -80,12 +80,20 @@ signal is under-specified.
   lands on the message that opened a trade, then pass that trade id to the matcher
   as an explicit target.
 - Fall back in order: reply link, then content fingerprint (VIP Gold order id;
-  KAL VIP quoted entry plus stop), then hold. Where it is ambiguous or has no link
-  to a single open trade, ignore it. Never widen to "close any XAUUSD".
+  KAL VIP quoted entry plus stop) resolving to exactly one eligible trade, then
+  hold. Where it is ambiguous or has no link to a single open trade, ignore it.
+  Never widen to "close any XAUUSD".
+- Resolve per `(provider/dialog, origin message, account)`, not globally. One
+  opening message fans out to one logical trade per linked account, so a lifecycle
+  command resolves to a trade per account. Before queueing, validate ownership,
+  active state, action-vs-state compatibility, and a live broker ticket. Defer
+  unresolved commands; never emit ticketless lifecycle work.
 
-`matchLifecycleCommandToTrade` gains an explicit-target path that bypasses the
-provider-plus-symbol heuristic when correlation supplies a trade id. The existing
-heuristic stays as the last resort, and `AMBIGUOUS` still means hold.
+`matchLifecycleCommandToTrade` gains an explicit-target path used only when
+correlation resolves to exactly one eligible trade. Provider-plus-symbol matching
+becomes review-only and never auto-executes a lifecycle command. Automatic
+execution requires reply-link or fingerprint correlation to a single eligible
+trade; everything else holds.
 
 ### 2. Parser classification fixes
 
@@ -144,10 +152,15 @@ maps to one behaviour (`ParserMode` at `packages/core/src/index.ts:3`,
   caps, or naked-order protection.
 - Reply-link correlation is forward-only. Existing rows have no reply id, so it is
   validated on live traffic from deploy onward.
-- A default stop replacing a broken value is protective. This morning's KAL VIP
-  post carried `Sl 4975` on a buy at 3981 (a typo), which review catches today and
-  a default stop would sanitise. It supports gating human channels to review by
-  default rather than auto-firing.
+- Invalid explicit values are held, not sanitised. Default gap-fills apply only to
+  genuinely missing fields. An explicit but invalid entry, stop, or target geometry
+  (this morning's `Sl 4975` on a buy at 3981) holds for review in both modes.
+  Reinterpreting an invalid value as a missing one is unsafe, so Aggressive may
+  waive only a typed guessed-entry reason, never an invalid-geometry reason.
+- Idempotency is explicit and atomic. A DB-enforced key over provider, raw command
+  ordinal, account, trade, and action prevents differently worded closes or cancels
+  from acting twice on the same live trade. All per-account target writes for one
+  command are transacted; multi-account lifecycle is all-or-hold.
 
 ## Change surface
 
@@ -164,26 +177,76 @@ maps to one behaviour (`ParserMode` at `packages/core/src/index.ts:3`,
 
 ## Sequencing
 
-1. Capture the reply link (adapter, migration). Forward-only, no behaviour change.
-2. Correlation resolver and matcher wiring. Unblocks KAL VIP lifecycle safely.
-3. VIP Gold parser fixes (cancel, echo dedup). Prerequisite before that channel
-   is enabled, or Aggressive would fire echoes and cancels as opens.
+1. Capture the reply link (adapter, migration), persisting a node per Telegram
+   message (or aliasing every folded constituent id) so the reply graph has no
+   gaps. Forward-only, no behaviour change.
+2. Correlation resolver and matcher wiring behind a feature gate, run first in a
+   per-provider shadow phase that logs the intended action without executing.
+   Promote a provider to live lifecycle only after shadow output is verified
+   against its captured traffic.
+3. VIP Gold parser fixes (cancel, echo dedup) with cancel and echo regression
+   gates that must pass before that provider can be enabled. This is an enforced
+   gate, not an operator note.
 4. Automatic/Aggressive control and UI cleanup.
 
-Each phase is independently testable against the two channels' captured messages.
+Each phase is exercised with reply-aware replay fixtures. Because the reply id is
+forward-only, correlation is validated on live shadow traffic, not on the existing
+two months of history.
 
 ## Resolved decisions
 
 - D1. Automatic applies safe gap-fills. A missing stop or take-profit is filled
   from provider defaults so nothing goes out naked; only guessed entry and
   ambiguous correlation are held.
-- D2. A per-provider `maxEntriesPerSignal` cap (default 5) bounds ladder exposure.
-  A parsed ladder beyond the cap is truncated to the first levels in listed order
-  with an audit entry. This limits blast radius from a parsing false positive and
-  from oversized ladders while clearing the observed single-entry and small-ladder
-  norm.
+- D2. A per-provider `maxEntriesPerSignal` cap (default 5) bounds exposure across
+  any multi-entry expansion (ladder or zone), measured before account fan-out. A
+  signal expanding beyond the cap holds the whole signal for review by default
+  rather than executing a partial. First-N execution is available only with
+  explicit provider opt-in, and then must define ordering, aggregate risk
+  redistribution, omitted-level visibility, and group-level all-or-hold execution.
 - D3. The low-execution finding (11 of 284) runs as a separate routing and
   guardian investigation, outside this work.
+
+## Revisions after Codex review (2026-07-17)
+
+Codex reviewed commit `4082cca1` (sol, xhigh). The critical and high findings are
+folded into the sections above. What changed:
+
+1. Provider-plus-symbol matching is review-only. Auto-execution requires reply-link
+   or fingerprint correlation to exactly one eligible trade (section 1).
+2. Correlation resolves per `(provider/dialog, origin message, account)` with
+   ownership, active-state, action-vs-state, and live-broker-ticket validation
+   before queueing. Unresolved commands defer; no ticketless lifecycle (section 1).
+3. Invalid explicit geometry holds in both modes; defaults fill only genuinely
+   missing fields (safety boundaries).
+4. A DB-enforced idempotency key with transacted per-account writes and
+   all-or-hold multi-account behaviour (safety boundaries).
+5. The persisted reply graph keeps a node per Telegram message (or aliases folded
+   constituent ids); traversal is bounded by dialog, depth, and a visited set; a
+   missing hop holds; fingerprint fallback must be independently unique
+   (sequencing step 1).
+6. Ladder parsing runs after lifecycle and noise classification, excludes quoted
+   replies and recognised lifecycle messages, and requires an explicit provider
+   capability plus positive and negative corpus gates. This prevents chatter or a
+   lifecycle reply becoming a phantom open.
+7. Aggressive guessed-entry needs a data model before build: per-provider default
+   entry, stop, and target with source, units, freshness, and provenance, keeping
+   explicit MARKET intent distinct from a guessed pending entry.
+8. Over-cap multi-entry signals hold by default; first-N is opt-in only (D2).
+9. Rollout is enforceable: reply-aware replay fixtures, a per-provider shadow
+   phase, feature-gated lifecycle execution, and VIP regression gates (sequencing).
+
+Open questions to settle before or within implementation:
+
+- Do unresolved lifecycle commands stay retryable, or become permanent review
+  holds?
+- Which target states are valid for each lifecycle action (cancel vs close vs
+  modify)?
+- Confirm multi-account lifecycle is all-or-hold.
+- What source and freshness bound produces an Aggressive guessed entry?
+- The opening `telegram_message_id` already exists in `TradeSource` and the
+  persisted trade JSON. The missing piece is a queryable, indexed,
+  provider/account-scoped origin mapping, not a new field on the trade.
 
 ## Out of scope
 
