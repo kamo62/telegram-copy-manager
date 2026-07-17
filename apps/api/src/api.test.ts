@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { brokerOrderSourceForDealReason, createApi } from "./app";
+import { brokerOrderSourceForDealReason, createApi, evaluateLifecycleActionState } from "./app";
 import type { TelegramAdapter, TelegramCapturedMessage, TelegramDialog } from "./telegram";
 
 const json = async <T>(response: Response) => (await response.json()) as T;
@@ -10145,6 +10145,312 @@ describe("signal correlation Phase 1 persistence", () => {
         ).toEqual({ count: 0 });
       } finally {
         verify.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("signal correlation Phase 2a shadow logging", () => {
+  test("evaluates lifecycle actions against the existing logical trade states", () => {
+    const cases: Array<
+      [
+        string,
+        "PLANNED" | "PENDING" | "OPEN" | "CLOSED" | "OUT_OF_SYNC",
+        "act" | "cancel" | "noop" | "hold",
+      ]
+    > = [
+      ["CANCEL_PENDING", "PLANNED", "act"],
+      ["CANCEL_PENDING", "PENDING", "act"],
+      ["CANCEL_PENDING", "OPEN", "hold"],
+      ["CANCEL_PENDING", "CLOSED", "noop"],
+      ["CLOSE_TRADE", "OPEN", "act"],
+      ["CLOSE_TRADE", "PENDING", "cancel"],
+      ["CLOSE_TRADE", "CLOSED", "noop"],
+      ["CLOSE_PARTIAL", "OPEN", "act"],
+      ["CLOSE_PARTIAL", "PENDING", "cancel"],
+      ["CLOSE_PARTIAL", "CLOSED", "noop"],
+      ["MODIFY_SL", "OPEN", "act"],
+      ["MODIFY_TP", "PENDING", "act"],
+      ["MOVE_SL_TO_BE", "OPEN", "act"],
+      ["TRAILING_STOP", "PENDING", "act"],
+      ["MODIFY_SL", "CLOSED", "noop"],
+      ["MARK_TP_HIT", "OPEN", "act"],
+      ["MARK_TP_HIT", "PENDING", "act"],
+      ["MARK_TP_HIT", "CLOSED", "noop"],
+      ["CLOSE_TRADE", "OUT_OF_SYNC", "hold"],
+    ];
+    for (const [commandType, status, verdict] of cases) {
+      expect(evaluateLifecycleActionState(commandType, status).verdict).toBe(verdict);
+    }
+    expect(evaluateLifecycleActionState("CANCEL_PENDING", "OPEN")).toMatchObject({
+      verdict: "hold",
+      reason: "cancel-on-open",
+    });
+    expect(evaluateLifecycleActionState("CLOSE_TRADE", "PENDING")).toMatchObject({
+      verdict: "cancel",
+      reason: "close-pending",
+    });
+    expect(evaluateLifecycleActionState("MARK_TP_HIT", "OPEN").reason).toBe("tp-hit-record-only");
+    expect(
+      evaluateLifecycleActionState("MARK_TP_HIT", "OPEN", { closeOnProviderTp: true }).reason,
+    ).toBe("tp-hit-close-opt-in");
+  });
+
+  test("resolves reply chains per account and records bounded unmatched reasons in one shadow audit per lifecycle", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-correlation-shadow-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const messages: TelegramCapturedMessage[] = [
+        {
+          telegramMessageId: "open",
+          messageDate: "2026-07-17T10:00:00.000Z",
+          rawText: "BUY XAUUSD",
+        },
+        {
+          telegramMessageId: "update",
+          replyToMessageId: "open",
+          messageDate: "2026-07-17T10:01:00.000Z",
+          rawText: "Trail stop XAUUSD by 10 pips",
+        },
+        {
+          telegramMessageId: "close",
+          replyToMessageId: "update",
+          messageDate: "2026-07-17T10:02:00.000Z",
+          rawText: "Close XAUUSD",
+        },
+        {
+          telegramMessageId: "unrelated",
+          messageDate: "2026-07-17T10:03:00.000Z",
+          rawText: "Market update",
+        },
+        {
+          telegramMessageId: "unrelated-life",
+          replyToMessageId: "unrelated",
+          messageDate: "2026-07-17T10:04:00.000Z",
+          rawText: "Trail stop XAUUSD by 10 pips",
+        },
+        {
+          telegramMessageId: "no-reply",
+          messageDate: "2026-07-17T10:05:00.000Z",
+          rawText: "Trail stop XAUUSD by 10 pips",
+        },
+        {
+          telegramMessageId: "gap",
+          replyToMessageId: "missing",
+          messageDate: "2026-07-17T10:06:00.000Z",
+          rawText: "Trail stop XAUUSD by 10 pips",
+        },
+        {
+          telegramMessageId: "cycle-a",
+          replyToMessageId: "cycle-b",
+          messageDate: "2026-07-17T10:07:00.000Z",
+          rawText: "Market update",
+        },
+        {
+          telegramMessageId: "cycle-b",
+          replyToMessageId: "cycle-a",
+          messageDate: "2026-07-17T10:08:00.000Z",
+          rawText: "Market update",
+        },
+        {
+          telegramMessageId: "cycle-life",
+          replyToMessageId: "cycle-a",
+          messageDate: "2026-07-17T10:09:00.000Z",
+          rawText: "Trail stop XAUUSD by 10 pips",
+        },
+        ...Array.from({ length: 13 }, (_, index) => ({
+          telegramMessageId: `deep-${index}`,
+          replyToMessageId: index === 0 ? undefined : `deep-${index - 1}`,
+          messageDate: `2026-07-17T10:${String(10 + index).padStart(2, "0")}:00.000Z`,
+          rawText: "Market update",
+        })),
+        {
+          telegramMessageId: "deep-life",
+          replyToMessageId: "deep-12",
+          messageDate: "2026-07-17T10:23:00.000Z",
+          rawText: "Trail stop XAUUSD by 10 pips",
+        },
+      ];
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442827",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-63442827/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      const db = new Database(databasePath);
+      db.query("UPDATE providers SET provider_config_json = ? WHERE id = ?").run(
+        JSON.stringify({ correlationMode: "shadow" }),
+        providerId,
+      );
+      db.close();
+
+      await app.runTelegramIngestionOnce();
+
+      const verify = new Database(databasePath, { readonly: true });
+      try {
+        const audits = verify
+          .query("SELECT data_json FROM audit_logs WHERE event_type = ?")
+          .all("correlation.shadow") as Array<{ data_json: string }>;
+        const byReply = new Map(
+          audits.map((row) => {
+            const data = JSON.parse(row.data_json) as {
+              replyToMessageId?: string;
+              accounts: Array<{
+                accountId: string;
+                resolved: { status: string; reason?: string; tradeId?: string };
+                agreement: boolean;
+              }>;
+            };
+            return [data.replyToMessageId, data] as const;
+          }),
+        );
+        expect(byReply.get("open")?.accounts[0]?.resolved.status).toBe("MATCHED");
+        expect(byReply.get("open")?.accounts).toHaveLength(2);
+        expect(byReply.get("open")?.accounts[0]?.resolved.tradeId).not.toBe(
+          byReply.get("open")?.accounts[1]?.resolved.tradeId,
+        );
+        expect(byReply.get("update")?.accounts[0]?.resolved.status).toBe("MATCHED");
+        expect(byReply.get("unrelated")?.accounts[0]?.resolved.reason).toBe(
+          "chain-ended-no-origin",
+        );
+        expect(byReply.get("missing")?.accounts[0]?.resolved.reason).toBe("gap-in-graph");
+        expect(byReply.get("cycle-a")?.accounts[0]?.resolved.reason).toBe("cycle");
+        expect(byReply.get("deep-12")?.accounts[0]?.resolved.reason).toBe("chain-too-deep");
+        const noReply = audits
+          .map(
+            (row) =>
+              JSON.parse(row.data_json) as {
+                replyToMessageId?: string;
+                accounts: Array<{ resolved: { method: string; reason?: string } }>;
+              },
+          )
+          .find((data) => !data.replyToMessageId);
+        expect(noReply?.accounts[0]?.resolved).toMatchObject({
+          method: "none",
+          reason: "no-reply-link",
+        });
+      } finally {
+        verify.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("shadow mode is audit-only, remains off by default, and contains shadow failures", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-correlation-shadow-safety-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const messages: TelegramCapturedMessage[] = [
+        {
+          telegramMessageId: "open",
+          messageDate: "2026-07-17T11:00:00.000Z",
+          rawText: "BUY XAUUSD",
+        },
+        {
+          telegramMessageId: "life",
+          replyToMessageId: "open",
+          messageDate: "2026-07-17T11:01:00.000Z",
+          rawText: "Trail stop XAUUSD by 10 pips",
+        },
+      ];
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      const offResult = await app.runTelegramIngestionOnce();
+      expect(offResult.queued).toBe(2);
+      const db = new Database(databasePath);
+      db.query("UPDATE providers SET provider_config_json = ? WHERE id = ?").run(
+        JSON.stringify({ correlationMode: "shadow" }),
+        providerId,
+      );
+      db.query("DELETE FROM parsed_signals WHERE provider_id = ? AND raw_message_id = ?").run(
+        providerId,
+        `raw_${providerId}_life`,
+      );
+      db.close();
+      const result = await app.runTelegramIngestionOnce();
+      expect(result.queued).toBe(1);
+
+      const verify = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          verify
+            .query("SELECT COUNT(*) AS count FROM audit_logs WHERE event_type = ?")
+            .get("correlation.shadow"),
+        ).toEqual({ count: 1 });
+        expect(verify.query("SELECT COUNT(*) AS count FROM queue_items").get()).toEqual({
+          count: 3,
+        });
+        expect(verify.query("SELECT COUNT(*) AS count FROM parsed_signals").get()).toEqual({
+          count: 2,
+        });
+      } finally {
+        verify.close();
+      }
+
+      const failing = new Database(databasePath);
+      failing
+        .query("DELETE FROM parsed_signals WHERE provider_id = ? AND raw_message_id = ?")
+        .run(providerId, `raw_${providerId}_life`);
+      failing.close();
+      const databasePrototype = Database.prototype as unknown as {
+        query: (sql: string) => unknown;
+      };
+      const originalQuery = databasePrototype.query;
+      databasePrototype.query = function (sql: string) {
+        if (sql.includes("SELECT logical_trade_id FROM trade_origins")) {
+          throw new Error("forced shadow resolver failure");
+        }
+        return originalQuery.call(this, sql);
+      };
+      let failureResult: Awaited<ReturnType<typeof app.runTelegramIngestionOnce>>;
+      try {
+        failureResult = await app.runTelegramIngestionOnce();
+      } finally {
+        databasePrototype.query = originalQuery;
+      }
+      expect(failureResult?.parsed).toBe(1);
+      const errorDb = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          errorDb
+            .query("SELECT COUNT(*) AS count FROM audit_logs WHERE event_type = ?")
+            .get("correlation.shadow-error"),
+        ).toEqual({ count: 1 });
+      } finally {
+        errorDb.close();
       }
     } finally {
       await rm(tempDir, { recursive: true, force: true });

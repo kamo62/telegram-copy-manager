@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.31.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this adds shadow-only correlation logging behind a per-provider gate that is off by default and changes nothing that queues or executes.
+
+- Phase 2a signal correlation: per-provider `correlationMode` ("off" | "shadow"); a bounded, account-scoped reply-chain resolver over the Phase 1 alias/origin tables; a pure lifecycle action-vs-state evaluator; and a shadow hook in ingestion that logs `correlation.shadow` (intended lifecycle action next to the legacy matcher) without executing. Errors are contained (`correlation.shadow-error`) so ingestion is never affected.
+
 ## 1.30.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because this fixes VIP Gold lifecycle classification and broadens symbol coverage without changing behaviour for existing correctly-parsed signals.

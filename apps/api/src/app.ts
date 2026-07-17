@@ -1167,6 +1167,58 @@ export function brokerOrderSourceForDealReason(reason: number | undefined): stri
 }
 
 type RawMessageClassification = "entry" | "management" | "noise" | "unknown";
+type CorrelationMode = "off" | "shadow";
+type LifecycleResolution = {
+  method: "reply-link" | "none";
+  status: "MATCHED" | "AMBIGUOUS" | "UNMATCHED";
+  tradeId?: string;
+  reason?: string;
+};
+type LifecycleActionState = {
+  verdict: "act" | "cancel" | "noop" | "hold";
+  reason: string;
+};
+
+export function evaluateLifecycleActionState(
+  commandType: string,
+  tradeStatus: LogicalTrade["status"] | undefined,
+  opts: { closeOnProviderTp?: boolean } = {},
+): LifecycleActionState {
+  const status = tradeStatus === "PLANNED" ? "PENDING" : tradeStatus;
+  const active = status === "OPEN" || status === "PENDING";
+  if (!status) return { verdict: "hold", reason: "missing-trade" };
+  if (status === "CLOSED" || status === "CANCELLED" || status === "ARCHIVED") {
+    return { verdict: "noop", reason: "trade-inactive" };
+  }
+  if (commandType === "CANCEL_PENDING") {
+    if (status === "PENDING") return { verdict: "act", reason: "cancel-pending" };
+    if (status === "OPEN") return { verdict: "hold", reason: "cancel-on-open" };
+    return { verdict: "hold", reason: "cancel-incompatible-state" };
+  }
+  if (commandType === "CLOSE_TRADE" || commandType === "CLOSE_PARTIAL") {
+    if (status === "OPEN") return { verdict: "act", reason: "close-open" };
+    if (status === "PENDING") return { verdict: "cancel", reason: "close-pending" };
+    return { verdict: "hold", reason: "close-incompatible-state" };
+  }
+  if (
+    commandType === "MODIFY_SL" ||
+    commandType === "MODIFY_TP" ||
+    commandType === "MOVE_SL_TO_BE" ||
+    commandType === "TRAILING_STOP"
+  ) {
+    return active
+      ? { verdict: "act", reason: "modify-active" }
+      : { verdict: "hold", reason: "modify-incompatible-state" };
+  }
+  if (commandType === "MARK_TP_HIT") {
+    if (!active) return { verdict: "hold", reason: "tp-hit-incompatible-state" };
+    return {
+      verdict: "act",
+      reason: opts.closeOnProviderTp ? "tp-hit-close-opt-in" : "tp-hit-record-only",
+    };
+  }
+  return { verdict: "hold", reason: "unsupported-lifecycle-command" };
+}
 
 /**
  * A minimal real-time delta pushed over the SSE stream. `type` names the
@@ -1931,6 +1983,129 @@ class AppStore {
     return Number.isFinite(value) && value >= 0 ? value : 30;
   }
 
+  private correlationMode(providerId: string): CorrelationMode {
+    const row = this.db
+      .query("SELECT provider_config_json FROM providers WHERE id = ?")
+      .get(providerId) as Row | null;
+    if (!row) return "off";
+    const config = parseJson<{ correlationMode?: string }>(String(row.provider_config_json)) ?? {};
+    return config.correlationMode === "shadow" ? "shadow" : "off";
+  }
+
+  private resolveLifecycleTarget(
+    providerId: string,
+    accountId: string,
+    lifecycleRawMessageId: string,
+    command: ParsedSignal,
+  ): LifecycleResolution {
+    void command;
+    const lifecycle = this.db
+      .query("SELECT reply_to_message_id FROM raw_messages WHERE id = ? AND provider_id = ?")
+      .get(lifecycleRawMessageId, providerId) as Row | null;
+    const replyToMessageId = lifecycle?.reply_to_message_id
+      ? String(lifecycle.reply_to_message_id)
+      : "";
+    if (!replyToMessageId) {
+      return { method: "none", status: "UNMATCHED", reason: "no-reply-link" };
+    }
+
+    const visited = new Set<string>();
+    let telegramMessageId = replyToMessageId;
+    for (let depth = 0; depth < 12; depth += 1) {
+      if (visited.has(telegramMessageId)) {
+        return { method: "reply-link", status: "UNMATCHED", reason: "cycle" };
+      }
+      visited.add(telegramMessageId);
+      const origins = this.db
+        .query(
+          "SELECT logical_trade_id FROM trade_origins WHERE provider_id = ? AND account_id = ? AND telegram_message_id = ?",
+        )
+        .all(providerId, accountId, telegramMessageId) as Row[];
+      const tradeIds = [...new Set(origins.map((origin) => String(origin.logical_trade_id)))];
+      if (tradeIds.length > 1) {
+        return { method: "reply-link", status: "AMBIGUOUS", reason: "multiple-origins" };
+      }
+      if (tradeIds.length === 1) {
+        return { method: "reply-link", status: "MATCHED", tradeId: tradeIds[0] };
+      }
+      const alias = this.db
+        .query(
+          `SELECT raw_messages.reply_to_message_id
+           FROM raw_message_aliases
+           JOIN raw_messages ON raw_messages.id = raw_message_aliases.raw_message_id
+           WHERE raw_message_aliases.provider_id = ?
+             AND raw_message_aliases.telegram_message_id = ?
+             AND raw_messages.provider_id = ?`,
+        )
+        .get(providerId, telegramMessageId, providerId) as Row | null;
+      if (!alias) {
+        return { method: "reply-link", status: "UNMATCHED", reason: "gap-in-graph" };
+      }
+      if (!alias.reply_to_message_id) {
+        return { method: "reply-link", status: "UNMATCHED", reason: "chain-ended-no-origin" };
+      }
+      telegramMessageId = String(alias.reply_to_message_id);
+    }
+    return { method: "reply-link", status: "UNMATCHED", reason: "chain-too-deep" };
+  }
+
+  private shadowLifecycleCorrelation(
+    providerId: string,
+    parsedSignalId: string,
+    signal: ParsedSignal,
+  ) {
+    const raw = this.db
+      .query(
+        `SELECT parsed_signals.raw_message_id, raw_messages.reply_to_message_id
+         FROM parsed_signals
+         JOIN raw_messages ON raw_messages.id = parsed_signals.raw_message_id
+         WHERE parsed_signals.id = ? AND parsed_signals.provider_id = ?`,
+      )
+      .get(parsedSignalId, providerId) as Row | null;
+    if (!raw?.raw_message_id) throw new Error("Lifecycle parsed signal has no raw message");
+    const targetAccountIds = this.targetAccountIdsForProvider(
+      providerId,
+      signal.accountId ?? this.defaultParserAccountId(providerId),
+    );
+    const settings = this.appSettings();
+    const defaultTakeProfit = { value: settings.defaultTakeProfitPips, unit: "PIPS" as const };
+    const accounts = targetAccountIds.map((accountId) => {
+      const config = this.providerConfig(providerId, accountId);
+      const targetSignal = applyProviderExecutionConfig(
+        accountId === signal.accountId
+          ? signal
+          : this.reparseSignalForAccount(signal, providerId, accountId),
+        config,
+        { defaultTakeProfit },
+      );
+      const legacy = matchLifecycleCommandToTrade(
+        targetSignal,
+        this.logicalTrades().filter((trade) => trade.accountId === accountId),
+      );
+      const resolved = this.resolveLifecycleTarget(
+        providerId,
+        accountId,
+        String(raw.raw_message_id),
+        targetSignal,
+      );
+      const resolvedTrade = resolved.tradeId ? this.logicalTrade(resolved.tradeId) : undefined;
+      return {
+        accountId,
+        legacy,
+        resolved,
+        actionState: evaluateLifecycleActionState(targetSignal.commandType, resolvedTrade?.status),
+        agreement: resolved.tradeId === legacy.tradeId,
+      };
+    });
+    this.audit("correlation.shadow", "info", "Lifecycle correlation shadow result", {
+      providerId,
+      parsedSignalId,
+      commandType: signal.commandType,
+      replyToMessageId: raw.reply_to_message_id ? String(raw.reply_to_message_id) : undefined,
+      accounts,
+    });
+  }
+
   captureMessages(providerId: string, messages: TelegramCapturedMessage[]) {
     const before = this.rawMessageCount(providerId);
     // Correlate same-sender follow-up fragments into their directional anchor so
@@ -2077,6 +2252,24 @@ class AppStore {
       result.parsed += parsed.length;
       for (const item of parsed) {
         if (item.reviewRequired) result.reviewRequired += 1;
+        if (
+          item.result.commandType !== "OPEN_TRADE" &&
+          item.result.commandType !== "NO_SIGNAL" &&
+          item.result.commandType !== "TRADE_SETUP"
+        ) {
+          try {
+            if (this.correlationMode(provider.id) === "shadow") {
+              this.shadowLifecycleCorrelation(provider.id, item.parsedSignalId, item.result);
+            }
+          } catch (error) {
+            this.audit("correlation.shadow-error", "error", "Lifecycle correlation shadow failed", {
+              providerId: provider.id,
+              parsedSignalId: item.parsedSignalId,
+              commandType: item.result.commandType,
+              error: error instanceof Error ? error.message : "Unknown correlation shadow error",
+            });
+          }
+        }
         if (!isAutoQueueableIngestionCommand(item.result.commandType) || item.reviewRequired) {
           continue;
         }
