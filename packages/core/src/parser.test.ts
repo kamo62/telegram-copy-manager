@@ -1040,3 +1040,25 @@ describe("stock index symbol recognition", () => {
     );
   });
 });
+
+describe("symbol not adjacent to the direction word", () => {
+  test("extracts a ticker from its own line / tag / slash pair", () => {
+    const cases: Array<[string, string]> = [
+      ["XAUUSD (ELVIS)\nBuy limit @ 4140\nSL 4110\nTP 4170", "XAUUSD"],
+      ["Nas100/US100 (ELVIS)\nBuy limit @ 29000\nSL 28750\nTP 29250", "NAS100"],
+      ["NZDUSD (ELVIS)\nBuy limit @ 0.56592\nTP 0.56995\nSL 0.56175", "NZDUSD"],
+      ["XAUUSD/GOLD\nBuy limit @4036\nTP 4066\nSL 4000", "XAUUSD"],
+    ];
+    for (const [text, sym] of cases) {
+      expect(parseSignalText(text, context)).toMatchObject({
+        commandType: "OPEN_TRADE",
+        canonicalSymbol: sym,
+      });
+    }
+  });
+
+  test("does not treat commentary words as tickers", () => {
+    const result = parseSignalText("BUY OPPORTUNITY 4050\nSL 4040\nTP 4070", context);
+    expect(result.canonicalSymbol).not.toBe("OPPORTUNITY");
+  });
+});

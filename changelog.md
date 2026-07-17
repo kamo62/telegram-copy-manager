@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.32.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this recovers symbols the parser previously missed without changing behaviour for signals that already resolved.
+
+- Extract a recognised ticker even when it is not adjacent to the direction word: on its own line, in a "SYM/SYM" pair, or tagged like "XAUUSD (ELVIS)". The scan is guarded to real signals and takes the earliest occurrence, so noise and locked/default providers are unaffected. Recovered ~116 missed symbols in one multi-symbol channel's history alone.
+- Excluded common commentary words (OPPORTUNITY, POSITIONS, FOLLOW, EMOTION, OUTLOOK) from being mis-read as tickers.
+
 ## 1.31.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because this adds shadow-only correlation logging behind a per-provider gate that is off by default and changes nothing that queues or executes.

@@ -341,6 +341,12 @@ const COMMAND_ALIASES = new Set([
   "CLOSED",
   "ORDER",
   "POSITION",
+  "POSITIONS",
+  "OPPORTUNITY",
+  "OPPORTUNITIES",
+  "FOLLOW",
+  "EMOTION",
+  "OUTLOOK",
 ]);
 
 export function normalizeSymbolText(symbol: string): string {
@@ -1284,7 +1290,31 @@ function extractRawSymbol(
   }
 
   if (context.providerId && commandType !== "NO_SIGNAL") {
-    return context.providerDefaultSymbols?.[context.providerId];
+    const providerDefault = context.providerDefaultSymbols?.[context.providerId];
+    if (providerDefault) return providerDefault;
+  }
+
+  // Recognised ticker that is not adjacent to the direction word: on its own line,
+  // in a "SYM/SYM" pair, or tagged like "XAUUSD (ELVIS)". Scan the known symbols and
+  // aliases and take the earliest occurrence. "/" counts as a boundary so
+  // "NAS100/US100" and "XAUUSD/GOLD" resolve to their first ticker. Guarded to real
+  // signals so noise and locked/default providers are unaffected.
+  if (commandType !== "NO_SIGNAL") {
+    const scanTargets = [...DEFAULT_CANONICAL_SYMBOLS, ...aliasKeys].sort(
+      (a, b) => b.length - a.length,
+    );
+    let earliest: { sym: string; idx: number } | undefined;
+    for (const symbol of scanTargets) {
+      if (COMMAND_ALIASES.has(symbol.toUpperCase())) continue;
+      const match = text.match(
+        new RegExp(`(^|[^A-Z0-9])(${escapeRegExp(symbol)})(?=$|[^A-Z0-9])`, "i"),
+      );
+      if (match?.index !== undefined && match[2]) {
+        const idx = match.index + match[1].length;
+        if (!earliest || idx < earliest.idx) earliest = { sym: match[2], idx };
+      }
+    }
+    if (earliest) return earliest.sym;
   }
 
   return undefined;
