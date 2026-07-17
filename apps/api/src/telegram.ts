@@ -16,6 +16,7 @@ export interface TelegramDialog {
 
 export interface TelegramCapturedMessage {
   telegramMessageId: string;
+  replyToMessageId?: string;
   messageDate: string;
   rawText: string;
   quotedText?: string;
@@ -204,6 +205,7 @@ interface GramjsDialog {
 
 interface GramjsMessage {
   id?: string | number | bigint;
+  replyTo?: { replyToMsgId?: string | number | bigint };
   date?: number;
   message?: string;
   getReplyMessage?: () => Promise<GramjsMessage | undefined>;
@@ -378,6 +380,10 @@ class GramjsTelegramAdapter implements TelegramAdapter {
       const quotedText = String(quoted?.message ?? "").trim();
       messages.push({
         telegramMessageId: String(message.id),
+        replyToMessageId:
+          message.replyTo?.replyToMsgId === undefined
+            ? undefined
+            : String(message.replyTo.replyToMsgId),
         messageDate,
         rawText,
         quotedText: quotedText || undefined,

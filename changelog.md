@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.27.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this adds backward-compatible, forward-only signal-correlation persistence without changing parsing, queueing, or execution behaviour.
+
+- Captured Telegram reply target ids and persisted them with raw messages.
+- Added raw-message aliases for every folded capture constituent and provider/account-scoped indexed trade-origin mappings.
+- Added migration and persistence coverage for reply links, aliases, and trade origins.
+
 ## 1.26.0 - 2026-07-15 (Minor)
 
 Release impact: Minor because this adds backward-compatible parser inference and queue dedup for single-symbol providers without changing MT5 or public API contracts.

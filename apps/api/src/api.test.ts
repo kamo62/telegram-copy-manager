@@ -9963,3 +9963,191 @@ describe("Telegram TC API", () => {
     expect(recent.provider.error).toBe("Telegram unavailable");
   });
 });
+
+describe("signal correlation Phase 1 persistence", () => {
+  test("migrates reply correlation storage idempotently on fresh and legacy databases", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-signal-correlation-"));
+    const legacyPath = join(tempDir, "legacy.db");
+    const freshPath = join(tempDir, "fresh.db");
+    try {
+      const legacy = new Database(legacyPath);
+      legacy.run(`
+        CREATE TABLE raw_messages (
+          id TEXT PRIMARY KEY,
+          provider_id TEXT NOT NULL,
+          telegram_message_id TEXT NOT NULL,
+          message_date TEXT NOT NULL,
+          raw_text TEXT NOT NULL,
+          fingerprint TEXT NOT NULL,
+          classification TEXT NOT NULL
+        )
+      `);
+      legacy.close();
+
+      for (const databasePath of [legacyPath, freshPath]) {
+        createApi({ databasePath, seedDemoData: false, telegramPollingEnabled: false });
+        createApi({ databasePath, seedDemoData: false, telegramPollingEnabled: false });
+        const db = new Database(databasePath, { readonly: true });
+        try {
+          const columns = db.query("PRAGMA table_info(raw_messages)").all() as Array<{
+            name: string;
+          }>;
+          expect(columns.filter((column) => column.name === "reply_to_message_id")).toHaveLength(1);
+          const tables = db
+            .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)")
+            .all("raw_message_aliases", "trade_origins") as Array<{ name: string }>;
+          expect(tables.map((table) => table.name).sort()).toEqual([
+            "raw_message_aliases",
+            "trade_origins",
+          ]);
+          const indexes = db
+            .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)")
+            .all(
+              "idx_raw_message_aliases_provider_telegram",
+              "idx_trade_origins_provider_account_telegram",
+            ) as Array<{ name: string }>;
+          expect(indexes.map((index) => index.name).sort()).toEqual([
+            "idx_raw_message_aliases_provider_telegram",
+            "idx_trade_origins_provider_account_telegram",
+          ]);
+        } finally {
+          db.close();
+        }
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("aliases every correlated constituent and each standalone raw message", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-signal-aliases-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter([
+          {
+            telegramMessageId: "anchor",
+            replyToMessageId: "opening-message",
+            messageDate: "2026-07-17T10:00:00.000Z",
+            rawText: "BUY XAUUSD",
+          },
+          {
+            telegramMessageId: "folded",
+            messageDate: "2026-07-17T10:00:05.000Z",
+            rawText: "SL 2290 TP 2320",
+          },
+          {
+            telegramMessageId: "standalone",
+            messageDate: "2026-07-17T10:10:00.000Z",
+            rawText: "SELL XAUUSD",
+          },
+        ]),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.runTelegramIngestionOnce();
+
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const aliases = db
+          .query(
+            "SELECT telegram_message_id, raw_message_id FROM raw_message_aliases WHERE provider_id = ? ORDER BY telegram_message_id",
+          )
+          .all(providerId) as Array<{ telegram_message_id: string; raw_message_id: string }>;
+        expect(aliases).toEqual([
+          { telegram_message_id: "anchor", raw_message_id: `raw_${providerId}_anchor` },
+          { telegram_message_id: "folded", raw_message_id: `raw_${providerId}_anchor` },
+          { telegram_message_id: "standalone", raw_message_id: `raw_${providerId}_standalone` },
+        ]);
+        expect(
+          db
+            .query("SELECT reply_to_message_id FROM raw_messages WHERE id = ?")
+            .get(`raw_${providerId}_anchor`),
+        ).toEqual({ reply_to_message_id: "opening-message" });
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("maps Telegram trade origins by provider and account while skipping manual origins", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-trade-origins-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter([
+          {
+            telegramMessageId: "opening-telegram-id",
+            messageDate: "2026-07-17T10:00:00.000Z",
+            rawText: "BUY XAUUSD\nSL 2290\nTP 2320",
+          },
+        ]),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      const imported = await app.request(`/api/providers/${providerId}/import-messages`, {
+        method: "POST",
+        body: JSON.stringify({ limit: 1 }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(imported.status).toBe(200);
+      const parsed = await json<{ parsed: Array<{ parsedSignalId: string }> }>(
+        await app.request(`/api/providers/${providerId}/parse-recent?limit=1`, { method: "POST" }),
+      );
+      const approved = await json<{ logicalTradeIds: string[] }>(
+        await app.request(`/api/signals/${parsed.parsed[0]!.parsedSignalId}/approve`, {
+          method: "POST",
+        }),
+      );
+
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const origin = db
+          .query(
+            "SELECT logical_trade_id FROM trade_origins WHERE provider_id = ? AND account_id = ? AND telegram_message_id = ?",
+          )
+          .get(providerId, "mt5-63442826", "opening-telegram-id") as {
+          logical_trade_id: string;
+        } | null;
+        expect(origin?.logical_trade_id).toBe(approved.logicalTradeIds[0]);
+      } finally {
+        db.close();
+      }
+
+      await app.request("/api/signals/manual", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          providerId,
+          direction: "SELL",
+          orderType: "MARKET",
+          brokerSymbol: "XAUUSD",
+          stopLoss: 2400,
+          takeProfits: [{ price: 2300 }],
+          volume: 0.01,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const verify = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          verify
+            .query(
+              "SELECT COUNT(*) AS count FROM trade_origins WHERE telegram_message_id = 'manual'",
+            )
+            .get(),
+        ).toEqual({ count: 0 });
+      } finally {
+        verify.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});

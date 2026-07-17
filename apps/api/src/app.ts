@@ -1954,14 +1954,15 @@ class AppStore {
       const parsedSignals = parseSignalTexts(parserText, context);
       this.db
         .query(
-          `INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO NOTHING`,
         )
         .run(
           `raw_${providerId}_${group.telegramMessageId}`,
           providerId,
           group.telegramMessageId,
+          group.replyToMessageId ?? null,
           group.messageDate,
           parserText,
           parsed.fingerprint,
@@ -1969,6 +1970,14 @@ class AppStore {
             ? "entry"
             : classifyParsedCommand(parsed.commandType),
         );
+      const rawMessageId = `raw_${providerId}_${group.telegramMessageId}`;
+      for (const telegramMessageId of group.correlatedMessageIds) {
+        this.db
+          .query(
+            "INSERT INTO raw_message_aliases (provider_id, telegram_message_id, raw_message_id) VALUES (?, ?, ?) ON CONFLICT(provider_id, telegram_message_id) DO NOTHING",
+          )
+          .run(providerId, telegramMessageId, rawMessageId);
+      }
     }
     const after = this.rawMessageCount(providerId);
     if (messages.length > 0) {
@@ -2567,23 +2576,30 @@ class AppStore {
   parseProviderMessage(providerId: string, rawText: string, accountId?: string) {
     const targetAccountId = accountId ?? this.defaultParserAccountId(providerId);
     const rawMessageId = `raw_${nanoid(10)}`;
+    const telegramMessageId = `manual-${Date.now()}`;
     const now = new Date().toISOString();
     const context = this.parserContext(providerId, targetAccountId);
     const firstResult = parseSignalText(rawText, context);
     const results = parseSignalTexts(rawText, context);
     this.db
       .query(
-        "INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         rawMessageId,
         providerId,
-        `manual-${Date.now()}`,
+        telegramMessageId,
+        null,
         now,
         rawText,
         firstResult.fingerprint,
         "unknown",
       );
+    this.db
+      .query(
+        "INSERT INTO raw_message_aliases (provider_id, telegram_message_id, raw_message_id) VALUES (?, ?, ?) ON CONFLICT(provider_id, telegram_message_id) DO NOTHING",
+      )
+      .run(providerId, telegramMessageId, rawMessageId);
     const parsedSignals = this.insertParsedSignalRows({
       providerId,
       rawMessageId,
@@ -3128,19 +3144,26 @@ class AppStore {
     let rawMessageId = input.rawMessageId;
     if (!rawMessageId) {
       rawMessageId = `raw_${nanoid(10)}`;
+      const telegramMessageId = `manual-${Date.now()}`;
       this.db
         .query(
-          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           rawMessageId,
           providerId,
-          `manual-${Date.now()}`,
+          telegramMessageId,
+          null,
           now,
           originalText,
           fingerprint,
           "entry",
         );
+      this.db
+        .query(
+          "INSERT INTO raw_message_aliases (provider_id, telegram_message_id, raw_message_id) VALUES (?, ?, ?) ON CONFLICT(provider_id, telegram_message_id) DO NOTHING",
+        )
+        .run(providerId, telegramMessageId, rawMessageId);
     }
     const parsedSignalId = `parse_${nanoid(10)}`;
     this.db
@@ -7677,6 +7700,18 @@ class AppStore {
         classification TEXT NOT NULL
       );
     `);
+    this.ensureColumn("raw_messages", "reply_to_message_id", "TEXT");
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS raw_message_aliases (
+        provider_id TEXT NOT NULL,
+        telegram_message_id TEXT NOT NULL,
+        raw_message_id TEXT NOT NULL,
+        UNIQUE(provider_id, telegram_message_id)
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_raw_message_aliases_provider_telegram ON raw_message_aliases(provider_id, telegram_message_id)",
+    );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS parsed_signals (
         id TEXT PRIMARY KEY,
@@ -7701,6 +7736,18 @@ class AppStore {
     `);
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_logical_trades_account_provider_created ON logical_trades(account_id, provider_id, status, created_at)",
+    );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS trade_origins (
+        provider_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        telegram_message_id TEXT NOT NULL,
+        logical_trade_id TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_trade_origins_provider_account_telegram ON trade_origins(provider_id, account_id, telegram_message_id)",
     );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS queue_items (
@@ -8691,6 +8738,20 @@ class AppStore {
         JSON.stringify(trade),
         trade.openedAt,
       );
+    const telegramMessageId = trade.source?.telegramMessageId;
+    if (telegramMessageId && telegramMessageId !== "manual") {
+      this.db
+        .query(
+          "INSERT INTO trade_origins (provider_id, account_id, telegram_message_id, logical_trade_id, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(logical_trade_id) DO UPDATE SET provider_id = excluded.provider_id, account_id = excluded.account_id, telegram_message_id = excluded.telegram_message_id, created_at = excluded.created_at",
+        )
+        .run(
+          trade.providerId ?? "",
+          trade.accountId ?? "",
+          telegramMessageId,
+          trade.id,
+          trade.openedAt,
+        );
+    }
   }
 
   private insertNonLeasedQueueItem(
