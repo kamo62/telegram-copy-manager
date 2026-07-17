@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.34.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this recovers stop-loss values the parser previously dropped without changing correctly-parsed signals.
+
+- Stop-loss extraction now handles a label with no separator before the price ("SL2286", "STOPLOSS2286") and the "=" and "S.L" variants, in addition to the existing "SL 2286" / "SL: 2286" / "S/L" forms. Pip annotations stuck to the price ("SL 28750(250pips)") were already tolerated. Signals that genuinely omit a stop still fall back to the provider default stop loss.
+
 ## 1.33.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because the traded-symbols filter is opt-in per provider and off by default; providers with no traded symbols are unaffected.

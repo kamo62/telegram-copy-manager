@@ -1499,10 +1499,12 @@ function expandShortLevel(levelText: string, referencePrice: number): number | u
 }
 
 function extractStopLoss(text: string): { value?: number; conflict: boolean } {
-  const labels = ["STOP[\\s-]*LOSS", "S\\s*\\/\\s*L", "SL"];
+  const labels = ["STOP[\\s-]*LOSS", "S\\s*[./]\\s*L", "SL"];
   const values = labels.flatMap((label) => {
+    // No word boundary after the label: providers write "SL2286" and "STOPLOSS2286"
+    // with no separator, and \b between a letter and a digit never matches.
     const regex = new RegExp(
-      `\\b${label}\\b\\s*(?:[:@]|TO|BELOW|ABOVE)?\\s*(\\d+(?:\\.\\d+)?)`,
+      `\\b${label}\\s*(?:[:@=]|TO|BELOW|ABOVE)?\\s*(\\d+(?:\\.\\d+)?)`,
       "gi",
     );
     return [...text.matchAll(regex)].map((match) => Number(match[1]));

@@ -1062,3 +1062,21 @@ describe("symbol not adjacent to the direction word", () => {
     expect(result.canonicalSymbol).not.toBe("OPPORTUNITY");
   });
 });
+
+describe("stop-loss label variations", () => {
+  test("extracts a stop with no separator between label and price", () => {
+    for (const sl of ["SL2286", "SL:2286", "SL=2286", "STOPLOSS2286", "S.L 2286", "S/L 2286"]) {
+      const result = parseSignalText(`GOLD SELL 2281\n${sl}\nTP 2276`, context);
+      expect(result.stopLoss).toBe(2286);
+    }
+  });
+
+  test("ignores a pip annotation stuck to the stop price", () => {
+    expect(parseSignalText("NAS100 BUY 29000\nSL 28750(250pips)\nTP 29250", context).stopLoss).toBe(
+      28750,
+    );
+    expect(parseSignalText("XAUUSD BUY 4140\nSL 4110 (300 pips)\nTP 4170", context).stopLoss).toBe(
+      4110,
+    );
+  });
+});
