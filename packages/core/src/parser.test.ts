@@ -948,3 +948,27 @@ describe("French vocabulary normalization", () => {
     });
   });
 });
+
+describe("WTI / crude oil recognition", () => {
+  test("classifies a WTI signal as an open trade mapped to USOIL", () => {
+    const result = parseSignalText("WTI SELL 58.05\nSL 58.80\nTP 57.40\nTP 57.00", context);
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "USOIL",
+      entry: { from: 58.05 },
+      stopLoss: 58.8,
+    });
+    expect(result.takeProfits.length).toBeGreaterThan(0);
+  });
+
+  test("recognises the USOIL and CRUDE aliases as the same instrument", () => {
+    for (const raw of ["USOIL", "CRUDE"]) {
+      expect(parseSignalText(`${raw} BUY 59.70\nSL 58.30\nTP 60.50`, context)).toMatchObject({
+        commandType: "OPEN_TRADE",
+        direction: "BUY",
+        canonicalSymbol: "USOIL",
+      });
+    }
+  });
+});

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.29.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this adds WTI crude oil symbol recognition without changing behaviour for existing instruments.
+
+- Added USOIL canonical with WTI/WTIUSD/XTIUSD/CRUDE/OIL aliases and open-trade classification, so crude signals parse as opens mapped to USOIL. Broker symbol mapping for live execution is still per-account configuration.
+
 ## 1.28.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because this extends the parser to recognise French-language signals without changing behaviour for existing English providers.

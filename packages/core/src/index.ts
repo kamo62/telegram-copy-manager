@@ -235,6 +235,7 @@ const DEFAULT_CANONICAL_SYMBOLS = new Set([
   "US30",
   "USDCHF",
   "USDJPY",
+  "USOIL",
   "XAGUSD",
   "XAUUSD",
 ]);
@@ -248,6 +249,12 @@ const BUILT_IN_ALIASES: Record<string, string> = {
   US30: "US30",
   DOW: "DJI30",
   NASDAQ: "NAS100",
+  WTI: "USOIL",
+  WTIUSD: "USOIL",
+  "WTI/USD": "USOIL",
+  XTIUSD: "USOIL",
+  CRUDE: "USOIL",
+  USOIL: "USOIL",
 };
 
 const BROKER_SYMBOL_VARIANTS: Record<string, string[]> = {
@@ -1111,7 +1118,8 @@ function isCloseCommand(upper: string): boolean {
 
 function hasOpenTradeIntent(upper: string): boolean {
   const hasDirection = /\b(BUY|SELL)\b/.test(upper);
-  const hasSymbol = /\b(GOLD|XAUUSD|XAU\/USD|[A-Z]{3}\/?[A-Z]{3})\b/.test(upper);
+  const hasSymbol =
+    /\b(GOLD|XAUUSD|XAU\/USD|WTI|WTIUSD|USOIL|XTIUSD|CRUDE|OIL|[A-Z]{3}\/?[A-Z]{3})\b/.test(upper);
   const hasEntryPlan = /\b(ENTRY|EXECUTION\s+MODEL|EXECUTION\s+PLAN)\b/.test(upper);
   const hasRiskPlan = /\bSL\b|\bSTOP\s*LOSS\b/.test(upper);
   const hasTargetPlan = /\bTP\b|\bTAKE\s*PROFIT\b/.test(upper);
