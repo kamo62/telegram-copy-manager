@@ -972,3 +972,71 @@ describe("WTI / crude oil recognition", () => {
     }
   });
 });
+
+describe("VIP Gold order lifecycle formats", () => {
+  test("classifies a Deleted order as a cancel keyed to its order id, not a new open", () => {
+    const result = parseSignalText("❌ Deleted Buy Stop on XAUUSD\n# 297968962", context);
+    expect(result.commandType).toBe("CANCEL_PENDING");
+    expect(result.canonicalSymbol).toBe("XAUUSD");
+    expect(result.providerOrderId).toBe("297968962");
+    // The order id must never leak into an entry price.
+    expect(result.entry).toBeUndefined();
+  });
+
+  test("still parses a NEW ORDER as an open and captures its order id", () => {
+    const result = parseSignalText(
+      "NEW ORDER - XAUUSD Sell Stop 📉\n# 299490138\n\n----------{ NEW }----------\nEntry: 3989.90 [Lots: 0.01]\nSL:    3995.90\nTP:    3977.90\n---------------------------",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "XAUUSD",
+      entry: { from: 3989.9 },
+      stopLoss: 3995.9,
+      providerOrderId: "299490138",
+    });
+  });
+
+  test("classifies a provider CLOSED report as a close keyed to its order id", () => {
+    const result = parseSignalText(
+      "🟢 CLOSED - XAUUSD Sell 🟢\n# 298696672\n\n--------{ CLOSED }---------\nProfit: 2.01$\nProfit: 0.19%",
+      context,
+    );
+    expect(result.commandType).toBe("CLOSE_TRADE");
+    expect(result.canonicalSymbol).toBe("XAUUSD");
+    expect(result.providerOrderId).toBe("298696672");
+  });
+});
+
+describe("stock index symbol recognition", () => {
+  test("classifies digit-bearing index tickers as open trades", () => {
+    const expectations: Array<[string, string]> = [
+      // the shared test context maps US30 -> DJI30 via globalAliases (alias wins).
+      ["US30 BUY 39000\nSL 38900\nTP 39200", "DJI30"],
+      ["NAS100 SELL 18000\nSL 18100\nTP 17800", "NAS100"],
+      ["US100 BUY 18000\nSL 17900\nTP 18200", "US100"],
+      ["SPX500 SELL 5100\nSL 5130\nTP 5050", "SPX500"],
+      ["GER40 BUY 18500\nSL 18400\nTP 18700", "GER40"],
+      ["UK100 BUY 8100\nSL 8050\nTP 8200", "UK100"],
+    ];
+    for (const [text, sym] of expectations) {
+      expect(parseSignalText(text, context)).toMatchObject({
+        commandType: "OPEN_TRADE",
+        canonicalSymbol: sym,
+      });
+    }
+  });
+
+  test("maps common index aliases to their canonical instrument", () => {
+    expect(parseSignalText("SP500 SELL 5100\nSL 5130\nTP 5050", context).canonicalSymbol).toBe(
+      "SPX500",
+    );
+    expect(parseSignalText("DAX BUY 18500\nSL 18400\nTP 18700", context).canonicalSymbol).toBe(
+      "GER40",
+    );
+    expect(parseSignalText("NASDAQ SELL 18000\nSL 18100\nTP 17800", context).canonicalSymbol).toBe(
+      "NAS100",
+    );
+  });
+});

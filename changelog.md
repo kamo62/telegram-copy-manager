@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.30.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this fixes VIP Gold lifecycle classification and broadens symbol coverage without changing behaviour for existing correctly-parsed signals.
+
+- VIP Gold order lifecycle: "Deleted <side> ... on <symbol> # <id>" now classifies as CANCEL_PENDING (previously misparsed as a new open with the order id read as an entry price), "CLOSED - <symbol> <side>" classifies as CLOSE_TRADE, and the provider order id (# <id>) is captured on the parsed signal for correlation keying.
+- Stock index coverage: US30/US100/NAS100/SPX500/GER40/UK100/JP225 canonicals plus common aliases (SP500, DAX, FTSE, NIKKEI, NDX, USTEC, etc.) and open-trade classification, so index signals parse instead of falling through to NO_SIGNAL.
+
 ## 1.29.0 - 2026-07-17 (Minor)
 
 Release impact: Minor because this adds WTI crude oil symbol recognition without changing behaviour for existing instruments.

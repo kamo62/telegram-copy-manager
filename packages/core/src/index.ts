@@ -124,6 +124,8 @@ export interface ParsedSignal {
   providerId?: string;
   accountId?: string;
   executionMode?: ExecutionMode;
+  /** Provider-side order id (e.g. VIP Gold "# 299490138"), when the message carries one. */
+  providerOrderId?: string;
   fingerprint: string;
 }
 
@@ -233,6 +235,11 @@ const DEFAULT_CANONICAL_SYMBOLS = new Set([
   "NAS100",
   "NZDUSD",
   "US30",
+  "US100",
+  "SPX500",
+  "GER40",
+  "UK100",
+  "JP225",
   "USDCHF",
   "USDJPY",
   "USOIL",
@@ -248,7 +255,31 @@ const BUILT_IN_ALIASES: Record<string, string> = {
   "GBP/USD": "GBPUSD",
   US30: "US30",
   DOW: "DJI30",
+  DJIA: "DJI30",
+  WS30: "DJI30",
   NASDAQ: "NAS100",
+  NAS100: "NAS100",
+  US100: "US100",
+  USTEC: "NAS100",
+  NDX: "NAS100",
+  NASDAQ100: "NAS100",
+  SPX500: "SPX500",
+  SPX: "SPX500",
+  SP500: "SPX500",
+  US500: "SPX500",
+  GER40: "GER40",
+  GER30: "GER40",
+  DE40: "GER40",
+  DE30: "GER40",
+  DAX: "GER40",
+  DAX40: "GER40",
+  UK100: "UK100",
+  FTSE: "UK100",
+  FTSE100: "UK100",
+  JP225: "JP225",
+  JPN225: "JP225",
+  NIKKEI: "JP225",
+  N225: "JP225",
   WTI: "USOIL",
   WTIUSD: "USOIL",
   "WTI/USD": "USOIL",
@@ -305,6 +336,11 @@ const COMMAND_ALIASES = new Set([
   "MOVE",
   "MODIFY",
   "UPDATE",
+  "DELETED",
+  "NEW",
+  "CLOSED",
+  "ORDER",
+  "POSITION",
 ]);
 
 export function normalizeSymbolText(symbol: string): string {
@@ -680,6 +716,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     warnings: [...new Set(warnings)],
     providerId: context.providerId,
     accountId: context.accountId,
+    providerOrderId: text.match(/#\s*(\d{6,})/)?.[1],
     fingerprint: createMessageFingerprint(original),
   };
 }
@@ -1012,6 +1049,19 @@ function detectCommandType(upper: string, matchedPatternIds: string[]): CommandT
     matchedPatternIds.push("setup.conditional-or-multi-scenario");
     return "TRADE_SETUP";
   }
+  // "Deleted <side> <type> on <symbol> # <id>" is a pending-order cancellation,
+  // not a new open. Without this it parses as a BUY/SELL with the order id read
+  // as an entry price. Keyed to the order id downstream via providerOrderId.
+  if (/\bDELETED\s+(?:BUY|SELL)\b/.test(upper)) {
+    matchedPatternIds.push("lifecycle.deleted-cancel");
+    return "CANCEL_PENDING";
+  }
+  // "CLOSED - <symbol> <side>" (with the "{ CLOSED }" block / profit report) is the
+  // provider closing its position. Align by closing our matching trade.
+  if (/\bCLOSED\s*[-–—]\s*[A-Z]{2,}/.test(upper) || /\{\s*CLOSED\s*\}/.test(upper)) {
+    matchedPatternIds.push("lifecycle.provider-closed");
+    return "CLOSE_TRADE";
+  }
   if (/\bTP\b.*\b(NOT\s+(?:REACHED|HIT)|WAIT|MONITOR)\b/.test(upper)) {
     matchedPatternIds.push("noise.tp-not-reached");
     return "NO_SIGNAL";
@@ -1119,7 +1169,9 @@ function isCloseCommand(upper: string): boolean {
 function hasOpenTradeIntent(upper: string): boolean {
   const hasDirection = /\b(BUY|SELL)\b/.test(upper);
   const hasSymbol =
-    /\b(GOLD|XAUUSD|XAU\/USD|WTI|WTIUSD|USOIL|XTIUSD|CRUDE|OIL|[A-Z]{3}\/?[A-Z]{3})\b/.test(upper);
+    /\b(GOLD|XAUUSD|XAU\/USD|WTI|WTIUSD|USOIL|XTIUSD|CRUDE|OIL|US30|US100|US500|NAS100|SPX500|SP500|GER40|GER30|DE40|DE30|UK100|JP225|JPN225|N225|DJI30|DJIA|DOW|DAX|DAX40|NDX|FTSE|FTSE100|NIKKEI|USTEC|NASDAQ|[A-Z]{3}\/?[A-Z]{3})\b/.test(
+      upper,
+    );
   const hasEntryPlan = /\b(ENTRY|EXECUTION\s+MODEL|EXECUTION\s+PLAN)\b/.test(upper);
   const hasRiskPlan = /\bSL\b|\bSTOP\s*LOSS\b/.test(upper);
   const hasTargetPlan = /\bTP\b|\bTAKE\s*PROFIT\b/.test(upper);
@@ -1223,6 +1275,12 @@ function extractRawSymbol(
   const lifecycleSymbol = lifecycle?.[1] ?? lifecycle?.[2];
   if (lifecycleSymbol && !COMMAND_ALIASES.has(lifecycleSymbol.toUpperCase())) {
     return lifecycleSymbol;
+  }
+
+  // "... on XAUUSD" (e.g. VIP Gold "Deleted Buy Stop on XAUUSD").
+  const onSymbol = text.match(/\bON\s+([A-Z]{3}\/?[A-Z]{3}|[A-Z]{6,12})\b/i);
+  if (onSymbol?.[1] && !COMMAND_ALIASES.has(onSymbol[1].toUpperCase())) {
+    return onSymbol[1];
   }
 
   if (context.providerId && commandType !== "NO_SIGNAL") {
