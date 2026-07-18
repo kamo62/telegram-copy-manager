@@ -20,10 +20,12 @@ const defaultLoad = (accountId: string) =>
  */
 export function ExposurePanel({
   accountId,
+  className,
   positions,
   load = defaultLoad,
 }: {
   accountId: string | null;
+  className?: string;
   positions: ExposurePosition[];
   load?: (accountId: string) => Promise<SymbolMeta[]>;
 }) {
@@ -55,31 +57,36 @@ export function ExposurePanel({
   const { totalLots, bySymbol } = computeExposure(positions, pipSizeFor);
 
   return (
-    <section className="exposure-panel" aria-label="Aggregate exposure">
+    <section
+      className={["exposure-panel", className].filter(Boolean).join(" ")}
+      aria-label="Aggregate exposure"
+    >
       <header className="exposure-head">
         <strong>Exposure</strong>
         <span className="exposure-total">{totalLots} lots open</span>
       </header>
-      <table className="exposure-table">
-        <thead>
-          <tr>
-            <th>Symbol</th>
-            <th>Lots</th>
-            <th>SL distance</th>
-            <th>Risk (pip·lots)</th>
-          </tr>
-        </thead>
-        <tbody>
-          {bySymbol.map((row) => (
-            <tr key={row.symbol}>
-              <td>{row.symbol}</td>
-              <td>{row.lots}</td>
-              <td>{row.riskPips > 0 ? `${row.riskPips} pips` : "—"}</td>
-              <td>{row.riskPipLots > 0 ? row.riskPipLots : "—"}</td>
+      <div className="exposure-table-wrap">
+        <table className="exposure-table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Lots</th>
+              <th>SL distance</th>
+              <th>Risk (pip·lots)</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {bySymbol.map((row) => (
+              <tr key={row.symbol}>
+                <td>{row.symbol}</td>
+                <td>{row.lots}</td>
+                <td>{row.riskPips > 0 ? `${row.riskPips} pips` : "—"}</td>
+                <td>{row.riskPipLots > 0 ? row.riskPipLots : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <p className="exposure-note">
         Monetary risk needs the broker's per-symbol tick value; pip·lots is a relative magnitude.
       </p>

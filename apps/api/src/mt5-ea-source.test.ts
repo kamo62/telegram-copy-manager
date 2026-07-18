@@ -5,10 +5,12 @@ const source = readFileSync("mt5/TelegramTC_EA.mq5", "utf8");
 const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as { version?: string };
 
 describe("MT5 Expert Advisor source", () => {
-  test("keeps EA version aligned with the canonical app package version", () => {
+  test("keeps the EA on the same compatible app release line", () => {
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
-    expect(eaVersion).toBe(packageJson.version);
+    // API-only patch releases can advance without changing the deployed EA
+    // protocol; major/minor remains the compatibility boundary.
+    expect(eaVersion?.split(".").slice(0, 2)).toEqual(packageJson.version?.split(".").slice(0, 2));
   });
 
   test("uses timer polling, WebRequest, typed MQL5 trade structures, and retcode reporting", () => {
@@ -47,6 +49,14 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("ACCOUNT_EQUITY");
     expect(source).toContain("ACCOUNT_PROFIT");
     expect(source).toContain('\\"profit\\":%.2f');
+  });
+
+  test("refreshes the guardian heartbeat before polling and refuses opens without a fresh quote", () => {
+    const onTimer = source.match(/void OnTimer\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const ensureSymbol = source.match(/bool EnsureSymbol\(string symbol\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(onTimer.indexOf("SendHeartbeat()")).toBeLessThan(onTimer.indexOf("PollAndExecute()"));
+    expect(ensureSymbol).toContain("no fresh tick after 2s — aborting execution");
+    expect(ensureSymbol).toMatch(/no fresh tick after 2s[\s\S]*return false/);
   });
 
   test("reports external manual history deals so account PnL can realize after close", () => {

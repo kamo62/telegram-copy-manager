@@ -1,8 +1,7 @@
-import { useColorAccents } from "../contexts/ColorAccentsContext";
-import { chartSparklineColor } from "../lib/chartPalette";
+import { downsample } from "../lib/downsample";
+import { DitherSparkline } from "./DitherSparkline";
 import type { GrowthSeries } from "./GrowthChart";
 import { Money } from "./Money";
-import { Sparkline } from "./Sparkline";
 
 /**
  * Default account landing. Deliberately light: the persistent account header
@@ -12,8 +11,8 @@ import { Sparkline } from "./Sparkline";
  * uncluttered.
  */
 export function SummaryPanel({ data, currency }: { data: GrowthSeries; currency?: string }) {
-  const { colorAccents } = useColorAccents();
   const equity = data.growth[1] ?? [];
+  const sparklineEquity = downsample(equity, 96);
   const hasTrend = equity.length >= 2 && Math.min(...equity) !== Math.max(...equity);
   const rising = hasTrend ? (equity[equity.length - 1] ?? 0) >= (equity[0] ?? 0) : true;
 
@@ -37,11 +36,10 @@ export function SummaryPanel({ data, currency }: { data: GrowthSeries; currency?
         </span>
       </header>
       {hasTrend ? (
-        <Sparkline
+        <DitherSparkline
           ariaLabel="Account equity trend"
-          color={chartSparklineColor(colorAccents, rising ? "growth" : "drawdown")}
-          data={equity}
-          height={72}
+          data={sparklineEquity}
+          tone={rising ? "growth" : "drawdown"}
         />
       ) : (
         <p className="summary-panel-empty">

@@ -15,6 +15,10 @@ export function LogsPage({
   onParserTabChange,
   providersLength,
   onParseRecent,
+  parseRecentBusy,
+  parseRecentResults,
+  parserLoading,
+  parserLoadError,
   snapshot,
   fixtureClassifications,
   onClassify,
@@ -27,6 +31,7 @@ export function LogsPage({
   onForcePush,
   aiReviewStatus,
   parserActionStatus,
+  parserActionPending,
   fixtureStatus,
   heldItems,
   onHeldRequeue,
@@ -36,6 +41,16 @@ export function LogsPage({
   onParserTabChange: (tab: string) => void;
   providersLength: number;
   onParseRecent: () => void;
+  parseRecentBusy: boolean;
+  parseRecentResults: Array<{
+    providerId: string;
+    captured: number;
+    inserted: number;
+    parsed: number;
+    error?: string;
+  }>;
+  parserLoading: boolean;
+  parserLoadError: boolean;
   snapshot: DashboardSnapshot;
   fixtureClassifications: Record<string, "entry" | "management" | "noise" | "unknown">;
   onClassify: (
@@ -51,6 +66,7 @@ export function LogsPage({
   onForcePush: (seed?: ManualSignalSeed) => void;
   aiReviewStatus: Record<string, string>;
   parserActionStatus: Record<string, string>;
+  parserActionPending: Record<string, boolean>;
   fixtureStatus: Record<string, string>;
   heldItems: HeldQueueItem[];
   onHeldRequeue: (item: HeldQueueItem, mode: HeldRequeueMode) => Promise<void> | void;
@@ -70,17 +86,33 @@ export function LogsPage({
           <>
             <div className="panel-toolbar">
               <button
-                disabled={providersLength === 0}
+                disabled={providersLength === 0 || parseRecentBusy}
                 onClick={onParseRecent}
                 title="Parse recent provider messages"
                 type="button"
               >
                 <RefreshCw size={13} aria-hidden="true" />
-                Parse recent
+                {parseRecentBusy ? "Parsing…" : "Parse recent"}
               </button>
             </div>
+            {parseRecentResults.length ? (
+              <div className="parse-recent-results">
+                {parseRecentResults.map((result) => (
+                  <span key={result.providerId}>
+                    {result.providerId}: {result.parsed} parsed, {result.inserted} new
+                    {result.error ? ` — ${result.error}` : ""}
+                  </span>
+                ))}
+              </div>
+            ) : null}
             <div className="parser-grid">
-              {snapshot.parserResults.length === 0 ? (
+              {parserLoading ? <p className="load-state">Loading ParseLab…</p> : null}
+              {!parserLoading && parserLoadError ? (
+                <p className="load-state load-state-error">
+                  ParseLab could not be loaded. Retry refresh.
+                </p>
+              ) : null}
+              {!parserLoading && !parserLoadError && snapshot.parserResults.length === 0 ? (
                 <EmptyState
                   body={
                     providersLength === 0
@@ -105,9 +137,11 @@ export function LogsPage({
                     onIgnore={() => onIgnore(result)}
                     onForcePush={onForcePush}
                     aiReview={aiReviewStatus[result.id]}
+                    actionPending={parserActionPending[result.id]}
+                    actionStatus={parserActionStatus[result.id]}
+                    fixtureStatus={fixtureStatus[rawMessageId]}
                     redactedText={redactedFixtureText[rawMessageId] ?? ""}
                     result={result}
-                    status={parserActionStatus[result.id] ?? fixtureStatus[rawMessageId]}
                   />
                 );
               })}

@@ -24,6 +24,7 @@ export function CommandPalette({
   const filtered = commands.filter((command) =>
     command.label.toLowerCase().includes(query.toLowerCase()),
   );
+  const selectedCommand = filtered[selectedIndex];
 
   useEffect(() => {
     if (open) {
@@ -42,11 +43,13 @@ export function CommandPalette({
         return;
       }
       if (event.key === "ArrowDown") {
+        if (filtered.length === 0) return;
         event.preventDefault();
         setSelectedIndex((i) => (i + 1) % filtered.length);
         return;
       }
       if (event.key === "ArrowUp") {
+        if (filtered.length === 0) return;
         event.preventDefault();
         setSelectedIndex((i) => (i - 1 + filtered.length) % filtered.length);
         return;
@@ -80,7 +83,11 @@ export function CommandPalette({
         <div className="command-palette-input">
           <Search size={14} aria-hidden="true" />
           <input
+            aria-activedescendant={
+              selectedCommand ? `command-palette-option-${selectedCommand.id}` : undefined
+            }
             aria-label="Command palette search"
+            aria-controls="command-palette-list"
             onChange={(event) => {
               setQuery(event.target.value);
               setSelectedIndex(0);
@@ -94,19 +101,22 @@ export function CommandPalette({
             <CornerDownLeft size={10} aria-hidden="true" />
           </span>
         </div>
-        <div className="command-list">
+        <div className="command-list" id="command-palette-list" role="listbox">
           {filtered.length === 0 ? (
             <div className="command-empty">No commands match "{query}"</div>
           ) : (
             filtered.map((command, index) => (
               <button
+                aria-selected={index === selectedIndex}
                 className={index === selectedIndex ? "active" : ""}
+                id={`command-palette-option-${command.id}`}
                 key={command.id}
                 onClick={() => {
                   command.action();
                   onClose();
                 }}
                 onMouseEnter={() => setSelectedIndex(index)}
+                role="option"
                 type="button"
               >
                 <span className="command-label">{command.label}</span>

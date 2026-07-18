@@ -15,6 +15,13 @@ const props = {
 };
 
 describe("StatusBar", () => {
+  test("labels the command palette as the narrow-screen menu", () => {
+    const view = render(<StatusBar {...props} lastPollError={false} />);
+    expect(view.getByRole("button", { name: "Open command palette" }).textContent).toContain(
+      "Menu",
+    );
+  });
+
   test("keeps poll failures visible and announced", async () => {
     const view = render(<StatusBar {...props} lastPollError />);
     expect(view.getByRole("img", { name: "Last poll failed" }).className).toContain("error");

@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.21.1"
+#property version   "1.37.1"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -99,15 +99,15 @@ void OnDeinit(const int reason)
 
 void OnTimer()
 {
-   SendSnapshot();
-   ManageTrailingStops();
-   PollAndExecute();
    datetime now = TimeLocal();
    if(LastHeartbeatSentAt == 0 || now - LastHeartbeatSentAt >= MathMax(1, HeartbeatSeconds))
    {
       SendHeartbeat();
       LastHeartbeatSentAt = now;
    }
+   SendSnapshot();
+   ManageTrailingStops();
+   PollAndExecute();
    if(LastHistoryBackfillAt == 0 || now - LastHistoryBackfillAt >= MathMax(1, HistoryBackfillSeconds))
    {
       SendHistoryDeals();
@@ -284,7 +284,7 @@ bool ExecuteOpenTrade(SignalCommand &command)
 {
    if(!EnsureSymbol(command.brokerSymbol))
    {
-      ReportFailure(command.queueItemId, "Symbol is not available in Market Watch", command.brokerSymbol);
+      ReportFailure(command.queueItemId, "Symbol is unavailable or has no fresh tick", command.brokerSymbol);
       return false;
    }
 
@@ -320,9 +320,8 @@ bool ExecuteOpenTrade(SignalCommand &command)
       request.price = MarketReferencePrice(command);
    }
 
-   // Compute defaults against a non-zero price. If the live tick is still
-   // unavailable (rare after EnsureSymbol's wait), fall back to the last
-   // SymbolInfoDouble read so we don't ship the order naked.
+   // EnsureSymbol guarantees a fresh tick, so defaults and market pricing use
+   // a non-zero quote rather than opening an unprotected market position.
    double referencePrice = request.price;
    if(referencePrice <= 0.0)
       referencePrice = MarketReferencePrice(command);
@@ -1352,9 +1351,9 @@ bool EnsureSymbol(string symbol)
          return true;
       Sleep(50);
    }
-   PrintFormat("Telegram TC EnsureSymbol: %s selected but no fresh tick after 2s — proceeding (SL/TP defaults may be missed)",
+   PrintFormat("Telegram TC EnsureSymbol: %s selected but no fresh tick after 2s — aborting execution",
       symbol);
-   return true;
+   return false;
 }
 
 double NormalizeVolume(string symbol, double requested)

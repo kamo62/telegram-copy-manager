@@ -1,3 +1,5 @@
+import { useEffect, useRef } from "react";
+
 export type TabId =
   | "summary"
   | "performance"
@@ -24,8 +26,20 @@ export function WorkspaceTabs({
   value: TabId;
   onChange: (id: TabId) => void;
 }) {
+  const tabsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const active = tabsRef.current?.querySelector<HTMLElement>(".workspace-tab.active");
+    active?.scrollIntoView?.({ block: "nearest", inline: "center" });
+  }, [value]);
+
   return (
-    <div className="workspace-tabs" role="tablist" aria-label="Live workspace sections">
+    <div
+      className="workspace-tabs"
+      ref={tabsRef}
+      role="tablist"
+      aria-label="Live workspace sections"
+    >
       {tabOptions.map((tab) => (
         <button
           aria-controls={`tabpanel-${tab.id}`}

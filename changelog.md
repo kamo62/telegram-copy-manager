@@ -1,5 +1,172 @@
 # Changelog
 
+## 1.37.1 - 2026-07-17 (Patch)
+
+Release impact: Patch because this removes idle UI work and confirmed dead code without changing public contracts.
+
+- Renamed the SSE transport keepalive so idle connections no longer trigger a full dashboard rebuild every 10 seconds, and capped header sparkline inputs with the existing 96-point sampler.
+- Replaced the chart tooltip's animation dependency with native CSS transitions and stopped shipping the root package manifest to the browser.
+- Removed import-graph-confirmed dead web components and helpers, narrowed internal-only core exports, and dropped the unused `zod` dependency.
+
+## 1.37.0 - 2026-07-17 (Minor)
+
+Release impact: Minor. Consolidates the parser template to two modes and folds the shorthand-level parser into the default path behind an opt-in capability; existing providers map to Automatic and behave as before.
+
+- Template modes reduced to Automatic (default) and Aggressive. The old deterministic / kal-vip / kal-vip-extended values normalize to Automatic; the menu drops the KAL VIP names and adds an Aggressive tooltip.
+- Aggressive executes the parser's "guessed" opens (low-confidence and geometry-inferred direction/entry) that Automatic holds for review. Both modes still hold on an unmapped symbol, a missing pending-order level, conflicting stop geometry, and lifecycle commands that cannot be tied to one open trade.
+- The shorthand-level ("ladder") parser is folded into the default path but gated by a per-provider `shorthandLevels` capability (off by default) plus a live reference price, and never runs on quoted replies. Ladder and zone expansions are capped at 5 entries per message.
+
+## 1.36.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this recovers signals that were misclassified as result recaps, without changing genuine recap handling.
+
+- A signal that spells out "Stoploss"/"Take Profit" and annotates a target with pips ("Take Profit : 4037 ( 70pips )") no longer trips the pip-based results-recap filter. Bare pip recaps ("XAUUSD +250 pips") are still ignored. Recovered ~113 signals on the Premium (Gold + Forex) channel; its remaining unresolved signals are symbol-less gold posts that resolve once the provider's traded symbol is set to XAUUSD.
+
+## 1.35.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this recovers FX-cross symbols the parser previously missed without affecting other resolution paths.
+
+- Recognise a currency cross that sits on its own line, away from the direction word (Elliott Wave: "CHFJPY 4H" then "Buy @ ..."). A 6-letter token is only treated as a pair when it is two known ISO currency codes, so commentary words like "SHOULD"/"MISSED" are not mistaken for tickers. Cut this channel's unparsed signals from 188 to 42 (the remainder are results summaries and non-tradeable synthetics).
+
+## 1.34.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this recovers stop-loss values the parser previously dropped without changing correctly-parsed signals.
+
+- Stop-loss extraction now handles a label with no separator before the price ("SL2286", "STOPLOSS2286") and the "=" and "S.L" variants, in addition to the existing "SL 2286" / "SL: 2286" / "S/L" forms. Pip annotations stuck to the price ("SL 28750(250pips)") were already tolerated. Signals that genuinely omit a stop still fall back to the provider default stop loss.
+
+## 1.33.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because the traded-symbols filter is opt-in per provider and off by default; providers with no traded symbols are unaffected.
+
+- Per-provider "traded symbols" (backend): optional `tradedSymbols` list. When set, symbol-less signals fill from the first symbol and open trades whose symbol is not in the list are HELD for review (SYMBOL_NOT_TRADED), never auto-executed; manual approval of an off-list symbol returns 422. Empty/absent = trade everything (unchanged); `lockedSymbol` still works as the fallback when no traded symbols are set.
+- New read-only endpoint `GET /api/providers/:id/detected-symbols` returns the symbols a channel actually posts (with counts) via the connected session without persisting messages, for the config picker.
+
+## 1.32.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this recovers symbols the parser previously missed without changing behaviour for signals that already resolved.
+
+- Extract a recognised ticker even when it is not adjacent to the direction word: on its own line, in a "SYM/SYM" pair, or tagged like "XAUUSD (ELVIS)". The scan is guarded to real signals and takes the earliest occurrence, so noise and locked/default providers are unaffected. Recovered ~116 missed symbols in one multi-symbol channel's history alone.
+- Excluded common commentary words (OPPORTUNITY, POSITIONS, FOLLOW, EMOTION, OUTLOOK) from being mis-read as tickers.
+
+## 1.31.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this adds shadow-only correlation logging behind a per-provider gate that is off by default and changes nothing that queues or executes.
+
+- Phase 2a signal correlation: per-provider `correlationMode` ("off" | "shadow"); a bounded, account-scoped reply-chain resolver over the Phase 1 alias/origin tables; a pure lifecycle action-vs-state evaluator; and a shadow hook in ingestion that logs `correlation.shadow` (intended lifecycle action next to the legacy matcher) without executing. Errors are contained (`correlation.shadow-error`) so ingestion is never affected.
+
+## 1.30.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this fixes VIP Gold lifecycle classification and broadens symbol coverage without changing behaviour for existing correctly-parsed signals.
+
+- VIP Gold order lifecycle: "Deleted <side> ... on <symbol> # <id>" now classifies as CANCEL_PENDING (previously misparsed as a new open with the order id read as an entry price), "CLOSED - <symbol> <side>" classifies as CLOSE_TRADE, and the provider order id (# <id>) is captured on the parsed signal for correlation keying.
+- Stock index coverage: US30/US100/NAS100/SPX500/GER40/UK100/JP225 canonicals plus common aliases (SP500, DAX, FTSE, NIKKEI, NDX, USTEC, etc.) and open-trade classification, so index signals parse instead of falling through to NO_SIGNAL.
+
+## 1.29.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this adds WTI crude oil symbol recognition without changing behaviour for existing instruments.
+
+- Added USOIL canonical with WTI/WTIUSD/XTIUSD/CRUDE/OIL aliases and open-trade classification, so crude signals parse as opens mapped to USOIL. Broker symbol mapping for live execution is still per-account configuration.
+
+## 1.28.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this extends the parser to recognise French-language signals without changing behaviour for existing English providers.
+
+- Added gated French vocabulary normalization: ACHAT/VENTE/VENDRE map to BUY/SELL, French articles and prepositions (LE/L'/MAINTENANT/À) are stripped, and comma decimals convert to points. Only fires when a French buy/sell verb is present, so English text (and every current live provider) parses byte-identically.
+- French market commentary without price levels stays classified as non-signal.
+
+## 1.27.0 - 2026-07-17 (Minor)
+
+Release impact: Minor because this adds backward-compatible, forward-only signal-correlation persistence without changing parsing, queueing, or execution behaviour.
+
+- Captured Telegram reply target ids and persisted them with raw messages.
+- Added raw-message aliases for every folded capture constituent and provider/account-scoped indexed trade-origin mappings.
+- Added migration and persistence coverage for reply links, aliases, and trade origins.
+
+## 1.26.0 - 2026-07-15 (Minor)
+
+Release impact: Minor because this adds backward-compatible parser inference and queue dedup for single-symbol providers without changing MT5 or public API contracts.
+
+- Inferred direction and symbol for directionless signals from providers with an explicitly configured locked symbol: a message carrying an entry zone, stop loss, and take profits promotes to an open trade only when the SL and every TP sit on consistent sides of the entry (the KAL VIP "limits here 4023-22, Sl 4017, Tp 4028/4035/4041" miss).
+- Matched plural "limits"/"stops" order-type keywords; "And limits here" previously fell through to MARKET, which would have filled immediately instead of resting at the zone.
+- Resolved order type for inferred signals from keywords first, then entry versus reference price; no reference price and no keyword routes to operator review, never MARKET.
+- Forced operator review when an inferred signal also references short-level pending stops ("stops for 60" expands to 4060), so both legs reach the operator instead of one being silently dropped.
+- Skipped geometry inference on quoted signal bodies, pips recaps, and restatement wording so forwarded or recapped trades cannot re-open.
+- Deduplicated re-worded open signals at the approval layer by provider, symbol, direction, order type, digits-rounded entry, and stop loss against pending, active, or 24-hour-recent queue items; duplicates land as DUPLICATE queue entries with a 409.
+- Expanded short levels to the nearest hundred block so boundary cases resolve correctly (reference 4005 with "95" gives 3995, not 4095).
+
+## 1.25.1 - 2026-07-14 (Patch)
+
+Release impact: Patch because this fixes Telegram retry behavior, settings data loss, and UI validation/rendering defects without changing MT5 or public API contracts.
+
+- Restored unbounded GramJS reconnect attempts after the prior capped-retry permanent-disconnect incident; retry delay remains capped, and provider ingestion is timeout-bounded and concurrent so Telegram outages cannot serially hold the polling pass.
+- Recorded provider-level timeout/stall state immediately, with operational alerts independent of other providers completing.
+- Reorganized symbol mapping into Global and focused Account tabs while preserving existing mapping payloads and account-rule safety.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.25.1`.
+- Prevented unrelated Settings saves from clearing a configured alert bot token, while making the dashboard report configuration state without returning the token.
+- Rejected invalid manual force-push prices and volumes, removed fabricated equity-chart growth, and hardened empty command-palette navigation.
+
+## 1.25.0 - 2026-07-14 (Minor)
+
+Release impact: Minor because this adds backward-compatible execution-safety behaviour across the API queue and MT5 EA.
+
+- Parsed `STOP LOSS`, `STOPLOSS`, `STOP-LOSS`, and `S/L` as protective stop-loss wording without consuming their price as an entry; standalone pending `STOP` tokens remain supported, and conflicting stop-loss labels require review.
+- Reject duplicate manual force-push retries for exactly 10 seconds using comparable timestamps and provider/raw-message identity, without suppressing later or genuinely distinct signals.
+- Keep Equity Guardian latched while a drawdown is breached or the latest equity heartbeat is stale; automatic guardian-held requeues preserve the original account and logical trade, and skip stale open-trade signals.
+- Ignore client-supplied guardian drawdown values on PATCH, require an entry for pending orders, and retain explicit entries that appear after SL/TP labels.
+- Require the EA to heartbeat before polling and abort execution when no fresh symbol tick arrives, preventing a naked market order.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.25.0`.
+
+## 1.24.0 - 2026-07-14 (Minor)
+
+Release impact: Minor because this adds backward-compatible ParseLab and execution-log diagnostics without changing MT5 execution contracts.
+
+- Surfaced parsed trade fields, parser diagnostics, symbol-resolution details, lifecycle state, held reasons, and full execution-report detail in the operator dashboard.
+- Made Parse recent process newest unparsed messages first and report each provider's capture, parse, and error outcome.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.24.0`.
+- Corrected ParseLab corrective-push account/mode projection, lifecycle state transitions, and action-race handling so operator UI state cannot create or mislabel live queue work.
+- Added the parsed-signal queue lookup index and limited held-reason lookups to visible dashboard rows.
+
+## 1.23.0 - 2026-07-13 (Minor)
+
+Release impact: Minor because this adds a backward-compatible per-account direct provider-symbol-to-broker-symbol mapping.
+
+- Added direct account broker overrides, accurate mapping previews, and broker-inventory dropdown selection for provider symbols that do not have a reusable canonical symbol.
+- Fixed direct override saves and deletes to preserve account safety rules, and made direct resolution obey account include, exclude, and broker-inventory checks.
+- Fixed attribution trade-table column sizing so Opened, Closed, and Realized P/L stay aligned.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.23.0`.
+
+## 1.22.0 - 2026-07-13 (Minor)
+
+Release impact: Minor because this adds a backward-compatible phone/tablet workflow and responsive UI states without changing API, database, or EA protocol contracts.
+
+- Made the operations workspace usable below 768px without an override screen, with command-palette navigation for global pages, linked accounts, and pending slots.
+- Contained workspace tabs and wide tables, kept provider and Telegram actions reachable, compacted secondary account tabs, and moved the Settings save action to a sticky, early position on narrow screens.
+- Fixed linked-account metadata collisions, narrow-screen touch targets, and ZAR/other account currencies on the Performance growth chart axis and tooltip.
+- Stopped non-animated dither charts from repainting sparkles and bloom canvases while idle.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.22.0`.
+
+## 1.21.4 - 2026-07-13 (Patch)
+
+Release impact: Patch — fixes an SSE reconnect loop; no API contract, DB, or EA protocol change; the EA `#property version` is bumped only to stay aligned.
+
+- Fixed the `/api/events` live-update stream being closed mid-connection. `Bun.serve` used the default ~10s idle timeout while the SSE heartbeat was 25s, so idle connections were dropped and the browser's `EventSource` reconnected in a loop (visible in Chrome as repeated `ERR_INCOMPLETE_CHUNKED_ENCODING` and reconnect churn/jank; Safari tolerated the silent reconnects). Set `idleTimeout: 255` and heartbeat every 10s so idle SSE connections stay alive.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.21.4`.
+
+## 1.21.3 - 2026-07-13 (Patch)
+
+Release impact: Patch because this reduces chart rendering and static-asset reload work without changing public contracts.
+
+- Downsampled dithered account chart series while retaining bucket peaks and drawdown lows, and cached content-hashed build assets for one year.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.21.3`.
+
+## 1.21.2 - 2026-07-12 (Patch)
+
+Release impact: Patch because this refines visual chart and operational-status clarity without changing public contracts.
+
+- Replaced the wide Summary trend with a dithered area chart while retaining lightweight SVG strips for repeated KPI and provider cards.
+- Widened the desktop sidebar and made online, offline, and pending account states colour-gated and shape-distinct.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.21.2`.
+
 ## 1.21.1 - 2026-07-12 (Patch)
 
 Release impact: Patch because this fixes visual colour-toggle and status-accessibility regressions without changing public contracts.

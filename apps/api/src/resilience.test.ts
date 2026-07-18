@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createApi } from "./app";
-import { parseConnectionRetries } from "./telegram";
+import { parseConnectionRetries, parseReconnectRetryDelay } from "./telegram";
 
 const json = async <T>(response: Response) => (await response.json()) as T;
 
@@ -76,7 +76,7 @@ async function setupAccountWithQueuedSignal(app: ReturnType<typeof createApi>) {
 }
 
 describe("telegram reconnect resilience helpers", () => {
-  test("parseConnectionRetries restores the gramjs Infinity default when unset or invalid", () => {
+  test("parseConnectionRetries keeps auto-reconnect attempts unbounded by default", () => {
     expect(parseConnectionRetries(undefined)).toBe(Number.POSITIVE_INFINITY);
     expect(parseConnectionRetries("")).toBe(Number.POSITIVE_INFINITY);
     expect(parseConnectionRetries("0")).toBe(Number.POSITIVE_INFINITY);
@@ -85,8 +85,15 @@ describe("telegram reconnect resilience helpers", () => {
   });
 
   test("parseConnectionRetries honours an explicit positive override", () => {
-    expect(parseConnectionRetries("5")).toBe(5);
     expect(parseConnectionRetries("20")).toBe(20);
+    expect(parseConnectionRetries("2")).toBe(2);
+  });
+
+  test("reconnect delay has a ceiling", () => {
+    expect(parseReconnectRetryDelay(undefined)).toBe(2000);
+    expect(parseReconnectRetryDelay("250")).toBe(250);
+    expect(parseReconnectRetryDelay("60000")).toBe(10000);
+    expect(parseReconnectRetryDelay("invalid")).toBe(2000);
   });
 });
 
@@ -188,6 +195,75 @@ describe("manual force-push", () => {
     const pending = dash.signalQueue.find((q) => q.status === "PENDING");
     expect(pending).toBeTruthy();
     expect(pending?.symbol).toBe("GOLD");
+  });
+
+  test("rejects a duplicate manual force-push within the retry window", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegramPollingEnabled: false,
+    });
+    const accountId = await registerAccount(app);
+    const body = {
+      accountId,
+      direction: "BUY",
+      orderType: "MARKET",
+      brokerSymbol: "GOLD",
+      stopLoss: 4100,
+      takeProfits: [{ price: 4200 }],
+      volume: 0.01,
+    };
+    expect(
+      (
+        await app.request("/api/signals/manual", {
+          method: "POST",
+          body: JSON.stringify(body),
+          headers: { "content-type": "application/json" },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await app.request("/api/signals/manual", {
+          method: "POST",
+          body: JSON.stringify(body),
+          headers: { "content-type": "application/json" },
+        })
+      ).status,
+    ).toBe(409);
+    const dashboard = await json<{ signalQueue: unknown[] }>(await app.request("/api/dashboard"));
+    expect(dashboard.signalQueue).toHaveLength(1);
+  });
+
+  test("deduplicates manual force-pushes for 10 seconds by provider and raw-message identity", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegramPollingEnabled: false,
+    });
+    const accountId = await registerAccount(app);
+    const body = {
+      accountId,
+      direction: "BUY" as const,
+      orderType: "MARKET" as const,
+      brokerSymbol: "GOLD",
+      stopLoss: 4100,
+      takeProfits: [{ price: 4200 }],
+      volume: 0.01,
+      providerId: "provider-one",
+      rawMessageId: "message-one",
+    };
+    const push = (input = body) =>
+      app.request("/api/signals/manual", {
+        method: "POST",
+        body: JSON.stringify(input),
+        headers: { "content-type": "application/json" },
+      });
+    expect((await push()).status).toBe(200);
+    expect((await push()).status).toBe(409);
+    expect(
+      (await push({ ...body, providerId: "provider-two", rawMessageId: "message-two" })).status,
+    ).toBe(200);
   });
 
   test("a paused Equity Guardian still blocks a manual push at lease time", async () => {

@@ -1,6 +1,6 @@
 export type Direction = "BUY" | "SELL";
 export type OrderType = "MARKET" | "LIMIT" | "STOP";
-export type ParserMode = "deterministic" | "kal-vip" | "kal-vip-extended";
+export type ParserMode = "automatic" | "aggressive";
 export type CommandType =
   | "NO_SIGNAL"
   | "OPEN_TRADE"
@@ -29,6 +29,7 @@ export type QueueStatus =
 export interface AccountSymbolMapping {
   accountId: string;
   canonicalOverrides?: Record<string, string>;
+  directBrokerOverrides?: Record<string, string>;
   prefix?: string;
   suffix?: string;
   includeSymbols?: string[];
@@ -43,10 +44,15 @@ export interface ParserContext {
   globalAliases?: Record<string, string>;
   providerAliases?: Record<string, Record<string, string>>;
   providerDefaultSymbols?: Record<string, string>;
+  geometryInferenceSymbol?: string;
   referencePrices?: Record<string, number>;
   accountMappings?: Record<string, AccountSymbolMapping>;
   defaultStopLoss?: DistanceInstruction;
   defaultTakeProfit?: DistanceInstruction;
+  /** Per-provider opt-in for terse shorthand-level posts ("41 / 56 / 03" expanded
+   * from a live reference price). Off by default: the grammar is loose enough to
+   * read prose as levels, so it only runs for providers that explicitly enable it. */
+  shorthandLevels?: boolean;
 }
 
 export interface SymbolResolution {
@@ -55,7 +61,9 @@ export interface SymbolResolution {
   brokerSymbol?: string;
   mappingStatus: MappingStatus;
   mappingSource:
+    | "manual"
     | "provider_alias"
+    | "account_direct"
     | "account_override"
     | "global_alias"
     | "broker_exact"
@@ -101,6 +109,7 @@ export interface ParsedSignal {
   canonicalSymbol?: string;
   brokerSymbol?: string;
   mappingStatus: MappingStatus;
+  mappingSource: SymbolResolution["mappingSource"];
   mappingWarnings: string[];
   entry?: PriceZone;
   stopLoss?: number;
@@ -118,6 +127,9 @@ export interface ParsedSignal {
   warnings: string[];
   providerId?: string;
   accountId?: string;
+  executionMode?: ExecutionMode;
+  /** Provider-side order id (e.g. VIP Gold "# 299490138"), when the message carries one. */
+  providerOrderId?: string;
   fingerprint: string;
 }
 
@@ -227,8 +239,14 @@ const DEFAULT_CANONICAL_SYMBOLS = new Set([
   "NAS100",
   "NZDUSD",
   "US30",
+  "US100",
+  "SPX500",
+  "GER40",
+  "UK100",
+  "JP225",
   "USDCHF",
   "USDJPY",
+  "USOIL",
   "XAGUSD",
   "XAUUSD",
 ]);
@@ -241,7 +259,37 @@ const BUILT_IN_ALIASES: Record<string, string> = {
   "GBP/USD": "GBPUSD",
   US30: "US30",
   DOW: "DJI30",
+  DJIA: "DJI30",
+  WS30: "DJI30",
   NASDAQ: "NAS100",
+  NAS100: "NAS100",
+  US100: "US100",
+  USTEC: "NAS100",
+  NDX: "NAS100",
+  NASDAQ100: "NAS100",
+  SPX500: "SPX500",
+  SPX: "SPX500",
+  SP500: "SPX500",
+  US500: "SPX500",
+  GER40: "GER40",
+  GER30: "GER40",
+  DE40: "GER40",
+  DE30: "GER40",
+  DAX: "GER40",
+  DAX40: "GER40",
+  UK100: "UK100",
+  FTSE: "UK100",
+  FTSE100: "UK100",
+  JP225: "JP225",
+  JPN225: "JP225",
+  NIKKEI: "JP225",
+  N225: "JP225",
+  WTI: "USOIL",
+  WTIUSD: "USOIL",
+  "WTI/USD": "USOIL",
+  XTIUSD: "USOIL",
+  CRUDE: "USOIL",
+  USOIL: "USOIL",
 };
 
 const BROKER_SYMBOL_VARIANTS: Record<string, string[]> = {
@@ -292,13 +340,24 @@ const COMMAND_ALIASES = new Set([
   "MOVE",
   "MODIFY",
   "UPDATE",
+  "DELETED",
+  "NEW",
+  "CLOSED",
+  "ORDER",
+  "POSITION",
+  "POSITIONS",
+  "OPPORTUNITY",
+  "OPPORTUNITIES",
+  "FOLLOW",
+  "EMOTION",
+  "OUTLOOK",
 ]);
 
-export function normalizeSymbolText(symbol: string): string {
+function normalizeSymbolText(symbol: string): string {
   return symbol.toUpperCase().replace(/\s+/g, "").replace("-", "").trim();
 }
 
-export function canonicalKey(value: string): string {
+function canonicalKey(value: string): string {
   return value.toUpperCase().trim();
 }
 
@@ -312,6 +371,8 @@ function brokerSymbolKey(value: string): string {
 export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): SymbolResolution {
   const raw = rawSymbol.trim();
   const normalized = normalizeSymbolText(raw);
+  const account = context.accountId ? context.accountMappings?.[context.accountId] : undefined;
+  const directBrokerSymbol = findDirectBrokerOverride(raw, account?.directBrokerOverrides);
   const providerAliases = context.providerId
     ? context.providerAliases?.[context.providerId]
     : undefined;
@@ -321,16 +382,22 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
     ...(context.globalAliases ?? {}),
   };
   const globalMatch = findAliasMatch(raw, builtInOrGlobal);
-  const canonicalSymbol =
-    providerMatch ?? globalMatch ?? canonicalFromBrokerVariant(raw) ?? normalized.replace("/", "");
-  let mappingSource: SymbolResolution["mappingSource"] = providerMatch
-    ? "provider_alias"
-    : globalMatch
-      ? "global_alias"
-      : "fallback";
+  const canonicalSymbol = directBrokerSymbol
+    ? (canonicalFromBrokerVariant(directBrokerSymbol) ?? directBrokerSymbol)
+    : (providerMatch ??
+      globalMatch ??
+      canonicalFromBrokerVariant(raw) ??
+      normalized.replace("/", ""));
+  let mappingSource: SymbolResolution["mappingSource"] = directBrokerSymbol
+    ? "account_direct"
+    : providerMatch
+      ? "provider_alias"
+      : globalMatch
+        ? "global_alias"
+        : "fallback";
   const warnings: string[] = [];
 
-  if (!isRecognizedCanonical(canonicalSymbol)) {
+  if (!directBrokerSymbol && !isRecognizedCanonical(canonicalSymbol)) {
     return {
       rawSymbol: raw,
       canonicalSymbol,
@@ -340,13 +407,15 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
     };
   }
 
-  const account = context.accountId ? context.accountMappings?.[context.accountId] : undefined;
   const availableBrokerSymbols = normalizedSymbolList(account?.availableBrokerSymbols);
-  let brokerSymbol = canonicalSymbol;
-  if (account?.canonicalOverrides?.[canonicalSymbol]) {
+  let brokerSymbol = directBrokerSymbol
+    ? (findAvailableBrokerSymbol([directBrokerSymbol], availableBrokerSymbols) ??
+      directBrokerSymbol)
+    : canonicalSymbol;
+  if (!directBrokerSymbol && account?.canonicalOverrides?.[canonicalSymbol]) {
     brokerSymbol = account.canonicalOverrides[canonicalSymbol];
     mappingSource = "account_override";
-  } else if (availableBrokerSymbols.length) {
+  } else if (!directBrokerSymbol && availableBrokerSymbols.length) {
     const exact = findAvailableBrokerSymbol([canonicalSymbol], availableBrokerSymbols);
     if (exact) {
       brokerSymbol = exact;
@@ -372,7 +441,7 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
         }
       }
     }
-  } else {
+  } else if (!directBrokerSymbol) {
     const prefixSuffix = prefixSuffixCandidates(canonicalSymbol, account)[0];
     if (prefixSuffix) {
       brokerSymbol = prefixSuffix;
@@ -432,6 +501,20 @@ export function resolveSymbol(rawSymbol: string, context: ParserContext = {}): S
   };
 }
 
+function findDirectBrokerOverride(rawSymbol: string, overrides?: Record<string, string>) {
+  if (!overrides) return undefined;
+  const rawKey = canonicalKey(rawSymbol);
+  const normalizedRaw = normalizeSymbolText(rawSymbol);
+  const brokerRaw = brokerSymbolKey(rawSymbol);
+  return Object.entries(overrides).find(([alias]) => {
+    return (
+      canonicalKey(alias) === rawKey ||
+      normalizeSymbolText(alias) === normalizedRaw ||
+      brokerSymbolKey(alias) === brokerRaw
+    );
+  })?.[1];
+}
+
 export function parseSignalText(originalText: string, context: ParserContext = {}): ParsedSignal {
   const original = originalText.replace(/\r\n/g, "\n").trim();
   const candidate = extractSignalCandidate(original);
@@ -440,16 +523,96 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const matchedPatternIds: string[] = [...candidate.matchedPatternIds];
   const warnings: string[] = [];
   const missingFields: string[] = [];
-  const commandType = detectCommandType(upper, matchedPatternIds);
+  let commandType = detectCommandType(upper, matchedPatternIds);
   let direction = detectDirection(upper);
-  const orderType = detectOrderType(upper);
-  const entry = commandType === "OPEN_TRADE" ? extractEntry(text, direction, orderType) : undefined;
-  const stopLoss = extractStopLoss(text);
+  let orderType: OrderType | undefined = detectOrderType(upper);
+  let entry = commandType === "OPEN_TRADE" ? extractEntry(text, direction, orderType) : undefined;
+  const stopLossResult = extractStopLoss(text);
+  const stopLoss = stopLossResult.value;
   const takeProfits = extractTakeProfits(text);
+  let geometryInferred = false;
+  if (
+    commandType === "NO_SIGNAL" &&
+    context.geometryInferenceSymbol &&
+    (!candidate.quotedText || candidate.commentText === text) &&
+    !/Quoted signal:/i.test(text) &&
+    !/\b\d+\s*PIPS?\b/i.test(text) &&
+    !/\b(still valid|as posted|from earlier|reminder|recap|already)\b/i.test(text) &&
+    stopLoss !== undefined &&
+    takeProfits.length > 0
+  ) {
+    const inferredEntry = extractEntry(text, undefined, orderType);
+    const inferredDirection = inferDirectionFromPrices(inferredEntry, stopLoss, takeProfits);
+    const entryValues = inferredEntry
+      ? [inferredEntry.from, ...(inferredEntry.to === undefined ? [] : [inferredEntry.to])]
+      : [];
+    const exitValues = [
+      stopLoss,
+      ...takeProfits.flatMap((target) => (target.price === undefined ? [] : [target.price])),
+    ];
+    if (
+      inferredEntry &&
+      inferredDirection &&
+      entryValues.every((value) => !exitValues.includes(value))
+    ) {
+      commandType = "OPEN_TRADE";
+      direction = inferredDirection;
+      entry = inferredEntry;
+      geometryInferred = true;
+      const noisePattern = matchedPatternIds.indexOf("noise.no-signal");
+      if (noisePattern !== -1) matchedPatternIds.splice(noisePattern, 1);
+      matchedPatternIds.push("open.geometry-inferred");
+
+      const referencePrice = referencePriceForSymbol(context.geometryInferenceSymbol, context);
+      const entryLow = Math.min(entry.from, entry.to ?? entry.from);
+      const entryHigh = Math.max(entry.from, entry.to ?? entry.from);
+      if (/\bLIMITS?\b/.test(upper)) {
+        orderType = "LIMIT";
+      } else if (hasPendingStopToken(upper)) {
+        orderType = "STOP";
+      } else if (referencePrice !== undefined) {
+        if (direction === "BUY") {
+          orderType =
+            entryHigh < referencePrice ? "LIMIT" : entryLow > referencePrice ? "STOP" : undefined;
+        } else {
+          orderType =
+            entryLow > referencePrice ? "LIMIT" : entryHigh < referencePrice ? "STOP" : undefined;
+        }
+      } else {
+        orderType = undefined;
+      }
+
+      const referenceGeometryValid =
+        referencePrice === undefined ||
+        orderType === undefined ||
+        (direction === "BUY" && orderType === "LIMIT" && entryHigh < referencePrice) ||
+        (direction === "BUY" && orderType === "STOP" && entryLow > referencePrice) ||
+        (direction === "SELL" && orderType === "LIMIT" && entryLow > referencePrice) ||
+        (direction === "SELL" && orderType === "STOP" && entryHigh < referencePrice);
+      if (orderType === undefined) {
+        warnings.push("Geometry-inferred order type requires operator review");
+      } else if (!referenceGeometryValid) {
+        warnings.push("Geometry-inferred order type conflicts with the reference price");
+      }
+
+      const pendingStop = text.match(/\bSTOPS?\s+(?:FOR|AT)\s+(\d{1,2})\b/i);
+      if (pendingStop?.[1]) {
+        const expanded =
+          referencePrice === undefined
+            ? undefined
+            : expandShortLevel(pendingStop[1], referencePrice);
+        warnings.push(
+          `Geometry-inferred signal also references pending stops at ${expanded ?? pendingStop[1]}`,
+        );
+      }
+    }
+  }
   const lotSize = commandType === "OPEN_TRADE" ? extractLotSize(text) : undefined;
   const riskPercent = commandType === "OPEN_TRADE" ? extractRiskPercent(text) : undefined;
   direction ??= inferDirectionFromPrices(entry, stopLoss, takeProfits);
-  const rawSymbol = extractRawSymbol(text, context, commandType);
+  const rawSymbol = geometryInferred
+    ? context.geometryInferenceSymbol
+    : extractRawSymbol(text, context, commandType);
   const symbol = rawSymbol
     ? resolveSymbol(rawSymbol, context)
     : {
@@ -463,7 +626,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const partialClose = commandType === "CLOSE_PARTIAL" ? extractPartialClose(upper) : undefined;
   const quotedSignal =
     candidate.quotedText && commandType !== "OPEN_TRADE" && commandType !== "NO_SIGNAL"
-      ? parseSignalText(candidate.quotedText, context)
+      ? parseSignalText(candidate.quotedText, { ...context, geometryInferenceSymbol: undefined })
       : undefined;
   const inheritedSymbol = quotedSignal?.canonicalSymbol ? quotedSignal : undefined;
   const effectiveRawSymbol = rawSymbol ?? inheritedSymbol?.rawSymbol;
@@ -475,6 +638,9 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const effectiveMappingWarnings = rawSymbol
     ? symbol.warnings
     : (inheritedSymbol?.mappingWarnings ?? symbol.warnings);
+  const effectiveMappingSource = rawSymbol
+    ? symbol.mappingSource
+    : (inheritedSymbol?.mappingSource ?? symbol.mappingSource);
   const defaultStopLoss =
     commandType === "OPEN_TRADE" && stopLoss === undefined ? context.defaultStopLoss : undefined;
   const defaultTakeProfit =
@@ -494,11 +660,16 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   if (stopLoss !== undefined) {
     matchedPatternIds.push("risk.stop-loss");
   }
+  if (stopLossResult.conflict) {
+    warnings.push("Conflicting stop-loss values found; using the explicit STOP LOSS value");
+  }
 
   if (commandType === "OPEN_TRADE") {
     if (!direction) missingFields.push("direction");
+    if (geometryInferred && !orderType) missingFields.push("orderType");
     if (!effectiveRawSymbol) missingFields.push("symbol");
     if (effectiveMappingStatus !== "mapped") missingFields.push("brokerSymbol");
+    if ((orderType === "LIMIT" || orderType === "STOP") && !entry) missingFields.push("entry");
     if (stopLoss === undefined && !defaultStopLoss) missingFields.push("stopLoss");
     if (takeProfits.length === 0 && !defaultTakeProfit) missingFields.push("takeProfit");
   } else if (commandType !== "NO_SIGNAL" && !rawSymbol && commandType !== "CLOSE_TRADE") {
@@ -537,6 +708,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     canonicalSymbol: effectiveCanonicalSymbol,
     brokerSymbol: effectiveBrokerSymbol,
     mappingStatus: effectiveMappingStatus,
+    mappingSource: effectiveMappingSource,
     mappingWarnings: effectiveMappingWarnings,
     entry,
     stopLoss,
@@ -554,40 +726,68 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     warnings: [...new Set(warnings)],
     providerId: context.providerId,
     accountId: context.accountId,
+    providerOrderId: text.match(/#\s*(\d{6,})/)?.[1],
     fingerprint: createMessageFingerprint(original),
   };
 }
+
+/** Cap on how many entries one message may expand into (ladder or zone), so a
+ * false positive or an oversized post can never spray unbounded orders. */
+const MAX_ENTRIES_PER_SIGNAL = 5;
 
 export function parseSignalTexts(
   originalText: string,
   context: ParserContext = {},
 ): ParsedSignal[] {
   const candidate = extractSignalCandidate(originalText.replace(/\r\n/g, "\n").trim());
-  if (context.parserMode === "kal-vip-extended") {
-    const extendedSignals = parseKalVipExtendedLevelSignals(originalText, candidate.text, context);
-    if (extendedSignals.length > 0) return extendedSignals;
+
+  // Shorthand ladder levels (e.g. "41 / 56 / 03" expanded from a live reference
+  // price) are part of the default path now, gated by an explicit per-provider
+  // capability that is off by default (the grammar is loose enough to read prose as
+  // levels). Never runs on a quoted reply, and only when a provider default symbol
+  // plus a reference price make the levels resolvable. Runs before the base parse so
+  // a terse level post expands instead of being read as one literal entry, and is
+  // capped so a false positive cannot spray orders.
+  if (
+    context.shorthandLevels &&
+    !candidate.quotedText &&
+    !/Quoted signal:/i.test(candidate.text)
+  ) {
+    const ladder = parseKalVipExtendedLevelSignals(originalText, candidate.text, context);
+    if (ladder.length > 0) return ladder.slice(0, MAX_ENTRIES_PER_SIGNAL);
   }
 
   const base = parseSignalText(originalText, context);
   const prices = extractDirectionalZonePrices(candidate.text);
   if (base.commandType !== "OPEN_TRADE" || prices.length <= 1) return [base];
 
-  return prices.map((price, index) => ({
-    ...base,
-    entry: { from: price },
-    fingerprint: createMessageFingerprint(`${base.originalText}\nzone-entry:${index + 1}:${price}`),
-  }));
+  return prices
+    .slice(0, MAX_ENTRIES_PER_SIGNAL)
+    .map((price, index) => ({
+      ...base,
+      entry: { from: price },
+      fingerprint: createMessageFingerprint(
+        `${base.originalText}\nzone-entry:${index + 1}:${price}`,
+      ),
+    }));
 }
 
-export function shouldRequireManualReview(signal: ParsedSignal): boolean {
+export function shouldRequireManualReview(signal: ParsedSignal, aggressive = false): boolean {
+  // Aggressive mode executes the parser's "guessed" opens (low confidence and
+  // direction/entry inferred from price geometry) instead of holding them. It does
+  // NOT waive the genuine safety holds below: an unmapped symbol, a missing field
+  // (including a pending order with no level), conflicting stop geometry, or a
+  // non-signal all still hold in both modes.
   return (
-    signal.confidence < 0.75 ||
+    (!aggressive && signal.confidence < 0.75) ||
     signal.mappingStatus !== "mapped" ||
     (signal.commandType === "OPEN_TRADE" && signal.missingFields.length > 0) ||
     (signal.commandType !== "OPEN_TRADE" &&
       signal.missingFields.some((field) => field !== "symbol")) ||
     signal.commandType === "TRADE_SETUP" ||
     signal.commandType === "NO_SIGNAL" ||
+    signal.warnings.some((warning) => warning.startsWith("Conflicting stop-loss values")) ||
+    (!aggressive && signal.warnings.some((warning) => warning.startsWith("Geometry-inferred"))) ||
     (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol"))
   );
 }
@@ -771,16 +971,6 @@ function isRecognizedCanonical(symbol: string): boolean {
   return DEFAULT_CANONICAL_SYMBOLS.has(symbol) || /^[A-Z]{6}$/.test(symbol);
 }
 
-/**
- * True when a broker-reported symbol maps to a canonical instrument the parser
- * already understands (a known canonical or a known broker variant). Used to
- * flag genuinely unconfigured EA symbols for operator attention.
- */
-export function isKnownBrokerSymbol(symbol: string): boolean {
-  if (isRecognizedCanonical(canonicalKey(symbol))) return true;
-  return Boolean(canonicalFromBrokerVariant(symbol));
-}
-
 function brokerVariantCandidates(canonicalSymbol: string): string[] {
   return uniqueSymbols([canonicalSymbol, ...(BROKER_SYMBOL_VARIANTS[canonicalSymbol] ?? [])]);
 }
@@ -812,7 +1002,31 @@ function uniqueSymbols(values: string[]) {
   return [...new Set(values.filter(Boolean))];
 }
 
+// Some providers post in French. Map their trading vocabulary onto the English
+// tokens the parser already understands, but only when a French buy/sell verb is
+// actually present, so English text (and every current live provider) parses
+// byte-identically and cannot regress.
+const FRENCH_DIRECTION_RE =
+  /\b(ACHAT|ACHATS|ACHETER|ACH[EÉÈ]TE|ACH[EÉÈ]TENT|VENTE|VENTES|VENDRE|VENDS|VEND|VENDEZ|VENDENT)\b/i;
+
+function normalizeFrenchVocabulary(text: string): string {
+  if (!FRENCH_DIRECTION_RE.test(text)) return text;
+  return text
+    .replace(/\b(ACHAT|ACHATS|ACHETER|ACH[EÉÈ]TE|ACH[EÉÈ]TENT)\b/gi, "BUY")
+    .replace(/\b(VENTE|VENTES|VENDRE|VENDS|VENDEZ|VENDENT|VEND)\b/gi, "SELL")
+    // French writes decimals with a comma; convert only inside a French message.
+    .replace(/(\d),(\d{2,})/g, "$1.$2")
+    // Drop the article/preposition/filler that sits between verb, symbol and price
+    // ("VENDRE L'EURNZD MAINTENANT À 1.99" -> "SELL EURNZD 1.99").
+    .replace(/\bL['’]\s*/gi, " ")
+    .replace(/\b(LES|LE|LA|DES|DU|AUX|AU|MAINTENANT)\b/gi, " ")
+    .replace(/[àÀ]/g, " ")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
 function extractSignalCandidate(text: string) {
+  text = normalizeFrenchVocabulary(text);
   const quoted = text.match(/Quoted signal:\n([\s\S]*?)(?:\n\nComment:\n([\s\S]*))?$/i);
   if (
     quoted?.[1] &&
@@ -860,6 +1074,19 @@ function detectCommandType(upper: string, matchedPatternIds: string[]): CommandT
     matchedPatternIds.push("setup.conditional-or-multi-scenario");
     return "TRADE_SETUP";
   }
+  // "Deleted <side> <type> on <symbol> # <id>" is a pending-order cancellation,
+  // not a new open. Without this it parses as a BUY/SELL with the order id read
+  // as an entry price. Keyed to the order id downstream via providerOrderId.
+  if (/\bDELETED\s+(?:BUY|SELL)\b/.test(upper)) {
+    matchedPatternIds.push("lifecycle.deleted-cancel");
+    return "CANCEL_PENDING";
+  }
+  // "CLOSED - <symbol> <side>" (with the "{ CLOSED }" block / profit report) is the
+  // provider closing its position. Align by closing our matching trade.
+  if (/\bCLOSED\s*[-–—]\s*[A-Z]{2,}/.test(upper) || /\{\s*CLOSED\s*\}/.test(upper)) {
+    matchedPatternIds.push("lifecycle.provider-closed");
+    return "CLOSE_TRADE";
+  }
   if (/\bTP\b.*\b(NOT\s+(?:REACHED|HIT)|WAIT|MONITOR)\b/.test(upper)) {
     matchedPatternIds.push("noise.tp-not-reached");
     return "NO_SIGNAL";
@@ -900,6 +1127,14 @@ function detectCommandType(upper: string, matchedPatternIds: string[]): CommandT
   ) {
     matchedPatternIds.push("lifecycle.modify-tp");
     return "MODIFY_TP";
+  }
+  if (
+    !/\b(BUY|SELL)\b/.test(upper) &&
+    (/\b\d+\s*PIPS?\b/.test(upper) ||
+      /\b(STILL VALID|AS POSTED|FROM EARLIER|REMINDER|RECAP|ALREADY)\b/.test(upper))
+  ) {
+    matchedPatternIds.push("noise.result-update");
+    return "NO_SIGNAL";
   }
   if (hasOpenTradeIntent(upper)) return "OPEN_TRADE";
   matchedPatternIds.push("noise.no-signal");
@@ -958,7 +1193,10 @@ function isCloseCommand(upper: string): boolean {
 
 function hasOpenTradeIntent(upper: string): boolean {
   const hasDirection = /\b(BUY|SELL)\b/.test(upper);
-  const hasSymbol = /\b(GOLD|XAUUSD|XAU\/USD|[A-Z]{3}\/?[A-Z]{3})\b/.test(upper);
+  const hasSymbol =
+    /\b(GOLD|XAUUSD|XAU\/USD|WTI|WTIUSD|USOIL|XTIUSD|CRUDE|OIL|US30|US100|US500|NAS100|SPX500|SP500|GER40|GER30|DE40|DE30|UK100|JP225|JPN225|N225|DJI30|DJIA|DOW|DAX|DAX40|NDX|FTSE|FTSE100|NIKKEI|USTEC|NASDAQ|[A-Z]{3}\/?[A-Z]{3})\b/.test(
+      upper,
+    );
   const hasEntryPlan = /\b(ENTRY|EXECUTION\s+MODEL|EXECUTION\s+PLAN)\b/.test(upper);
   const hasRiskPlan = /\bSL\b|\bSTOP\s*LOSS\b/.test(upper);
   const hasTargetPlan = /\bTP\b|\bTAKE\s*PROFIT\b/.test(upper);
@@ -998,7 +1236,11 @@ function isResultSummary(upper: string): boolean {
     /\b\d+\s*PIPS?\b/.test(upper) &&
     !/\bSL\b/.test(upper) &&
     !/\bTP\b/.test(upper) &&
-    !/\bENTRY\b/.test(upper)
+    !/\bENTRY\b/.test(upper) &&
+    // Spelled-out levels ("Stoploss : 4048", "Take Profit : 4037 ( 70pips )") mean
+    // this is a real signal with a pip annotation, not a bare "+250 pips" recap.
+    !/\bSTOP\s*-?\s*LOSS\b/.test(upper) &&
+    !/\bTAKE\s*-?\s*PROFIT\b/.test(upper)
   );
 }
 
@@ -1013,20 +1255,28 @@ function inferDirectionFromPrices(
   stopLoss?: number,
   takeProfits: TakeProfitTarget[] = [],
 ): Direction | undefined {
-  if (!entry || stopLoss === undefined || !takeProfits[0]?.price) return undefined;
-  const entryMid = entry.to === undefined ? entry.from : (entry.from + entry.to) / 2;
-  const firstTarget = takeProfits[0].price;
-  if (firstTarget > entryMid && stopLoss < entryMid) return "BUY";
-  if (firstTarget < entryMid && stopLoss > entryMid) return "SELL";
+  if (!entry || stopLoss === undefined || takeProfits.length === 0) return undefined;
+  const targets = takeProfits.map((target) => target.price);
+  if (targets.some((target) => target === undefined)) return undefined;
+  const entryLow = Math.min(entry.from, entry.to ?? entry.from);
+  const entryHigh = Math.max(entry.from, entry.to ?? entry.from);
+  if (stopLoss < entryLow && targets.every((target) => target! > entryHigh)) return "BUY";
+  if (stopLoss > entryHigh && targets.every((target) => target! < entryLow)) return "SELL";
   return undefined;
 }
 
 function detectOrderType(upper: string): OrderType {
   if (isDirectionalZoneSignal(upper)) return "LIMIT";
-  if (/\bLIMIT\b/.test(upper)) return "LIMIT";
-  if (/\bSTOP\b/.test(upper)) return "STOP";
-  return "MARKET";
+  if (/\bLIMITS?\b/.test(upper)) return "LIMIT";
+  return hasPendingStopToken(upper) ? "STOP" : "MARKET";
 }
+
+// A 6-letter token made of two known ISO currency codes is an FX pair even when it
+// sits on its own line (Elliott Wave: "CHFJPY 4H" then "Buy @ ..."). Matching the
+// currency set instead of a bare [A-Z]{6} avoids false hits like "SHOULD"/"MISSED".
+const FX_CURRENCY =
+  "USD|EUR|GBP|JPY|CHF|CAD|AUD|NZD|XAU|XAG|ZAR|SGD|HKD|NOK|SEK|DKK|MXN|TRY|CNH|PLN|CZK";
+const FX_PAIR_RE = new RegExp(`\\b(?:${FX_CURRENCY})/?(?:${FX_CURRENCY})\\b`, "i");
 
 function extractRawSymbol(
   text: string,
@@ -1063,8 +1313,42 @@ function extractRawSymbol(
     return lifecycleSymbol;
   }
 
+  // "... on XAUUSD" (e.g. VIP Gold "Deleted Buy Stop on XAUUSD").
+  const onSymbol = text.match(/\bON\s+([A-Z]{3}\/?[A-Z]{3}|[A-Z]{6,12})\b/i);
+  if (onSymbol?.[1] && !COMMAND_ALIASES.has(onSymbol[1].toUpperCase())) {
+    return onSymbol[1];
+  }
+
   if (context.providerId && commandType !== "NO_SIGNAL") {
-    return context.providerDefaultSymbols?.[context.providerId];
+    const providerDefault = context.providerDefaultSymbols?.[context.providerId];
+    if (providerDefault) return providerDefault;
+  }
+
+  // Recognised ticker that is not adjacent to the direction word: on its own line,
+  // in a "SYM/SYM" pair, or tagged like "XAUUSD (ELVIS)". Scan the known symbols and
+  // aliases and take the earliest occurrence. "/" counts as a boundary so
+  // "NAS100/US100" and "XAUUSD/GOLD" resolve to their first ticker. Guarded to real
+  // signals so noise and locked/default providers are unaffected.
+  if (commandType !== "NO_SIGNAL") {
+    const scanTargets = [...DEFAULT_CANONICAL_SYMBOLS, ...aliasKeys].sort(
+      (a, b) => b.length - a.length,
+    );
+    let earliest: { sym: string; idx: number } | undefined;
+    for (const symbol of scanTargets) {
+      if (COMMAND_ALIASES.has(symbol.toUpperCase())) continue;
+      const match = text.match(
+        new RegExp(`(^|[^A-Z0-9])(${escapeRegExp(symbol)})(?=$|[^A-Z0-9])`, "i"),
+      );
+      if (match?.index !== undefined && match[2]) {
+        const idx = match.index + (match[1]?.length ?? 0);
+        if (!earliest || idx < earliest.idx) earliest = { sym: match[2], idx };
+      }
+    }
+    const fxPair = text.match(FX_PAIR_RE);
+    if (fxPair?.index !== undefined && (!earliest || fxPair.index < earliest.idx)) {
+      earliest = { sym: fxPair[0].replace(/\//g, ""), idx: fxPair.index };
+    }
+    if (earliest) return earliest.sym;
   }
 
   return undefined;
@@ -1085,7 +1369,17 @@ function extractEntry(
     return { from: Number(singleEntry[1]) };
   }
 
-  const standaloneZone = text.match(/(?:^|\n)\s*(\d+(?:\.\d+)?)\s*(?:-|TO)\s*(\d+(?:\.\d+)?)/i);
+  const atPrice = text.match(/@\s*(\d+(?:\.\d+)?)/);
+  if (atPrice?.[1]) {
+    return { from: Number(atPrice[1]) };
+  }
+
+  const riskOrTarget = text.search(/\b(?:SL|S\s*\/\s*L|STOP[\s-]*LOSS|TP\d*|TAKE\s+PROFIT)\b/i);
+  const entryText = riskOrTarget === -1 ? text : text.slice(0, riskOrTarget);
+
+  const standaloneZone = entryText.match(
+    /(?:^|\n)\s*(\d+(?:\.\d+)?)\s*(?:-|TO)\s*(\d+(?:\.\d+)?)/i,
+  );
   if (standaloneZone?.[1] && standaloneZone[2]) {
     return {
       from: Number(standaloneZone[1]),
@@ -1093,12 +1387,7 @@ function extractEntry(
     };
   }
 
-  const atPrice = text.match(/@\s*(\d+(?:\.\d+)?)/);
-  if (atPrice?.[1]) {
-    return { from: Number(atPrice[1]) };
-  }
-
-  const orderZone = text.match(
+  const orderZone = entryText.match(
     /\b(?:BUY|SELL)\s+(?:LIMIT|STOP)?\s*(\d+(?:\.\d+)?)\s*(?:-|TO)\s*(\d+(?:\.\d+)?)/i,
   );
   if (orderZone?.[1] && orderZone[2]) {
@@ -1106,13 +1395,15 @@ function extractEntry(
   }
 
   if (!direction) return undefined;
-  const directionLine = text.match(new RegExp(`\\b${direction}\\b[^\\n]*?(\\d+(?:\\.\\d+)?)`, "i"));
+  const directionLine = entryText.match(
+    new RegExp(`\\b${direction}\\b[^\\n]*?(\\d+(?:\\.\\d+)?)`, "i"),
+  );
   if (directionLine?.[1] && !/\bNOW\b/i.test(directionLine[0])) {
     return { from: Number(directionLine[1]) };
   }
 
   if (orderType && orderType !== "MARKET") {
-    const firstPrice = text.match(/\b(\d+(?:\.\d+)?)\b/);
+    const firstPrice = entryText.match(/\b(\d+(?:\.\d+)?)\b/);
     if (firstPrice?.[1]) return { from: Number(firstPrice[1]) };
   }
 
@@ -1232,11 +1523,41 @@ function expandShortLevel(levelText: string, referencePrice: number): number | u
   if (!Number.isFinite(referencePrice) || referencePrice <= 0) return undefined;
   const numeric = Number(levelText);
   if (!Number.isFinite(numeric) || numeric < 0 || numeric > 99) return undefined;
-  return Math.floor(referencePrice / 100) * 100 + numeric;
+  const base = Math.floor(referencePrice / 100) * 100;
+  return [base - 100 + numeric, base + numeric, base + 100 + numeric].reduce(
+    (nearest, candidate) =>
+      Math.abs(candidate - referencePrice) < Math.abs(nearest - referencePrice)
+        ? candidate
+        : nearest,
+  );
 }
 
-function extractStopLoss(text: string): number | undefined {
-  return extractPriceNearToken(text, "SL");
+function extractStopLoss(text: string): { value?: number; conflict: boolean } {
+  const labels = ["STOP[\\s-]*LOSS", "S\\s*[./]\\s*L", "SL"];
+  const values = labels.flatMap((label) => {
+    // No word boundary after the label: providers write "SL2286" and "STOPLOSS2286"
+    // with no separator, and \b between a letter and a digit never matches.
+    const regex = new RegExp(
+      `\\b${label}\\s*(?:[:@=]|TO|BELOW|ABOVE)?\\s*(\\d+(?:\\.\\d+)?)`,
+      "gi",
+    );
+    return [...text.matchAll(regex)].map((match) => Number(match[1]));
+  });
+  const value = values[0];
+  return {
+    value,
+    conflict: value !== undefined && values.some((candidate) => candidate !== value),
+  };
+}
+
+function hasPendingStopToken(text: string): boolean {
+  const stop = /\bSTOPS?\b/g;
+  let match = stop.exec(text);
+  while (match) {
+    if (!/^\s*-?\s*LOSS\b/.test(text.slice(match.index + match[0].length))) return true;
+    match = stop.exec(text);
+  }
+  return false;
 }
 
 function normalizeZoneEnd(start: string, end: string): number {

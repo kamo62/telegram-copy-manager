@@ -238,29 +238,6 @@ export function validateProviderConfigDraft(draft: ProviderConfigDraft): {
   return { valid: errors.length === 0, errors };
 }
 
-/** Best-effort migration of legacy freeform strings into the structured shape. */
-export function parseLegacyStrategy(value: string): TpStrategy {
-  const trimmed = value.trim().toLowerCase();
-  if (!trimmed || trimmed.includes("unchanged") || trimmed.includes("no change"))
-    return { kind: "no-change" };
-  const tpMatch = trimmed.match(/tp(\d+).*?([+-]?\s*\d+)\s*pips?/);
-  if (tpMatch) {
-    return {
-      kind: "set-sl-to-tp",
-      tpLeg: Number(tpMatch[1]) || 1,
-      offsetPips: Math.abs(Number(tpMatch[2]?.replace(/\s+/g, "") ?? 0)) || 0,
-    };
-  }
-  if (trimmed.includes("entry")) {
-    const pipsMatch = trimmed.match(/([+-]?\s*\d+)\s*pips?/);
-    return {
-      kind: "set-sl-to-entry",
-      offsetPips: pipsMatch ? Math.abs(Number(pipsMatch[1]?.replace(/\s+/g, "") ?? 0)) || 0 : 0,
-    };
-  }
-  return { kind: "no-change" };
-}
-
 export interface ProviderConfigTestResult {
   ok: boolean;
   summary: string;
@@ -513,33 +490,33 @@ export function ProviderConfigModal({
           }}
           ref={formRef}
         >
-          <section className="config-section">
-            <h3 className="config-section-title">Message template</h3>
-            <div className="config-row">
-              <label className="config-field config-field-grow">
-                <span className="config-label">Template</span>
-                <select
-                  aria-label={`Parser mode for ${provider.title}`}
-                  defaultValue={provider.parserMode}
-                  name="parserMode"
+          {!accountLabel ? (
+            <section className="config-section">
+              <h3 className="config-section-title">Message template</h3>
+              <div className="config-row">
+                <label className="config-field config-field-grow">
+                  <span className="config-label">Template</span>
+                  <select
+                    aria-label={`Parser mode for ${provider.title}`}
+                    defaultValue={provider.parserMode === "aggressive" ? "aggressive" : "automatic"}
+                    name="parserMode"
+                    title="Aggressive: signals missing a stop, target, or exact entry are still executed using this provider's default settings (for example a 60-pip SL). Lifecycle commands that cannot be tied to one specific open trade are still skipped for safety."
+                  >
+                    <option value="automatic">Automatic</option>
+                    <option value="aggressive">Aggressive</option>
+                  </select>
+                </label>
+                <button
+                  aria-label={`Test provider config for ${provider.title}`}
+                  className="btn btn-ghost btn-small"
+                  disabled={!onTest || testBusy || !testRawText.trim() || !validation.valid}
+                  onClick={performTest}
+                  type="button"
                 >
-                  <option value="deterministic">Automatic</option>
-                  <option value="kal-vip">KAL VIP tuned</option>
-                  <option value="kal-vip-extended">KAL VIP extended</option>
-                </select>
-              </label>
-              <button
-                aria-label={`Test provider config for ${provider.title}`}
-                className="btn btn-ghost btn-small"
-                disabled={!onTest || testBusy || !testRawText.trim() || !validation.valid}
-                onClick={performTest}
-                type="button"
-              >
-                <Play aria-hidden="true" size={13} />
-                Test message
-              </button>
-            </div>
-            {!accountLabel ? (
+                  <Play aria-hidden="true" size={13} />
+                  Test message
+                </button>
+              </div>
               <label className="config-field">
                 <span className="config-label">Locked symbol</span>
                 <input
@@ -549,23 +526,23 @@ export function ProviderConfigModal({
                   placeholder="XAUUSD"
                 />
               </label>
-            ) : null}
-            <label className="config-field">
-              <span className="config-label">Test message</span>
-              <textarea
-                aria-label={`Provider test message for ${provider.title}`}
-                className="config-test-message"
-                onInput={(event) => setTestRawText(event.currentTarget.value)}
-                rows={4}
-                value={testRawText}
-              />
-            </label>
-            {testResult ? (
-              <p className={testResult.ok ? "config-test-result ok" : "config-test-result error"}>
-                {testResult.summary}
-              </p>
-            ) : null}
-          </section>
+              <label className="config-field">
+                <span className="config-label">Test message</span>
+                <textarea
+                  aria-label={`Provider test message for ${provider.title}`}
+                  className="config-test-message"
+                  onInput={(event) => setTestRawText(event.currentTarget.value)}
+                  rows={4}
+                  value={testRawText}
+                />
+              </label>
+              {testResult ? (
+                <p className={testResult.ok ? "config-test-result ok" : "config-test-result error"}>
+                  {testResult.summary}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
 
           <section className="config-section">
             <h3 className="config-section-title">Risk management</h3>

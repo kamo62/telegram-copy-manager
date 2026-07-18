@@ -6,6 +6,7 @@ export interface SymbolMappingRowData {
   canonicalSymbol: string;
   brokerSymbol: string;
   status: string;
+  hint?: string;
   scope?: string;
   providerId?: string;
   accountId?: string;
@@ -25,7 +26,7 @@ export function SymbolMappingsTable({
       <table className="data-table symbol-mappings-table">
         <thead>
           <tr>
-            <th scope="col">Raw symbol</th>
+            <th scope="col">Provider symbol</th>
             <th scope="col">Canonical</th>
             <th scope="col">Broker symbol</th>
             <th scope="col">Scope</th>
@@ -54,6 +55,7 @@ export function SymbolMappingsTable({
               <td>{mapping.scope ?? "global"}</td>
               <td>
                 <Tag tone={mapping.status === "mapped" ? "good" : "warn"}>{mapping.status}</Tag>
+                {mapping.hint ? <span className="data-table-subtle">{mapping.hint}</span> : null}
               </td>
               <td>
                 {onDelete && mapping.scope !== "account" ? (

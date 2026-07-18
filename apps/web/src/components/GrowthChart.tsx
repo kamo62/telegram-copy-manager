@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Area } from "@/components/dither-kit/area";
 import { AreaChart } from "@/components/dither-kit/area-chart";
 import { Grid } from "@/components/dither-kit/grid";
@@ -6,7 +6,10 @@ import { Tooltip } from "@/components/dither-kit/tooltip";
 import { XAxis } from "@/components/dither-kit/x-axis";
 import { YAxis } from "@/components/dither-kit/y-axis";
 import { useColorAccents } from "../contexts/ColorAccentsContext";
+import { useLocale } from "../contexts/LocaleContext";
 import { chartDitherColor } from "../lib/chartPalette";
+import { downsampleIndices } from "../lib/downsample";
+import { formatMoney } from "../lib/format";
 import { Money } from "./Money";
 import { SkeletonChart } from "./Skeleton";
 
@@ -20,6 +23,15 @@ export type GrowthSeries = {
   numberOfTrades: number;
 };
 
+export function formatGrowthChartValue(
+  value: number,
+  isGrowth: boolean,
+  currency: string | undefined,
+  locale: string,
+): string {
+  return isGrowth ? formatMoney(value, currency ?? "", locale) : `${value.toFixed(1)}%`;
+}
+
 export function GrowthChart({
   data,
   loading = false,
@@ -31,10 +43,17 @@ export function GrowthChart({
 }) {
   const [view, setView] = useState<"growth" | "drawdown">("growth");
   const { colorAccents } = useColorAccents();
-  const isTimeSeries = data.growth[0].some((value) => value > 1_000_000);
-  const [xs, ys] = view === "growth" ? data.growth : data.drawdown;
-  const rows = xs.map((x, index) => ({ x, value: ys[index] ?? 0 }));
-  const isGrowth = view === "growth";
+  const { locale } = useLocale();
+  const hasEquityHistory = data.growth[1].length > 0;
+  const { isGrowth, isTimeSeries, rows } = useMemo(() => {
+    const [xs, ys] = view === "growth" ? data.growth : data.drawdown;
+    const indices = downsampleIndices(ys, 240);
+    return {
+      isGrowth: view === "growth",
+      isTimeSeries: data.growth[0].some((value) => value > 1_000_000),
+      rows: indices.map((index) => ({ x: xs[index] ?? index, value: ys[index] ?? 0 })),
+    };
+  }, [data.drawdown, data.growth, view]);
   const sampleLabel = isTimeSeries
     ? `${data.numberOfTrades} sample${data.numberOfTrades === 1 ? "" : "s"}`
     : `${data.numberOfTrades} trade${data.numberOfTrades === 1 ? "" : "s"}`;
@@ -84,6 +103,8 @@ export function GrowthChart({
       </header>
       {loading ? (
         <SkeletonChart />
+      ) : !hasEquityHistory ? (
+        <div className="chart-canvas-wrap">No equity history yet</div>
       ) : (
         <div className="chart-canvas-wrap" data-color-accents={colorAccents ? "on" : "off"}>
           <AreaChart
@@ -112,45 +133,19 @@ export function GrowthChart({
               }
             />
             <YAxis
-              tickFormatter={(value) =>
-                isGrowth ? `$${value.toLocaleString()}` : `${value.toFixed(1)}%`
-              }
+              tickFormatter={(value) => formatGrowthChartValue(value, isGrowth, currency, locale)}
             />
             <Area dataKey="value" variant="gradient" />
             <Tooltip
               labelKey="x"
-              valueFormatter={(value) =>
-                isGrowth ? `$${value.toLocaleString()}` : `${value.toFixed(1)}%`
-              }
+              valueFormatter={(value) => formatGrowthChartValue(value, isGrowth, currency, locale)}
             />
           </AreaChart>
         </div>
       )}
-      <footer className="chart-card-foot">{isTimeSeries ? "Time" : "Number of trades"}</footer>
+      {hasEquityHistory ? (
+        <footer className="chart-card-foot">{isTimeSeries ? "Time" : "Number of trades"}</footer>
+      ) : null}
     </section>
   );
-}
-
-export function buildPlaceholderGrowth(executedCount: number): GrowthSeries {
-  const numberOfTrades = Math.max(50, Math.min(executedCount * 12 || 297, 600));
-  const xs = Array.from({ length: numberOfTrades }, (_v, i) => i);
-  let balance = 9500;
-  const growthValues: number[] = [];
-  const drawdownValues: number[] = [];
-  let peak = balance;
-  for (let i = 0; i < numberOfTrades; i += 1) {
-    const noise = Math.sin(i * 0.31) * 35 + Math.sin(i * 0.07) * 22;
-    const drift = 12 + Math.sin(i * 0.018) * 6;
-    balance += drift + noise;
-    if (balance < 9000) balance = 9000;
-    if (balance > peak) peak = balance;
-    growthValues.push(Math.round(balance));
-    drawdownValues.push(Math.round(((peak - balance) / peak) * 100 * 10) / 10);
-  }
-  return {
-    growth: [xs, growthValues],
-    drawdown: [xs, drawdownValues],
-    totalProfit: Math.round(balance - 9500),
-    numberOfTrades,
-  };
 }

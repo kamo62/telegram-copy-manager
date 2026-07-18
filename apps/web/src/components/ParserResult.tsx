@@ -11,6 +11,26 @@ function defaultClassification(commandType: string): "entry" | "management" | "n
   return "unknown";
 }
 
+function flagReasons(result: {
+  commandType: string;
+  confidence: number;
+  mappingStatus: string;
+  mappingWarnings?: string[];
+  missingFields?: string[];
+  warnings?: string[];
+}) {
+  const reasons = [
+    ...(result.commandType === "NO_SIGNAL" ? ["No trade signal"] : []),
+    ...(result.commandType === "TRADE_SETUP" ? ["Conditional trade setup"] : []),
+    ...(result.confidence < 0.75 ? ["Low confidence"] : []),
+    ...(result.mappingStatus !== "mapped" ? [`Symbol mapping: ${result.mappingStatus}`] : []),
+    ...(result.missingFields ?? []).map((field) => `Missing ${field}`),
+    ...(result.warnings ?? []),
+    ...(result.mappingWarnings ?? []),
+  ];
+  return [...new Set(reasons)];
+}
+
 export function ParserResult({
   result,
   fixtureClassification,
@@ -23,7 +43,9 @@ export function ParserResult({
   onIgnore,
   onForcePush,
   aiReview,
-  status,
+  actionStatus,
+  actionPending = false,
+  fixtureStatus,
 }: {
   result: {
     id: string;
@@ -32,11 +54,19 @@ export function ParserResult({
     providerTitle: string;
     rawText: string;
     commandType: string;
+    rawSymbol?: string;
     canonicalSymbol: string;
     brokerSymbol: string;
     mappingStatus: string;
+    mappingSource?: string;
+    mappingWarnings?: string[];
     confidence: number;
+    matchedPatternIds?: string[];
+    missingFields?: string[];
+    warnings?: string[];
     reviewRequired: boolean;
+    status?: string;
+    heldReason?: string;
     accountId?: string;
     providerId?: string;
     direction?: "BUY" | "SELL";
@@ -57,11 +87,18 @@ export function ParserResult({
   onIgnore?: () => void;
   onForcePush?: (seed: ManualSignalSeed) => void;
   aiReview?: string;
-  status?: string;
+  actionStatus?: string;
+  actionPending?: boolean;
+  fixtureStatus?: string;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const classification =
     fixtureClassification ?? result.classification ?? defaultClassification(result.commandType);
+  const reasons = flagReasons(result);
+  const displayedStatus = actionStatus ?? result.status;
+  const terminalStatus =
+    displayedStatus && displayedStatus !== "PARSED" && !actionPending ? displayedStatus : undefined;
+  const canExtract = result.reviewRequired && result.commandType !== "NO_SIGNAL";
 
   return (
     <article className="parser-result" key={result.id}>
@@ -71,17 +108,53 @@ export function ParserResult({
       </div>
       <div className="parser-fields">
         <Field label="Command" value={result.commandType} />
+        <Field label="Side" value={result.direction ?? "—"} />
+        <Field label="Order" value={result.orderType ?? "—"} />
+        <Field label="Entry" value={result.entry?.from?.toString() ?? "—"} />
+        <Field label="SL" value={result.stopLoss?.toString() ?? "—"} />
+        <Field
+          label="TPs"
+          value={
+            (result.takeProfits ?? [])
+              .map((tp) => (typeof tp === "number" ? tp : tp.price))
+              .join(" / ") || "—"
+          }
+        />
+        <Field label="Lots" value={result.volume?.toString() ?? "—"} />
+        <Field label="Mode" value={result.executionMode ?? "—"} />
         <Field label="Canonical" value={result.canonicalSymbol} />
         <Field label="Broker" value={result.brokerSymbol} />
         <Field label="Confidence" value={`${Math.round(result.confidence * 100)}%`} />
       </div>
+      <div className="parser-diagnostics">
+        <strong>Why flagged</strong>
+        {reasons.length ? (
+          <ul>
+            {reasons.map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        ) : (
+          <span>No parser warning</span>
+        )}
+        <small>
+          Symbol resolution: {result.rawSymbol || "—"} → {result.canonicalSymbol || "—"} →{" "}
+          {result.brokerSymbol || "—"}
+          {result.mappingSource ? ` (${result.mappingSource})` : ""}
+        </small>
+        {result.mappingWarnings?.[0] ? <small>{result.mappingWarnings[0]}</small> : null}
+        {result.matchedPatternIds?.length ? (
+          <small>Patterns: {result.matchedPatternIds.join(", ")}</small>
+        ) : null}
+      </div>
       <div className="parser-actions">
-        <Tag tone={result.reviewRequired ? "warn" : "good"}>
-          {result.reviewRequired ? "Needs GPT extraction" : result.mappingStatus}
+        <Tag tone={terminalStatus ? "good" : result.reviewRequired ? "warn" : "good"}>
+          {terminalStatus ?? reasons[0] ?? result.mappingStatus}
         </Tag>
-        {result.reviewRequired && onAiReview ? (
+        {canExtract && onAiReview ? (
           <button
             className="btn btn-ghost btn-small"
+            disabled={actionPending}
             onClick={onAiReview}
             title="Extract entry, SL, and TPs"
             type="button"
@@ -90,9 +163,10 @@ export function ParserResult({
             Extract with GPT
           </button>
         ) : null}
-        {onApprove ? (
+        {!terminalStatus && onApprove ? (
           <button
             className="btn btn-primary btn-small"
+            disabled={actionPending}
             onClick={onApprove}
             title="Approve this parser output for the MT5 queue"
             type="button"
@@ -101,9 +175,10 @@ export function ParserResult({
             Approve
           </button>
         ) : null}
-        {onIgnore ? (
+        {!terminalStatus && onIgnore ? (
           <button
             className="btn btn-ghost btn-small btn-destructive-subtle"
+            disabled={actionPending}
             onClick={onIgnore}
             title="Ignore this parser output"
             type="button"
@@ -112,9 +187,13 @@ export function ParserResult({
             Ignore
           </button>
         ) : null}
-        {onForcePush ? (
+        {terminalStatus && result.heldReason ? (
+          <small className="ai-review-note">{result.heldReason}</small>
+        ) : null}
+        {!terminalStatus && onForcePush ? (
           <button
             className="btn btn-ghost btn-small"
+            disabled={actionPending}
             onClick={() =>
               onForcePush({
                 accountId: result.accountId,
@@ -155,6 +234,9 @@ export function ParserResult({
               <option value="noise">Noise</option>
               <option value="unknown">Unknown</option>
             </select>
+            <small className="fixture-classification-hint">
+              Fixture classification: saved only with this fixture.
+            </small>
             <textarea
               aria-label={`Redacted fixture text for ${result.providerTitle}`}
               className="settings-input fixture-textarea"
@@ -174,7 +256,7 @@ export function ParserResult({
             >
               Save fixture
             </button>
-            {status ? <small className="fixture-status">{status}</small> : null}
+            {fixtureStatus ? <small className="fixture-status">{fixtureStatus}</small> : null}
           </div>
         ) : null}
       </div>

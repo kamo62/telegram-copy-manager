@@ -1,7 +1,6 @@
 import { Server } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import packageJson from "../../../package.json";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountsOverview } from "./components/AccountsOverview";
 import { AlertsBanner } from "./components/AlertsBanner";
@@ -10,7 +9,6 @@ import { useConfirm } from "./components/ConfirmDialog";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ExposurePanel } from "./components/ExposurePanel";
-import { buildPlaceholderGrowth } from "./components/GrowthChart";
 import { KeyboardShortcutsOverlay } from "./components/KeyboardShortcutsOverlay";
 import { LiveRegion } from "./components/LiveRegion";
 import {
@@ -30,10 +28,8 @@ import type { ProviderRowData } from "./components/ProvidersTable";
 import type { SetupFormState, SetupStep } from "./components/SetupFlow";
 import { navItems, Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
-import { SmallViewportNotice } from "./components/SmallViewportNotice";
 import { StatusBar } from "./components/StatusBar";
 import { SummaryPanel } from "./components/SummaryPanel";
-import { SymbolMappingModal } from "./components/SymbolMappingModal";
 import { type TabId, WorkspaceTabs } from "./components/WorkspaceTabs";
 import { useToast } from "./contexts/ToastContext";
 import { useAnnouncer } from "./hooks/useAnnouncer";
@@ -49,6 +45,7 @@ import {
   type HeldRequeueMode,
   type TradeResolutionAction,
 } from "./lib/api";
+import { downsample } from "./lib/downsample";
 import type { ExposurePosition } from "./lib/exposure";
 import { EquityGuardianPage } from "./pages/EquityGuardianPage";
 import { HistoryPage } from "./pages/HistoryPage";
@@ -116,7 +113,7 @@ export interface DashboardSnapshot {
     drawdownDangerPct: number;
     reportingCurrency: "USD" | "ZAR";
     usdZarRate: number;
-    alertBotToken?: string;
+    alertBotConfigured?: boolean;
     alertChatId?: string;
     alertOnGuardianPause?: boolean;
     alertOnEaOffline?: boolean;
@@ -208,11 +205,19 @@ export interface DashboardSnapshot {
     providerTitle: string;
     rawText: string;
     commandType: string;
+    rawSymbol?: string;
     canonicalSymbol: string;
     brokerSymbol: string;
     mappingStatus: string;
+    mappingSource?: string;
+    mappingWarnings?: string[];
     confidence: number;
+    matchedPatternIds?: string[];
+    missingFields?: string[];
+    warnings?: string[];
     reviewRequired: boolean;
+    status?: string;
+    heldReason?: string;
     accountId?: string;
     providerId?: string;
     direction?: "BUY" | "SELL";
@@ -266,6 +271,7 @@ export interface DashboardSnapshot {
     brokerSymbol: string;
     status: string;
     scope?: string;
+    hint?: string;
     providerId?: string;
     accountId?: string;
   }>;
@@ -273,7 +279,15 @@ export interface DashboardSnapshot {
     id: string;
     queueItemId: string;
     retcode: number;
+    retcodeExternal?: number;
     brokerComment: string;
+    errorText?: string;
+    orderTicket?: string;
+    positionTicket?: string;
+    dealTicket?: string;
+    requestedPrice?: number;
+    filledPrice?: number;
+    volume?: number;
     status: string;
     timestamp?: string;
   }>;
@@ -490,6 +504,9 @@ export function App({
   const activeView = route.view;
   const activeTab = route.tab;
   const selectedAccountId = route.accountId;
+  const dashboardUrl = selectedAccountId
+    ? `/api/dashboard?accountId=${encodeURIComponent(selectedAccountId)}`
+    : "/api/dashboard";
   const [configProvider, setConfigProvider] = useState<ProviderRowData | null>(null);
   const [parserTab, setParserTab] = useState("Recent Parses");
   const [historyTab, setHistoryTab] = useState<"Open" | "Closed">("Open");
@@ -510,7 +527,6 @@ export function App({
     ...emptySetupForm(),
     ...initialPendingAuth,
   });
-  const [mappingModalOpen, setMappingModalOpen] = useState(false);
   const [manualSignalOpen, setManualSignalOpen] = useState(false);
   const [manualSignalSeed, setManualSignalSeed] = useState<ManualSignalSeed | undefined>(undefined);
   const [fixtureClassifications, setFixtureClassifications] = useState<
@@ -520,6 +536,17 @@ export function App({
   const [fixtureStatus, setFixtureStatus] = useState<Record<string, string>>({});
   const [aiReviewStatus, setAiReviewStatus] = useState<Record<string, string>>({});
   const [parserActionStatus, setParserActionStatus] = useState<Record<string, string>>({});
+  const [parserActionPending, setParserActionPending] = useState<Record<string, boolean>>({});
+  const [parseRecentBusy, setParseRecentBusy] = useState(false);
+  const [parseRecentResults, setParseRecentResults] = useState<
+    Array<{
+      providerId: string;
+      captured: number;
+      inserted: number;
+      parsed: number;
+      error?: string;
+    }>
+  >([]);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   // Pending link-slots are transient pre-account UI state (not represented in the URL);
   // selecting one clears any focused account and vice versa.
@@ -562,36 +589,13 @@ export function App({
   const announce = useAnnouncer();
   const toast = useToast();
   const { confirm, dialog: confirmDialog } = useConfirm();
-  const [viewportTooSmall, setViewportTooSmall] = useState(() => {
-    if (typeof window === "undefined") return false;
-    if (window.localStorage.getItem("tg-tc.viewport-override") === "1") return false;
-    return window.innerWidth < 768;
-  });
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.localStorage.getItem("tg-tc.viewport-override") === "1") return;
-    let frame = 0;
-    function check() {
-      window.cancelAnimationFrame(frame);
-      frame = window.requestAnimationFrame(() => {
-        setViewportTooSmall(window.innerWidth < 768);
-      });
-    }
-    window.addEventListener("resize", check);
-    return () => {
-      window.removeEventListener("resize", check);
-      window.cancelAnimationFrame(frame);
-    };
-  }, []);
-
   useEffect(() => {
     if (initialSnapshot) return;
     let active = true;
     async function load() {
       setRefreshing(true);
       try {
-        const data = await apiGet<DashboardSnapshot>("/api/dashboard");
+        const data = await apiGet<DashboardSnapshot>(dashboardUrl);
         if (active) {
           setSnapshot(data);
           setLastPollError(false);
@@ -679,7 +683,7 @@ export function App({
       source?.close();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [initialSnapshot, refreshHeldItems]);
+  }, [dashboardUrl, initialSnapshot, refreshHeldItems]);
 
   const telegramConnected = snapshot.telegramSessions.some(
     (session) => session.status === "CONNECTED",
@@ -883,21 +887,23 @@ export function App({
     // approximation — exact per-window aggregation would need a separate
     // backend roll-up and isn't worth the round-trip for a 28px chart.
     const equityPoints = usePerformanceSeries ? (perf?.equityCurve ?? []) : [];
-    const equitySeries = equityPoints.map((point) => point.equity);
+    const fullEquitySeries = equityPoints.map((point) => point.equity);
+    const equitySeries = downsample(fullEquitySeries, 96);
     const initialBalance = perf?.initialBalance ?? null;
-    const profitSeries =
-      initialBalance !== null && equitySeries.length > 0
-        ? equitySeries.map((value) => value - initialBalance)
+    const fullProfitSeries =
+      initialBalance !== null && fullEquitySeries.length > 0
+        ? fullEquitySeries.map((value) => value - initialBalance)
         : [];
+    const profitSeries = downsample(fullProfitSeries, 96);
     const tail = (arr: number[], count: number) =>
       arr.length > count ? arr.slice(arr.length - count) : arr;
     const series: AccountHeaderData["series"] = {
       balance: equitySeries,
       equity: equitySeries,
       totalProfit: profitSeries,
-      today: tail(profitSeries, 12),
-      thisWeek: tail(profitSeries, 24),
-      thisMonth: tail(profitSeries, 48),
+      today: tail(fullProfitSeries, 12),
+      thisWeek: tail(fullProfitSeries, 24),
+      thisMonth: tail(fullProfitSeries, 48),
     };
 
     return {
@@ -994,7 +1000,24 @@ export function App({
         id: `nav-${id}`,
         label: `Go to ${label}`,
         shortcut: String(index + 1),
-        action: () => setActiveView(id),
+        action: () => {
+          if (id === "dashboard") {
+            setSelectedSlotId(null);
+            navigate("/");
+            return;
+          }
+          setActiveView(id);
+        },
+      })),
+      ...sidebarAccounts.map((account) => ({
+        id: `account-${account.id}`,
+        label: `Open account ${account.label}`,
+        action: () => setSelectedAccountId(account.id),
+      })),
+      ...sidebarPendingSlots.map((slot) => ({
+        id: `slot-${slot.id}`,
+        label: `Open pending slot ${slot.name}`,
+        action: () => selectSlot(slot.id),
       })),
       ...(snapshot.providers.length > 0
         ? [
@@ -1006,7 +1029,7 @@ export function App({
           ]
         : []),
     ],
-    [snapshot.providers.length],
+    [sidebarAccounts, sidebarPendingSlots, snapshot.providers.length],
   );
 
   useHotkeys((event) => {
@@ -1055,9 +1078,12 @@ export function App({
       : snapshot.accountPerformance;
     const series = performance?.equityCurve;
     if (!series?.length) {
-      return buildPlaceholderGrowth(
-        snapshot.executionLogs.filter((log) => log.status === "EXECUTED").length,
-      );
+      return {
+        growth: [[], []] as [number[], number[]],
+        drawdown: [[], []] as [number[], number[]],
+        totalProfit: performance?.totalProfit ?? 0,
+        numberOfTrades: 0,
+      };
     }
     return {
       growth: [series.map((point) => point.x), series.map((point) => point.equity)] as [
@@ -1074,17 +1100,12 @@ export function App({
       netDeposits: performance?.netDeposits ?? undefined,
       numberOfTrades: series.length,
     };
-  }, [
-    focusedAccount,
-    snapshot.accountPerformance,
-    snapshot.accountPerformanceByAccount,
-    snapshot.executionLogs,
-  ]);
+  }, [focusedAccount, snapshot.accountPerformance, snapshot.accountPerformanceByAccount]);
 
   async function refreshDashboard() {
     setRefreshing(true);
     try {
-      const data = await apiGet<DashboardSnapshot>("/api/dashboard");
+      const data = await apiGet<DashboardSnapshot>(dashboardUrl);
       setSnapshot(data);
       setLastPollError(false);
       setLastSyncAt(new Date().toISOString());
@@ -1425,6 +1446,7 @@ export function App({
 
   async function saveExecutionSettingsForm(formElement: HTMLFormElement) {
     const formData = new FormData(formElement);
+    const alertBotToken = String(formData.get("alertBotToken") ?? "").trim();
     await apiPatch("/api/settings", {
       defaultLotSize: Number(formData.get("defaultLotSize")),
       defaultRiskPercent: Number(formData.get("defaultRiskPercent")),
@@ -1439,7 +1461,7 @@ export function App({
       drawdownDangerPct: Number(formData.get("drawdownDangerPct")),
       reportingCurrency: String(formData.get("reportingCurrency") ?? "USD"),
       usdZarRate: Number(formData.get("usdZarRate")),
-      alertBotToken: String(formData.get("alertBotToken") ?? ""),
+      ...(alertBotToken ? { alertBotToken } : {}),
       alertChatId: String(formData.get("alertChatId") ?? ""),
       alertOnGuardianPause: formData.has("alertOnGuardianPause"),
       alertOnEaOffline: formData.has("alertOnEaOffline"),
@@ -1477,10 +1499,39 @@ export function App({
       (provider) => provider.id,
     );
     if (providerIds.length === 0) return;
-    await Promise.all(
-      providerIds.map((providerId) => apiPost(`/api/providers/${providerId}/parse-recent?limit=5`)),
-    );
-    await refreshDashboard();
+    setParseRecentBusy(true);
+    try {
+      const results = await Promise.all(
+        providerIds.map(async (providerId) => {
+          try {
+            const data = await apiPost<{
+              provider?: {
+                providerId: string;
+                captured: number;
+                inserted: number;
+                parsed: number;
+                error?: string;
+              };
+            }>(`/api/providers/${providerId}/parse-recent?limit=5`);
+            return data.provider ?? { providerId, captured: 0, inserted: 0, parsed: 0 };
+          } catch (error) {
+            return {
+              providerId,
+              captured: 0,
+              inserted: 0,
+              parsed: 0,
+              error: error instanceof Error ? error.message : "Parse request failed",
+            };
+          }
+        }),
+      );
+      setParseRecentResults(results);
+      if (results.some((result) => result.error))
+        toast.error("Some provider messages could not be parsed");
+      await refreshDashboard();
+    } finally {
+      setParseRecentBusy(false);
+    }
   }
 
   async function saveParserFixture(
@@ -1546,38 +1597,38 @@ export function App({
   }
 
   async function approveParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Queued" }));
+    setParserActionPending((current) => ({ ...current, [result.id]: true }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Approving…" }));
     try {
       await apiPost(`/api/signals/${result.id}/approve`);
     } catch (error) {
-      setParserActionStatus((current) => ({
-        ...current,
-        [result.id]: error instanceof Error ? error.message : "Approval failed",
-      }));
+      setParserActionStatus(({ [result.id]: _status, ...current }) => current);
       toast.error(error instanceof Error ? error.message : "Approval failed");
       await refreshDashboard();
       return;
+    } finally {
+      setParserActionPending((current) => ({ ...current, [result.id]: false }));
     }
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Queued" }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "APPROVED" }));
     announce("Signal approved and queued for MT5");
     toast.success("Signal approved and queued");
     await refreshDashboard();
   }
 
   async function ignoreParsedSignal(result: DashboardSnapshot["parserResults"][number]) {
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignored" }));
+    setParserActionPending((current) => ({ ...current, [result.id]: true }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignoring…" }));
     try {
       await apiPost(`/api/signals/${result.id}/ignore`);
     } catch (error) {
-      setParserActionStatus((current) => ({
-        ...current,
-        [result.id]: error instanceof Error ? error.message : "Ignore failed",
-      }));
+      setParserActionStatus(({ [result.id]: _status, ...current }) => current);
       toast.error(error instanceof Error ? error.message : "Ignore failed");
       await refreshDashboard();
       return;
+    } finally {
+      setParserActionPending((current) => ({ ...current, [result.id]: false }));
     }
-    setParserActionStatus((current) => ({ ...current, [result.id]: "Ignored" }));
+    setParserActionStatus((current) => ({ ...current, [result.id]: "IGNORED" }));
     announce("Signal ignored");
     toast.success("Signal ignored");
     await refreshDashboard();
@@ -1693,7 +1744,7 @@ export function App({
     canonicalSymbol: string;
     providerId?: string;
   }) {
-    await apiFetch("/api/symbol-mappings/aliases", {
+    const saved = await apiFetch<{ error?: string }>("/api/symbol-mappings/aliases", {
       method: "PUT",
       body: {
         scope: payload.providerId ? "provider" : "global",
@@ -1702,11 +1753,19 @@ export function App({
         canonicalSymbol: payload.canonicalSymbol,
       },
     });
-    setMappingModalOpen(false);
+    if (saved.error) throw new Error(saved.error);
     await refreshDashboard();
   }
 
   async function deleteSymbolMapping(mapping: DashboardSnapshot["symbolMappings"][number]) {
+    if (mapping.scope === "account · direct" && mapping.accountId) {
+      await apiFetch(`/api/symbol-mappings/account/${mapping.accountId}/direct`, {
+        method: "DELETE",
+        body: { rawSymbol: mapping.rawSymbol },
+      });
+      await refreshDashboard();
+      return;
+    }
     await apiFetch("/api/symbol-mappings/aliases", {
       method: "DELETE",
       body: {
@@ -1720,27 +1779,41 @@ export function App({
 
   async function saveAccountMapping(payload: {
     accountId: string;
-    canonicalSymbol: string;
-    brokerSymbol: string;
-    prefix: string;
-    suffix: string;
-    includeSymbols: string[];
-    excludeSymbols: string[];
+    direct?: boolean;
+    rawSymbol?: string;
+    canonicalSymbol?: string;
+    brokerSymbol?: string;
+    prefix?: string;
+    suffix?: string;
+    includeSymbols?: string[];
+    excludeSymbols?: string[];
   }) {
+    const canonicalSymbol = payload.canonicalSymbol?.trim().toUpperCase();
+    const brokerSymbol = payload.brokerSymbol?.trim();
     await apiFetch(`/api/symbol-mappings/account/${payload.accountId}`, {
       method: "PUT",
-      body: {
-        accountId: payload.accountId,
-        canonicalOverrides: {
-          [payload.canonicalSymbol.trim().toUpperCase()]: payload.brokerSymbol.trim(),
-        },
-        prefix: payload.prefix,
-        suffix: payload.suffix,
-        includeSymbols: payload.includeSymbols,
-        excludeSymbols: payload.excludeSymbols,
-      },
+      body: payload.direct
+        ? {
+            accountId: payload.accountId,
+            rawSymbol: payload.rawSymbol,
+            brokerSymbol: payload.brokerSymbol,
+            direct: true,
+          }
+        : {
+            accountId: payload.accountId,
+            ...(canonicalSymbol && brokerSymbol
+              ? { canonicalOverrides: { [canonicalSymbol]: brokerSymbol } }
+              : {}),
+            ...(payload.prefix !== undefined ? { prefix: payload.prefix } : {}),
+            ...(payload.suffix !== undefined ? { suffix: payload.suffix } : {}),
+            ...(payload.includeSymbols !== undefined
+              ? { includeSymbols: payload.includeSymbols }
+              : {}),
+            ...(payload.excludeSymbols !== undefined
+              ? { excludeSymbols: payload.excludeSymbols }
+              : {}),
+          },
     });
-    setMappingModalOpen(false);
     await refreshDashboard();
   }
 
@@ -1765,19 +1838,6 @@ export function App({
       return;
     }
     setActiveView(viewId);
-  }
-
-  if (viewportTooSmall) {
-    return (
-      <SmallViewportNotice
-        onContinueAnyway={() => {
-          if (typeof window !== "undefined") {
-            window.localStorage.setItem("tg-tc.viewport-override", "1");
-          }
-          setViewportTooSmall(false);
-        }}
-      />
-    );
   }
 
   const displayedSetupStep: SetupStep =
@@ -1807,7 +1867,9 @@ export function App({
       <LiveRegion />
       <KeyboardShortcutsOverlay onClose={() => setShortcutsOpen(false)} open={shortcutsOpen} />
       <StatusBar
-        appVersion={packageJson.version}
+        appVersion={
+          (globalThis as typeof globalThis & { __APP_VERSION__?: string }).__APP_VERSION__ ?? "dev"
+        }
         database={snapshot.health.database}
         lastPollError={lastPollError}
         lastSyncAt={lastSyncAt}
@@ -1838,7 +1900,11 @@ export function App({
             <PendingSlotView slot={focusedSlot} />
           ) : showDashboard ? (
             <>
-              <AccountHeader data={accountHeaderData} loading={initialLoading} />
+              <AccountHeader
+                className={activeTab === "summary" ? undefined : "account-context-secondary"}
+                data={accountHeaderData}
+                loading={initialLoading}
+              />
               {snapshot.providers.length === 0 &&
               snapshot.mt5Accounts.length === 0 &&
               sidebarPendingSlots.length === 0 ? (
@@ -1858,6 +1924,7 @@ export function App({
               {focusedAccount ? (
                 <ExposurePanel
                   accountId={focusedAccount.id}
+                  className={activeTab === "summary" ? undefined : "account-context-secondary"}
                   positions={[
                     ...((focusedAccount as { appPositions?: ExposurePosition[] }).appPositions ??
                       []),
@@ -2003,6 +2070,10 @@ export function App({
                 onParserTabChange={setParserTab}
                 providersLength={snapshot.providers.length}
                 onParseRecent={() => void parseRecentProviderMessages()}
+                parseRecentBusy={parseRecentBusy}
+                parseRecentResults={parseRecentResults}
+                parserLoading={initialLoading}
+                parserLoadError={lastPollError}
                 snapshot={snapshot}
                 fixtureClassifications={fixtureClassifications}
                 onClassify={(rawMessageId, classification) =>
@@ -2024,6 +2095,7 @@ export function App({
                 onForcePush={openManualSignal}
                 aiReviewStatus={aiReviewStatus}
                 parserActionStatus={parserActionStatus}
+                parserActionPending={parserActionPending}
                 fixtureStatus={fixtureStatus}
                 heldItems={heldItems}
                 onHeldDismiss={dismissHeldItem}
@@ -2065,10 +2137,14 @@ export function App({
 
             {showMapping ? (
               <SymbolSettingsPage
+                availableBrokerSymbols={focusedAccount?.availableSymbols ?? []}
+                defaultAccountId={focusedAccount?.id ?? ""}
+                defaultProviderId={snapshot.providers[0]?.id}
                 loading={initialLoading}
                 mappings={snapshot.symbolMappings}
-                onAdd={() => setMappingModalOpen(true)}
                 onDelete={deleteSymbolMapping}
+                onSaveAccountMapping={saveAccountMapping}
+                onSaveGlobalAlias={saveSymbolAlias}
               />
             ) : null}
 
@@ -2106,15 +2182,6 @@ export function App({
         onTest={testProviderSettings}
         open={configProvider !== null}
         provider={configProvider}
-      />
-
-      <SymbolMappingModal
-        defaultAccountId={snapshot.mt5Accounts[0]?.id ?? ""}
-        defaultProviderId={snapshot.providers[0]?.id}
-        onClose={() => setMappingModalOpen(false)}
-        onSaveAccountMapping={saveAccountMapping}
-        onSaveGlobalAlias={saveSymbolAlias}
-        open={mappingModalOpen}
       />
 
       <ManualSignalModal

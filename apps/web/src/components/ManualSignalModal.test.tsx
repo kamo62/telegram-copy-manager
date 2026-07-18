@@ -1,7 +1,7 @@
 import "../test-setup";
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render } from "@testing-library/react";
-import { ManualSignalModal } from "./ManualSignalModal";
+import { ManualSignalModal, validateManualSignalValues } from "./ManualSignalModal";
 
 afterEach(() => cleanup());
 
@@ -44,5 +44,38 @@ describe("ManualSignalModal", () => {
     expect((view.getByLabelText("Execution") as HTMLSelectElement).value).toBe("SPLIT_ORDER");
     expect((view.getByPlaceholderText("TP1 price") as HTMLInputElement).value).toBe("3375");
     expect((view.getByPlaceholderText("TP2 price") as HTMLInputElement).value).toBe("3360");
+  });
+
+  test("rejects invalid numeric prices and volume before submit", () => {
+    expect(
+      validateManualSignalValues({
+        direction: "BUY",
+        orderType: "LIMIT",
+        entryFrom: "-1",
+        entryTo: "",
+        stopLoss: "nope",
+        volume: "-0.1",
+        takeProfits: ["invalid"],
+      }),
+    ).toEqual({
+      entryFrom: "Entry price must be a positive number",
+      stopLoss: "Stop loss must be a positive number",
+      volume: "Volume must be a positive number",
+      takeProfits: ["TP1 must be a positive number"],
+    });
+  });
+
+  test("requires a pending BUY stop loss to stay below entry", () => {
+    expect(
+      validateManualSignalValues({
+        direction: "BUY",
+        orderType: "LIMIT",
+        entryFrom: "100",
+        entryTo: "",
+        stopLoss: "101",
+        volume: "",
+        takeProfits: [],
+      }).stopLoss,
+    ).toBe("Stop loss must be below entry");
   });
 });

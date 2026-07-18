@@ -46,6 +46,69 @@ interface TpRow {
   price: string;
 }
 
+interface FieldErrors {
+  entryFrom?: string;
+  entryTo?: string;
+  stopLoss?: string;
+  volume?: string;
+  takeProfits: Record<string, string>;
+}
+
+export function validateManualSignalValues(input: {
+  direction: "BUY" | "SELL";
+  orderType: "MARKET" | "LIMIT" | "STOP";
+  entryFrom: string;
+  entryTo: string;
+  stopLoss: string;
+  volume: string;
+  takeProfits: string[];
+}) {
+  const errors: {
+    entryFrom?: string;
+    entryTo?: string;
+    stopLoss?: string;
+    volume?: string;
+    takeProfits: string[];
+  } = { takeProfits: [] };
+  const entryFrom = input.entryFrom.trim() ? Number(input.entryFrom) : undefined;
+  const entryTo = input.entryTo.trim() ? Number(input.entryTo) : undefined;
+  const stopLoss = input.stopLoss.trim() ? Number(input.stopLoss) : undefined;
+  const volume = input.volume.trim() ? Number(input.volume) : undefined;
+
+  if (input.orderType !== "MARKET") {
+    if (!Number.isFinite(entryFrom) || entryFrom === undefined || entryFrom <= 0) {
+      errors.entryFrom = "Entry price must be a positive number";
+    }
+    if (entryTo !== undefined && (!Number.isFinite(entryTo) || entryTo <= 0)) {
+      errors.entryTo = "Entry range end must be a positive number";
+    } else if (entryFrom !== undefined && entryTo !== undefined && entryTo < entryFrom) {
+      errors.entryTo = "Entry range end cannot be below entry start";
+    }
+  }
+  if (stopLoss !== undefined && (!Number.isFinite(stopLoss) || stopLoss <= 0)) {
+    errors.stopLoss = "Stop loss must be a positive number";
+  } else if (
+    stopLoss !== undefined &&
+    entryFrom !== undefined &&
+    Number.isFinite(entryFrom) &&
+    ((input.direction === "BUY" && stopLoss >= entryFrom) ||
+      (input.direction === "SELL" && stopLoss <= entryFrom))
+  ) {
+    errors.stopLoss = `Stop loss must be ${input.direction === "BUY" ? "below" : "above"} entry`;
+  }
+  if (volume !== undefined && (!Number.isFinite(volume) || volume <= 0)) {
+    errors.volume = "Volume must be a positive number";
+  }
+  for (const [index, takeProfit] of input.takeProfits.entries()) {
+    if (!takeProfit.trim()) continue;
+    const price = Number(takeProfit);
+    if (!Number.isFinite(price) || price <= 0) {
+      errors.takeProfits[index] = `TP${index + 1} must be a positive number`;
+    }
+  }
+  return errors;
+}
+
 let tpCounter = 0;
 const newTp = (price = ""): TpRow => ({ id: `tp-${++tpCounter}`, price });
 
@@ -80,11 +143,15 @@ export function ManualSignalModal({
   const [volume, setVolume] = useState("");
   const [executionMode, setExecutionMode] = useState<"VIRTUAL_TP" | "SPLIT_ORDER">("VIRTUAL_TP");
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({ takeProfits: {} });
   const [submitting, setSubmitting] = useState(false);
+  const seededAccountId = accounts.some((account) => account.id === seed?.accountId)
+    ? seed?.accountId
+    : undefined;
 
   useEffect(() => {
     if (!open) return;
-    setAccountId(seed?.accountId ?? accounts[0]?.id ?? "");
+    setAccountId(seededAccountId ?? accounts[0]?.id ?? "");
     setSymbol(seed?.brokerSymbol ?? "");
     setDirection(seed?.direction ?? "BUY");
     setOrderType(seed?.orderType ?? "LIMIT");
@@ -99,8 +166,9 @@ export function ManualSignalModal({
     setVolume(seed?.volume == null ? "" : String(seed.volume));
     setExecutionMode(seed?.executionMode ?? "VIRTUAL_TP");
     setError("");
+    setFieldErrors({ takeProfits: {} });
     setSubmitting(false);
-  }, [open, seed, accounts]);
+  }, [open, seed, accounts, seededAccountId]);
 
   useFocusTrap(dialogRef, open, onClose);
   if (!open) return null;
@@ -112,13 +180,44 @@ export function ManualSignalModal({
     setError("");
     if (!accountId) return setError("Select an account");
     if (!symbol.trim()) return setError("Select or enter a symbol");
-    if (orderType !== "MARKET" && !entryFrom.trim()) {
-      return setError("Entry price is required for limit and stop orders");
+    const entryFromValue = entryFrom.trim() ? Number(entryFrom) : undefined;
+    const entryToValue = entryTo.trim() ? Number(entryTo) : undefined;
+    const stopLossValue = stopLoss.trim() ? Number(stopLoss) : undefined;
+    const volumeValue = volume.trim() ? Number(volume) : undefined;
+    const validation = validateManualSignalValues({
+      direction,
+      orderType,
+      entryFrom,
+      entryTo,
+      stopLoss,
+      volume,
+      takeProfits: tps.map((tp) => tp.price),
+    });
+    const errors: FieldErrors = {
+      ...validation,
+      takeProfits: Object.fromEntries(
+        tps.flatMap((tp, index) =>
+          validation.takeProfits[index] ? [[tp.id, validation.takeProfits[index]]] : [],
+        ),
+      ),
+    };
+    const takeProfits = tps.flatMap((tp, index) => {
+      if (!tp.price.trim()) return [];
+      const price = Number(tp.price);
+      if (validation.takeProfits[index]) return [];
+      return [{ price }];
+    });
+    if (
+      errors.entryFrom ||
+      errors.entryTo ||
+      errors.stopLoss ||
+      errors.volume ||
+      Object.keys(errors.takeProfits).length > 0
+    ) {
+      setFieldErrors(errors);
+      return setError("Correct the highlighted fields");
     }
-    const takeProfits = tps
-      .map((tp) => Number(tp.price))
-      .filter((price) => Number.isFinite(price) && price > 0)
-      .map((price) => ({ price }));
+    setFieldErrors({ takeProfits: {} });
     const payload: ManualSignalPayload = {
       accountId,
       providerId: seed?.providerId,
@@ -128,13 +227,10 @@ export function ManualSignalModal({
       canonicalSymbol: seed?.canonicalSymbol,
       direction,
       orderType,
-      entry:
-        orderType === "MARKET"
-          ? undefined
-          : { from: Number(entryFrom), to: entryTo.trim() ? Number(entryTo) : undefined },
-      stopLoss: stopLoss.trim() ? Number(stopLoss) : undefined,
+      entry: orderType === "MARKET" ? undefined : { from: entryFromValue!, to: entryToValue },
+      stopLoss: stopLossValue,
       takeProfits,
-      volume: volume.trim() ? Number(volume) : undefined,
+      volume: volumeValue,
       executionMode,
     };
     setSubmitting(true);
@@ -189,6 +285,7 @@ export function ManualSignalModal({
               <span>Account</span>
               <select
                 className="settings-input"
+                disabled={Boolean(seededAccountId)}
                 onChange={(event) => {
                   setAccountId(event.target.value);
                   setSymbol("");
@@ -268,20 +365,28 @@ export function ManualSignalModal({
                 <label className="manual-field">
                   <span>Entry from</span>
                   <input
+                    aria-invalid={Boolean(fieldErrors.entryFrom)}
                     className="settings-input"
                     inputMode="decimal"
                     onChange={(event) => setEntryFrom(event.target.value)}
                     value={entryFrom}
                   />
+                  {fieldErrors.entryFrom ? (
+                    <span className="manual-signal-error">{fieldErrors.entryFrom}</span>
+                  ) : null}
                 </label>
                 <label className="manual-field">
                   <span>Entry to (optional)</span>
                   <input
+                    aria-invalid={Boolean(fieldErrors.entryTo)}
                     className="settings-input"
                     inputMode="decimal"
                     onChange={(event) => setEntryTo(event.target.value)}
                     value={entryTo}
                   />
+                  {fieldErrors.entryTo ? (
+                    <span className="manual-signal-error">{fieldErrors.entryTo}</span>
+                  ) : null}
                 </label>
               </>
             ) : null}
@@ -289,22 +394,30 @@ export function ManualSignalModal({
             <label className="manual-field">
               <span>Stop loss</span>
               <input
+                aria-invalid={Boolean(fieldErrors.stopLoss)}
                 className="settings-input"
                 inputMode="decimal"
                 onChange={(event) => setStopLoss(event.target.value)}
                 value={stopLoss}
               />
+              {fieldErrors.stopLoss ? (
+                <span className="manual-signal-error">{fieldErrors.stopLoss}</span>
+              ) : null}
             </label>
 
             <label className="manual-field">
               <span>Volume (lots)</span>
               <input
+                aria-invalid={Boolean(fieldErrors.volume)}
                 className="settings-input"
                 inputMode="decimal"
                 onChange={(event) => setVolume(event.target.value)}
                 placeholder="default if blank"
                 value={volume}
               />
+              {fieldErrors.volume ? (
+                <span className="manual-signal-error">{fieldErrors.volume}</span>
+              ) : null}
             </label>
 
             <label className="manual-field">
@@ -327,6 +440,7 @@ export function ManualSignalModal({
             {tps.map((tp, index) => (
               <div className="manual-tp-row" key={tp.id}>
                 <input
+                  aria-invalid={Boolean(fieldErrors.takeProfits[tp.id])}
                   className="settings-input"
                   inputMode="decimal"
                   onChange={(event) =>
@@ -339,6 +453,9 @@ export function ManualSignalModal({
                   placeholder={`TP${index + 1} price`}
                   value={tp.price}
                 />
+                {fieldErrors.takeProfits[tp.id] ? (
+                  <span className="manual-signal-error">{fieldErrors.takeProfits[tp.id]}</span>
+                ) : null}
                 <button
                   aria-label={`Remove TP${index + 1}`}
                   className="icon-btn"

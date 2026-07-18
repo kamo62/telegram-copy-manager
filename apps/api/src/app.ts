@@ -36,8 +36,10 @@ import {
   type TelegramAdapter,
   type TelegramCapturedMessage,
   type TelegramDialog,
+  TelegramRpcTimeoutError,
   type TelegramSessionHealth,
   type TelegramSessionStatus,
+  withTelegramRpcTimeout,
 } from "./telegram";
 
 export interface ApiOptions {
@@ -48,6 +50,17 @@ export interface ApiOptions {
   telegramAdapter?: "mock" | "gramjs";
   telegramPollingEnabled?: boolean;
   telegramPollingIntervalMs?: number;
+  telegramRpcTimeoutMs?: number;
+}
+
+const DEFAULT_TELEGRAM_RPC_TIMEOUT_MS = 5_000;
+const MAX_TELEGRAM_RPC_TIMEOUT_MS = 30_000;
+
+function telegramRpcTimeoutMs(value?: number) {
+  const configured = value ?? Number(process.env.TELEGRAM_RPC_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? Math.min(Math.floor(configured), MAX_TELEGRAM_RPC_TIMEOUT_MS)
+    : DEFAULT_TELEGRAM_RPC_TIMEOUT_MS;
 }
 
 const demoAccountId = "mt5-100200300";
@@ -80,6 +93,11 @@ const EQUITY_CURVE_RETENTION_DAYS = 90;
 const MAX_EXECUTION_LOG_LIMIT = 500;
 
 type SymbolAliasScope = "global" | "provider";
+type AccountMappingInput = AccountSymbolMapping & {
+  direct?: boolean;
+  rawSymbol?: string;
+  brokerSymbol?: string;
+};
 type AppOrderType = Extract<OrderType, "MARKET" | "LIMIT" | "STOP">;
 type EquityCurveScope = "account" | "provider";
 type StatsRange = "today" | "7d" | "30d" | "90d" | "all";
@@ -125,6 +143,8 @@ interface AccountSlotInput {
 interface ProviderExecutionConfig {
   parserMode?: ParserMode | string;
   lockedSymbol?: string;
+  tradedSymbols?: string[];
+  shorthandLevels?: boolean;
   riskMode: "fixed" | "percent";
   riskAmount: number;
   takeProfitLevels: ProviderTakeProfitLevel[];
@@ -174,7 +194,11 @@ const defaultAppSettings: AppSettings = {
 };
 const pendingOpenMissingGraceSeconds = 10;
 const EA_HEARTBEAT_SECONDS = 5;
+const EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS = 30;
+const GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS = 60 * 60;
 const ALERT_DEDUP_MS = 30 * 60 * 1000;
+const MANUAL_PUSH_DEDUP_SECONDS = 10;
+const OPEN_SIGNAL_DEDUP_SECONDS = 24 * 60 * 60;
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
 
@@ -182,6 +206,7 @@ function defaultAccountMapping(accountId = demoAccountId): AccountSymbolMapping 
   return {
     accountId,
     canonicalOverrides: {},
+    directBrokerOverrides: {},
     prefix: "",
     suffix: "",
     includeSymbols: [],
@@ -218,11 +243,14 @@ export function createApi(options: ApiOptions = {}) {
   app.get("/health", (c) => c.json(healthPayload()));
 
   app.get("/api/telegram/status", (c) => c.json(store.telegramStatus(telegram.name)));
-  app.get("/api/dashboard", (c) => c.json(store.dashboard(telegram.name)));
-  app.get("/api/settings", (c) => c.json({ settings: store.appSettings() }));
+  app.get("/api/dashboard", (c) =>
+    c.json(store.dashboard(telegram.name, c.req.query("accountId"))),
+  );
+  app.get("/api/settings", (c) => c.json({ settings: store.settingsProjection() }));
   app.patch("/api/settings", async (c) => {
     const body = await c.req.json<Partial<AppSettings> & { azureOpenAIApiKey?: string }>();
-    return c.json({ settings: store.updateAppSettings(body) });
+    store.updateAppSettings(body);
+    return c.json({ settings: store.settingsProjection() });
   });
   app.post("/api/admin/alert-test", async (c) => {
     const result = await store.sendAlertTest();
@@ -358,6 +386,7 @@ export function createApi(options: ApiOptions = {}) {
       enabled?: boolean;
       parserMode?: string;
       lockedSymbol?: string | null;
+      tradedSymbols?: string[] | null;
       riskProfile?: string;
       lotSize?: number;
       riskMode?: "fixed" | "percent";
@@ -388,6 +417,26 @@ export function createApi(options: ApiOptions = {}) {
       }
     }
     return c.json({ messages: store.recentMessages(c.req.param("id"), limit) });
+  });
+
+  app.get("/api/providers/:id/detected-symbols", async (c) => {
+    const providerId = c.req.param("id");
+    const provider = store.providerDetails(providerId);
+    if (!provider) return c.json({ error: "Provider not found" }, 404);
+    const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 1000), 1), 50_000);
+    const sessionId = store.connectedSessionIdForProfile(provider.profileId);
+    let messages: TelegramCapturedMessage[];
+    if (sessionId) {
+      try {
+        await telegram.listDialogs(sessionId);
+        messages = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit);
+      } catch {
+        messages = store.recentMessages(providerId, limit, false);
+      }
+    } else {
+      messages = store.recentMessages(providerId, limit, false);
+    }
+    return c.json({ symbols: store.detectedSymbols(providerId, messages) });
   });
 
   app.post("/api/providers/:id/import-messages", async (c) => {
@@ -428,19 +477,46 @@ export function createApi(options: ApiOptions = {}) {
     const limit = Number(c.req.query("limit") ?? 10);
     const provider = store.providerDetails(providerId);
     const sessionId = provider ? store.connectedSessionIdForProfile(provider.profileId) : undefined;
+    let captured = 0;
+    let inserted = 0;
+    let fetchError: string | undefined;
     if (provider && sessionId) {
       try {
-        const captured = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit);
-        if (captured.length > 0) {
-          store.captureMessages(provider.id, captured);
+        const messages = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit);
+        captured = messages.length;
+        if (messages.length > 0) {
+          inserted = store.captureMessages(provider.id, messages).inserted;
         }
-      } catch {
+      } catch (error) {
         if (telegram.name !== "mock") {
-          return c.json({ parsed: [] });
+          fetchError = error instanceof Error ? error.message : "Telegram fetch failed";
         }
       }
     }
-    return c.json({ parsed: store.parseRecentProviderMessages(providerId, limit) });
+    try {
+      const parsed = store.parseRecentProviderMessages(providerId, limit);
+      return c.json({
+        parsed,
+        provider: {
+          providerId,
+          captured,
+          inserted,
+          parsed: parsed.length,
+          ...(fetchError ? { error: fetchError } : {}),
+        },
+      });
+    } catch (error) {
+      return c.json({
+        parsed: [],
+        provider: {
+          providerId,
+          captured,
+          inserted,
+          parsed: 0,
+          error: error instanceof Error ? error.message : "Parser failed",
+        },
+      });
+    }
   });
 
   app.patch("/api/messages/:id/classification", async (c) => {
@@ -518,7 +594,11 @@ export function createApi(options: ApiOptions = {}) {
     return c.json({ error: approved.error }, 422);
   });
 
-  app.post("/api/signals/:id/ignore", (c) => c.json(store.ignoreSignal(c.req.param("id"))));
+  app.post("/api/signals/:id/ignore", (c) => {
+    const ignored = store.ignoreSignal(c.req.param("id"));
+    if ("error" in ignored) return c.json({ error: ignored.error }, ignored.statusCode);
+    return c.json(ignored);
+  });
 
   app.post("/api/signals/manual", async (c) => {
     const body = await c.req.json<ManualSignalInput>();
@@ -535,7 +615,7 @@ export function createApi(options: ApiOptions = {}) {
     return c.json(review);
   });
 
-  app.get("/api/symbol-mappings", (c) => c.json(store.symbolMappings()));
+  app.get("/api/symbol-mappings", (c) => c.json(store.symbolMappings(c.req.query("accountId"))));
 
   app.put("/api/symbol-mappings/aliases", async (c) => {
     const body = await c.req.json<{
@@ -556,8 +636,14 @@ export function createApi(options: ApiOptions = {}) {
   });
 
   app.put("/api/symbol-mappings/account/:accountId", async (c) => {
-    const mapping = await c.req.json<AccountSymbolMapping>();
-    return c.json(store.saveAccountMapping(c.req.param("accountId"), mapping));
+    const mapping = await c.req.json<AccountMappingInput>();
+    const saved = store.saveAccountMapping(c.req.param("accountId"), mapping);
+    if ("error" in saved) return c.json(saved, 400);
+    return c.json(saved);
+  });
+  app.delete("/api/symbol-mappings/account/:accountId/direct", async (c) => {
+    const body = await c.req.json<{ rawSymbol: string }>();
+    return c.json(store.deleteDirectBrokerOverride(c.req.param("accountId"), body.rawSymbol));
   });
 
   app.get("/api/mt5/accounts", (c) => c.json({ accounts: store.mt5Accounts() }));
@@ -615,11 +701,23 @@ export function createApi(options: ApiOptions = {}) {
   app.get("/api/equity-guardian", (c) => c.json({ guardians: store.equityGuardians() }));
   app.patch("/api/equity-guardian/:accountId", async (c) => {
     const body = await c.req.json<{ threshold?: number; paused?: boolean }>();
-    return c.json({ guardian: store.updateEquityGuardian(c.req.param("accountId"), body) });
+    const accountId = c.req.param("accountId");
+    const guardian = store.updateEquityGuardian(accountId, {
+      threshold: body.threshold,
+      paused: body.paused,
+    });
+    if (body.paused !== false) return c.json({ guardian });
+    const result = store.unpauseEquityGuardian(accountId);
+    if ("error" in result)
+      return c.json({ error: result.error, guardian: result.guardian }, result.statusCode);
+    return c.json(result);
   });
-  app.post("/api/equity-guardian/:accountId/unpause", (c) =>
-    c.json({ guardian: store.unpauseEquityGuardian(c.req.param("accountId")) }),
-  );
+  app.post("/api/equity-guardian/:accountId/unpause", (c) => {
+    const result = store.unpauseEquityGuardian(c.req.param("accountId"));
+    if ("error" in result)
+      return c.json({ error: result.error, guardian: result.guardian }, result.statusCode);
+    return c.json(result);
+  });
 
   app.get("/api/account/performance", (c) => c.json(store.accountPerformance()));
   app.get("/api/accounts/:accountId/attribution", (c) =>
@@ -836,8 +934,10 @@ export function createApi(options: ApiOptions = {}) {
         }
         await stream.sleep(250);
         sinceHeartbeatMs += 250;
-        if (sinceHeartbeatMs >= 25_000) {
-          await stream.writeSSE({ event: "heartbeat", data: JSON.stringify({ ts: Date.now() }) });
+        // Heartbeat well under the server idleTimeout so idle SSE connections are
+        // never closed mid-stream (which makes EventSource reconnect in a loop).
+        if (sinceHeartbeatMs >= 10_000) {
+          await stream.writeSSE({ event: "ping", data: JSON.stringify({ ts: Date.now() }) });
           sinceHeartbeatMs = 0;
         }
       }
@@ -846,13 +946,29 @@ export function createApi(options: ApiOptions = {}) {
   );
 
   if (options.staticRoot) {
-    app.use("/*", serveStatic({ root: options.staticRoot }));
-    app.get("*", async (c) => c.html(await Bun.file(`${options.staticRoot}/index.html`).text()));
+    app.use(
+      "/*",
+      serveStatic({
+        root: options.staticRoot,
+        onFound: (path, c) => {
+          if (c.req.path.startsWith("/assets/")) {
+            c.header("Cache-Control", "public, max-age=31536000, immutable");
+          } else if (path.endsWith("/index.html")) {
+            c.header("Cache-Control", "no-cache");
+          }
+        },
+      }),
+    );
+    app.get("*", async (c) => {
+      c.header("Cache-Control", "no-cache");
+      return c.html(await Bun.file(`${options.staticRoot}/index.html`).text());
+    });
   }
 
   const ingestion = createTelegramIngestionLoop(store, telegram, {
     enabled: options.telegramPollingEnabled ?? options.databasePath !== ":memory:",
     intervalMs: options.telegramPollingIntervalMs,
+    rpcTimeoutMs: options.telegramRpcTimeoutMs,
   });
 
   return Object.assign(app, ingestion);
@@ -869,10 +985,28 @@ interface TelegramIngestionResult {
   skipped?: boolean;
 }
 
+interface TelegramProviderHealth {
+  providerId: string;
+  sessionId: string;
+  healthy: boolean;
+  stalled: boolean;
+  checkedAt: string;
+  error?: string;
+}
+
+type TelegramProvider = {
+  id: string;
+  profileId: string;
+  dialogId: string;
+  title: string;
+  enabled: boolean;
+  lastMessageAt: string;
+};
+
 function createTelegramIngestionLoop(
   store: AppStore,
   telegram: TelegramAdapter,
-  options: { enabled: boolean; intervalMs?: number },
+  options: { enabled: boolean; intervalMs?: number; rpcTimeoutMs?: number },
 ) {
   let running = false;
   const runTelegramIngestionOnce = async (): Promise<TelegramIngestionResult> => {
@@ -890,7 +1024,11 @@ function createTelegramIngestionLoop(
     }
     running = true;
     try {
-      return await store.ingestEnabledProviders(telegram);
+      return await store.ingestEnabledProviders(
+        telegram,
+        50,
+        telegramRpcTimeoutMs(options.rpcTimeoutMs),
+      );
     } finally {
       running = false;
     }
@@ -1052,6 +1190,58 @@ export function brokerOrderSourceForDealReason(reason: number | undefined): stri
 }
 
 type RawMessageClassification = "entry" | "management" | "noise" | "unknown";
+type CorrelationMode = "off" | "shadow";
+type LifecycleResolution = {
+  method: "reply-link" | "none";
+  status: "MATCHED" | "AMBIGUOUS" | "UNMATCHED";
+  tradeId?: string;
+  reason?: string;
+};
+type LifecycleActionState = {
+  verdict: "act" | "cancel" | "noop" | "hold";
+  reason: string;
+};
+
+export function evaluateLifecycleActionState(
+  commandType: string,
+  tradeStatus: LogicalTrade["status"] | undefined,
+  opts: { closeOnProviderTp?: boolean } = {},
+): LifecycleActionState {
+  const status = tradeStatus === "PLANNED" ? "PENDING" : tradeStatus;
+  const active = status === "OPEN" || status === "PENDING";
+  if (!status) return { verdict: "hold", reason: "missing-trade" };
+  if (status === "CLOSED" || status === "CANCELLED" || status === "ARCHIVED") {
+    return { verdict: "noop", reason: "trade-inactive" };
+  }
+  if (commandType === "CANCEL_PENDING") {
+    if (status === "PENDING") return { verdict: "act", reason: "cancel-pending" };
+    if (status === "OPEN") return { verdict: "hold", reason: "cancel-on-open" };
+    return { verdict: "hold", reason: "cancel-incompatible-state" };
+  }
+  if (commandType === "CLOSE_TRADE" || commandType === "CLOSE_PARTIAL") {
+    if (status === "OPEN") return { verdict: "act", reason: "close-open" };
+    if (status === "PENDING") return { verdict: "cancel", reason: "close-pending" };
+    return { verdict: "hold", reason: "close-incompatible-state" };
+  }
+  if (
+    commandType === "MODIFY_SL" ||
+    commandType === "MODIFY_TP" ||
+    commandType === "MOVE_SL_TO_BE" ||
+    commandType === "TRAILING_STOP"
+  ) {
+    return active
+      ? { verdict: "act", reason: "modify-active" }
+      : { verdict: "hold", reason: "modify-incompatible-state" };
+  }
+  if (commandType === "MARK_TP_HIT") {
+    if (!active) return { verdict: "hold", reason: "tp-hit-incompatible-state" };
+    return {
+      verdict: "act",
+      reason: opts.closeOnProviderTp ? "tp-hit-close-opt-in" : "tp-hit-record-only",
+    };
+  }
+  return { verdict: "hold", reason: "unsupported-lifecycle-command" };
+}
 
 /**
  * A minimal real-time delta pushed over the SSE stream. `type` names the
@@ -1093,6 +1283,9 @@ class AppStore {
   // Last known Telegram session health per session id, recorded by the capture
   // loop and surfaced in the dashboard so a silent stall is visible.
   private readonly telegramHealth = new Map<string, TelegramSessionHealth>();
+  // Per-provider state is kept separately because one stalled dialog RPC must
+  // not wait for another provider before becoming visible to the operator.
+  private readonly telegramProviderHealth = new Map<string, TelegramProviderHealth>();
   // In-memory pub/sub for the SSE stream. Subscribers are SSE connections that
   // forward typed deltas to the dashboard so it stops polling on a timer.
   // ponytail: single-process in-memory bus. Ceiling — events do not survive a
@@ -1190,6 +1383,7 @@ class AppStore {
           enabled: Boolean(row.enabled),
           parserMode: String(row.parser_mode),
           lockedSymbol: normalizeLockedSymbol(config?.lockedSymbol),
+          tradedSymbols: normalizeTradedSymbols(config?.tradedSymbols),
           riskProfile: String(row.risk_profile),
           lotSize: Number(row.lot_size),
           riskMode: config?.riskMode,
@@ -1257,7 +1451,7 @@ class AppStore {
         input.title ?? dialog?.title ?? input.dialogId,
         dialog?.type ?? "channel",
         0,
-        "deterministic",
+        "automatic",
         "balanced",
         defaultAppSettings.defaultLotSize,
         now,
@@ -1321,6 +1515,8 @@ class AppStore {
       enabled?: boolean;
       parserMode?: string;
       lockedSymbol?: string | null;
+      tradedSymbols?: string[] | null;
+      shorthandLevels?: boolean;
       riskProfile?: string;
       lotSize?: number;
       riskMode?: "fixed" | "percent";
@@ -1344,6 +1540,8 @@ class AppStore {
       );
     const hasProviderConfigPatch =
       "lockedSymbol" in input ||
+      "tradedSymbols" in input ||
+      "shorthandLevels" in input ||
       input.riskMode !== undefined ||
       input.riskAmount !== undefined ||
       "takeProfitLevels" in input ||
@@ -1362,6 +1560,14 @@ class AppStore {
           "lockedSymbol" in input
             ? normalizeLockedSymbol(input.lockedSymbol)
             : existingConfig.lockedSymbol,
+        tradedSymbols:
+          "tradedSymbols" in input
+            ? normalizeTradedSymbols(input.tradedSymbols)
+            : existingConfig.tradedSymbols,
+        shorthandLevels:
+          "shorthandLevels" in input
+            ? Boolean(input.shorthandLevels)
+            : existingConfig.shorthandLevels,
       });
     }
     this.audit("provider.update", "info", "Provider settings updated", {
@@ -1383,6 +1589,8 @@ class AppStore {
     const providerLevelConfig: ProviderExecutionConfig = {
       parserMode: normalizeParserMode(provider?.parserMode),
       lockedSymbol: normalizeLockedSymbol(config.lockedSymbol),
+      tradedSymbols: normalizeTradedSymbols(config.tradedSymbols),
+      shorthandLevels: config.shorthandLevels === true,
       riskMode: config.riskMode === "percent" ? "percent" : "fixed",
       riskAmount: positiveNumber(config.riskAmount, fallbackAmount),
       takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
@@ -1402,6 +1610,8 @@ class AppStore {
         return {
           parserMode: providerLevelConfig.parserMode,
           lockedSymbol: providerLevelConfig.lockedSymbol,
+          tradedSymbols: providerLevelConfig.tradedSymbols,
+          shorthandLevels: providerLevelConfig.shorthandLevels,
           riskMode: override.riskMode === "percent" ? "percent" : "fixed",
           riskAmount: positiveNumber(override.riskAmount, fallbackAmount),
           takeProfitLevels: normalizeProviderTpLevels(override.takeProfitLevels),
@@ -1440,6 +1650,14 @@ class AppStore {
             "lockedSymbol" in input.config
               ? normalizeLockedSymbol(input.config.lockedSymbol)
               : currentConfig.lockedSymbol,
+          tradedSymbols:
+            "tradedSymbols" in input.config
+              ? normalizeTradedSymbols(input.config.tradedSymbols)
+              : currentConfig.tradedSymbols,
+          shorthandLevels:
+            "shorthandLevels" in input.config
+              ? Boolean(input.config.shorthandLevels)
+              : currentConfig.shorthandLevels,
           riskMode: input.config.riskMode === "percent" ? "percent" : currentConfig.riskMode,
           riskAmount: positiveNumber(input.config.riskAmount, currentConfig.riskAmount),
           takeProfitLevels:
@@ -1472,6 +1690,11 @@ class AppStore {
     config: ProviderExecutionConfig,
     accountId?: string,
   ) {
+    const normalizedConfig: ProviderExecutionConfig = {
+      ...config,
+      lockedSymbol: normalizeLockedSymbol(config.lockedSymbol),
+      tradedSymbols: normalizeTradedSymbols(config.tradedSymbols),
+    };
     const now = new Date().toISOString();
     if (accountId) {
       // Per-account override stored on the link row. Preserves the existing `enabled`
@@ -1480,25 +1703,25 @@ class AppStore {
         .query(
           "INSERT INTO account_provider_links (account_id, provider_id, enabled, updated_at, config_json) VALUES (?, ?, 0, ?, ?) ON CONFLICT(account_id, provider_id) DO UPDATE SET config_json = excluded.config_json, updated_at = excluded.updated_at",
         )
-        .run(accountId, providerId, now, JSON.stringify(config));
+        .run(accountId, providerId, now, JSON.stringify(normalizedConfig));
       this.audit("provider.config.update", "info", "Per-account provider config updated", {
         providerId,
         accountId,
-        config,
+        config: normalizedConfig,
       });
       return;
     }
     this.db
       .query("UPDATE providers SET provider_config_json = ? WHERE id = ?")
-      .run(JSON.stringify(config), providerId);
+      .run(JSON.stringify(normalizedConfig), providerId);
     this.db
       .query(
         "INSERT INTO provider_config_history (id, provider_id, config_json, created_at) VALUES (?, ?, ?, ?)",
       )
-      .run(`provider_config_${nanoid(10)}`, providerId, JSON.stringify(config), now);
+      .run(`provider_config_${nanoid(10)}`, providerId, JSON.stringify(normalizedConfig), now);
     this.audit("provider.config.update", "info", "Provider execution config updated", {
       providerId,
-      config,
+      config: normalizedConfig,
     });
   }
 
@@ -1782,6 +2005,20 @@ class AppStore {
     }));
   }
 
+  detectedSymbols(providerId: string, messages: TelegramCapturedMessage[]) {
+    const context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
+    const counts = new Map<string, number>();
+    for (const message of messages) {
+      for (const signal of parseSignalTexts(telegramParserText(message), context)) {
+        if (signal.commandType !== "OPEN_TRADE" || !signal.canonicalSymbol) continue;
+        counts.set(signal.canonicalSymbol, (counts.get(signal.canonicalSymbol) ?? 0) + 1);
+      }
+    }
+    return [...counts]
+      .map(([symbol, count]) => ({ symbol, count }))
+      .sort((left, right) => right.count - left.count || left.symbol.localeCompare(right.symbol));
+  }
+
   classifyMessage(messageId: string, classification: RawMessageClassification) {
     if (!isRawMessageClassification(classification)) {
       return { error: "Unsupported message classification" };
@@ -1813,6 +2050,129 @@ class AppStore {
     return Number.isFinite(value) && value >= 0 ? value : 30;
   }
 
+  private correlationMode(providerId: string): CorrelationMode {
+    const row = this.db
+      .query("SELECT provider_config_json FROM providers WHERE id = ?")
+      .get(providerId) as Row | null;
+    if (!row) return "off";
+    const config = parseJson<{ correlationMode?: string }>(String(row.provider_config_json)) ?? {};
+    return config.correlationMode === "shadow" ? "shadow" : "off";
+  }
+
+  private resolveLifecycleTarget(
+    providerId: string,
+    accountId: string,
+    lifecycleRawMessageId: string,
+    command: ParsedSignal,
+  ): LifecycleResolution {
+    void command;
+    const lifecycle = this.db
+      .query("SELECT reply_to_message_id FROM raw_messages WHERE id = ? AND provider_id = ?")
+      .get(lifecycleRawMessageId, providerId) as Row | null;
+    const replyToMessageId = lifecycle?.reply_to_message_id
+      ? String(lifecycle.reply_to_message_id)
+      : "";
+    if (!replyToMessageId) {
+      return { method: "none", status: "UNMATCHED", reason: "no-reply-link" };
+    }
+
+    const visited = new Set<string>();
+    let telegramMessageId = replyToMessageId;
+    for (let depth = 0; depth < 12; depth += 1) {
+      if (visited.has(telegramMessageId)) {
+        return { method: "reply-link", status: "UNMATCHED", reason: "cycle" };
+      }
+      visited.add(telegramMessageId);
+      const origins = this.db
+        .query(
+          "SELECT logical_trade_id FROM trade_origins WHERE provider_id = ? AND account_id = ? AND telegram_message_id = ?",
+        )
+        .all(providerId, accountId, telegramMessageId) as Row[];
+      const tradeIds = [...new Set(origins.map((origin) => String(origin.logical_trade_id)))];
+      if (tradeIds.length > 1) {
+        return { method: "reply-link", status: "AMBIGUOUS", reason: "multiple-origins" };
+      }
+      if (tradeIds.length === 1) {
+        return { method: "reply-link", status: "MATCHED", tradeId: tradeIds[0] };
+      }
+      const alias = this.db
+        .query(
+          `SELECT raw_messages.reply_to_message_id
+           FROM raw_message_aliases
+           JOIN raw_messages ON raw_messages.id = raw_message_aliases.raw_message_id
+           WHERE raw_message_aliases.provider_id = ?
+             AND raw_message_aliases.telegram_message_id = ?
+             AND raw_messages.provider_id = ?`,
+        )
+        .get(providerId, telegramMessageId, providerId) as Row | null;
+      if (!alias) {
+        return { method: "reply-link", status: "UNMATCHED", reason: "gap-in-graph" };
+      }
+      if (!alias.reply_to_message_id) {
+        return { method: "reply-link", status: "UNMATCHED", reason: "chain-ended-no-origin" };
+      }
+      telegramMessageId = String(alias.reply_to_message_id);
+    }
+    return { method: "reply-link", status: "UNMATCHED", reason: "chain-too-deep" };
+  }
+
+  private shadowLifecycleCorrelation(
+    providerId: string,
+    parsedSignalId: string,
+    signal: ParsedSignal,
+  ) {
+    const raw = this.db
+      .query(
+        `SELECT parsed_signals.raw_message_id, raw_messages.reply_to_message_id
+         FROM parsed_signals
+         JOIN raw_messages ON raw_messages.id = parsed_signals.raw_message_id
+         WHERE parsed_signals.id = ? AND parsed_signals.provider_id = ?`,
+      )
+      .get(parsedSignalId, providerId) as Row | null;
+    if (!raw?.raw_message_id) throw new Error("Lifecycle parsed signal has no raw message");
+    const targetAccountIds = this.targetAccountIdsForProvider(
+      providerId,
+      signal.accountId ?? this.defaultParserAccountId(providerId),
+    );
+    const settings = this.appSettings();
+    const defaultTakeProfit = { value: settings.defaultTakeProfitPips, unit: "PIPS" as const };
+    const accounts = targetAccountIds.map((accountId) => {
+      const config = this.providerConfig(providerId, accountId);
+      const targetSignal = applyProviderExecutionConfig(
+        accountId === signal.accountId
+          ? signal
+          : this.reparseSignalForAccount(signal, providerId, accountId),
+        config,
+        { defaultTakeProfit },
+      );
+      const legacy = matchLifecycleCommandToTrade(
+        targetSignal,
+        this.logicalTrades().filter((trade) => trade.accountId === accountId),
+      );
+      const resolved = this.resolveLifecycleTarget(
+        providerId,
+        accountId,
+        String(raw.raw_message_id),
+        targetSignal,
+      );
+      const resolvedTrade = resolved.tradeId ? this.logicalTrade(resolved.tradeId) : undefined;
+      return {
+        accountId,
+        legacy,
+        resolved,
+        actionState: evaluateLifecycleActionState(targetSignal.commandType, resolvedTrade?.status),
+        agreement: resolved.tradeId === legacy.tradeId,
+      };
+    });
+    this.audit("correlation.shadow", "info", "Lifecycle correlation shadow result", {
+      providerId,
+      parsedSignalId,
+      commandType: signal.commandType,
+      replyToMessageId: raw.reply_to_message_id ? String(raw.reply_to_message_id) : undefined,
+      accounts,
+    });
+  }
+
   captureMessages(providerId: string, messages: TelegramCapturedMessage[]) {
     const before = this.rawMessageCount(providerId);
     // Correlate same-sender follow-up fragments into their directional anchor so
@@ -1836,14 +2196,15 @@ class AppStore {
       const parsedSignals = parseSignalTexts(parserText, context);
       this.db
         .query(
-          `INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO NOTHING`,
         )
         .run(
           `raw_${providerId}_${group.telegramMessageId}`,
           providerId,
           group.telegramMessageId,
+          group.replyToMessageId ?? null,
           group.messageDate,
           parserText,
           parsed.fingerprint,
@@ -1851,6 +2212,14 @@ class AppStore {
             ? "entry"
             : classifyParsedCommand(parsed.commandType),
         );
+      const rawMessageId = `raw_${providerId}_${group.telegramMessageId}`;
+      for (const telegramMessageId of group.correlatedMessageIds) {
+        this.db
+          .query(
+            "INSERT INTO raw_message_aliases (provider_id, telegram_message_id, raw_message_id) VALUES (?, ?, ?) ON CONFLICT(provider_id, telegram_message_id) DO NOTHING",
+          )
+          .run(providerId, telegramMessageId, rawMessageId);
+      }
     }
     const after = this.rawMessageCount(providerId);
     if (messages.length > 0) {
@@ -1870,9 +2239,42 @@ class AppStore {
   async ingestEnabledProviders(
     telegram: TelegramAdapter,
     limit = 50,
+    rpcTimeoutMs = telegramRpcTimeoutMs(),
+  ): Promise<TelegramIngestionResult> {
+    const providers = this.providers().filter((provider) => provider.enabled);
+    const results = await Promise.all(
+      providers.map((provider) => this.ingestProvider(telegram, provider, limit, rpcTimeoutMs)),
+    );
+    return results.reduce(
+      (total, result) => ({
+        providers: total.providers + result.providers,
+        captured: total.captured + result.captured,
+        inserted: total.inserted + result.inserted,
+        parsed: total.parsed + result.parsed,
+        queued: total.queued + result.queued,
+        reviewRequired: total.reviewRequired + result.reviewRequired,
+        errors: total.errors + result.errors,
+      }),
+      {
+        providers: 0,
+        captured: 0,
+        inserted: 0,
+        parsed: 0,
+        queued: 0,
+        reviewRequired: 0,
+        errors: 0,
+      },
+    );
+  }
+
+  private async ingestProvider(
+    telegram: TelegramAdapter,
+    provider: TelegramProvider,
+    limit: number,
+    rpcTimeoutMs: number,
   ): Promise<TelegramIngestionResult> {
     const result: TelegramIngestionResult = {
-      providers: 0,
+      providers: 1,
       captured: 0,
       inserted: 0,
       parsed: 0,
@@ -1880,94 +2282,114 @@ class AppStore {
       reviewRequired: 0,
       errors: 0,
     };
-    const activeSessions = new Set<string>();
-    for (const provider of this.providers().filter((item) => item.enabled)) {
-      result.providers += 1;
-      const sessionId = this.connectedSessionIdForProfile(provider.profileId);
-      if (sessionId) activeSessions.add(sessionId);
-      if (!sessionId) {
-        if (!this.providersWithoutSession.has(provider.id)) {
-          this.providersWithoutSession.add(provider.id);
-          this.audit(
-            "telegram.ingest.skip",
-            "warn",
-            "Enabled provider has no connected Telegram session",
-            { providerId: provider.id },
-          );
-          log("warn", "telegram.ingest.skip", { providerId: provider.id });
-        }
-        continue;
-      }
-      // Provider reconnected — clear the warned flag so we re-log if it drops again.
-      this.providersWithoutSession.delete(provider.id);
-      try {
-        const captured = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit, {
-          dateFrom: provider.lastMessageAt,
-        });
-        const captureResult = this.captureMessages(provider.id, captured);
-        result.captured += captureResult.captured;
-        result.inserted += captureResult.inserted;
-        const parsed = this.parseUnparsedProviderMessages(
-          provider.id,
-          Math.max(limit, captured.length),
-          this.defaultParserAccountId(provider.id),
+    const sessionId = this.connectedSessionIdForProfile(provider.profileId);
+    if (!sessionId) {
+      if (!this.providersWithoutSession.has(provider.id)) {
+        this.providersWithoutSession.add(provider.id);
+        this.audit(
+          "telegram.ingest.skip",
+          "warn",
+          "Enabled provider has no connected Telegram session",
+          {
+            providerId: provider.id,
+          },
         );
-        result.parsed += parsed.length;
-        for (const item of parsed) {
-          if (item.reviewRequired) result.reviewRequired += 1;
-          if (!isAutoQueueableIngestionCommand(item.result.commandType) || item.reviewRequired) {
-            continue;
-          }
-          const approval = this.approveSignal(item.parsedSignalId);
-          if ("body" in approval) {
-            result.queued +=
-              approval.body.queueItems?.length ?? (approval.body.queueItemId ? 1 : 0);
-          } else if (approval.statusCode !== 409) {
-            result.errors += 1;
-            this.audit("telegram.ingest.queue-failed", "warn", approval.error, {
+        log("warn", "telegram.ingest.skip", { providerId: provider.id });
+      }
+      return result;
+    }
+
+    this.providersWithoutSession.delete(provider.id);
+    let recordedHealth = false;
+    try {
+      const captured = await withTelegramRpcTimeout(
+        telegram.fetchRecentMessages(sessionId, provider.dialogId, limit, {
+          dateFrom: provider.lastMessageAt,
+        }),
+        rpcTimeoutMs,
+      );
+      const captureResult = this.captureMessages(provider.id, captured);
+      result.captured += captureResult.captured;
+      result.inserted += captureResult.inserted;
+      const parsed = this.parseUnparsedProviderMessages(
+        provider.id,
+        Math.max(limit, captured.length),
+        this.defaultParserAccountId(provider.id),
+      );
+      result.parsed += parsed.length;
+      for (const item of parsed) {
+        const tradedSymbolHoldReason = this.tradedSymbolHoldReason(provider.id, item.result);
+        if (tradedSymbolHoldReason) {
+          this.holdSignalForTradedSymbol(item.parsedSignalId, item.result, tradedSymbolHoldReason);
+          result.reviewRequired += 1;
+          continue;
+        }
+        if (item.reviewRequired) result.reviewRequired += 1;
+        if (
+          item.result.commandType !== "OPEN_TRADE" &&
+          item.result.commandType !== "NO_SIGNAL" &&
+          item.result.commandType !== "TRADE_SETUP"
+        ) {
+          try {
+            if (this.correlationMode(provider.id) === "shadow") {
+              this.shadowLifecycleCorrelation(provider.id, item.parsedSignalId, item.result);
+            }
+          } catch (error) {
+            this.audit("correlation.shadow-error", "error", "Lifecycle correlation shadow failed", {
               providerId: provider.id,
               parsedSignalId: item.parsedSignalId,
+              commandType: item.result.commandType,
+              error: error instanceof Error ? error.message : "Unknown correlation shadow error",
             });
-            if (isUnmatchedLifecycleError(approval.error)) {
-              const linked = this.linkDroppedLifecycle(
-                provider.id,
-                item.parsedSignalId,
-                item.result,
+          }
+        }
+        if (!isAutoQueueableIngestionCommand(item.result.commandType) || item.reviewRequired) {
+          continue;
+        }
+        const approval = this.approveSignal(item.parsedSignalId);
+        if ("body" in approval) {
+          result.queued += approval.body.queueItems?.length ?? (approval.body.queueItemId ? 1 : 0);
+        } else if (approval.statusCode !== 409) {
+          result.errors += 1;
+          this.audit("telegram.ingest.queue-failed", "warn", approval.error, {
+            providerId: provider.id,
+            parsedSignalId: item.parsedSignalId,
+          });
+          if (isUnmatchedLifecycleError(approval.error)) {
+            const linked = this.linkDroppedLifecycle(provider.id, item.parsedSignalId, item.result);
+            if (linked > 0) {
+              this.audit(
+                "telegram.ingest.lifecycle-dropped",
+                "warn",
+                "Linked dropped lifecycle command to held open trade",
+                {
+                  providerId: provider.id,
+                  parsedSignalId: item.parsedSignalId,
+                  commandType: item.result.commandType,
+                  linked,
+                },
               );
-              if (linked > 0) {
-                this.audit(
-                  "telegram.ingest.lifecycle-dropped",
-                  "warn",
-                  "Linked dropped lifecycle command to held open trade",
-                  {
-                    providerId: provider.id,
-                    parsedSignalId: item.parsedSignalId,
-                    commandType: item.result.commandType,
-                    linked,
-                  },
-                );
-              }
             }
           }
         }
-      } catch (error) {
-        result.errors += 1;
-        this.audit("telegram.ingest.error", "error", "Telegram provider ingestion failed", {
-          providerId: provider.id,
-          error: error instanceof Error ? error.message : "Unknown ingestion error",
-        });
-        // A revoked/expired GramJS auth key keeps the DB row CONNECTED forever
-        // (gramjs just retries the dead key), so /api/telegram/status reports
-        // connected:true and the web UI stays pinned to the "connected" screen
-        // with no login form. Reconcile the row to DISCONNECTED so the operator
-        // can re-authenticate. Subsequent providers on the same dead session
-        // then resolve no connected session and are skipped, not re-polled.
-        if (isTelegramDeadSessionError(error)) {
-          await this.reconcileDeadTelegramSession(telegram, sessionId, error);
-        }
       }
+    } catch (error) {
+      result.errors += 1;
+      this.audit("telegram.ingest.error", "error", "Telegram provider ingestion failed", {
+        providerId: provider.id,
+        error: error instanceof Error ? error.message : "Unknown ingestion error",
+      });
+      this.recordProviderHealth(telegram, provider, sessionId, error);
+      recordedHealth = true;
+      // A revoked/expired GramJS auth key keeps the DB row CONNECTED forever
+      // (gramjs just retries the dead key), so reconcile it without letting a
+      // stuck disconnect hold the provider health record or the ingestion pass.
+      if (isTelegramDeadSessionError(error)) {
+        await this.reconcileDeadTelegramSession(telegram, sessionId, error, rpcTimeoutMs);
+      }
+    } finally {
+      if (!recordedHealth) this.recordProviderHealth(telegram, provider, sessionId);
     }
-    this.recordTelegramHealth(telegram, activeSessions);
     return result;
   }
 
@@ -2029,14 +2451,17 @@ class AppStore {
     telegram: TelegramAdapter,
     sessionId: string,
     error: unknown,
+    rpcTimeoutMs: number,
   ) {
     const current = this.db
       .query("SELECT status FROM telegram_sessions WHERE id = ?")
       .get(sessionId) as Row | null;
     if (!current || String(current.status) === "DISCONNECTED") return;
-    // disconnect() also removes the dead session file, so the unbounded
-    // reconnect storm stops and the file can't be re-imported on next boot.
-    await telegram.disconnect(sessionId).catch(() => undefined);
+    // disconnect() also removes the dead session file, so reconnect attempts
+    // stop and the file can't be re-imported on next boot.
+    await withTelegramRpcTimeout(telegram.disconnect(sessionId), rpcTimeoutMs).catch(
+      () => undefined,
+    );
     this.updateTelegramSession(sessionId, "DISCONNECTED");
     this.audit(
       "telegram.session.dead",
@@ -2074,8 +2499,53 @@ class AppStore {
     }
   }
 
+  private recordProviderHealth(
+    telegram: TelegramAdapter,
+    provider: TelegramProvider,
+    sessionId: string,
+    error?: unknown,
+  ) {
+    const sessionHealth = telegram.sessionHealth?.(sessionId);
+    const timeout = error instanceof TelegramRpcTimeoutError;
+    const stalled = timeout || Boolean(sessionHealth?.stalled);
+    const healthy = !error && !sessionHealth?.stalled;
+    const previous = this.telegramProviderHealth.get(provider.id);
+    const health: TelegramProviderHealth = {
+      providerId: provider.id,
+      sessionId,
+      healthy,
+      stalled,
+      checkedAt: nowIso(),
+      error: error instanceof Error ? error.message : error ? String(error) : undefined,
+    };
+    this.telegramProviderHealth.set(provider.id, health);
+    this.recordTelegramHealth(telegram, new Set([sessionId]));
+    if (stalled && !previous?.stalled) {
+      this.audit("telegram.provider.stalled", "error", "Telegram provider ingestion stalled", {
+        providerId: provider.id,
+        sessionId,
+        error: health.error,
+      });
+      this.dispatchAlert(
+        "telegram-provider-stalled",
+        provider.id,
+        `Telegram ingestion stalled for provider ${provider.title}.`,
+        "alertOnTelegramStall",
+      );
+    } else if (healthy && previous?.stalled) {
+      this.audit("telegram.provider.recovered", "info", "Telegram provider ingestion recovered", {
+        providerId: provider.id,
+        sessionId,
+      });
+    }
+  }
+
   telegramSessionHealth(): TelegramSessionHealth[] {
     return [...this.telegramHealth.values()];
+  }
+
+  telegramProviderHealthSnapshot(): TelegramProviderHealth[] {
+    return [...this.telegramProviderHealth.values()];
   }
 
   // Operational conditions that silently block trading and should be shown
@@ -2083,7 +2553,12 @@ class AppStore {
   // or a Telegram session that has stopped receiving updates.
   operationalAlerts() {
     const alerts: Array<{
-      kind: "guardian-paused" | "telegram-stalled" | "unmapped-symbols" | "provider-health";
+      kind:
+        | "guardian-paused"
+        | "telegram-stalled"
+        | "telegram-provider-stalled"
+        | "unmapped-symbols"
+        | "provider-health";
       severity: "warn" | "error";
       message: string;
       accountId?: string;
@@ -2138,6 +2613,17 @@ class AppStore {
           lastContactAt: health.lastContactAt,
           stalledSeconds: health.stalledSeconds,
         },
+      });
+    }
+    for (const health of this.telegramProviderHealthSnapshot()) {
+      if (!health.stalled) continue;
+      const provider = this.providerDetails(health.providerId);
+      if (!provider?.enabled) continue;
+      alerts.push({
+        kind: "telegram-provider-stalled",
+        severity: "error",
+        message: `Telegram provider ${provider?.title ?? health.providerId} is stalled — incoming signals may be delayed or missed`,
+        detail: { ...health },
       });
     }
     const needsMapping = this.providerSymbolsNeedingMapping();
@@ -2260,6 +2746,8 @@ class AppStore {
     input: { accountId?: string; dateFrom?: string; dateTo?: string } = {},
   ) {
     const accountId = input.accountId ?? this.defaultParserAccountId(providerId);
+    const aggressive =
+      normalizeParserMode(this.providerConfig(providerId).parserMode) === "aggressive";
     const rows = this.rawMessagesForBacktest(providerId, input);
     const commandCounts: Record<string, number> = {};
     const mappingStatusCounts: Record<string, number> = {};
@@ -2303,7 +2791,7 @@ class AppStore {
       if (parsed.commandType === "OPEN_TRADE") openSignals += 1;
       else if (parsed.commandType !== "NO_SIGNAL") lifecycleCommands += 1;
       if (parsed.commandType !== "NO_SIGNAL") actionableMessages += 1;
-      const needsReview = shouldRequireManualReview(parsed);
+      const needsReview = shouldRequireManualReview(parsed, aggressive);
       if (needsReview) reviewRequired += 1;
       if (needsReview && parsed.commandType !== "NO_SIGNAL") actionableReviewRequired += 1;
       if (needsReview && parsed.commandType !== "NO_SIGNAL") {
@@ -2356,23 +2844,30 @@ class AppStore {
   parseProviderMessage(providerId: string, rawText: string, accountId?: string) {
     const targetAccountId = accountId ?? this.defaultParserAccountId(providerId);
     const rawMessageId = `raw_${nanoid(10)}`;
+    const telegramMessageId = `manual-${Date.now()}`;
     const now = new Date().toISOString();
     const context = this.parserContext(providerId, targetAccountId);
     const firstResult = parseSignalText(rawText, context);
     const results = parseSignalTexts(rawText, context);
     this.db
       .query(
-        "INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         rawMessageId,
         providerId,
-        `manual-${Date.now()}`,
+        telegramMessageId,
+        null,
         now,
         rawText,
         firstResult.fingerprint,
         "unknown",
       );
+    this.db
+      .query(
+        "INSERT INTO raw_message_aliases (provider_id, telegram_message_id, raw_message_id) VALUES (?, ?, ?) ON CONFLICT(provider_id, telegram_message_id) DO NOTHING",
+      )
+      .run(providerId, telegramMessageId, rawMessageId);
     const parsedSignals = this.insertParsedSignalRows({
       providerId,
       rawMessageId,
@@ -2395,11 +2890,12 @@ class AppStore {
       providerId,
       limit,
       accountId ?? this.defaultParserAccountId(providerId),
+      true,
     );
   }
 
-  parsedSignals() {
-    return (
+  parsedSignals(limit?: number) {
+    const rows = (
       this.db
         .query(
           `SELECT parsed_signals.id, parsed_signals.provider_id, parsed_signals.raw_message_id, raw_messages.classification,
@@ -2409,7 +2905,24 @@ class AppStore {
            ORDER BY parsed_signals.created_at DESC`,
         )
         .all() as Row[]
-    ).map((row) => ({
+    ).slice(0, limit);
+    const ids = rows.map((row) => String(row.id));
+    const heldReasons = new Map<string, string>();
+    if (ids.length > 0) {
+      const placeholders = ids.map(() => "?").join(", ");
+      const heldRows = this.db
+        .query(
+          `SELECT parsed_signal_id, held_reason FROM queue_items
+           WHERE parsed_signal_id IN (${placeholders})
+           ORDER BY parsed_signal_id, created_at DESC`,
+        )
+        .all(...ids) as Row[];
+      for (const row of heldRows) {
+        const id = String(row.parsed_signal_id);
+        if (!heldReasons.has(id)) heldReasons.set(id, String(row.held_reason ?? ""));
+      }
+    }
+    return rows.map((row) => ({
       id: String(row.id),
       providerId: String(row.provider_id),
       rawMessageId: String(row.raw_message_id),
@@ -2417,6 +2930,7 @@ class AppStore {
       result: parseJson<ParsedSignal>(String(row.result_json)),
       reviewRequired: Boolean(row.review_required),
       status: String(row.status),
+      heldReason: heldReasons.get(String(row.id)) ?? "",
       createdAt: String(row.created_at),
     }));
   }
@@ -2475,6 +2989,10 @@ class AppStore {
     const signal = parseJson<ParsedSignal>(String(row.result_json));
     const source = this.sourceForParsedSignal(parsedSignalId, signal);
     const providerId = String(row.provider_id);
+    const tradedSymbolHoldReason = this.tradedSymbolHoldReason(providerId, signal);
+    if (tradedSymbolHoldReason) {
+      return { statusCode: 422, error: tradedSymbolHoldReason };
+    }
     const targetAccountIds = this.targetAccountIdsForProvider(
       providerId,
       signal.accountId ?? this.defaultParserAccountId(providerId),
@@ -2566,9 +3084,17 @@ class AppStore {
         };
       });
       for (const target of targetSignals) {
+        const targetTradedSymbolHoldReason = this.tradedSymbolHoldReason(
+          providerId,
+          target.signal,
+          target.config,
+        );
+        if (targetTradedSymbolHoldReason) {
+          return { statusCode: 422, error: targetTradedSymbolHoldReason };
+        }
         if (
           target.signal.commandType !== "OPEN_TRADE" ||
-          shouldRequireManualReview(target.signal)
+          shouldRequireManualReview(target.signal, target.config.parserMode === "aggressive")
         ) {
           return {
             statusCode: 422,
@@ -2586,6 +3112,20 @@ class AppStore {
             error: "Runner mode is only supported for VIRTUAL_TP execution today",
           };
         }
+      }
+      const parameterDuplicate = targetSignals.find((target) =>
+        this.hasDuplicateOpenSignal(providerId, target.accountId, target.signal),
+      );
+      if (parameterDuplicate) {
+        this.insertNonLeasedQueueItem(parsedSignalId, parameterDuplicate.signal, "DUPLICATE", {
+          accountId: parameterDuplicate.accountId,
+          executionMode,
+          settings,
+        });
+        this.db
+          .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+          .run("DUPLICATE", parsedSignalId);
+        return { statusCode: 409, error: "Matching open signal has already been queued" };
       }
       const queueItems: string[] = [];
       const logicalTradeIds: string[] = [];
@@ -2605,10 +3145,7 @@ class AppStore {
           accountId: target.accountId,
           logicalTradeId: targetLogicalTradeId,
           executionMode,
-          volume:
-            target.config.riskMode === "fixed"
-              ? target.config.riskAmount
-              : (provider?.lotSize ?? settings.defaultLotSize),
+          volume: target.config.riskMode === "fixed" ? target.config.riskAmount : 0,
           riskPercent:
             target.config.riskMode === "percent"
               ? target.config.riskAmount
@@ -2768,6 +3305,51 @@ class AppStore {
     }
   }
 
+  private tradedSymbolHoldReason(
+    providerId: string,
+    signal: ParsedSignal,
+    config = this.providerConfig(providerId),
+  ) {
+    const tradedSymbols = normalizeTradedSymbols(config.tradedSymbols);
+    if (signal.commandType !== "OPEN_TRADE" || !tradedSymbols?.length) return undefined;
+    const symbol = normalizeLockedSymbol(signal.canonicalSymbol);
+    if (symbol && tradedSymbols.includes(symbol)) return undefined;
+    return `Symbol ${symbol ?? "unavailable"} is not in this provider's traded symbols`;
+  }
+
+  private holdSignalForTradedSymbol(
+    parsedSignalId: string,
+    signal: ParsedSignal,
+    heldReason: string,
+  ) {
+    const providerIdRow = this.db
+      .query("SELECT provider_id FROM parsed_signals WHERE id = ?")
+      .get(parsedSignalId) as Row | null;
+    if (!providerIdRow) return;
+    const providerId = String(providerIdRow.provider_id);
+    const accountId =
+      this.targetAccountIdsForProvider(
+        providerId,
+        signal.accountId ?? this.defaultParserAccountId(providerId),
+      )[0] ??
+      signal.accountId ??
+      this.defaultParserAccountId(providerId);
+    const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "HELD", {
+      accountId,
+      executionMode: "VIRTUAL_TP",
+      settings: this.appSettings(),
+      heldReason: "SYMBOL_NOT_TRADED",
+    });
+    this.db.query("UPDATE parsed_signals SET status = ? WHERE id = ?").run("HELD", parsedSignalId);
+    this.audit("signal.symbol-not-traded", "warn", heldReason, {
+      parsedSignalId,
+      providerId,
+      queueItemId,
+      heldReason: "SYMBOL_NOT_TRADED",
+    });
+    this.alertHeldQueueItem(queueItemId, "SYMBOL_NOT_TRADED");
+  }
+
   // Force-push a manually composed or corrected signal straight to one
   // account's MT5 queue, bypassing the parser. Used when the parser got a
   // Telegram signal wrong (or missed it). Operator-supplied values are used
@@ -2784,7 +3366,7 @@ class AppStore {
           status: string;
         };
       }
-    | { statusCode: 404 | 422; error: string } {
+    | { statusCode: 404 | 409 | 422; error: string } {
     const account = this.mt5Accounts().find((item) => item.id === input.accountId);
     if (!account) return { statusCode: 404, error: "Account not found" };
     if ((input.commandType ?? "OPEN_TRADE") !== "OPEN_TRADE") {
@@ -2829,7 +3411,30 @@ class AppStore {
         : { from: Number(input.entry?.from), to: Number(input.entry?.to ?? input.entry?.from) };
     const originalText =
       input.rawText?.trim() || manualTicketSummary(input, brokerSymbol, orderType, entry);
-    const fingerprint = createMessageFingerprint(`${originalText}:${nanoid(6)}`);
+    const fingerprint = createMessageFingerprint(
+      JSON.stringify({
+        accountId: input.accountId,
+        providerId: input.providerId ?? "",
+        rawMessageIdentity: input.rawMessageId ?? input.rawText?.trim() ?? "",
+        brokerSymbol,
+        direction: input.direction,
+        orderType,
+        entry,
+        stopLoss: input.stopLoss,
+        takeProfits: input.takeProfits,
+        volume,
+        riskPercent,
+        executionMode,
+      }),
+    );
+    const duplicate = this.db
+      .query(
+        "SELECT id FROM parsed_signals WHERE fingerprint = ? AND unixepoch(created_at) >= unixepoch('now') - ? LIMIT 1",
+      )
+      .get(fingerprint, MANUAL_PUSH_DEDUP_SECONDS) as Row | null;
+    if (duplicate) {
+      return { statusCode: 409, error: "Duplicate manual push rejected; retry after 10 seconds" };
+    }
 
     const signal: ParsedSignal = {
       originalText,
@@ -2840,6 +3445,7 @@ class AppStore {
       canonicalSymbol: input.canonicalSymbol?.trim() || brokerSymbol,
       brokerSymbol,
       mappingStatus: "mapped",
+      mappingSource: "manual",
       mappingWarnings: [],
       entry,
       stopLoss: Number.isFinite(input.stopLoss) ? Number(input.stopLoss) : undefined,
@@ -2852,6 +3458,7 @@ class AppStore {
       warnings: [],
       providerId: input.providerId,
       accountId: input.accountId,
+      executionMode,
       fingerprint,
     };
 
@@ -2862,19 +3469,26 @@ class AppStore {
     let rawMessageId = input.rawMessageId;
     if (!rawMessageId) {
       rawMessageId = `raw_${nanoid(10)}`;
+      const telegramMessageId = `manual-${Date.now()}`;
       this.db
         .query(
-          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           rawMessageId,
           providerId,
-          `manual-${Date.now()}`,
+          telegramMessageId,
+          null,
           now,
           originalText,
           fingerprint,
           "entry",
         );
+      this.db
+        .query(
+          "INSERT INTO raw_message_aliases (provider_id, telegram_message_id, raw_message_id) VALUES (?, ?, ?) ON CONFLICT(provider_id, telegram_message_id) DO NOTHING",
+        )
+        .run(providerId, telegramMessageId, rawMessageId);
     }
     const parsedSignalId = `parse_${nanoid(10)}`;
     this.db
@@ -2940,24 +3554,26 @@ class AppStore {
     return { body: { queueItemId, logicalTradeId, parsedSignalId, status: "PENDING" } };
   }
 
-  ignoreSignal(parsedSignalId: string) {
+  ignoreSignal(
+    parsedSignalId: string,
+  ): { parsedSignalId: string; status: "IGNORED" } | { statusCode: 404 | 409; error: string } {
     const row = this.db
       .query("SELECT provider_id, result_json FROM parsed_signals WHERE id = ?")
       .get(parsedSignalId) as Row | null;
-    if (row) {
-      const existing = this.db
-        .query("SELECT id FROM queue_items WHERE parsed_signal_id = ?")
-        .get(parsedSignalId) as Row | null;
-      if (!existing) {
-        const signal = parseJson<ParsedSignal>(String(row.result_json));
-        const providerId = String(row.provider_id);
-        this.insertNonLeasedQueueItem(parsedSignalId, signal, "IGNORED", {
-          accountId: signal.accountId ?? this.defaultParserAccountId(providerId),
-          executionMode: "VIRTUAL_TP",
-          settings: this.appSettings(),
-        });
-      }
+    if (!row) return { statusCode: 404, error: "Parsed signal not found" };
+    const existing = this.db
+      .query("SELECT id FROM queue_items WHERE parsed_signal_id = ?")
+      .get(parsedSignalId) as Row | null;
+    if (existing) {
+      return { statusCode: 409, error: "Signal has already been approved or queued" };
     }
+    const signal = parseJson<ParsedSignal>(String(row.result_json));
+    const providerId = String(row.provider_id);
+    this.insertNonLeasedQueueItem(parsedSignalId, signal, "IGNORED", {
+      accountId: signal.accountId ?? this.defaultParserAccountId(providerId),
+      executionMode: "VIRTUAL_TP",
+      settings: this.appSettings(),
+    });
     this.db
       .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
       .run("IGNORED", parsedSignalId);
@@ -3117,11 +3733,7 @@ class AppStore {
     }
 
     const originalAccountId = String(row.account_id ?? "");
-    const providerId = String(row.provider_id ?? "");
-    const targetAccountId =
-      (providerId
-        ? this.targetAccountIdsForProvider(providerId, originalAccountId)[0]
-        : undefined) ?? originalAccountId;
+    const targetAccountId = originalAccountId;
     if (this.isEquityGuardianPaused(targetAccountId)) {
       return {
         statusCode: 409 as const,
@@ -3146,6 +3758,11 @@ class AppStore {
     this.db
       .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
       .run("DISMISSED", nowIso(), id);
+    if (row.parsed_signal_id) {
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("PENDING", String(row.parsed_signal_id));
+    }
     this.audit(
       "queue.requeue",
       "info",
@@ -3171,7 +3788,9 @@ class AppStore {
   }
 
   dismissQueueItem(id: string) {
-    const row = this.db.query("SELECT status FROM queue_items WHERE id = ?").get(id) as Row | null;
+    const row = this.db
+      .query("SELECT status, parsed_signal_id FROM queue_items WHERE id = ?")
+      .get(id) as Row | null;
     if (!row) return { statusCode: 404 as const, error: "Held queue item not found" };
     if (String(row.status) !== "HELD") {
       return { statusCode: 409 as const, error: "Only HELD queue items can be dismissed" };
@@ -3179,6 +3798,11 @@ class AppStore {
     this.db
       .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
       .run("DISMISSED", nowIso(), id);
+    if (row.parsed_signal_id) {
+      this.db
+        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+        .run("DISMISSED", String(row.parsed_signal_id));
+    }
     this.audit(
       "queue.dismiss",
       "info",
@@ -3507,7 +4131,7 @@ class AppStore {
       ? Number(input.currentDrawdown)
       : current.currentDrawdown;
     const breached = currentDrawdown >= threshold;
-    const paused = input.paused ?? (current.paused || breached);
+    const paused = input.paused === true || current.paused || breached;
     const breaches = [...current.breaches];
     if (breached && !current.paused) {
       breaches.push({ at: new Date().toISOString(), drawdown: currentDrawdown, action: "paused" });
@@ -3537,6 +4161,46 @@ class AppStore {
 
   unpauseEquityGuardian(accountId: string) {
     const current = this.equityGuardian(accountId);
+    const blocked = this.equityGuardianUnpauseBlocker(accountId, current);
+    if (blocked) {
+      const breaches = [
+        ...current.breaches,
+        {
+          at: new Date().toISOString(),
+          drawdown: current.currentDrawdown,
+          action: "manual_unpause_rejected",
+        },
+      ];
+      this.db
+        .query(
+          "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
+        )
+        .run(
+          accountId,
+          current.threshold,
+          current.currentDrawdown,
+          1,
+          JSON.stringify(breaches),
+          new Date().toISOString(),
+        );
+      const guardian = this.equityGuardian(accountId);
+      this.audit(
+        "equity-guardian.unpause-rejected",
+        "warn",
+        "Equity Guardian remains paused because the safety check failed",
+        {
+          accountId,
+          currentDrawdown: current.currentDrawdown,
+          threshold: current.threshold,
+          blocked,
+        },
+      );
+      return {
+        statusCode: 409 as const,
+        error: `Equity Guardian remains paused because ${blocked}`,
+        guardian,
+      };
+    }
     const breaches = [
       ...current.breaches,
       { at: new Date().toISOString(), drawdown: current.currentDrawdown, action: "manual_unpause" },
@@ -3553,10 +4217,74 @@ class AppStore {
         JSON.stringify(breaches),
         new Date().toISOString(),
       );
+    const releasedQueueItemIds = this.appSettings().releaseHeldOnGuardianUnpause
+      ? this.releaseGuardianHeldQueueItems(accountId)
+      : [];
     this.audit("equity-guardian.unpause", "info", "Equity Guardian manually unpaused", {
       accountId,
+      releasedQueueItemIds,
     });
-    return this.equityGuardian(accountId);
+    return { guardian: this.equityGuardian(accountId), releasedQueueItemIds };
+  }
+
+  private releaseGuardianHeldQueueItems(accountId: string): string[] {
+    const held = this.db
+      .query(
+        `SELECT queue_items.id, queue_items.created_at, logical_trades.data_json
+         FROM queue_items
+         LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
+         WHERE queue_items.account_id = ? AND queue_items.status = 'HELD' AND queue_items.held_reason = 'GUARDIAN'`,
+      )
+      .all(accountId) as Row[];
+    return held.flatMap((row) => {
+      const trade = row.data_json ? parseJson<LogicalTrade>(String(row.data_json)) : undefined;
+      const sourceDate = trade?.source?.messageDate || String(row.created_at);
+      if (this.guardianReleaseExpired(sourceDate)) {
+        this.audit(
+          "equity-guardian.release-skipped",
+          "warn",
+          "Guardian-held trade was too old to release",
+          {
+            accountId,
+            queueItemId: String(row.id),
+            sourceDate,
+          },
+        );
+        return [];
+      }
+      const result = this.requeueQueueItem(String(row.id), "market");
+      return "queueItemId" in result && result.queueItemId ? [result.queueItemId] : [];
+    });
+  }
+
+  private equityGuardianUnpauseBlocker(
+    accountId: string,
+    current: ReturnType<AppStore["equityGuardian"]>,
+  ): string | undefined {
+    const row = this.db
+      .query("SELECT last_heartbeat_at FROM mt5_accounts WHERE id = ?")
+      .get(accountId) as Row | null;
+    const heartbeatAt = Date.parse(String(row?.last_heartbeat_at ?? ""));
+    if (
+      !Number.isFinite(heartbeatAt) ||
+      Date.now() - heartbeatAt > EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS * 1000
+    ) {
+      return "the latest equity heartbeat is stale or unavailable";
+    }
+    if (current.currentDrawdown >= current.threshold) {
+      return "current drawdown is still at or above its threshold";
+    }
+    return undefined;
+  }
+
+  private guardianReleaseExpired(sourceDate: string) {
+    const settings = this.appSettings();
+    if (openTradeTimestampExpired(sourceDate, settings)) return true;
+    const timestamp = Date.parse(normalizedDateInput(sourceDate));
+    return (
+      Number.isFinite(timestamp) &&
+      Date.now() - timestamp > GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS * 1000
+    );
   }
 
   private isEquityGuardianPaused(accountId?: string) {
@@ -6509,7 +7237,15 @@ class AppStore {
     };
   }
 
-  symbolMappings() {
+  symbolMappings(previewAccountId?: string) {
+    const accountMappings = (
+      this.db
+        .query("SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id")
+        .all() as Row[]
+    ).map((row) => parseJson<AccountSymbolMapping>(String(row.mapping_json)));
+    const accountMappingsById = Object.fromEntries(
+      accountMappings.map((mapping) => [mapping.accountId, mapping]),
+    );
     const aliases = [
       ...Object.entries(this.globalAliases()).map(([rawSymbol, canonicalSymbol]) => ({
         rawSymbol,
@@ -6517,6 +7253,7 @@ class AppStore {
         brokerSymbol: canonicalSymbol,
         status: "mapped",
         scope: "global",
+        providerId: undefined,
       })),
       ...Object.entries(this.providerAliases()).flatMap(([providerId, values]) =>
         Object.entries(values).map(([rawSymbol, canonicalSymbol]) => ({
@@ -6529,13 +7266,33 @@ class AppStore {
         })),
       ),
     ];
-    const accountMappings = (
-      this.db
-        .query("SELECT account_id, mapping_json FROM account_symbol_mappings ORDER BY account_id")
-        .all() as Row[]
-    ).map((row) => parseJson<AccountSymbolMapping>(String(row.mapping_json)));
+    const previewAliases = aliases.map((alias) => {
+      const resolution = resolveSymbol(
+        alias.rawSymbol,
+        alias.scope === "provider"
+          ? {
+              providerId: alias.providerId,
+              globalAliases: this.globalAliases(),
+              providerAliases: this.providerAliases(),
+              accountId: previewAccountId,
+              accountMappings: accountMappingsById,
+            }
+          : {
+              globalAliases: this.globalAliases(),
+              accountId: previewAccountId,
+              accountMappings: accountMappingsById,
+            },
+      );
+      return {
+        ...alias,
+        canonicalSymbol: resolution.canonicalSymbol ?? alias.canonicalSymbol,
+        brokerSymbol: resolution.brokerSymbol ?? alias.canonicalSymbol,
+        status: resolution.mappingStatus,
+        hint: resolution.warnings[0],
+      };
+    });
     const preview = [
-      ...aliases,
+      ...previewAliases,
       ...accountMappings.flatMap((mapping) =>
         Object.entries(mapping.canonicalOverrides ?? {}).map(([canonicalSymbol, brokerSymbol]) => ({
           rawSymbol: canonicalSymbol,
@@ -6548,6 +7305,23 @@ class AppStore {
           scope: "account",
           accountId: mapping.accountId,
         })),
+      ),
+      ...accountMappings.flatMap((mapping) =>
+        Object.entries(mapping.directBrokerOverrides ?? {}).map(([rawSymbol, brokerSymbol]) => {
+          const resolution = resolveSymbol(rawSymbol, {
+            accountId: mapping.accountId,
+            accountMappings: { [mapping.accountId]: mapping },
+          });
+          return {
+            rawSymbol,
+            canonicalSymbol: resolution.canonicalSymbol ?? brokerSymbol,
+            brokerSymbol: resolution.brokerSymbol ?? brokerSymbol,
+            status: resolution.mappingStatus,
+            scope: "account · direct",
+            accountId: mapping.accountId,
+            hint: resolution.warnings[0],
+          };
+        }),
       ),
     ];
     return {
@@ -6563,6 +7337,24 @@ class AppStore {
       .query("DELETE FROM symbol_aliases WHERE scope = ? AND provider_id = ? AND raw_symbol = ?")
       .run(scope, scope === "provider" ? providerId : "", rawSymbol.trim().toUpperCase());
     return this.symbolMappings();
+  }
+
+  deleteDirectBrokerOverride(accountId: string, rawSymbol: string) {
+    const existing = this.storedAccountMapping(accountId);
+    if (!existing) return this.symbolMappings();
+    const directBrokerOverrides = { ...(existing.directBrokerOverrides ?? {}) };
+    const key = Object.keys(directBrokerOverrides).find(
+      (candidate) => directBrokerOverrideKey(candidate) === directBrokerOverrideKey(rawSymbol),
+    );
+    if (!key) return this.symbolMappings();
+    delete directBrokerOverrides[key];
+    const mapping = { ...existing, directBrokerOverrides };
+    this.db
+      .query(
+        "INSERT INTO account_symbol_mappings (account_id, mapping_json, updated_at) VALUES (?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET mapping_json = excluded.mapping_json, updated_at = excluded.updated_at",
+      )
+      .run(accountId, JSON.stringify(mapping), new Date().toISOString());
+    return { accountId, mapping };
   }
 
   saveSymbolAlias(input: {
@@ -6608,14 +7400,27 @@ class AppStore {
     };
   }
 
-  saveAccountMapping(accountId: string, mapping: AccountSymbolMapping) {
+  saveAccountMapping(accountId: string, mapping: AccountMappingInput) {
+    if (mapping.direct) {
+      const rawSymbol = mapping.rawSymbol?.trim();
+      const brokerSymbol = mapping.brokerSymbol?.trim();
+      if (!rawSymbol || !brokerSymbol) {
+        return { error: "Direct mapping requires provider and broker symbols" };
+      }
+      mapping = { accountId, directBrokerOverrides: { [rawSymbol]: brokerSymbol } };
+    }
     const existing = this.storedAccountMapping(accountId) ?? defaultAccountMapping(accountId);
     const incomingOverrides = normalizeCanonicalOverrides(mapping.canonicalOverrides);
+    const incomingDirectOverrides = normalizeDirectBrokerOverrides(mapping.directBrokerOverrides);
     const merged: AccountSymbolMapping = {
       accountId,
       canonicalOverrides: {
         ...(existing.canonicalOverrides ?? {}),
         ...incomingOverrides,
+      },
+      directBrokerOverrides: {
+        ...(existing.directBrokerOverrides ?? {}),
+        ...incomingDirectOverrides,
       },
       prefix: mapping.prefix ?? existing.prefix ?? "",
       suffix: mapping.suffix ?? existing.suffix ?? "",
@@ -6770,6 +7575,11 @@ class AppStore {
         process.env.AZURE_OPENAI_API_KEY || this.secret("azureOpenAIApiKey"),
       ),
     };
+  }
+
+  settingsProjection() {
+    const { alertBotToken, ...settings } = this.appSettings();
+    return { ...settings, alertBotConfigured: Boolean(alertBotToken) };
   }
 
   updateAppSettings(input: Partial<AppSettings> & { azureOpenAIApiKey?: string }) {
@@ -6939,10 +7749,10 @@ class AppStore {
     };
   }
 
-  dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock") {
+  dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock", previewAccountId?: string) {
     const providers = this.providers();
     const queue = this.queueItems();
-    const parsed = this.parsedSignals();
+    const parsed = this.parsedSignals(8);
     const accounts = this.mt5Accounts();
     return {
       health: {
@@ -6950,7 +7760,7 @@ class AppStore {
         database: "connected",
         telegramAdapter,
       },
-      appSettings: this.appSettings(),
+      appSettings: this.settingsProjection(),
       accountPerformance: this.accountPerformance(accounts),
       accountPerformanceByAccount: Object.fromEntries(
         accounts.map((account) => [account.id, this.accountPerformance([account])]),
@@ -6964,6 +7774,7 @@ class AppStore {
       equityGuardians: this.equityGuardians(),
       telegramSessions: this.telegramSessionSummaries(),
       telegramHealth: this.telegramSessionHealth(),
+      telegramProviderHealth: this.telegramProviderHealthSnapshot(),
       alerts: this.operationalAlerts(),
       providers: providers.map((provider) => ({
         id: provider.id,
@@ -6992,6 +7803,7 @@ class AppStore {
         initialBalance: account.initialBalance,
         heartbeatStatus: account.heartbeatStatus,
         marginMode: account.marginMode,
+        availableSymbols: account.availableSymbols,
         openPositionCount: account.openPositionCount,
         pendingOrderCount: account.pendingOrderCount,
         externalPositionCount: account.externalPositionCount,
@@ -7006,8 +7818,10 @@ class AppStore {
         lastHeartbeatAt: account.lastHeartbeatAt,
         lastSnapshotAt: account.lastSnapshotAt,
       })),
-      parserResults: parsed.slice(0, 8).map((signal) => ({
+      parserResults: parsed.map((signal) => ({
         id: signal.id,
+        accountId: signal.result.accountId,
+        providerId: signal.result.providerId ?? signal.providerId,
         rawMessageId: signal.rawMessageId,
         classification: signal.classification,
         providerTitle:
@@ -7015,11 +7829,26 @@ class AppStore {
           signal.providerId,
         rawText: signal.result.originalText,
         commandType: signal.result.commandType,
+        direction: signal.result.direction,
+        orderType: signal.result.orderType,
+        entry: signal.result.entry,
+        stopLoss: signal.result.stopLoss,
+        takeProfits: signal.result.takeProfits,
+        volume: signal.result.lotSize,
+        executionMode: signal.result.executionMode,
+        rawSymbol: signal.result.rawSymbol ?? "",
         canonicalSymbol: signal.result.canonicalSymbol ?? "",
         brokerSymbol: signal.result.brokerSymbol ?? "",
         mappingStatus: signal.result.mappingStatus,
+        mappingSource: signal.result.mappingSource,
+        mappingWarnings: signal.result.mappingWarnings,
         confidence: signal.result.confidence,
+        matchedPatternIds: signal.result.matchedPatternIds,
+        missingFields: signal.result.missingFields,
+        warnings: signal.result.warnings,
         reviewRequired: signal.reviewRequired,
+        status: signal.status,
+        heldReason: signal.heldReason || undefined,
       })),
       parserFixtures: this.fixtures().slice(0, 20),
       signalQueue: queue.map((item) => ({
@@ -7031,12 +7860,20 @@ class AppStore {
         riskPercent: item.payload.riskPercent ?? null,
       })),
       logicalTrades: this.logicalTradesForDashboard(),
-      symbolMappings: this.symbolMappings().preview,
+      symbolMappings: this.symbolMappings(previewAccountId ?? accounts[0]?.id).preview,
       executionLogs: this.executionLogs(undefined, 10).map((log) => ({
         id: log.id,
         queueItemId: log.queueItemId,
         retcode: log.retcode,
+        retcodeExternal: log.retcodeExternal,
         brokerComment: log.brokerComment,
+        errorText: log.errorText,
+        orderTicket: log.orderTicket,
+        positionTicket: log.positionTicket,
+        dealTicket: log.dealTicket,
+        requestedPrice: log.requestedPrice,
+        filledPrice: log.filledPrice,
+        volume: log.volume,
         status: log.status,
         timestamp: log.createdAt,
       })),
@@ -7188,6 +8025,18 @@ class AppStore {
         classification TEXT NOT NULL
       );
     `);
+    this.ensureColumn("raw_messages", "reply_to_message_id", "TEXT");
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS raw_message_aliases (
+        provider_id TEXT NOT NULL,
+        telegram_message_id TEXT NOT NULL,
+        raw_message_id TEXT NOT NULL,
+        UNIQUE(provider_id, telegram_message_id)
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_raw_message_aliases_provider_telegram ON raw_message_aliases(provider_id, telegram_message_id)",
+    );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS parsed_signals (
         id TEXT PRIMARY KEY,
@@ -7214,6 +8063,18 @@ class AppStore {
       "CREATE INDEX IF NOT EXISTS idx_logical_trades_account_provider_created ON logical_trades(account_id, provider_id, status, created_at)",
     );
     this.db.run(`
+      CREATE TABLE IF NOT EXISTS trade_origins (
+        provider_id TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        telegram_message_id TEXT NOT NULL,
+        logical_trade_id TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_trade_origins_provider_account_telegram ON trade_origins(provider_id, account_id, telegram_message_id)",
+    );
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS queue_items (
         id TEXT PRIMARY KEY,
         parsed_signal_id TEXT NOT NULL,
@@ -7230,6 +8091,9 @@ class AppStore {
     this.ensureColumn("queue_items", "lease_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("queue_items", "held_reason", "TEXT");
     this.ensureColumn("queue_items", "origin_queue_item_id", "TEXT");
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_queue_items_parsed_signal_created ON queue_items(parsed_signal_id, created_at)",
+    );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS held_lifecycle_drops (
         id TEXT PRIMARY KEY,
@@ -7828,7 +8692,7 @@ class AppStore {
         "Alpha FX Signals",
         "channel",
         0,
-        "deterministic",
+        "automatic",
         "balanced",
         defaultAppSettings.defaultLotSize,
         new Date().toISOString(),
@@ -7865,15 +8729,23 @@ class AppStore {
   private parserContext(
     providerId: string,
     accountId: string,
-    overrides?: Pick<ProviderExecutionConfig, "parserMode" | "lockedSymbol">,
+    overrides?: Pick<
+      ProviderExecutionConfig,
+      "parserMode" | "lockedSymbol" | "tradedSymbols" | "shorthandLevels"
+    >,
   ) {
     const settings = this.appSettings();
     const providerConfig = this.providerConfig(providerId);
     const lockedSymbol = normalizeLockedSymbol(
       overrides?.lockedSymbol ?? providerConfig.lockedSymbol,
     );
+    const tradedSymbols = normalizeTradedSymbols(
+      overrides?.tradedSymbols ?? providerConfig.tradedSymbols,
+    );
+    const fallbackSymbol = tradedSymbols?.[0] ?? lockedSymbol;
     const providerDefaultSymbols = this.providerDefaultSymbols();
-    if (lockedSymbol) providerDefaultSymbols[providerId] = lockedSymbol;
+    if (fallbackSymbol) providerDefaultSymbols[providerId] = fallbackSymbol;
+    const shorthandLevels = overrides?.shorthandLevels ?? providerConfig.shorthandLevels === true;
     return {
       providerId,
       accountId,
@@ -7881,10 +8753,12 @@ class AppStore {
       globalAliases: this.globalAliases(),
       providerAliases: this.providerAliases(),
       providerDefaultSymbols,
+      geometryInferenceSymbol: fallbackSymbol,
       referencePrices: this.referencePricesForAccount(accountId),
       accountMappings: this.accountMappings(accountId),
       defaultStopLoss: { value: settings.defaultStopLossPips, unit: "PIPS" as const },
       defaultTakeProfit: { value: settings.defaultTakeProfitPips, unit: "PIPS" as const },
+      shorthandLevels,
     };
   }
 
@@ -7928,6 +8802,8 @@ class AppStore {
     return Object.fromEntries(
       this.providers()
         .map((provider) => {
+          const tradedSymbol = normalizeTradedSymbols(provider.tradedSymbols)?.[0];
+          if (tradedSymbol) return [provider.id, tradedSymbol] as const;
           const lockedSymbol = normalizeLockedSymbol(provider.lockedSymbol);
           if (lockedSymbol) return [provider.id, lockedSymbol] as const;
           if (provider.title.toLowerCase().includes("kal")) return [provider.id, "XAUUSD"] as const;
@@ -8023,6 +8899,7 @@ class AppStore {
       return {
         accountId,
         canonicalOverrides: {},
+        directBrokerOverrides: existing.directBrokerOverrides ?? {},
         prefix: "",
         suffix: "",
         includeSymbols: [],
@@ -8037,7 +8914,12 @@ class AppStore {
     };
   }
 
-  private parseUnparsedProviderMessages(providerId: string, limit: number, accountId: string) {
+  private parseUnparsedProviderMessages(
+    providerId: string,
+    limit: number,
+    accountId: string,
+    newestFirst = false,
+  ) {
     const rows = this.db
       .query(
         `SELECT id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification
@@ -8046,7 +8928,7 @@ class AppStore {
            AND NOT EXISTS (
              SELECT 1 FROM parsed_signals WHERE parsed_signals.raw_message_id = raw_messages.id
            )
-         ORDER BY message_date ASC
+         ORDER BY message_date ${newestFirst ? "DESC" : "ASC"}
          LIMIT ?`,
       )
       .all(providerId, limit) as Row[];
@@ -8084,12 +8966,24 @@ class AppStore {
     results: ParsedSignal[];
     createdAt: string;
   }) {
-    return input.results.map((result) => {
+    const aggressive =
+      normalizeParserMode(this.providerConfig(input.providerId).parserMode) === "aggressive";
+    return input.results.map((unfilteredResult) => {
+      const tradedSymbolHoldReason = this.tradedSymbolHoldReason(
+        input.providerId,
+        unfilteredResult,
+      );
+      const result = tradedSymbolHoldReason
+        ? {
+            ...unfilteredResult,
+            warnings: [...unfilteredResult.warnings, tradedSymbolHoldReason],
+          }
+        : unfilteredResult;
       const parsedSignalId = `parse_${nanoid(10)}`;
       // Adaptive learning: if the operator has approved this signal structure
       // enough times, stop flagging mapped open trades for review.
       const reviewRequired =
-        shouldRequireManualReview(result) &&
+        (Boolean(tradedSymbolHoldReason) || shouldRequireManualReview(result, aggressive)) &&
         !learnedOverrideApplies(
           result,
           this.trainingExampleCount(input.providerId, structuralFingerprint(result.originalText)),
@@ -8192,6 +9086,20 @@ class AppStore {
         JSON.stringify(trade),
         trade.openedAt,
       );
+    const telegramMessageId = trade.source?.telegramMessageId;
+    if (telegramMessageId && telegramMessageId !== "manual") {
+      this.db
+        .query(
+          "INSERT INTO trade_origins (provider_id, account_id, telegram_message_id, logical_trade_id, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(logical_trade_id) DO UPDATE SET provider_id = excluded.provider_id, account_id = excluded.account_id, telegram_message_id = excluded.telegram_message_id, created_at = excluded.created_at",
+        )
+        .run(
+          trade.providerId ?? "",
+          trade.accountId ?? "",
+          telegramMessageId,
+          trade.id,
+          trade.openedAt,
+        );
+    }
   }
 
   private insertNonLeasedQueueItem(
@@ -8241,6 +9149,60 @@ class AppStore {
         now,
       );
     return item.id;
+  }
+
+  private hasDuplicateOpenSignal(providerId: string, accountId: string, signal: ParsedSignal) {
+    const symbol = normalizeLockedSymbol(
+      signal.brokerSymbol ?? signal.canonicalSymbol ?? signal.rawSymbol,
+    );
+    if (
+      signal.commandType !== "OPEN_TRADE" ||
+      !symbol ||
+      !signal.direction ||
+      !signal.orderType ||
+      !signal.entry
+    ) {
+      return false;
+    }
+    const metadata = this.db
+      .query(
+        "SELECT digits FROM symbol_metadata WHERE account_id = ? AND upper(symbol) = upper(?) LIMIT 1",
+      )
+      .get(accountId, symbol) as Row | null;
+    const fallbackDigits = Math.max(0, Math.ceil(-Math.log10(brokerPipSize(symbol))));
+    const digits = Math.min(
+      8,
+      Math.max(0, Math.round(nullableNumber(metadata?.digits) ?? fallbackDigits)),
+    );
+    const entry = Number(signal.entry.from.toFixed(digits));
+    const rows = this.db
+      .query(
+        `SELECT queue_items.payload_json
+         FROM queue_items
+         JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
+         LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
+         WHERE parsed_signals.provider_id = ?
+           AND json_extract(queue_items.payload_json, '$.commandType') = 'OPEN_TRADE'
+           AND queue_items.status IN ('PENDING','LEASED','EXECUTED','HELD')
+           AND (
+             queue_items.status IN ('PENDING','LEASED','HELD')
+             OR logical_trades.status IN ('OPEN','PENDING','OUT_OF_SYNC')
+             OR unixepoch(queue_items.created_at) >= unixepoch('now') - ?
+           )`,
+      )
+      .all(providerId, OPEN_SIGNAL_DEDUP_SECONDS) as Row[];
+    return rows.some((row) => {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      const payloadSymbol = normalizeLockedSymbol(payload.brokerSymbol ?? payload.canonicalSymbol);
+      return (
+        payloadSymbol === symbol &&
+        payload.direction === signal.direction &&
+        payload.orderType === signal.orderType &&
+        payload.entry !== undefined &&
+        Number(payload.entry.from.toFixed(digits)) === entry &&
+        (payload.stopLoss ?? null) === (signal.stopLoss ?? null)
+      );
+    });
   }
 
   private mt5SnapshotsByAccount() {
@@ -10210,13 +11172,25 @@ function normalizeProviderTpLevels(
 }
 
 function normalizeParserMode(value: unknown): ParserMode {
-  return value === "kal-vip" || value === "kal-vip-extended" ? value : "deterministic";
+  return value === "aggressive" ? "aggressive" : "automatic";
 }
 
 function normalizeLockedSymbol(value: unknown): string | undefined {
   if (typeof value !== "string" && typeof value !== "number") return undefined;
   const normalized = String(value).trim().toUpperCase().replace(/\s+/g, "");
   return normalized ? normalized : undefined;
+}
+
+function normalizeTradedSymbols(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const symbols = [
+    ...new Set(
+      value
+        .map((symbol) => normalizeLockedSymbol(symbol)?.replace(/[/-]/g, ""))
+        .filter(Boolean) as string[],
+    ),
+  ];
+  return symbols.length > 0 ? symbols : undefined;
 }
 
 function normalizeTakeProfitStrategy(
@@ -10587,6 +11561,9 @@ function reviewReasons(signal: ParsedSignal) {
   if (signal.confidence < 0.75) reasons.push("low-confidence");
   if (signal.mappingStatus !== "mapped") reasons.push(`mapping-${signal.mappingStatus}`);
   for (const field of signal.missingFields) reasons.push(`missing-${field}`);
+  for (const warning of signal.warnings) {
+    if (warning.startsWith("Geometry-inferred")) reasons.push(warning);
+  }
   if (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol")) {
     reasons.push("lifecycle-missing-symbol");
   }
@@ -10761,6 +11738,22 @@ function normalizeCanonicalOverrides(overrides: Record<string, string> | undefin
       ])
       .filter(([canonicalSymbol, brokerSymbol]) => canonicalSymbol && brokerSymbol),
   );
+}
+
+function normalizeDirectBrokerOverrides(overrides: Record<string, string> | undefined) {
+  if (!overrides) return {};
+  return Object.fromEntries(
+    Object.entries(overrides)
+      .map(([rawSymbol, brokerSymbol]) => [directBrokerOverrideKey(rawSymbol), brokerSymbol.trim()])
+      .filter(([rawSymbol, brokerSymbol]) => rawSymbol && brokerSymbol),
+  );
+}
+
+function directBrokerOverrideKey(value: string) {
+  return value
+    .toUpperCase()
+    .replace(/[\s/_.#-]/g, "")
+    .trim();
 }
 
 function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {

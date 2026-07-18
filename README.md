@@ -1,27 +1,38 @@
 # Telegram TC
 
-Telegram TC is a local-first Telegram-to-MetaTrader 5 copy-trading operations desk. It connects to
-Telegram signal channels, normalizes messages into executable trade commands, lets an operator review
-and configure provider behaviour, and exposes a polling contract for the `TelegramTC_EA` Expert
-Advisor to execute work in MT5.
+Telegram TC is a Telegram-to-MetaTrader 5 signal-copying platform. It connects to Telegram signal
+channels, normalizes their messages into executable trade commands, lets an operator review and
+configure how each provider is copied, and drives the `TelegramTC_EA` Expert Advisor to place and
+manage the trades in MT5. It is built to handle the many ways real channels post signals rather than
+a single fixed format.
 
-The app is MT5-first. Telegram auth, provider selection, parsing, queueing, account linking, and
-broker-state reconciliation are implemented. Live trading still depends on a configured Telegram
-account, a demo or live MT5 terminal, and the EA being attached to an MT5 chart with WebRequest
-enabled for the backend URL.
+The system is MT5-first and provider-agnostic: any channel can be added as a provider, tested against
+its own history, tuned, and assigned to one or more MT5 accounts. Live copying requires a connected
+Telegram account, a demo or live MT5 terminal, and the EA attached to a chart with WebRequest enabled
+for the backend URL.
 
 ## What It Does
 
-- Connects a Telegram account with either the deterministic mock adapter or the real GramJS adapter.
-- Turns selected Telegram channels or groups into providers that can be enabled, disabled, tested,
-  configured, symbol-locked, and assigned to one or more MT5 accounts.
-- Parses open-trade and lifecycle messages, including market/limit/stop entries, SL/TP levels,
-  partial closes, move-SL commands, TP-hit announcements, and trailing-stop commands.
-- Supports a KAL VIP extended parser mode for terse Gold/XAUUSD level posts, expanding short levels
-  like `41`, `56`, and `03` from a fresh EA-reported reference price when the provider is locked to
-  one symbol.
+- Connects a Telegram account through a deterministic mock adapter (for testing) or the real GramJS
+  adapter.
+- Turns any Telegram channel or group into a provider that can be enabled, disabled, tested against
+  its own message history, configured, and assigned to one or more MT5 accounts.
+- Parses open-trade and lifecycle messages across the formats channels actually use: market, limit,
+  and stop entries; entry zones; single and laddered levels; a stop and multiple take-profit targets;
+  partial closes; move-SL-to-break-even; TP-hit and provider-close announcements; cancellations; and
+  trailing stops.
+- Reads a wide instrument range (forex majors and crosses, metals, indices, crypto, and oil) and
+  copes with real-world formatting: the symbol on its own line or in a `SYM/SYM` pair, tickers with
+  digits (`US30`, `NAS100`), a stop with no separator (`SL2286`), pip annotations, and non-English
+  signal vocabulary such as French buy/sell terms.
+- Fills in details a channel omits: a missing symbol from the provider's configured instrument(s),
+  and a missing stop or target from provider defaults, so nothing is queued naked.
+- Restricts a provider to a chosen set of traded symbols so only the instruments you want are copied,
+  holding off-list signals for review.
 - Resolves symbols through global aliases, provider aliases, account-specific overrides, broker
   suffix/prefix rules, and EA-reported broker symbol inventories.
+- Ties provider follow-ups (cancels, TP-hits, closes, re-entries) back to the specific open trade
+  they refer to through the Telegram reply link, so managed positions stay aligned with the provider.
 - Builds logical trades and queue items for the EA while keeping parser intent separate from broker
   execution results.
 - Deduplicates captured Telegram messages and can expire stale open-trade replays so refetching the
@@ -29,10 +40,9 @@ enabled for the backend URL.
 - Supports app-managed virtual TP handling, TP1-TP4 allocation, runner lots, break-even/last-TP/trail
   runner behaviour, split-order execution mode, and app-owned default SL/TP distances.
 - Reconciles MT5 reports, snapshots, and broker history into open/closed trade history, execution
-  logs, missing pending-order cancellation, out-of-sync diagnostics, account performance, provider
-  performance, and external/manual broker activity.
-- Normalizes USD/ZAR mixed-account performance into a configured reporting currency and leaves
-  unsupported mixed-currency aggregates blank instead of relabeling unknown conversions.
+  logs, pending-order cancellation, out-of-sync diagnostics, and account/provider performance.
+- Normalizes mixed-currency account performance into a configured reporting currency and leaves
+  unsupported conversions blank instead of relabeling unknown rates.
 - Pauses new open trades per account through Equity Guardian when drawdown breaches the configured
   threshold, while allowing lifecycle management commands to continue.
 
@@ -161,7 +171,7 @@ Optional script knobs include `TELEGRAM_TC_API_URL`, `TELEGRAM_TARGET_DIALOG`,
 2. Start the API or Docker service.
 3. In the app, create a link slot from `Linked Accounts`.
 4. In MT5, open `Tools -> Options -> Expert Advisors`, enable WebRequest, and add the backend URL
-   that the EA will call, for example `http://192.168.0.100:18787`.
+   that the EA will call, for example `http://<your-server-host>:18787`.
 5. Attach `TelegramTC_EA` to a chart, enable live trading, set `BackendBaseUrl` to the API `/api`
    URL, and paste the app link code into `LinkCode`.
 6. Wait for the EA to register and heartbeat. The slot will turn into a connected account in the

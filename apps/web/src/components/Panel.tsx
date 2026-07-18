@@ -15,6 +15,9 @@ export function Panel({
   testId?: string;
   title: string;
 }) {
+  const tabPanelId = tabs
+    ? `panel-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-content`
+    : undefined;
   return (
     <section className={`panel ${className}`} data-testid={testId}>
       <header>
@@ -24,7 +27,9 @@ export function Panel({
             {tabs.map((tab) => (
               <button
                 aria-selected={activeTab === tab}
+                aria-controls={tabPanelId}
                 className={`panel-tab ${activeTab === tab ? "active" : ""}`}
+                id={`${tabPanelId}-${tab.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
                 key={tab}
                 onClick={() => onTabChange(tab)}
                 role="tab"
@@ -36,7 +41,17 @@ export function Panel({
           </div>
         ) : null}
       </header>
-      {children}
+      {tabs && activeTab && onTabChange ? (
+        <div
+          aria-labelledby={`${tabPanelId}-${activeTab.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
+          id={tabPanelId}
+          role="tabpanel"
+        >
+          {children}
+        </div>
+      ) : (
+        children
+      )}
     </section>
   );
 }

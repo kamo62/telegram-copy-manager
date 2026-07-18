@@ -53,7 +53,7 @@ h3 {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 200px minmax(0, 1fr);
+  grid-template-columns: 232px minmax(0, 1fr);
   min-height: 100vh;
 }
 
@@ -350,7 +350,7 @@ h3 {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 5px 8px 5px 10px;
+  padding: 6px 8px 6px 10px;
   font-family: var(--font-ui);
   font-size: 11px;
   font-weight: 500;
@@ -382,8 +382,8 @@ h3 {
 }
 
 .sidebar-child-dot {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
 }
@@ -424,10 +424,22 @@ h3 {
 }
 
 .sidebar-child-dot.pending {
-  border-radius: 0;
-  background: var(--ink);
-  box-shadow: none;
+  width: 13px;
+  height: 13px;
+  color: var(--ink);
   animation: pulse-soft 1.6s var(--ease-in-out) infinite;
+}
+
+:root[data-color-accents="on"] .sidebar-child-dot.ok {
+  background: var(--up);
+}
+
+:root[data-color-accents="on"] .sidebar-child-dot.off {
+  border-color: var(--down);
+}
+
+:root[data-color-accents="on"] .sidebar-child-dot.pending {
+  color: var(--warn-dim);
 }
 
 .sidebar-child-meta {
@@ -1322,6 +1334,24 @@ h3 {
   gap: 8px;
 }
 
+.parser-diagnostics,
+.parse-recent-results,
+.log-details {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+.parser-diagnostics ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.fixture-classification-hint {
+  color: var(--ink-3);
+}
+
 .fixture-controls {
   display: flex;
   flex-wrap: wrap;
@@ -1645,6 +1675,25 @@ h3 {
   white-space: nowrap;
   flex: 1;
   min-width: 0;
+}
+
+.log-error {
+  color: hsl(0 70% 38%);
+  font-size: 12px;
+}
+
+.log-details {
+  padding-top: 4px;
+  border-top: 1px solid var(--line-subtle);
+}
+
+.load-state {
+  margin: 0;
+  color: var(--ink-3);
+}
+
+.load-state-error {
+  color: hsl(0 70% 38%);
 }
 
 .log-queue-id {
@@ -2443,59 +2492,6 @@ h3 {
   padding: 1px 5px;
 }
 
-.small-viewport-notice {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: var(--bg);
-  z-index: 100;
-}
-
-.small-viewport-notice-inner {
-  display: grid;
-  gap: 14px;
-  justify-items: center;
-  max-width: 360px;
-  text-align: center;
-}
-
-.small-viewport-notice-glyph {
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  border-radius: 14px;
-  background: var(--accent-soft);
-  color: var(--accent);
-}
-
-.small-viewport-notice-title {
-  font-family: var(--font-display);
-  font-size: 22px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  margin: 0;
-  color: var(--ink);
-}
-
-.small-viewport-notice-body {
-  font-size: 13px;
-  line-height: 1.55;
-  color: var(--ink-2);
-  margin: 0;
-}
-
-.small-viewport-notice-body-secondary {
-  font-size: 12px;
-  color: var(--ink-3);
-}
-
-.small-viewport-notice-continue {
-  margin-top: 6px;
-}
-
 .error-boundary {
   display: grid;
   place-items: center;
@@ -2567,43 +2563,6 @@ h3 {
   display: flex;
   gap: 8px;
   margin-top: 4px;
-}
-
-.error-panel {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  background: hsl(0 85% 98%);
-  border: 1px solid hsl(0 70% 88%);
-  border-radius: var(--radius-2);
-  color: var(--ink-2);
-}
-
-.error-panel-glyph {
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  color: var(--down);
-}
-
-.error-panel-body {
-  display: grid;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-
-.error-panel-body strong {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.error-panel-body span {
-  font-size: 12px;
-  color: var(--ink-2);
-  word-break: break-word;
 }
 
 .skip-link {
@@ -3696,6 +3655,28 @@ h3 {
 
 .attribution-table-wrap {
   box-shadow: none;
+}
+
+.attribution-trades-table {
+  min-width: 880px;
+  table-layout: fixed;
+}
+
+.attribution-trades-table th:nth-child(1) {
+  width: 22%;
+}
+.attribution-trades-table th:nth-child(2) {
+  width: 14%;
+}
+.attribution-trades-table th:nth-child(3) {
+  width: 12%;
+}
+.attribution-trades-table th:nth-child(4),
+.attribution-trades-table th:nth-child(5) {
+  width: 17%;
+}
+.attribution-trades-table th:nth-child(6) {
+  width: 18%;
 }
 
 .attribution-source-chip {
@@ -6025,7 +6006,7 @@ select.config-strategy-input {
   align-items: baseline;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: var(--fs-7);
+  font-size: var(--fs-6);
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--ink);
@@ -6035,8 +6016,15 @@ select.config-strategy-input {
 
 .kpi-primary .kpi-amount {
   color: var(--ink);
-  font-size: var(--fs-8);
+  font-size: var(--fs-7);
   letter-spacing: -0.02em;
+}
+
+/* Reserve the P/L card's Today/Week/Month toggle height in the other KPI cards
+   so all four amounts + sparklines line up on the same baseline. */
+.kpi-window-spacer {
+  height: 26px;
+  margin: 2px 0;
 }
 
 .kpi-delta {
@@ -6096,6 +6084,12 @@ select.config-strategy-input {
   display: block;
   margin-top: 6px;
   overflow: visible;
+}
+
+.dither-sparkline {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
 }
 
 /* Donut layout on AccountsOverview — donut on the left, legend right.
@@ -6293,7 +6287,7 @@ select.config-strategy-input {
   color: var(--ink-dim);
 }
 
-.summary-panel .sparkline {
+.summary-panel .dither-sparkline {
   display: block;
   width: 100%;
 }
@@ -7713,6 +7707,11 @@ select.config-strategy-input {
 }
 
 @media (max-width: 760px) {
+  .activity-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
   .status-bar .status-chip:not(:first-child):not(.status-chip-error) {
     display: none;
   }
@@ -8082,4 +8081,252 @@ select.config-strategy-input {
 .resolve-menu-popover button:disabled {
   color: var(--ink-faint);
   cursor: not-allowed;
+}
+
+/* Responsive operations shell -------------------------------------------- */
+
+.status-action-label {
+  display: none;
+}
+
+.status-bar .refresh-btn {
+  width: 28px;
+  height: 28px;
+  margin-left: 2px;
+}
+
+.kpi-window-toggle button,
+.chart-toggle button {
+  min-height: 28px;
+}
+
+.exposure-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.account-thresholds-wrap {
+  max-height: none;
+}
+
+.settings-panel {
+  overflow: visible;
+}
+
+@media (max-width: 900px) {
+  .workspace {
+    padding: var(--space-4);
+    gap: var(--space-4);
+  }
+
+  .workspace-tabs {
+    position: sticky;
+    top: 32px;
+    z-index: 20;
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+    background: var(--bg);
+  }
+
+  .workspace-tab {
+    flex: 0 0 auto;
+    min-height: 40px;
+    padding: 8px 11px;
+  }
+
+  .account-context-secondary {
+    display: none;
+  }
+
+  .providers-table th:nth-child(n + 3):nth-child(-n + 10),
+  .providers-table td:nth-child(n + 3):nth-child(-n + 10) {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .status-bar {
+    height: 40px;
+    gap: 8px;
+    padding-inline: 8px;
+  }
+
+  .status-bar .status-actions {
+    gap: 4px;
+  }
+
+  .status-bar .refresh-btn {
+    width: auto;
+    min-width: 32px;
+    height: 32px;
+    margin-left: 0;
+    padding-inline: 8px;
+    gap: 5px;
+  }
+
+  .status-action-label {
+    display: inline;
+    font-size: 11px;
+  }
+
+  .workspace {
+    padding: 12px;
+    gap: 12px;
+  }
+
+  .workspace-tabs {
+    top: 40px;
+    margin-inline: -12px;
+    padding-inline: 12px;
+  }
+
+  .panel > *:not(header) {
+    padding: 16px;
+  }
+
+  .account-header {
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .account-header-title {
+    font-size: 22px;
+  }
+
+  .account-kpis {
+    gap: 8px;
+  }
+
+  .kpi {
+    gap: 4px;
+    padding: 8px;
+  }
+
+  .kpi .sparkline,
+  .kpi-spark-placeholder {
+    display: none;
+  }
+
+  .kpi-window-toggle button,
+  .chart-toggle button {
+    min-height: 36px;
+  }
+
+  .exposure-panel {
+    padding: 14px;
+  }
+
+  .exposure-table {
+    min-width: 430px;
+  }
+
+  .data-table-wrap {
+    overscroll-behavior-inline: contain;
+    scrollbar-width: thin;
+  }
+
+  .providers-table th:nth-child(2),
+  .providers-table td:nth-child(2) {
+    display: none;
+  }
+
+  .providers-table .provider-account-cell {
+    min-width: 104px;
+  }
+
+  .settings-actions {
+    position: sticky;
+    top: 44px;
+    z-index: 15;
+    padding: 8px 0 10px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-actions .btn {
+    width: 100%;
+    min-height: 42px;
+  }
+
+  .settings-section {
+    padding: 14px;
+  }
+
+  .account-thresholds-table {
+    min-width: 430px;
+  }
+}
+
+@media (max-width: 600px) {
+  .setup-provider-row {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .setup-provider-name {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .setup-provider-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .setup-provider-actions .btn {
+    min-height: 40px;
+    padding-inline: 8px;
+  }
+
+  .linked-accounts-create {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .linked-accounts-create .btn {
+    min-height: 42px;
+  }
+
+  .account-row {
+    grid-template-columns: 32px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .account-row > .tag {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .account-row-meta,
+  .account-row-stats {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .linked-slot-body {
+    min-width: 0;
+  }
+
+  .linked-slot-body span {
+    overflow-wrap: anywhere;
+  }
+
+  .linked-slot-delete {
+    width: 36px;
+    height: 36px;
+  }
+
+  .provider-link-block {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .provider-link-block > .btn,
+  .linked-account-actions .btn {
+    min-height: 40px;
+  }
 }

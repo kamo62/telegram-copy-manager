@@ -109,6 +109,61 @@ describe("deterministic signal parser", () => {
     });
   });
 
+  test("disambiguates STOP order tokens from stop-loss labels without using an SL price as entry", () => {
+    const stopLoss = parseSignalText("BUY GOLD STOP LOSS 2290 TP 2320", context);
+    expect(stopLoss).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      orderType: "MARKET",
+      entry: undefined,
+      stopLoss: 2290,
+    });
+    expect(shouldRequireManualReview(stopLoss)).toBe(false);
+
+    for (const [text, entry] of [
+      ["BUY GOLD LIMIT SL 2290 TP 2320 ENTRY 2310", { from: 2310 }],
+      ["BUY GOLD LIMIT SL 2290 TP 2320 ENTRY 2310-2312", { from: 2310, to: 2312 }],
+      ["BUY GOLD LIMIT SL 2290 TP 2320 @2310", { from: 2310 }],
+    ] as const) {
+      const signal = parseSignalText(text, context);
+      expect(signal).toMatchObject({ orderType: "LIMIT", entry });
+      expect(signal.missingFields).not.toContain("entry");
+      expect(shouldRequireManualReview(signal)).toBe(false);
+    }
+
+    for (const orderType of ["LIMIT", "STOP"] as const) {
+      const missingPendingEntry = parseSignalText(`BUY GOLD ${orderType} SL 2290 TP 2320`, context);
+      expect(missingPendingEntry).toMatchObject({ orderType, entry: undefined });
+      expect(missingPendingEntry.missingFields).toContain("entry");
+      expect(shouldRequireManualReview(missingPendingEntry)).toBe(true);
+    }
+
+    for (const [text, entry] of [
+      ["BUY STOP 2290", 2290],
+      ["SELL STOP @1.2345", 1.2345],
+      ["BUY GOLD STOP 2310 SL 2290", 2310],
+      ["BUY GOLD @ 2310 ORDER TYPE: STOP SL 2290", 2310],
+    ] as const) {
+      expect(parseSignalText(text, context)).toMatchObject({
+        orderType: "STOP",
+        entry: { from: entry },
+      });
+    }
+    expect(parseSignalText("BUY STOP LIMIT", context).orderType).toBe("LIMIT");
+    expect(parseSignalText("BUY STOPLOSSUSD 2290", context).orderType).toBe("MARKET");
+
+    for (const text of ["SL 2290", "S/L: 2290", "StopLoss 2290", "STOP-LOSS 2290"]) {
+      expect(parseSignalText(`BUY GOLD ${text} TP 2320`, context)).toMatchObject({
+        entry: undefined,
+        stopLoss: 2290,
+      });
+    }
+
+    const conflicting = parseSignalText("BUY GOLD STOP LOSS 2290 SL 2280 TP 2320", context);
+    expect(conflicting.stopLoss).toBe(2290);
+    expect(shouldRequireManualReview(conflicting)).toBe(true);
+  });
+
   test("extracts optional lot size and risk percent from open trade text", () => {
     const result = parseSignalText(
       "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900\nLot 0.25\nRisk 0.75%",
@@ -289,7 +344,7 @@ describe("deterministic signal parser", () => {
       globalAliases: { GOLD: "XAUUSD" },
       providerDefaultSymbols: { "kal-vip": "XAUUSD" },
       accountMappings: context.accountMappings,
-      parserMode: "kal-vip-extended",
+      shorthandLevels: true,
       referencePrices: { XAUUSD: 4444.2 },
       defaultStopLoss: { value: 50, unit: "PIPS" },
       defaultTakeProfit: { value: 200, unit: "PIPS" },
@@ -324,7 +379,7 @@ describe("deterministic signal parser", () => {
     }
   });
 
-  test("keeps KAL VIP short level commentary gated to extended mode with a reference price", () => {
+  test("keeps KAL VIP short level commentary gated to the shorthand-levels capability", () => {
     const baseContext: ParserContext = {
       providerId: "kal-vip",
       accountId: "mt5-demo-1",
@@ -344,17 +399,18 @@ describe("deterministic signal parser", () => {
       "The 03 level can be a buy",
     ].join("\n");
 
+    // Capability off + reference price present -> still gated (no phantom opens).
     expect(
       parseSignalTexts(rawText, {
         ...baseContext,
-        parserMode: "deterministic",
         referencePrices: { XAUUSD: 4444.2 },
       }),
     ).toMatchObject([{ commandType: "NO_SIGNAL" }]);
+    // Capability on but no reference price -> nothing to expand from.
     expect(
       parseSignalTexts(rawText, {
         ...baseContext,
-        parserMode: "kal-vip-extended",
+        shorthandLevels: true,
       }),
     ).toMatchObject([{ commandType: "NO_SIGNAL" }]);
   });
@@ -525,6 +581,139 @@ describe("deterministic signal parser", () => {
     expect(result.warnings).toContain("Symbol could not be mapped to a broker symbol");
     expect(shouldRequireManualReview(result)).toBe(true);
   });
+
+  test("infers locked-symbol geometry and holds the incident when it also references stops", () => {
+    const incident = [
+      "You can still place stops for 60 ",
+      "",
+      "And limits here ",
+      "",
+      "4023-22",
+      "",
+      "Sl 4017",
+      "",
+      "Tp 4028",
+      "Tp 4035",
+      "Tp 4041",
+    ].join("\n");
+    const geometryContext: ParserContext = {
+      ...context,
+      providerId: "kal-vip",
+      geometryInferenceSymbol: "XAUUSD",
+      referencePrices: { XAUUSD: 4050 },
+    };
+    const held = parseSignalText(incident, geometryContext);
+    const clean = parseSignalText(
+      incident.replace("You can still place stops for 60 \n\n", ""),
+      geometryContext,
+    );
+
+    expect(held).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      orderType: "LIMIT",
+      entry: { from: 4023, to: 4022 },
+      stopLoss: 4017,
+      canonicalSymbol: "XAUUSD",
+    });
+    expect(held.takeProfits.map((target) => target.price)).toEqual([4028, 4035, 4041]);
+    expect(held.matchedPatternIds).toContain("open.geometry-inferred");
+    expect(held.warnings).toContain(
+      "Geometry-inferred signal also references pending stops at 4060",
+    );
+    expect(shouldRequireManualReview(held)).toBe(true);
+    expect(clean).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      orderType: "LIMIT",
+    });
+    expect(shouldRequireManualReview(clean)).toBe(false);
+  });
+
+  test("fails closed around geometry inference ambiguity and quoted or recap text", () => {
+    const geometryContext: ParserContext = {
+      ...context,
+      providerId: "kal-vip",
+      providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+      geometryInferenceSymbol: "XAUUSD",
+      referencePrices: { XAUUSD: 4050 },
+    };
+    const sell = parseSignalText(
+      "And limits here\n\n4077-78\n\nSL 4083\n\nTP 4072\nTP 4065\nTP 4058",
+      geometryContext,
+    );
+    const inconsistent = parseSignalText(
+      "And limits here\n\n4023-22\n\nSL 4025\n\nTP 4028\nTP 4019",
+      geometryContext,
+    );
+    const unlocked = parseSignalText("And limits here\n\n4023-22\n\nSL 4017\n\nTP 4028", {
+      ...geometryContext,
+      geometryInferenceSymbol: undefined,
+    });
+    const quoted = parseSignalText(
+      "Quoted signal:\nAnd limits here\n\n4023-22\n\nSL 4017\n\nTP 4028\n\nComment:\n",
+      geometryContext,
+    );
+    const recap = parseSignalText("we got 50 pips… entry 4023 sl 4017 tp 4028", geometryContext);
+
+    expect(sell).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      orderType: "LIMIT",
+      entry: { from: 4077, to: 4078 },
+      stopLoss: 4083,
+    });
+    expect(sell.takeProfits.map((target) => target.price)).toEqual([4072, 4065, 4058]);
+    expect(shouldRequireManualReview(sell)).toBe(false);
+    expect(inconsistent.commandType).toBe("NO_SIGNAL");
+    expect(unlocked.commandType).toBe("NO_SIGNAL");
+    expect(quoted.commandType).toBe("NO_SIGNAL");
+    expect(recap.commandType).toBe("NO_SIGNAL");
+  });
+
+  test("keeps stop-loss distinct from plural pending stops and infers missing order types safely", () => {
+    const geometryContext: ParserContext = {
+      ...context,
+      providerId: "kal-vip",
+      geometryInferenceSymbol: "XAUUSD",
+      referencePrices: { XAUUSD: 4050 },
+    };
+    const stopLoss = parseSignalText("4023-22\nSTOP LOSS 4017\nTP 4028", geometryContext);
+    const pluralStop = parseSignalText("STOPS FOR 60\n4023-22\nSL 4017\nTP 4028", geometryContext);
+    const noReference = parseSignalText("4023-22\nSL 4017\nTP 4028", {
+      ...geometryContext,
+      referencePrices: {},
+    });
+    const conflictingLimit = parseSignalText(
+      "LIMITS HERE\n4060-61\nSL 4055\nTP 4068",
+      geometryContext,
+    );
+
+    expect(stopLoss.orderType).toBe("LIMIT");
+    expect(pluralStop.orderType).toBe("STOP");
+    expect(shouldRequireManualReview(pluralStop)).toBe(true);
+    expect(noReference.orderType).toBeUndefined();
+    expect(noReference.missingFields).toContain("orderType");
+    expect(shouldRequireManualReview(noReference)).toBe(true);
+    expect(conflictingLimit.orderType).toBe("LIMIT");
+    expect(shouldRequireManualReview(conflictingLimit)).toBe(true);
+  });
+
+  test("expands short levels to the nearest hundred block", () => {
+    for (const [referencePrice, level, expected] of [
+      [4050, "60", 4060],
+      [4095, "5", 4105],
+      [4005, "95", 3995],
+    ] as const) {
+      const [signal] = parseSignalTexts(`Buy is at ${level}`, {
+        providerId: "kal-vip",
+        shorthandLevels: true,
+        providerDefaultSymbols: { "kal-vip": "XAUUSD" },
+        referencePrices: { XAUUSD: referencePrice },
+      });
+      expect(signal?.entry?.from).toBe(expected);
+    }
+  });
 });
 
 describe("symbol resolver", () => {
@@ -541,6 +730,51 @@ describe("symbol resolver", () => {
       brokerSymbol: "DJI30.raw",
       mappingStatus: "mapped",
     });
+  });
+
+  test("maps direct provider-to-broker overrides before the canonical recognition gate", () => {
+    expect(
+      resolveSymbol("GOLD", {
+        accountId: "mt5-direct",
+        globalAliases: { GOLD: "XAUUSD.RAW" },
+        accountMappings: {
+          "mt5-direct": {
+            accountId: "mt5-direct",
+            directBrokerOverrides: { GOLD: "XAUUSD.raw" },
+            availableBrokerSymbols: ["XAUUSD.raw", "XAUUSD.pro"],
+          },
+        },
+      }),
+    ).toMatchObject({
+      canonicalSymbol: "XAUUSD",
+      brokerSymbol: "XAUUSD.raw",
+      mappingStatus: "mapped",
+      mappingSource: "account_direct",
+    });
+  });
+
+  test("applies account safety checks to direct provider-to-broker overrides", () => {
+    const accountId = "mt5-direct-safe";
+    const direct = {
+      accountId,
+      directBrokerOverrides: { GOLD: "XAUUSD.raw" },
+      availableBrokerSymbols: ["XAUUSD.raw"],
+    };
+
+    expect(
+      resolveSymbol("GOLD", {
+        accountId,
+        accountMappings: { [accountId]: { ...direct, excludeSymbols: ["XAUUSD.raw"] } },
+      }),
+    ).toMatchObject({ mappingStatus: "excluded", mappingSource: "account_direct" });
+    expect(
+      resolveSymbol("GOLD.", {
+        accountId,
+        accountMappings: {
+          [accountId]: { ...direct, availableBrokerSymbols: ["XAUUSD.pro"] },
+        },
+      }),
+    ).toMatchObject({ mappingStatus: "unavailable", mappingSource: "account_direct" });
   });
 
   test("marks excluded and unavailable mapped symbols distinctly", () => {
@@ -665,5 +899,266 @@ describe("symbol resolver", () => {
       brokerSymbol: "m.EURUSD.pro",
       mappingStatus: "mapped",
     });
+  });
+});
+
+describe("French vocabulary normalization", () => {
+  test("parses a symbol-first French buy signal", () => {
+    const result = parseSignalText("XAUUSD ACHAT 5062 SL 5048 TP 5073 TP 5080 TP 5110", context);
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      canonicalSymbol: "XAUUSD",
+      entry: { from: 5062 },
+      stopLoss: 5048,
+    });
+  });
+
+  test("parses a verb-first French sell signal with article, filler and comma decimals", () => {
+    const result = parseSignalText(
+      "VENDRE L'EURNZD MAINTENANT À 1,99190 SL À 1,99700 TP À 1,98600 TP À 1,98000",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "EURNZD",
+      entry: { from: 1.9919 },
+      stopLoss: 1.997,
+    });
+  });
+
+  test("does not open a trade on French market commentary with no levels", () => {
+    expect(parseSignalText("GOLD Je patiente pour une vente", context).commandType).not.toBe(
+      "OPEN_TRADE",
+    );
+    expect(parseSignalText("Ne chercher pas d'achat privilègier les ventes", context).commandType).toBe(
+      "NO_SIGNAL",
+    );
+  });
+
+  test("leaves English signals byte-identical (no French tokens present)", () => {
+    const english = "SELL EURUSD 1.0850\nSL 1.0900\nTP1 1.0800";
+    const before = parseSignalText(english, context);
+    expect(before).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "EURUSD",
+      entry: { from: 1.085 },
+      stopLoss: 1.09,
+    });
+  });
+});
+
+describe("WTI / crude oil recognition", () => {
+  test("classifies a WTI signal as an open trade mapped to USOIL", () => {
+    const result = parseSignalText("WTI SELL 58.05\nSL 58.80\nTP 57.40\nTP 57.00", context);
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "USOIL",
+      entry: { from: 58.05 },
+      stopLoss: 58.8,
+    });
+    expect(result.takeProfits.length).toBeGreaterThan(0);
+  });
+
+  test("recognises the USOIL and CRUDE aliases as the same instrument", () => {
+    for (const raw of ["USOIL", "CRUDE"]) {
+      expect(parseSignalText(`${raw} BUY 59.70\nSL 58.30\nTP 60.50`, context)).toMatchObject({
+        commandType: "OPEN_TRADE",
+        direction: "BUY",
+        canonicalSymbol: "USOIL",
+      });
+    }
+  });
+});
+
+describe("VIP Gold order lifecycle formats", () => {
+  test("classifies a Deleted order as a cancel keyed to its order id, not a new open", () => {
+    const result = parseSignalText("❌ Deleted Buy Stop on XAUUSD\n# 297968962", context);
+    expect(result.commandType).toBe("CANCEL_PENDING");
+    expect(result.canonicalSymbol).toBe("XAUUSD");
+    expect(result.providerOrderId).toBe("297968962");
+    // The order id must never leak into an entry price.
+    expect(result.entry).toBeUndefined();
+  });
+
+  test("still parses a NEW ORDER as an open and captures its order id", () => {
+    const result = parseSignalText(
+      "NEW ORDER - XAUUSD Sell Stop 📉\n# 299490138\n\n----------{ NEW }----------\nEntry: 3989.90 [Lots: 0.01]\nSL:    3995.90\nTP:    3977.90\n---------------------------",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "XAUUSD",
+      entry: { from: 3989.9 },
+      stopLoss: 3995.9,
+      providerOrderId: "299490138",
+    });
+  });
+
+  test("classifies a provider CLOSED report as a close keyed to its order id", () => {
+    const result = parseSignalText(
+      "🟢 CLOSED - XAUUSD Sell 🟢\n# 298696672\n\n--------{ CLOSED }---------\nProfit: 2.01$\nProfit: 0.19%",
+      context,
+    );
+    expect(result.commandType).toBe("CLOSE_TRADE");
+    expect(result.canonicalSymbol).toBe("XAUUSD");
+    expect(result.providerOrderId).toBe("298696672");
+  });
+});
+
+describe("stock index symbol recognition", () => {
+  test("classifies digit-bearing index tickers as open trades", () => {
+    const expectations: Array<[string, string]> = [
+      // the shared test context maps US30 -> DJI30 via globalAliases (alias wins).
+      ["US30 BUY 39000\nSL 38900\nTP 39200", "DJI30"],
+      ["NAS100 SELL 18000\nSL 18100\nTP 17800", "NAS100"],
+      ["US100 BUY 18000\nSL 17900\nTP 18200", "US100"],
+      ["SPX500 SELL 5100\nSL 5130\nTP 5050", "SPX500"],
+      ["GER40 BUY 18500\nSL 18400\nTP 18700", "GER40"],
+      ["UK100 BUY 8100\nSL 8050\nTP 8200", "UK100"],
+    ];
+    for (const [text, sym] of expectations) {
+      expect(parseSignalText(text, context)).toMatchObject({
+        commandType: "OPEN_TRADE",
+        canonicalSymbol: sym,
+      });
+    }
+  });
+
+  test("maps common index aliases to their canonical instrument", () => {
+    expect(parseSignalText("SP500 SELL 5100\nSL 5130\nTP 5050", context).canonicalSymbol).toBe(
+      "SPX500",
+    );
+    expect(parseSignalText("DAX BUY 18500\nSL 18400\nTP 18700", context).canonicalSymbol).toBe(
+      "GER40",
+    );
+    expect(parseSignalText("NASDAQ SELL 18000\nSL 18100\nTP 17800", context).canonicalSymbol).toBe(
+      "NAS100",
+    );
+  });
+});
+
+describe("symbol not adjacent to the direction word", () => {
+  test("extracts a ticker from its own line / tag / slash pair", () => {
+    const cases: Array<[string, string]> = [
+      ["XAUUSD (ELVIS)\nBuy limit @ 4140\nSL 4110\nTP 4170", "XAUUSD"],
+      ["Nas100/US100 (ELVIS)\nBuy limit @ 29000\nSL 28750\nTP 29250", "NAS100"],
+      ["NZDUSD (ELVIS)\nBuy limit @ 0.56592\nTP 0.56995\nSL 0.56175", "NZDUSD"],
+      ["XAUUSD/GOLD\nBuy limit @4036\nTP 4066\nSL 4000", "XAUUSD"],
+    ];
+    for (const [text, sym] of cases) {
+      expect(parseSignalText(text, context)).toMatchObject({
+        commandType: "OPEN_TRADE",
+        canonicalSymbol: sym,
+      });
+    }
+  });
+
+  test("does not treat commentary words as tickers", () => {
+    const result = parseSignalText("BUY OPPORTUNITY 4050\nSL 4040\nTP 4070", context);
+    expect(result.canonicalSymbol).not.toBe("OPPORTUNITY");
+  });
+});
+
+describe("stop-loss label variations", () => {
+  test("extracts a stop with no separator between label and price", () => {
+    for (const sl of ["SL2286", "SL:2286", "SL=2286", "STOPLOSS2286", "S.L 2286", "S/L 2286"]) {
+      const result = parseSignalText(`GOLD SELL 2281\n${sl}\nTP 2276`, context);
+      expect(result.stopLoss).toBe(2286);
+    }
+  });
+
+  test("ignores a pip annotation stuck to the stop price", () => {
+    expect(parseSignalText("NAS100 BUY 29000\nSL 28750(250pips)\nTP 29250", context).stopLoss).toBe(
+      28750,
+    );
+    expect(parseSignalText("XAUUSD BUY 4140\nSL 4110 (300 pips)\nTP 4170", context).stopLoss).toBe(
+      4110,
+    );
+  });
+});
+
+describe("currency-cross on its own line (Elliott Wave format)", () => {
+  test("resolves an FX cross that is not adjacent to the direction", () => {
+    const result = parseSignalText(
+      "🧑‍💻 CHFJPY 4H\n👉 Buy @ 199.280\n🔺 SL @ 198.576\n🔹 Tp 1 @ 201.923\n🔹 Tp 2 @ 207.036",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      canonicalSymbol: "CHFJPY",
+      entry: { from: 199.28 },
+      stopLoss: 198.576,
+    });
+    expect(result.takeProfits.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("does not treat a six-letter non-currency word as a pair", () => {
+    // "MISSED" is six letters but not two currency codes; it must not resolve.
+    expect(parseSignalText("MISSED the entry\nTP 4070", context).canonicalSymbol).toBeUndefined();
+  });
+});
+
+describe("spelled-out stop/target with a pip annotation", () => {
+  test("parses a signal whose take-profit carries a pip note", () => {
+    const result = parseSignalText(
+      "🧑‍💻 XAU/USD Sell 4042 - 4045\n📌 Stoploss : 4048\n- Take Profit : 4037 ( 70pips )\n- Take Profit : 4015 ( 350pips )",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "XAUUSD",
+      entry: { from: 4042, to: 4045 },
+      stopLoss: 4048,
+    });
+  });
+
+  test("still ignores a bare pip results recap", () => {
+    expect(parseSignalText("XAUUSD sell 150 pips this week", context).commandType).toBe("NO_SIGNAL");
+    expect(parseSignalText("GBPCAD +50 pips / CHFJPY +200 pips", context).commandType).toBe(
+      "NO_SIGNAL",
+    );
+  });
+});
+
+describe("Automatic vs Aggressive review policy", () => {
+  const guessedOpen = {
+    commandType: "OPEN_TRADE" as const,
+    mappingStatus: "mapped" as const,
+    confidence: 0.6,
+    missingFields: [] as string[],
+    warnings: ["Geometry-inferred direction from price levels"],
+  };
+
+  test("Aggressive executes a guessed (geometry-inferred, low-confidence) open that Automatic holds", () => {
+    expect(shouldRequireManualReview(guessedOpen as never, false)).toBe(true);
+    expect(shouldRequireManualReview(guessedOpen as never, true)).toBe(false);
+  });
+
+  test("Aggressive still holds on the real safety reasons", () => {
+    // Unmapped symbol holds in both modes.
+    expect(
+      shouldRequireManualReview({ ...guessedOpen, mappingStatus: "unmapped" } as never, true),
+    ).toBe(true);
+    // A pending order missing its entry level holds in both modes.
+    expect(
+      shouldRequireManualReview(
+        { ...guessedOpen, confidence: 0.9, warnings: [], missingFields: ["entry"] } as never,
+        true,
+      ),
+    ).toBe(true);
+    // Conflicting stop geometry holds in both modes.
+    expect(
+      shouldRequireManualReview(
+        { ...guessedOpen, warnings: ["Conflicting stop-loss values"] } as never,
+        true,
+      ),
+    ).toBe(true);
   });
 });

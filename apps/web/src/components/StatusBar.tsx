@@ -95,7 +95,8 @@ export function StatusBar({
           title="Open command palette ( / )"
           type="button"
         >
-          <TerminalSquare size={12} />
+          <TerminalSquare aria-hidden="true" size={14} />
+          <span className="status-action-label">Menu</span>
         </button>
         <button
           aria-label="Refresh dashboard"
@@ -105,7 +106,7 @@ export function StatusBar({
           title={refreshing ? "Refreshing dashboard" : "Refresh dashboard"}
           type="button"
         >
-          <RefreshCw size={12} />
+          <RefreshCw aria-hidden="true" size={14} />
         </button>
       </div>
     </header>

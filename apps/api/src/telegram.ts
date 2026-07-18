@@ -16,6 +16,7 @@ export interface TelegramDialog {
 
 export interface TelegramCapturedMessage {
   telegramMessageId: string;
+  replyToMessageId?: string;
   messageDate: string;
   rawText: string;
   quotedText?: string;
@@ -67,6 +68,16 @@ export interface TelegramAdapter {
   sessionHealth?(sessionId: string): TelegramSessionHealth;
 }
 
+const DEFAULT_RECONNECT_RETRY_DELAY_MS = 2_000;
+const MAX_RECONNECT_RETRY_DELAY_MS = 10_000;
+
+export class TelegramRpcTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Telegram RPC timed out after ${timeoutMs}ms`);
+    this.name = "TelegramRpcTimeoutError";
+  }
+}
+
 // gramjs defaults connectionRetries to Infinity. The previous override of 5
 // capped MTProto reconnect attempts, so any network blip longer than ~5s left
 // the client permanently disconnected with no further retries and live signal
@@ -78,12 +89,34 @@ export function parseConnectionRetries(raw: string | undefined): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : Number.POSITIVE_INFINITY;
 }
 
+export function parseReconnectRetryDelay(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return DEFAULT_RECONNECT_RETRY_DELAY_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0
+    ? Math.min(Math.floor(parsed), MAX_RECONNECT_RETRY_DELAY_MS)
+    : DEFAULT_RECONNECT_RETRY_DELAY_MS;
+}
+
+export async function withTelegramRpcTimeout<T>(operation: Promise<T>, timeoutMs: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new TelegramRpcTimeoutError(timeoutMs)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const TELEGRAM_CONNECTION_RETRIES = parseConnectionRetries(process.env.TELEGRAM_CONNECTION_RETRIES);
 
 const GRAMJS_CLIENT_OPTIONS = {
   connectionRetries: TELEGRAM_CONNECTION_RETRIES,
   autoReconnect: true,
-  retryDelay: 2000,
+  retryDelay: parseReconnectRetryDelay(process.env.TELEGRAM_RECONNECT_RETRY_DELAY_MS),
 };
 
 // How long without a successful Telegram RPC before the session is considered
@@ -172,6 +205,7 @@ interface GramjsDialog {
 
 interface GramjsMessage {
   id?: string | number | bigint;
+  replyTo?: { replyToMsgId?: string | number | bigint };
   date?: number;
   message?: string;
   getReplyMessage?: () => Promise<GramjsMessage | undefined>;
@@ -346,6 +380,10 @@ class GramjsTelegramAdapter implements TelegramAdapter {
       const quotedText = String(quoted?.message ?? "").trim();
       messages.push({
         telegramMessageId: String(message.id),
+        replyToMessageId:
+          message.replyTo?.replyToMsgId === undefined
+            ? undefined
+            : String(message.replyTo.replyToMsgId),
         messageDate,
         rawText,
         quotedText: quotedText || undefined,
@@ -380,8 +418,8 @@ class GramjsTelegramAdapter implements TelegramAdapter {
       return pending.client;
     }
 
-    // Return the cached client as-is. gramjs reconnects the transport on its own
-    // (connectionRetries is unbounded — see GRAMJS_CLIENT_OPTIONS), and its
+    // Return the cached client as-is. GramJS reconnects the transport on its own
+    // with the configured options above, and its
     // connection getters misreport on a working client, so we do NOT health-check
     // or rebuild here: doing so caused a reconnect storm. A genuine stall is
     // surfaced via sessionHealth (contact recency) for the operator instead.

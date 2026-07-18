@@ -8,6 +8,9 @@ export type MoneyProps = {
   warnAbove?: number;
   dangerAbove?: number;
   align?: "right" | "left";
+  /** Render the bare number without the currency symbol (use when the currency
+   * is already shown elsewhere, e.g. a "· ZAR" label). Default true. */
+  symbol?: boolean;
   className?: string;
 };
 
@@ -34,6 +37,7 @@ export function Money({
   warnAbove,
   dangerAbove,
   align = "right",
+  symbol = true,
   className,
 }: MoneyProps) {
   const tone = resolveTone(value, { signTone, warnAbove, dangerAbove });
@@ -41,9 +45,16 @@ export function Money({
   if (tone) classes.push(`money-${tone}`);
   if (className) classes.push(className);
   const style = align === "left" ? undefined : { textAlign: "right" as const };
+  const text =
+    symbol || value === null || value === undefined || !Number.isFinite(value)
+      ? formatMoney(value, currency ?? "USD", locale)
+      : new Intl.NumberFormat(locale ?? undefined, {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        }).format(value);
   return (
     <span className={classes.join(" ")} style={style}>
-      {formatMoney(value, currency ?? "USD", locale)}
+      {text}
     </span>
   );
 }

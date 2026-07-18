@@ -11,6 +11,8 @@ const render = (ui: Parameters<typeof rtlRender>[0], options?: Parameters<typeof
   rtlRender(ui, { wrapper: MemoryRouter, ...options });
 
 beforeEach(() => {
+  (globalThis as typeof globalThis & { __APP_VERSION__?: string }).__APP_VERSION__ =
+    packageJson.version;
   globalThis.fetch = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
 });
 
@@ -55,9 +57,20 @@ const snapshot: DashboardSnapshot = {
       server: "MetaQuotes-Demo",
       heartbeatStatus: "online",
       marginMode: "HEDGING",
+      availableSymbols: ["XAUUSD.raw", "XAUUSD.pro"],
       openPositionCount: 1,
       pendingOrderCount: 0,
       lastSnapshotAt: "2026-05-09T09:00:00.000Z",
+    },
+    {
+      id: "mt5-live-2",
+      accountNumber: "200300400",
+      server: "MetaQuotes-Live",
+      heartbeatStatus: "online",
+      marginMode: "HEDGING",
+      availableSymbols: ["XAUUSD.raw"],
+      openPositionCount: 0,
+      pendingOrderCount: 0,
     },
   ],
   parserResults: [
@@ -68,6 +81,15 @@ const snapshot: DashboardSnapshot = {
       providerTitle: "Alpha FX Signals",
       rawText: "BUY EURUSD @ 1.0850",
       commandType: "OPEN_TRADE",
+      accountId: "mt5-live-2",
+      providerId: "provider-alpha",
+      direction: "SELL",
+      orderType: "STOP",
+      entry: { from: 1.081, to: 1.082 },
+      stopLoss: 1.09,
+      takeProfits: [{ price: 1.075 }, 1.07],
+      volume: 0.25,
+      executionMode: "SPLIT_ORDER",
       canonicalSymbol: "EURUSD",
       brokerSymbol: "EURUSD.raw",
       mappingStatus: "mapped",
@@ -260,7 +282,7 @@ describe("App dashboard", () => {
     expect(view.queryByText("Initial Balance")).toBeNull();
     expect(view.getByText(/12,345\.67/)).toBeTruthy();
     expect(view.getByText(/15,432\.10/)).toBeTruthy();
-    expect(view.getByText(/137\.50/)).toBeTruthy();
+    expect(view.getAllByText(/137\.50/).length).toBeGreaterThan(0);
   });
 
   test("performance growth chart uses the active performance currency over the first account row", () => {
@@ -473,7 +495,8 @@ describe("App dashboard", () => {
     });
 
     const header = within(view.getByLabelText("Account performance"));
-    expect(header.getAllByText(/\$45\.50/).length).toBeGreaterThanOrEqual(1);
+    // KPI amounts render without the currency symbol (currency shown in the label).
+    expect(header.getAllByText(/45\.50/).length).toBeGreaterThanOrEqual(1);
   });
 
   test("account growth chart uses the focused account performance series", () => {
@@ -807,6 +830,7 @@ describe("App dashboard", () => {
     fireEvent.click(
       view.getByRole("button", { name: "Configure Alpha FX Signals for this account" }),
     );
+    expect(view.queryByLabelText("Parser mode for Alpha FX Signals")).toBeNull();
     fireEvent.change(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
       target: { value: "0.5" },
     });
@@ -1103,15 +1127,23 @@ describe("App dashboard", () => {
     ]);
   });
 
-  test("lets the operator update default execution settings", async () => {
+  test("saves other settings without sending a blank alert token", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
       return fixtureResponse(url);
     }) as typeof fetch;
 
-    const view = render(<App initialSnapshot={snapshot} />);
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          appSettings: { ...snapshot.appSettings, alertBotConfigured: true },
+        }}
+      />,
+    );
     clickSidebar(view, "Settings");
+    expect(view.getByText(/A bot token is configured/)).toBeTruthy();
     fireEvent.change(await view.findByLabelText("Default lot size"), {
       target: { value: "0.25" },
     });
@@ -1142,7 +1174,6 @@ describe("App dashboard", () => {
       drawdownDangerPct: 20,
       reportingCurrency: "ZAR",
       usdZarRate: 18.5,
-      alertBotToken: "",
       alertChatId: "",
       alertOnGuardianPause: false,
       alertOnEaOffline: false,
@@ -1150,6 +1181,7 @@ describe("App dashboard", () => {
       alertOnHeld: false,
       alertOnTelegramStall: false,
     });
+    expect(JSON.parse(String(settingsCall?.init?.body))).not.toHaveProperty("alertBotToken");
   });
 
   test("per-account risk override fields resync after backend normalization", () => {
@@ -1197,9 +1229,10 @@ describe("App dashboard", () => {
       "20",
     );
     expect(view.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
+    expect(view.container.querySelector(".settings-panel .account-thresholds-wrap")).toBeTruthy();
   });
 
-  test("lets the operator save global aliases and account symbol mappings", async () => {
+  test("saves global and provider aliases and guards account mappings without a focused account", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
@@ -1210,56 +1243,218 @@ describe("App dashboard", () => {
     await clickTabAsync(view, "Symbol Settings");
 
     fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
-    fireEvent.change(view.getByLabelText("Alias raw symbol"), { target: { value: "SILVER" } });
-    fireEvent.change(view.getByLabelText("Alias canonical symbol"), {
+    expect(view.getByRole("tab", { name: "Account" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.change(view.getByLabelText("Provider symbol"), { target: { value: "SILVER" } });
+    fireEvent.change(view.getByLabelText("Canonical symbol"), {
       target: { value: "XAGUSD" },
     });
     fireEvent.click(view.getByRole("button", { name: "Save global alias" }));
+    await waitFor(() =>
+      expect(calls.filter((call) => call.url === "/api/symbol-mappings/aliases")).toHaveLength(1),
+    );
 
-    fireEvent.click(view.getByRole("button", { name: "Add mapping" }));
-    fireEvent.click(view.getByRole("tab", { name: "Account-specific" }));
-    fireEvent.change(view.getByLabelText("Mapping account ID"), {
-      target: { value: "mt5-demo-1" },
-    });
-    fireEvent.change(view.getByLabelText("Mapping canonical symbol"), {
-      target: { value: "XAGUSD" },
-    });
-    fireEvent.change(view.getByLabelText("Mapping broker symbol"), {
-      target: { value: "XAGUSD.pro" },
-    });
-    fireEvent.change(view.getByLabelText("Mapping prefix"), { target: { value: "m." } });
-    fireEvent.change(view.getByLabelText("Mapping suffix"), { target: { value: ".raw" } });
-    fireEvent.change(view.getByLabelText("Mapping include symbols"), {
-      target: { value: "XAGUSD.pro,EURUSD.raw" },
-    });
-    fireEvent.change(view.getByLabelText("Mapping exclude symbols"), {
-      target: { value: "US30.raw" },
-    });
-    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByLabelText("Only for one provider"));
+    fireEvent.change(view.getByLabelText("Provider symbol"), { target: { value: "METAL" } });
+    fireEvent.change(view.getByLabelText("Canonical symbol"), { target: { value: "XAUUSD" } });
+    fireEvent.click(view.getByRole("button", { name: "Save global alias" }));
 
-    await view.findByText("XAUUSD.r");
-    const aliasCall = calls.find((call) => call.url === "/api/symbol-mappings/aliases");
-    expect(aliasCall?.init?.method).toBe("PUT");
-    expect(JSON.parse(String(aliasCall?.init?.body))).toEqual({
+    await waitFor(() =>
+      expect(calls.filter((call) => call.url === "/api/symbol-mappings/aliases")).toHaveLength(2),
+    );
+    const aliasCalls = calls.filter((call) => call.url === "/api/symbol-mappings/aliases");
+    expect(JSON.parse(String(aliasCalls[0]?.init?.body))).toEqual({
       scope: "global",
       rawSymbol: "SILVER",
       canonicalSymbol: "XAGUSD",
     });
+    expect(JSON.parse(String(aliasCalls[1]?.init?.body))).toEqual({
+      scope: "provider",
+      providerId: "provider-alpha",
+      rawSymbol: "METAL",
+      canonicalSymbol: "XAUUSD",
+    });
+  });
 
+  test("saves canonical free text and omits untouched account rules", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = rtlRender(
+      <MemoryRouter initialEntries={["/accounts/mt5-demo-1/symbols"]}>
+        <App initialSnapshot={snapshot} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByRole("tab", { name: "Account" }));
+    expect(view.getByLabelText("Mapping account ID").hasAttribute("readonly")).toBe(true);
+    fireEvent.change(view.getByLabelText("Account source symbol"), {
+      target: { value: "XAGUSD" },
+    });
+    fireEvent.change(view.getByLabelText("Broker symbol for this account"), {
+      target: { value: "XAGUSD.offline" },
+    });
+    fireEvent.input(view.getByLabelText("Mapping prefix"), { target: { value: "m." } });
+    fireEvent.blur(view.getByLabelText("Mapping prefix"));
+    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/symbol-mappings/account/mt5-demo-1")).toBe(
+        true,
+      ),
+    );
     const mappingCall = calls.find(
       (call) => call.url === "/api/symbol-mappings/account/mt5-demo-1",
     );
-    expect(mappingCall?.init?.method).toBe("PUT");
     expect(JSON.parse(String(mappingCall?.init?.body))).toEqual({
       accountId: "mt5-demo-1",
-      canonicalOverrides: {
-        XAGUSD: "XAGUSD.pro",
-      },
+      canonicalOverrides: { XAGUSD: "XAGUSD.offline" },
       prefix: "m.",
-      suffix: ".raw",
-      includeSymbols: ["XAGUSD.pro", "EURUSD.raw"],
+    });
+  });
+
+  test("saves account rules without creating a symbol override", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = rtlRender(
+      <MemoryRouter initialEntries={["/accounts/mt5-demo-1/symbols"]}>
+        <App initialSnapshot={snapshot} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByRole("tab", { name: "Account" }));
+    fireEvent.change(view.getByLabelText("Account source symbol"), {
+      target: { value: "XAUUSD" },
+    });
+    fireEvent.input(view.getByLabelText("Mapping exclude symbols"), {
+      target: { value: "US30.raw" },
+    });
+    fireEvent.blur(view.getByLabelText("Mapping exclude symbols"));
+    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/symbol-mappings/account/mt5-demo-1")).toBe(
+        true,
+      ),
+    );
+    const mappingCall = calls.find(
+      (call) => call.url === "/api/symbol-mappings/account/mt5-demo-1",
+    );
+    expect(JSON.parse(String(mappingCall?.init?.body))).toEqual({
+      accountId: "mt5-demo-1",
       excludeSymbols: ["US30.raw"],
     });
+  });
+
+  test("saves direct provider-to-broker mappings from the account tab", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = rtlRender(
+      <MemoryRouter initialEntries={["/accounts/mt5-demo-1/symbols"]}>
+        <App initialSnapshot={snapshot} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(view.getByRole("tab", { name: "Account" }));
+    fireEvent.click(view.getByLabelText("Map from provider symbol"));
+    expect(view.getByRole("option", { name: "XAUUSD.raw" })).toBeTruthy();
+    fireEvent.change(view.getByLabelText("Account source symbol"), { target: { value: "GOLD" } });
+    fireEvent.change(view.getByLabelText("Broker symbol for this account"), {
+      target: { value: "XAUUSD.pro" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/symbol-mappings/account/mt5-demo-1")).toBe(
+        true,
+      ),
+    );
+    const mappingCall = calls.find(
+      (call) => call.url === "/api/symbol-mappings/account/mt5-demo-1",
+    );
+    expect(JSON.parse(String(mappingCall?.init?.body))).toEqual({
+      accountId: "mt5-demo-1",
+      rawSymbol: "GOLD",
+      brokerSymbol: "XAUUSD.pro",
+      direct: true,
+    });
+  });
+
+  test("validates required mapping fields before saving", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const globalView = render(<App initialSnapshot={snapshot} />);
+    await clickTabAsync(globalView, "Symbol Settings");
+    fireEvent.click(await globalView.findByRole("button", { name: "Add mapping" }));
+    expect(globalView.getByLabelText("Provider symbol").hasAttribute("required")).toBe(true);
+    expect(globalView.getByLabelText("Canonical symbol").hasAttribute("required")).toBe(true);
+    fireEvent.click(globalView.getByRole("button", { name: "Save global alias" }));
+    globalView.unmount();
+
+    const accountView = rtlRender(
+      <MemoryRouter initialEntries={["/accounts/mt5-demo-1/symbols"]}>
+        <App initialSnapshot={snapshot} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await accountView.findByRole("button", { name: "Add mapping" }));
+    fireEvent.click(accountView.getByRole("tab", { name: "Account" }));
+    fireEvent.click(accountView.getByLabelText("Map from provider symbol"));
+    expect(accountView.getByLabelText("Account source symbol").hasAttribute("required")).toBe(true);
+    fireEvent.change(accountView.getByLabelText("Broker symbol for this account"), {
+      target: { value: "XAUUSD.pro" },
+    });
+    fireEvent.click(accountView.getByRole("button", { name: "Save account mapping" }));
+
+    expect(calls.some((call) => call.url.startsWith("/api/symbol-mappings/"))).toBe(false);
+  });
+
+  test("deletes direct mappings through the account mapping endpoint", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const directSnapshot: DashboardSnapshot = {
+      ...snapshot,
+      symbolMappings: [
+        ...snapshot.symbolMappings,
+        {
+          rawSymbol: "GOLD DIRECT",
+          canonicalSymbol: "XAUUSD",
+          brokerSymbol: "XAUUSD.pro",
+          status: "mapped",
+          scope: "account · direct",
+          accountId: "mt5-demo-1",
+        },
+      ],
+    };
+
+    const view = render(<App initialSnapshot={directSnapshot} />);
+    await clickTabAsync(view, "Symbol Settings");
+    const row = view.getByText("GOLD DIRECT").closest("tr");
+    expect(row).toBeTruthy();
+    fireEvent.click(within(row!).getByRole("button", { name: "Delete" }));
+
+    const deleteCall = calls.find(
+      (call) => call.url === "/api/symbol-mappings/account/mt5-demo-1/direct",
+    );
+    expect(deleteCall?.init?.method).toBe("DELETE");
+    expect(JSON.parse(String(deleteCall?.init?.body))).toEqual({ rawSymbol: "GOLD DIRECT" });
   });
 
   test("lets the operator redact parser fixture text before saving", async () => {
@@ -1641,26 +1836,23 @@ describe("App dashboard", () => {
     expect(view.getByText("No MT5 reports yet")).toBeTruthy();
   });
 
-  test("renders the SmallViewportNotice below 768px and continues anyway on click", () => {
+  test("renders the workspace and account navigation directly on phone widths", () => {
     const originalWidth = window.innerWidth;
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
       value: 375,
     });
-    window.localStorage.removeItem("tg-tc.viewport-override");
     try {
       const view = render(<App initialSnapshot={snapshot} />);
-      expect(view.getByText("Use a larger screen")).toBeTruthy();
-      fireEvent.click(view.getByRole("button", { name: "Continue anyway" }));
-      expect(window.localStorage.getItem("tg-tc.viewport-override")).toBe("1");
-      // After continue-anyway, the workspace renders.
+      expect(view.queryByText("Use a larger screen")).toBeNull();
       expect(view.getByRole("heading", { name: /TG-TC/ })).toBeTruthy();
+      const menu = view.getByRole("button", { name: "Open command palette" });
+      expect(menu.textContent).toContain("Menu");
     } finally {
       Object.defineProperty(window, "innerWidth", {
         configurable: true,
         value: originalWidth,
       });
-      window.localStorage.removeItem("tg-tc.viewport-override");
     }
   });
 
@@ -1952,32 +2144,13 @@ describe("App dashboard", () => {
   test("Correct and push threads every parsed trade field into the manual modal", async () => {
     globalThis.fetch = (async (url: string | URL | Request, _init?: RequestInit) =>
       fixtureResponse(url)) as typeof fetch;
-    const view = render(
-      <App
-        initialSnapshot={{
-          ...snapshot,
-          parserResults: [
-            {
-              ...snapshot.parserResults[0]!,
-              accountId: "mt5-demo-1",
-              providerId: "provider-alpha",
-              direction: "SELL",
-              orderType: "STOP",
-              entry: { from: 1.081, to: 1.082 },
-              stopLoss: 1.09,
-              takeProfits: [{ price: 1.075 }, 1.07],
-              volume: 0.25,
-              executionMode: "SPLIT_ORDER",
-            },
-          ],
-        }}
-      />,
-    );
+    const view = render(<App initialSnapshot={snapshot} />);
 
     await clickTabAsync(view, "Logs");
     fireEvent.click(view.getByRole("button", { name: "Correct & push" }));
-    expect((view.getByLabelText("Account") as HTMLSelectElement).value).toBe("mt5-demo-1");
-    expect((view.getByLabelText("Symbol") as HTMLInputElement).value).toBe("EURUSD.raw");
+    expect((view.getByLabelText("Account") as HTMLSelectElement).value).toBe("mt5-live-2");
+    expect((view.getByLabelText("Account") as HTMLSelectElement).disabled).toBe(true);
+    expect((view.getByLabelText("Symbol") as HTMLInputElement).value).toBe("XAUUSD.raw");
     expect((view.getByLabelText("Direction") as HTMLSelectElement).value).toBe("SELL");
     expect((view.getByLabelText("Order type") as HTMLSelectElement).value).toBe("STOP");
     expect((view.getByLabelText("Entry from") as HTMLInputElement).value).toBe("1.081");
@@ -1987,6 +2160,63 @@ describe("App dashboard", () => {
     expect((view.getByLabelText("Execution") as HTMLSelectElement).value).toBe("SPLIT_ORDER");
     expect((view.getByPlaceholderText("TP1 price") as HTMLInputElement).value).toBe("1.075");
     expect((view.getByPlaceholderText("TP2 price") as HTMLInputElement).value).toBe("1.07");
+  });
+
+  test("disables conflicting parser actions while approval is in flight and reflects approval", async () => {
+    let resolveApproval: (response: Response) => void = () => {};
+    const approval = new Promise<Response>((resolve) => {
+      resolveApproval = resolve;
+    });
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      const requestUrl = String(url);
+      calls.push(requestUrl);
+      if (requestUrl === "/api/signals/parse-1/approve") return approval;
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const view = render(<App initialSnapshot={snapshot} />);
+
+    await clickTabAsync(view, "Logs");
+    fireEvent.click(view.getByRole("button", { name: "Approve" }));
+    expect(view.getByRole("button", { name: "Approve" }).hasAttribute("disabled")).toBe(true);
+    expect(view.getByRole("button", { name: "Ignore" }).hasAttribute("disabled")).toBe(true);
+    fireEvent.click(view.getByRole("button", { name: "Ignore" }));
+    expect(calls).not.toContain("/api/signals/parse-1/ignore");
+
+    resolveApproval(Response.json({ status: "PENDING" }));
+    expect(await view.findByText("APPROVED")).toBeTruthy();
+    expect(view.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Ignore" })).toBeNull();
+  });
+
+  test("keeps Parse recent busy and surfaces a provider parse failure", async () => {
+    let resolveParse: (response: Response) => void = () => {};
+    const parseResponse = new Promise<Response>((resolve) => {
+      resolveParse = resolve;
+    });
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("/parse-recent?limit=5")) return parseResponse;
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const view = render(<App initialSnapshot={snapshot} />);
+
+    await clickTabAsync(view, "Logs");
+    fireEvent.click(view.getByRole("button", { name: "Parse recent" }));
+    expect(view.getByRole("button", { name: "Parsing…" }).hasAttribute("disabled")).toBe(true);
+
+    resolveParse(
+      Response.json({
+        parsed: [],
+        provider: {
+          providerId: "provider-alpha",
+          captured: 0,
+          inserted: 0,
+          parsed: 0,
+          error: "Telegram fetch failed",
+        },
+      }),
+    );
+    expect(await view.findByText(/Telegram fetch failed/)).toBeTruthy();
   });
 
   test("Settings sends alert tests and shows the returned database backup filename", async () => {
