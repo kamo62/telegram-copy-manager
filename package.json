@@ -1,6 +1,6 @@
 {
   "name": "telegram-tc",
-  "version": "1.37.1",
+  "version": "1.38.0",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
@@ -15,7 +15,7 @@
     "test:backend": "bun test packages/core apps/api",
     "test:frontend": "bun test apps/web",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "biome check .",
+    "lint": "bun scripts/check-css-duplicates.ts && biome check .",
     "format": "biome check --write .",
     "build": "bun run build:api && bun run build:web",
     "build:api": "bun build apps/api/src/server.ts --target=bun --outdir dist/api --external telegram --external telegram/sessions --external websocket --external bufferutil --external utf-8-validate",

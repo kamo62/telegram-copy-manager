@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { readdirSync, unlinkSync } from "node:fs";
+import { copyFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import {
   type AccountSymbolMapping,
@@ -46,6 +46,7 @@ export interface ApiOptions {
   databasePath?: string;
   seedDemoData?: boolean;
   staticRoot?: string;
+  assetArchiveRoot?: string;
   telegram?: TelegramAdapter;
   telegramAdapter?: "mock" | "gramjs";
   telegramPollingEnabled?: boolean;
@@ -213,6 +214,41 @@ function defaultAccountMapping(accountId = demoAccountId): AccountSymbolMapping 
     excludeSymbols: [],
     availableBrokerSymbols: [],
   };
+}
+
+export const ASSET_ARCHIVE_MAX_FILES = 256;
+
+export function archiveStaticAssets(
+  staticRoot: string,
+  archiveRoot: string,
+  maxFiles = ASSET_ARCHIVE_MAX_FILES,
+) {
+  const currentAssets = join(staticRoot, "assets");
+  const archivedAssets = join(archiveRoot, "assets");
+  mkdirSync(archivedAssets, { recursive: true });
+
+  let archived = 0;
+  const currentAssetNames = new Set<string>();
+  for (const entry of readdirSync(currentAssets, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    currentAssetNames.add(entry.name);
+    copyFileSync(join(currentAssets, entry.name), join(archivedAssets, entry.name));
+    archived += 1;
+  }
+
+  const archivedEntries = readdirSync(archivedAssets, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => ({
+      name: entry.name,
+      mtimeMs: statSync(join(archivedAssets, entry.name)).mtimeMs,
+    }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs || b.name.localeCompare(a.name));
+  const staleEntries = archivedEntries.filter((entry) => !currentAssetNames.has(entry.name));
+  const staleRetention = Math.max(0, maxFiles - currentAssetNames.size);
+  const pruned = staleEntries.slice(staleRetention);
+  for (const entry of pruned) unlinkSync(join(archivedAssets, entry.name));
+
+  return { archived, pruned: pruned.length, retained: archivedEntries.length - pruned.length };
 }
 
 export function createApi(options: ApiOptions = {}) {
@@ -959,6 +995,17 @@ export function createApi(options: ApiOptions = {}) {
         },
       }),
     );
+    if (options.assetArchiveRoot) {
+      app.use(
+        "/assets/*",
+        serveStatic({
+          root: options.assetArchiveRoot,
+          onFound: (_path, c) => {
+            c.header("Cache-Control", "public, max-age=31536000, immutable");
+          },
+        }),
+      );
+    }
     app.get("*", async (c) => {
       c.header("Cache-Control", "no-cache");
       return c.html(await Bun.file(`${options.staticRoot}/index.html`).text());
@@ -966,7 +1013,9 @@ export function createApi(options: ApiOptions = {}) {
   }
 
   const ingestion = createTelegramIngestionLoop(store, telegram, {
-    enabled: options.telegramPollingEnabled ?? options.databasePath !== ":memory:",
+    enabled:
+      options.telegramPollingEnabled ??
+      (process.env.NODE_ENV !== "test" && options.databasePath !== ":memory:"),
     intervalMs: options.telegramPollingIntervalMs,
     rpcTimeoutMs: options.telegramRpcTimeoutMs,
   });
@@ -1008,9 +1057,9 @@ function createTelegramIngestionLoop(
   telegram: TelegramAdapter,
   options: { enabled: boolean; intervalMs?: number; rpcTimeoutMs?: number },
 ) {
-  let running = false;
+  let activeRun: Promise<TelegramIngestionResult> | undefined;
   const runTelegramIngestionOnce = async (): Promise<TelegramIngestionResult> => {
-    if (running) {
+    if (activeRun) {
       return {
         providers: 0,
         captured: 0,
@@ -1022,16 +1071,12 @@ function createTelegramIngestionLoop(
         skipped: true,
       };
     }
-    running = true;
-    try {
-      return await store.ingestEnabledProviders(
-        telegram,
-        50,
-        telegramRpcTimeoutMs(options.rpcTimeoutMs),
-      );
-    } finally {
-      running = false;
-    }
+    activeRun = store
+      .ingestEnabledProviders(telegram, 50, telegramRpcTimeoutMs(options.rpcTimeoutMs))
+      .finally(() => {
+        activeRun = undefined;
+      });
+    return activeRun;
   };
   const intervalMs =
     options.intervalMs ?? Math.max(1000, store.appSettings().pollingIntervalSeconds * 1000);
@@ -1046,8 +1091,9 @@ function createTelegramIngestionLoop(
   }
   return {
     runTelegramIngestionOnce,
-    stopTelegramIngestion: () => {
+    stopTelegramIngestion: async () => {
       if (timer) clearInterval(timer);
+      await activeRun;
     },
   };
 }
@@ -1293,6 +1339,26 @@ class AppStore {
   // is a shared broker (Redis/Postgres LISTEN) if the API is ever scaled out.
   private readonly eventSubscribers = new Set<(event: AppStoreEvent) => void>();
   private readonly alertSentAt = new Map<string, number>();
+  private storeRevision = 0;
+  private observedDataVersion: number | undefined;
+  private dashboardPerformanceCache:
+    | {
+        revision: number;
+        accountPerformance: ReturnType<AppStore["accountPerformance"]>;
+        accountPerformanceByAccount: Record<string, ReturnType<AppStore["accountPerformance"]>>;
+        providerPerformance: ReturnType<AppStore["providerPerformance"]>;
+        providerPerformanceByAccount: Record<string, ReturnType<AppStore["providerPerformance"]>>;
+      }
+    | undefined;
+  private readonly providerScoreCache = new Map<
+    string,
+    {
+      revision: number;
+      score:
+        | (ProviderScoreResult & { providerId: string; title: string; learnedPatterns: number })
+        | null;
+    }
+  >();
 
   constructor(databasePath: string, allowDemoData = false) {
     this.databasePath = databasePath;
@@ -2641,10 +2707,8 @@ class AppStore {
       });
     }
     // Provider health: surface providers whose rolling win rate has turned red.
-    // ponytail: providerScore recomputes per provider here. Ceiling — O(providers
-    // × trades) per dashboard build; upgrade path is the provider_score_cache.
     for (const provider of this.providers()) {
-      const score = this.providerScore(provider.id);
+      const score = this.providerScore(provider.id, false);
       if (!score) continue;
       const breach = providerScoreAlert(provider.title, score);
       if (!breach) continue;
@@ -4380,6 +4444,7 @@ class AppStore {
       positions: input.positions,
       symbols: input.symbols,
     });
+    this.invalidateDashboardCaches();
     // Snapshots arrive every ~2 s per account. The full payload is already
     // persisted in mt5_snapshots; writing an audit_logs row per poll was
     // producing ~43k rows/day per account with zero diagnostic value.
@@ -4647,6 +4712,7 @@ class AppStore {
         totalPnlDelta: repairedPnlDelta,
       });
     }
+    if (recorded > 0 || updated > 0) this.invalidateDashboardCaches();
     return {
       accountId: input.accountId,
       received: input.deals.length,
@@ -7750,10 +7816,12 @@ class AppStore {
   }
 
   dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock", previewAccountId?: string) {
+    this.syncExternalStoreRevision();
     const providers = this.providers();
     const queue = this.queueItems();
     const parsed = this.parsedSignals(8);
     const accounts = this.mt5Accounts();
+    const performance = this.dashboardPerformance(accounts);
     return {
       health: {
         status: "ok",
@@ -7761,14 +7829,10 @@ class AppStore {
         telegramAdapter,
       },
       appSettings: this.settingsProjection(),
-      accountPerformance: this.accountPerformance(accounts),
-      accountPerformanceByAccount: Object.fromEntries(
-        accounts.map((account) => [account.id, this.accountPerformance([account])]),
-      ),
-      providerPerformance: this.providerPerformance(undefined, accounts),
-      providerPerformanceByAccount: Object.fromEntries(
-        accounts.map((account) => [account.id, this.providerPerformance(account.id, accounts)]),
-      ),
+      accountPerformance: performance.accountPerformance,
+      accountPerformanceByAccount: performance.accountPerformanceByAccount,
+      providerPerformance: performance.providerPerformance,
+      providerPerformanceByAccount: performance.providerPerformanceByAccount,
       accountSlots: this.accountSlots(),
       accountProviderLinks: this.accountProviderLinks(),
       equityGuardians: this.equityGuardians(),
@@ -7878,6 +7942,25 @@ class AppStore {
         timestamp: log.createdAt,
       })),
     };
+  }
+
+  private dashboardPerformance(accounts: ReturnType<AppStore["mt5Accounts"]>) {
+    if (this.dashboardPerformanceCache?.revision === this.storeRevision) {
+      return this.dashboardPerformanceCache;
+    }
+    const projections = {
+      revision: this.storeRevision,
+      accountPerformance: this.accountPerformance(accounts),
+      accountPerformanceByAccount: Object.fromEntries(
+        accounts.map((account) => [account.id, this.accountPerformance([account])]),
+      ),
+      providerPerformance: this.providerPerformance(undefined, accounts),
+      providerPerformanceByAccount: Object.fromEntries(
+        accounts.map((account) => [account.id, this.providerPerformance(account.id, accounts)]),
+      ),
+    };
+    this.dashboardPerformanceCache = projections;
+    return projections;
   }
 
   seedDemoData() {
@@ -9954,14 +10037,17 @@ class AppStore {
     return { providerId, cleared };
   }
 
-  /**
-   * Rolling provider quality score from broker fills. Computed on demand so it
-   * always reflects the latest broker history.
-   * ponytail: recomputed per request rather than materialized in a cache table.
-   * Ceiling — O(trades) per call; upgrade path is provider_score_cache refreshed
-   * on history ingestion if a provider accumulates thousands of trades.
-   */
-  providerScore(providerId: string) {
+  /** Rolling provider quality score from broker fills, cached until the store mutates. */
+  providerScore(providerId: string, syncExternalRevision = true) {
+    if (syncExternalRevision) this.syncExternalStoreRevision();
+    const cached = this.providerScoreCache.get(providerId);
+    if (cached?.revision === this.storeRevision) return cached.score;
+    const score = this.computeProviderScore(providerId);
+    this.providerScoreCache.set(providerId, { revision: this.storeRevision, score });
+    return score;
+  }
+
+  private computeProviderScore(providerId: string) {
     const provider = this.providers().find((item) => item.id === providerId);
     if (!provider) return null;
     const trades = this.logicalTrades().filter((trade) => trade.providerId === providerId);
@@ -10119,12 +10205,30 @@ class AppStore {
 
   /** Broadcast a delta to every subscriber. A broken listener never blocks a write. */
   emitEvent(event: AppStoreEvent) {
+    this.invalidateDashboardCaches();
     for (const listener of this.eventSubscribers) {
       try {
         listener(event);
       } catch {
         // A slow or closed SSE connection must not break the write path.
       }
+    }
+  }
+
+  private invalidateDashboardCaches() {
+    this.storeRevision += 1;
+    this.dashboardPerformanceCache = undefined;
+    this.providerScoreCache.clear();
+  }
+
+  private syncExternalStoreRevision() {
+    const row = this.db.query("PRAGMA data_version").get() as Row | null;
+    const dataVersion = Number(row?.data_version ?? 0);
+    if (this.observedDataVersion === undefined) {
+      this.observedDataVersion = dataVersion;
+    } else if (dataVersion !== this.observedDataVersion) {
+      this.observedDataVersion = dataVersion;
+      this.invalidateDashboardCaches();
     }
   }
 

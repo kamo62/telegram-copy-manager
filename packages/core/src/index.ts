@@ -748,11 +748,7 @@ export function parseSignalTexts(
   // plus a reference price make the levels resolvable. Runs before the base parse so
   // a terse level post expands instead of being read as one literal entry, and is
   // capped so a false positive cannot spray orders.
-  if (
-    context.shorthandLevels &&
-    !candidate.quotedText &&
-    !/Quoted signal:/i.test(candidate.text)
-  ) {
+  if (context.shorthandLevels && !candidate.quotedText && !/Quoted signal:/i.test(candidate.text)) {
     const ladder = parseKalVipExtendedLevelSignals(originalText, candidate.text, context);
     if (ladder.length > 0) return ladder.slice(0, MAX_ENTRIES_PER_SIGNAL);
   }
@@ -761,15 +757,11 @@ export function parseSignalTexts(
   const prices = extractDirectionalZonePrices(candidate.text);
   if (base.commandType !== "OPEN_TRADE" || prices.length <= 1) return [base];
 
-  return prices
-    .slice(0, MAX_ENTRIES_PER_SIGNAL)
-    .map((price, index) => ({
-      ...base,
-      entry: { from: price },
-      fingerprint: createMessageFingerprint(
-        `${base.originalText}\nzone-entry:${index + 1}:${price}`,
-      ),
-    }));
+  return prices.slice(0, MAX_ENTRIES_PER_SIGNAL).map((price, index) => ({
+    ...base,
+    entry: { from: price },
+    fingerprint: createMessageFingerprint(`${base.originalText}\nzone-entry:${index + 1}:${price}`),
+  }));
 }
 
 export function shouldRequireManualReview(signal: ParsedSignal, aggressive = false): boolean {
@@ -1011,18 +1003,20 @@ const FRENCH_DIRECTION_RE =
 
 function normalizeFrenchVocabulary(text: string): string {
   if (!FRENCH_DIRECTION_RE.test(text)) return text;
-  return text
-    .replace(/\b(ACHAT|ACHATS|ACHETER|ACH[EÉÈ]TE|ACH[EÉÈ]TENT)\b/gi, "BUY")
-    .replace(/\b(VENTE|VENTES|VENDRE|VENDS|VENDEZ|VENDENT|VEND)\b/gi, "SELL")
-    // French writes decimals with a comma; convert only inside a French message.
-    .replace(/(\d),(\d{2,})/g, "$1.$2")
-    // Drop the article/preposition/filler that sits between verb, symbol and price
-    // ("VENDRE L'EURNZD MAINTENANT À 1.99" -> "SELL EURNZD 1.99").
-    .replace(/\bL['’]\s*/gi, " ")
-    .replace(/\b(LES|LE|LA|DES|DU|AUX|AU|MAINTENANT)\b/gi, " ")
-    .replace(/[àÀ]/g, " ")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
+  return (
+    text
+      .replace(/\b(ACHAT|ACHATS|ACHETER|ACH[EÉÈ]TE|ACH[EÉÈ]TENT)\b/gi, "BUY")
+      .replace(/\b(VENTE|VENTES|VENDRE|VENDS|VENDEZ|VENDENT|VEND)\b/gi, "SELL")
+      // French writes decimals with a comma; convert only inside a French message.
+      .replace(/(\d),(\d{2,})/g, "$1.$2")
+      // Drop the article/preposition/filler that sits between verb, symbol and price
+      // ("VENDRE L'EURNZD MAINTENANT À 1.99" -> "SELL EURNZD 1.99").
+      .replace(/\bL['’]\s*/gi, " ")
+      .replace(/\b(LES|LE|LA|DES|DU|AUX|AU|MAINTENANT)\b/gi, " ")
+      .replace(/[àÀ]/g, " ")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim()
+  );
 }
 
 function extractSignalCandidate(text: string) {

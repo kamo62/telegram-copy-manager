@@ -1,6 +1,19 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
+const bunFetchAndStreams = {
+  Headers,
+  ReadableStream,
+  Request,
+  Response,
+  TransformStream,
+  WritableStream,
+};
+
 GlobalRegistrator.register();
+
+// Keep Bun's fetch/stream implementations available to API tests in a combined
+// run; happy-dom's Node stream shims do not implement WritableStream.getWriter.
+Object.assign(globalThis, bunFetchAndStreams);
 
 if (!globalThis.ResizeObserver) {
   Object.defineProperty(globalThis, "ResizeObserver", {

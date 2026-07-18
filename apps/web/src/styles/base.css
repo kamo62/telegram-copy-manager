@@ -930,10 +930,6 @@ h3 {
   color: var(--ink-3);
 }
 
-.sidebar nav button.active::before {
-  display: none;
-}
-
 /* Workspace ---------------------------------------------------------------- */
 
 .workspace {
@@ -2237,11 +2233,6 @@ h3 {
 
 /* Premium UI polish pass ---------------------------------------------------- */
 
-.status-bar .refresh-btn:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--accent-ring);
-}
-
 .workspace-tab {
   transition:
     color var(--duration-2) var(--ease-out),
@@ -2297,17 +2288,6 @@ h3 {
   outline: 1px solid hsl(355 78% 46% / 0.2);
 }
 
-.data-table-wrap {
-  max-height: calc(100vh - 240px);
-  overflow: auto;
-}
-
-.data-table thead {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-}
-
 .data-table thead th {
   z-index: 5;
   box-shadow: 0 1px 0 var(--line);
@@ -2315,15 +2295,6 @@ h3 {
 
 .data-table tbody tr {
   transition: background var(--duration-1) var(--ease-out);
-}
-
-.data-table-th-sortable {
-  cursor: pointer;
-  user-select: none;
-}
-
-.data-table-th-sortable:hover {
-  color: var(--ink);
 }
 
 .signin-title {
@@ -2409,22 +2380,6 @@ h3 {
 
 .dialog-row-muted strong {
   color: var(--ink-2);
-}
-
-.broker-trail-list {
-  display: grid;
-  gap: 6px;
-}
-
-.broker-trail-item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  background: var(--panel-2);
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-sm);
 }
 
 .broker-trail-item code {

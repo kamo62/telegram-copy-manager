@@ -208,13 +208,10 @@ describe("SSE event stream (Task 1)", () => {
     });
 
     const res = await app.request("/api/events");
-    // In a combined `bun test` run the frontend suite registers happy-dom
-    // globals, which replace Bun's streaming Response — the SSE handler then
-    // 500s and cannot be streamed here. Full delta delivery is verified by
-    // `bun run test:backend` (no happy-dom), where this asserts the hello frame
-    // and an audit delta. Skip cleanly when the runtime can't stream.
-    const reader = res.status === 200 ? res.body?.getReader() : null;
-    if (!reader) return;
+    expect(res.status).toBe(200);
+    const reader = res.body?.getReader();
+    expect(reader).toBeDefined();
+    if (!reader) throw new Error("SSE response has no readable body");
     const decoder = new TextDecoder();
 
     const readChunk = async (): Promise<string> => {
@@ -228,15 +225,8 @@ describe("SSE event stream (Task 1)", () => {
       return decoder.decode(result.value);
     };
 
-    // First frame is the hello event. In a combined `bun test` run the frontend
-    // suite registers happy-dom globals, replacing Response/ReadableStream so the
-    // body yields nothing here — in that case the endpoint shape (200 + reader)
-    // is validated and full delivery is covered by `bun run test:backend`.
     const hello = await readChunk();
-    if (!hello.includes("event: hello")) {
-      await reader.cancel().catch(() => {});
-      return;
-    }
+    expect(hello).toContain("event: hello");
 
     // Trigger a state change that emits an audit event.
     await app.request("/api/settings", {

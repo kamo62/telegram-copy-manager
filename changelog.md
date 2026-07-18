@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.38.0 - 2026-07-18 (Minor)
+
+Release impact: Minor because this adds persistent asset retention during deploys and backward-compatible route-level code splitting without changing API, SSE, database, or EA protocol contracts.
+
+- Archived the outgoing and current web build assets under the existing mounted data volume, served missing hashed assets from that archive, and capped retention at 256 files so clients can finish loading across deploy swaps.
+- Split the nine workspace pages into lazy-loaded route chunks behind a shared Suspense fallback, and made the React/ReactDOM vendor split include the actual runtime modules.
+- Coalesced concurrent dashboard loads, skipped dashboard state replacement for deep-equal snapshots, and cached aggregate, per-account, and provider-score dashboard projections per store revision.
+- Made the combined Bun test environment deterministic by draining active Telegram ingestion before teardown and restoring Bun's native streaming primitives after DOM setup.
+- Removed eight verified exact duplicate top-level CSS rule blocks and added a lint-stage duplicate guard.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.38.0`.
+
 ## 1.37.1 - 2026-07-17 (Patch)
 
 Release impact: Patch because this removes idle UI work and confirmed dead code without changing public contracts.

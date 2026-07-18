@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render as rtlRender, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import packageJson from "../../../package.json";
-import { App, type DashboardSnapshot } from "./App";
+import { App, type DashboardSnapshot, dashboardSnapshotsEqual } from "./App";
 import { SettingsPage } from "./pages/SettingsPage";
 
 // App now reads its view/tab/account from the URL, so every render needs Router context.
@@ -167,10 +167,91 @@ function fixtureResponse(url: string | URL | Request, payload: unknown = snapsho
 }
 
 describe("App dashboard", () => {
-  test("keeps workspace pages in the initial app module to avoid stale dev-server lazy import failures", async () => {
-    const source = await Bun.file(new URL("./App.tsx", import.meta.url)).text();
+  test("compares dashboard snapshots deeply without depending on object key order", () => {
+    expect(
+      dashboardSnapshotsEqual(
+        { health: { status: "ok" }, queue: [1, 2] },
+        {
+          queue: [1, 2],
+          health: { status: "ok" },
+        },
+      ),
+    ).toBe(true);
+    expect(dashboardSnapshotsEqual({ queue: [1, 2] }, { queue: [1, 3] })).toBe(false);
+  });
 
-    expect(source).not.toContain('import("./pages/');
+  test("coalesces dashboard event bursts while a load is in flight", async () => {
+    const originalEventSource = globalThis.EventSource;
+    const instances: FakeEventSource[] = [];
+    class FakeEventSource {
+      onerror: (() => void) | null = null;
+      onopen: (() => void) | null = null;
+      private listeners = new Map<string, Array<() => void>>();
+
+      constructor(_url: string) {
+        instances.push(this);
+      }
+
+      addEventListener(type: string, listener: () => void) {
+        this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+      }
+
+      emit(type: string) {
+        for (const listener of this.listeners.get(type) ?? []) listener();
+      }
+
+      close() {}
+    }
+    globalThis.EventSource = FakeEventSource as unknown as typeof EventSource;
+    let resolveDashboard: (response: Response) => void = () => {};
+    const dashboardResponse = new Promise<Response>((resolve) => {
+      resolveDashboard = resolve;
+    });
+    let dashboardLoads = 0;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url) === "/api/dashboard") {
+        dashboardLoads += 1;
+        return dashboardResponse;
+      }
+      if (String(url) === "/api/telegram/status") {
+        return Response.json({
+          connected: true,
+          telegramAdapter: "mock",
+          telegramSessions: snapshot.telegramSessions,
+        });
+      }
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    try {
+      const view = render(<App />);
+      await waitFor(() => expect(instances).toHaveLength(1));
+      instances[0]?.emit("queue");
+      instances[0]?.emit("trade");
+      instances[0]?.emit("heartbeat");
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(dashboardLoads).toBe(1);
+
+      resolveDashboard(Response.json(snapshot));
+      await view.findByRole("heading", { name: "TG-TC · Operations" });
+    } finally {
+      globalThis.EventSource = originalEventSource;
+    }
+  });
+
+  test("allows lazy workspace pages only with the persistent asset fallback wired", async () => {
+    const [source, apiSource, serverSource, deploySource] = await Promise.all([
+      Bun.file(new URL("./App.tsx", import.meta.url)).text(),
+      Bun.file(new URL("../../api/src/app.ts", import.meta.url)).text(),
+      Bun.file(new URL("../../api/src/server.ts", import.meta.url)).text(),
+      Bun.file(new URL("../../../scripts/deploy.sh", import.meta.url)).text(),
+    ]);
+
+    expect(source.match(/lazy\(\(\) =>\s*import\("\.\/pages\//g)).toHaveLength(9);
+    expect(apiSource).toContain('app.use(\n        "/assets/*"');
+    expect(apiSource).toContain("root: options.assetArchiveRoot");
+    expect(serverSource).toContain("archiveStaticAssets(staticRoot, assetArchiveRoot)");
+    expect(deploySource).toContain("/app/data/asset-archive/assets");
   });
 
   test("lets the operator restart Telegram login after entering the wrong phone number", async () => {
@@ -285,7 +366,7 @@ describe("App dashboard", () => {
     expect(view.getAllByText(/137\.50/).length).toBeGreaterThan(0);
   });
 
-  test("performance growth chart uses the active performance currency over the first account row", () => {
+  test("performance growth chart uses the active performance currency over the first account row", async () => {
     const view = render(
       <App
         initialSnapshot={{
@@ -327,7 +408,7 @@ describe("App dashboard", () => {
     );
 
     clickTab(view, "Performance");
-    const chart = within(view.getByLabelText("Account growth chart"));
+    const chart = within(await view.findByLabelText("Account growth chart"));
     expect(chart.getByText(/\$12\.34/)).toBeTruthy();
     expect(chart.queryByText(/R\s*12\.34/)).toBeNull();
   });
@@ -499,7 +580,7 @@ describe("App dashboard", () => {
     expect(header.getAllByText(/45\.50/).length).toBeGreaterThanOrEqual(1);
   });
 
-  test("account growth chart uses the focused account performance series", () => {
+  test("account growth chart uses the focused account performance series", async () => {
     const routeSnapshot: DashboardSnapshot = {
       ...snapshot,
       accountPerformance: {
@@ -560,7 +641,7 @@ describe("App dashboard", () => {
       ),
     });
 
-    const chart = within(view.getByLabelText("Account growth chart"));
+    const chart = within(await view.findByLabelText("Account growth chart"));
     expect(chart.getByText(/2 samples/)).toBeTruthy();
     expect(chart.getByText(/\$45\.50/)).toBeTruthy();
   });
@@ -859,7 +940,7 @@ describe("App dashboard", () => {
     clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
-      target: { value: "kal-vip-extended" },
+      target: { value: "aggressive" },
     });
     fireEvent.input(view.getByLabelText("Locked symbol for Alpha FX Signals"), {
       target: { value: "XAUUSD" },
@@ -878,7 +959,7 @@ describe("App dashboard", () => {
     const settingsCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
     expect(settingsCall?.init?.method).toBe("PATCH");
     expect(JSON.parse(String(settingsCall?.init?.body))).toMatchObject({
-      parserMode: "kal-vip-extended",
+      parserMode: "aggressive",
       lockedSymbol: "XAUUSD",
       lotSize: 0.2,
       riskMode: "fixed",
@@ -1099,7 +1180,7 @@ describe("App dashboard", () => {
     clickSidebar(view, "Telegram Setup");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
-      target: { value: "kal-vip-extended" },
+      target: { value: "aggressive" },
     });
     fireEvent.input(view.getByLabelText("Locked symbol for Alpha FX Signals"), {
       target: { value: "XAUUSD" },
@@ -1117,7 +1198,7 @@ describe("App dashboard", () => {
     const body = JSON.parse(String(testCall?.init?.body));
     expect(body.rawText).toBe("BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910");
     expect(body.config).toMatchObject({
-      parserMode: "kal-vip-extended",
+      parserMode: "aggressive",
       lockedSymbol: "XAUUSD",
       riskMode: "fixed",
       riskAmount: 0.1,
@@ -1143,7 +1224,7 @@ describe("App dashboard", () => {
       />,
     );
     clickSidebar(view, "Settings");
-    expect(view.getByText(/A bot token is configured/)).toBeTruthy();
+    expect(await view.findByText(/A bot token is configured/)).toBeTruthy();
     fireEvent.change(await view.findByLabelText("Default lot size"), {
       target: { value: "0.25" },
     });

@@ -932,9 +932,9 @@ describe("French vocabulary normalization", () => {
     expect(parseSignalText("GOLD Je patiente pour une vente", context).commandType).not.toBe(
       "OPEN_TRADE",
     );
-    expect(parseSignalText("Ne chercher pas d'achat privilègier les ventes", context).commandType).toBe(
-      "NO_SIGNAL",
-    );
+    expect(
+      parseSignalText("Ne chercher pas d'achat privilègier les ventes", context).commandType,
+    ).toBe("NO_SIGNAL");
   });
 
   test("leaves English signals byte-identical (no French tokens present)", () => {
@@ -1120,7 +1120,9 @@ describe("spelled-out stop/target with a pip annotation", () => {
   });
 
   test("still ignores a bare pip results recap", () => {
-    expect(parseSignalText("XAUUSD sell 150 pips this week", context).commandType).toBe("NO_SIGNAL");
+    expect(parseSignalText("XAUUSD sell 150 pips this week", context).commandType).toBe(
+      "NO_SIGNAL",
+    );
     expect(parseSignalText("GBPCAD +50 pips / CHFJPY +200 pips", context).commandType).toBe(
       "NO_SIGNAL",
     );

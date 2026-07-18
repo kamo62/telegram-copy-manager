@@ -29,10 +29,16 @@ export default defineConfig(({ mode }) => ({
     rollupOptions: {
       output: {
         // Split long-lived vendor code into its own chunks so an app-code
-        // redeploy doesn't bust the React / charts / icons cache.
-        manualChunks: {
-          "react-vendor": ["react", "react-dom"],
-          "icons-vendor": ["lucide-react"],
+        // redeploy doesn't bust the React / icons cache.
+        manualChunks(id) {
+          if (
+            id.includes("/node_modules/react/") ||
+            id.includes("/node_modules/react-dom/") ||
+            id.includes("/node_modules/scheduler/")
+          ) {
+            return "react-vendor";
+          }
+          if (id.includes("/node_modules/lucide-react/")) return "icons-vendor";
         },
       },
     },

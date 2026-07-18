@@ -1,5 +1,5 @@
 import { Server } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountsOverview } from "./components/AccountsOverview";
@@ -47,15 +47,34 @@ import {
 } from "./lib/api";
 import { downsample } from "./lib/downsample";
 import type { ExposurePosition } from "./lib/exposure";
-import { EquityGuardianPage } from "./pages/EquityGuardianPage";
-import { HistoryPage } from "./pages/HistoryPage";
-import { LinkedAccountsPage } from "./pages/LinkedAccountsPage";
-import { LogsPage } from "./pages/LogsPage";
-import { PerformancePage } from "./pages/PerformancePage";
-import { ProvidersPage } from "./pages/ProvidersPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { SymbolSettingsPage } from "./pages/SymbolSettingsPage";
-import { TelegramSetupPage } from "./pages/TelegramSetupPage";
+
+const EquityGuardianPage = lazy(() =>
+  import("./pages/EquityGuardianPage").then((module) => ({ default: module.EquityGuardianPage })),
+);
+const HistoryPage = lazy(() =>
+  import("./pages/HistoryPage").then((module) => ({ default: module.HistoryPage })),
+);
+const LinkedAccountsPage = lazy(() =>
+  import("./pages/LinkedAccountsPage").then((module) => ({ default: module.LinkedAccountsPage })),
+);
+const LogsPage = lazy(() =>
+  import("./pages/LogsPage").then((module) => ({ default: module.LogsPage })),
+);
+const PerformancePage = lazy(() =>
+  import("./pages/PerformancePage").then((module) => ({ default: module.PerformancePage })),
+);
+const ProvidersPage = lazy(() =>
+  import("./pages/ProvidersPage").then((module) => ({ default: module.ProvidersPage })),
+);
+const SettingsPage = lazy(() =>
+  import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })),
+);
+const SymbolSettingsPage = lazy(() =>
+  import("./pages/SymbolSettingsPage").then((module) => ({ default: module.SymbolSettingsPage })),
+);
+const TelegramSetupPage = lazy(() =>
+  import("./pages/TelegramSetupPage").then((module) => ({ default: module.TelegramSetupPage })),
+);
 
 export interface ProviderPerformanceRow {
   id: string;
@@ -482,6 +501,29 @@ function pathForTab(accountId: string | null, tab: TabId): string {
   return tab === "summary" ? "/" : `/${tab}`;
 }
 
+export function dashboardSnapshotsEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => dashboardSnapshotsEqual(value, right[index]))
+    );
+  }
+  const leftKeys = Object.keys(left);
+  const rightRecord = right as Record<string, unknown>;
+  return (
+    leftKeys.length === Object.keys(rightRecord).length &&
+    leftKeys.every(
+      (key) =>
+        Object.hasOwn(rightRecord, key) &&
+        dashboardSnapshotsEqual((left as Record<string, unknown>)[key], rightRecord[key]),
+    )
+  );
+}
+
 export function App({
   initialDialogs = [],
   initialSnapshot,
@@ -507,6 +549,24 @@ export function App({
   const dashboardUrl = selectedAccountId
     ? `/api/dashboard?accountId=${encodeURIComponent(selectedAccountId)}`
     : "/api/dashboard";
+  const dashboardRequest = useRef<{ url: string; promise: Promise<DashboardSnapshot> } | undefined>(
+    undefined,
+  );
+  const loadDashboard = useCallback(() => {
+    if (dashboardRequest.current?.url === dashboardUrl) {
+      return dashboardRequest.current.promise;
+    }
+    const promise = apiGet<DashboardSnapshot>(dashboardUrl);
+    dashboardRequest.current = { url: dashboardUrl, promise };
+    const clear = () => {
+      if (dashboardRequest.current?.promise === promise) dashboardRequest.current = undefined;
+    };
+    void promise.then(clear, clear);
+    return promise;
+  }, [dashboardUrl]);
+  const applyDashboardSnapshot = useCallback((data: DashboardSnapshot) => {
+    setSnapshot((current) => (dashboardSnapshotsEqual(current, data) ? current : data));
+  }, []);
   const [configProvider, setConfigProvider] = useState<ProviderRowData | null>(null);
   const [parserTab, setParserTab] = useState("Recent Parses");
   const [historyTab, setHistoryTab] = useState<"Open" | "Closed">("Open");
@@ -595,9 +655,9 @@ export function App({
     async function load() {
       setRefreshing(true);
       try {
-        const data = await apiGet<DashboardSnapshot>(dashboardUrl);
+        const data = await loadDashboard();
         if (active) {
-          setSnapshot(data);
+          applyDashboardSnapshot(data);
           setLastPollError(false);
           setLastSyncAt(new Date().toISOString());
           void refreshHeldItems().catch(() => undefined);
@@ -683,7 +743,7 @@ export function App({
       source?.close();
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [dashboardUrl, initialSnapshot, refreshHeldItems]);
+  }, [applyDashboardSnapshot, initialSnapshot, loadDashboard, refreshHeldItems]);
 
   const telegramConnected = snapshot.telegramSessions.some(
     (session) => session.status === "CONNECTED",
@@ -1105,8 +1165,8 @@ export function App({
   async function refreshDashboard() {
     setRefreshing(true);
     try {
-      const data = await apiGet<DashboardSnapshot>(dashboardUrl);
-      setSnapshot(data);
+      const data = await loadDashboard();
+      applyDashboardSnapshot(data);
       setLastPollError(false);
       setLastSyncAt(new Date().toISOString());
     } catch {
@@ -1972,202 +2032,210 @@ export function App({
             </>
           ) : null}
 
-          {showSummary ? (
-            <SummaryPanel data={growthData} currency={accountHeaderData.currency} />
-          ) : null}
+          <Suspense
+            fallback={
+              <section className="panel" aria-busy="true">
+                Loading view…
+              </section>
+            }
+          >
+            {showSummary ? (
+              <SummaryPanel data={growthData} currency={accountHeaderData.currency} />
+            ) : null}
 
-          {showPerformance ? (
-            <PerformancePage
-              accounts={focusedAccount ? [focusedAccount] : snapshot.mt5Accounts}
-              currency={accountHeaderData.currency}
-              data={growthData}
-              loading={initialLoading}
-              providers={snapshot.providers.map((provider) => ({
-                id: provider.id,
-                title: provider.title,
-              }))}
-            />
-          ) : null}
-
-          {showEquityGuardian ? (
-            <EquityGuardianPage
-              guardianHeldCounts={guardianHeldCounts}
-              guardians={snapshot.equityGuardians ?? []}
-              onSave={(accountId, formElement) => void saveGuardian(accountId, formElement)}
-              onUnpause={(accountId, requeueHeld) => void unpauseGuardian(accountId, requeueHeld)}
-            />
-          ) : null}
-
-          <section className="content-grid">
-            {showTelegram ? (
-              <TelegramSetupPage
-                form={form}
-                busy={setupBusy}
-                error={setupError}
-                onReset={resetTelegramConnection}
-                setForm={setForm}
-                setupStep={setupStep}
-                startTelegramConnection={startTelegramConnection}
-                submitCode={submitCode}
-                submitPassword={submitPassword}
-                dialogs={availableDialogs}
-                onRefreshDialogs={loadDialogs}
-                onResyncProviders={resyncProvidersToCurrentSession}
-                onRemoveDialog={(dialog) => {
-                  const provider = snapshot.providers.find((p) => p.dialogId === dialog.id);
-                  if (provider) return deleteProvider(provider);
-                }}
-                onSelectDialog={selectDialog}
-                selectedDialogIds={snapshot.providers.map((provider) => provider.dialogId)}
+            {showPerformance ? (
+              <PerformancePage
+                accounts={focusedAccount ? [focusedAccount] : snapshot.mt5Accounts}
+                currency={accountHeaderData.currency}
+                data={growthData}
+                loading={initialLoading}
                 providers={snapshot.providers.map((provider) => ({
                   id: provider.id,
                   title: provider.title,
-                  enabled: provider.enabled,
                 }))}
-                onToggleProvider={(provider) => {
-                  const full = snapshot.providers.find((p) => p.id === provider.id);
-                  if (full) void toggleProvider(full);
-                }}
-                onRemoveProvider={(provider) => {
-                  const full = snapshot.providers.find((p) => p.id === provider.id);
-                  if (full) void deleteProvider(full);
-                }}
-                onConfigureProvider={(provider) => {
-                  const full = snapshot.providers.find((p) => p.id === provider.id);
-                  if (full) setConfigProvider(full);
-                }}
               />
             ) : null}
 
-            {showProviders ? (
-              <ProvidersPage
-                accountId={selectedAccountId}
-                accountLabel={
-                  focusedAccount ? focusedAccount.accountNumber || focusedAccount.id : undefined
-                }
-                accounts={snapshot.mt5Accounts.map((account) => ({
-                  id: account.id,
-                  label: account.accountNumber || account.id,
-                }))}
-                currency={
-                  (focusedAccount as { currency?: string } | undefined)?.currency ??
-                  (snapshot.mt5Accounts[0] as { currency?: string } | undefined)?.currency
-                }
-                loading={initialLoading}
-                onConfigure={(provider) => setConfigProvider(provider)}
-                onExport={() => void exportProviderPerformance()}
-                onToggleAccountLink={(accountId, providerId, enabled) =>
-                  void toggleAccountProviderLink(accountId, providerId, enabled)
-                }
-                providerLinks={snapshot.accountProviderLinks ?? []}
-                providers={providerRows}
+            {showEquityGuardian ? (
+              <EquityGuardianPage
+                guardianHeldCounts={guardianHeldCounts}
+                guardians={snapshot.equityGuardians ?? []}
+                onSave={(accountId, formElement) => void saveGuardian(accountId, formElement)}
+                onUnpause={(accountId, requeueHeld) => void unpauseGuardian(accountId, requeueHeld)}
               />
             ) : null}
 
-            {showParser ? (
-              <LogsPage
-                parserTab={parserTab}
-                onParserTabChange={setParserTab}
-                providersLength={snapshot.providers.length}
-                onParseRecent={() => void parseRecentProviderMessages()}
-                parseRecentBusy={parseRecentBusy}
-                parseRecentResults={parseRecentResults}
-                parserLoading={initialLoading}
-                parserLoadError={lastPollError}
-                snapshot={snapshot}
-                fixtureClassifications={fixtureClassifications}
-                onClassify={(rawMessageId, classification) =>
-                  setFixtureClassifications((current) => ({
-                    ...current,
-                    [rawMessageId]: classification,
-                  }))
-                }
-                redactedFixtureText={redactedFixtureText}
-                onRedactedChange={(rawMessageId, value) =>
-                  setRedactedFixtureText((current) => ({ ...current, [rawMessageId]: value }))
-                }
-                onSaveFixture={(result, redactedText) =>
-                  void saveParserFixture(result, redactedText)
-                }
-                onAiReview={(result) => void requestAiReview(result)}
-                onApprove={(result) => void approveParsedSignal(result)}
-                onIgnore={(result) => void ignoreParsedSignal(result)}
-                onForcePush={openManualSignal}
-                aiReviewStatus={aiReviewStatus}
-                parserActionStatus={parserActionStatus}
-                parserActionPending={parserActionPending}
-                fixtureStatus={fixtureStatus}
-                heldItems={heldItems}
-                onHeldDismiss={dismissHeldItem}
-                onHeldRequeue={requeueHeldItem}
-              />
-            ) : null}
+            <section className="content-grid">
+              {showTelegram ? (
+                <TelegramSetupPage
+                  form={form}
+                  busy={setupBusy}
+                  error={setupError}
+                  onReset={resetTelegramConnection}
+                  setForm={setForm}
+                  setupStep={setupStep}
+                  startTelegramConnection={startTelegramConnection}
+                  submitCode={submitCode}
+                  submitPassword={submitPassword}
+                  dialogs={availableDialogs}
+                  onRefreshDialogs={loadDialogs}
+                  onResyncProviders={resyncProvidersToCurrentSession}
+                  onRemoveDialog={(dialog) => {
+                    const provider = snapshot.providers.find((p) => p.dialogId === dialog.id);
+                    if (provider) return deleteProvider(provider);
+                  }}
+                  onSelectDialog={selectDialog}
+                  selectedDialogIds={snapshot.providers.map((provider) => provider.dialogId)}
+                  providers={snapshot.providers.map((provider) => ({
+                    id: provider.id,
+                    title: provider.title,
+                    enabled: provider.enabled,
+                  }))}
+                  onToggleProvider={(provider) => {
+                    const full = snapshot.providers.find((p) => p.id === provider.id);
+                    if (full) void toggleProvider(full);
+                  }}
+                  onRemoveProvider={(provider) => {
+                    const full = snapshot.providers.find((p) => p.id === provider.id);
+                    if (full) void deleteProvider(full);
+                  }}
+                  onConfigureProvider={(provider) => {
+                    const full = snapshot.providers.find((p) => p.id === provider.id);
+                    if (full) setConfigProvider(full);
+                  }}
+                />
+              ) : null}
 
-            {showTrades ? (
-              <HistoryPage
-                accounts={snapshot.mt5Accounts}
-                activeTab={historyTab}
-                currency={
-                  (focusedAccount as { currency?: string } | undefined)?.currency ??
-                  (snapshot.mt5Accounts[0] as { currency?: string } | undefined)?.currency
-                }
-                focusedAccountId={selectedAccountId}
-                onTabChange={setHistoryTab}
-                onExportJournal={() => void exportTradeJournal()}
-                onResolveTrade={resolveTrade}
-                trades={snapshot.logicalTrades}
-              />
-            ) : null}
+              {showProviders ? (
+                <ProvidersPage
+                  accountId={selectedAccountId}
+                  accountLabel={
+                    focusedAccount ? focusedAccount.accountNumber || focusedAccount.id : undefined
+                  }
+                  accounts={snapshot.mt5Accounts.map((account) => ({
+                    id: account.id,
+                    label: account.accountNumber || account.id,
+                  }))}
+                  currency={
+                    (focusedAccount as { currency?: string } | undefined)?.currency ??
+                    (snapshot.mt5Accounts[0] as { currency?: string } | undefined)?.currency
+                  }
+                  loading={initialLoading}
+                  onConfigure={(provider) => setConfigProvider(provider)}
+                  onExport={() => void exportProviderPerformance()}
+                  onToggleAccountLink={(accountId, providerId, enabled) =>
+                    void toggleAccountProviderLink(accountId, providerId, enabled)
+                  }
+                  providerLinks={snapshot.accountProviderLinks ?? []}
+                  providers={providerRows}
+                />
+              ) : null}
 
-            {showMt5 ? (
-              <LinkedAccountsPage
-                accounts={snapshot.mt5Accounts}
-                slots={snapshot.accountSlots ?? []}
-                onCreateSlot={(event) => void createAccountSlot(event)}
-                onDeleteAccount={(account) => void deleteAccount(account)}
-                onDeleteSlot={(slot) => void deleteAccountSlot(slot)}
-                onEditProviderLinks={() => {
-                  setActiveView("dashboard");
-                  setActiveTab("providers");
-                }}
-                providers={snapshot.providers}
-                providerLinks={snapshot.accountProviderLinks ?? []}
-              />
-            ) : null}
+              {showParser ? (
+                <LogsPage
+                  parserTab={parserTab}
+                  onParserTabChange={setParserTab}
+                  providersLength={snapshot.providers.length}
+                  onParseRecent={() => void parseRecentProviderMessages()}
+                  parseRecentBusy={parseRecentBusy}
+                  parseRecentResults={parseRecentResults}
+                  parserLoading={initialLoading}
+                  parserLoadError={lastPollError}
+                  snapshot={snapshot}
+                  fixtureClassifications={fixtureClassifications}
+                  onClassify={(rawMessageId, classification) =>
+                    setFixtureClassifications((current) => ({
+                      ...current,
+                      [rawMessageId]: classification,
+                    }))
+                  }
+                  redactedFixtureText={redactedFixtureText}
+                  onRedactedChange={(rawMessageId, value) =>
+                    setRedactedFixtureText((current) => ({ ...current, [rawMessageId]: value }))
+                  }
+                  onSaveFixture={(result, redactedText) =>
+                    void saveParserFixture(result, redactedText)
+                  }
+                  onAiReview={(result) => void requestAiReview(result)}
+                  onApprove={(result) => void approveParsedSignal(result)}
+                  onIgnore={(result) => void ignoreParsedSignal(result)}
+                  onForcePush={openManualSignal}
+                  aiReviewStatus={aiReviewStatus}
+                  parserActionStatus={parserActionStatus}
+                  parserActionPending={parserActionPending}
+                  fixtureStatus={fixtureStatus}
+                  heldItems={heldItems}
+                  onHeldDismiss={dismissHeldItem}
+                  onHeldRequeue={requeueHeldItem}
+                />
+              ) : null}
 
-            {showMapping ? (
-              <SymbolSettingsPage
-                availableBrokerSymbols={focusedAccount?.availableSymbols ?? []}
-                defaultAccountId={focusedAccount?.id ?? ""}
-                defaultProviderId={snapshot.providers[0]?.id}
-                loading={initialLoading}
-                mappings={snapshot.symbolMappings}
-                onDelete={deleteSymbolMapping}
-                onSaveAccountMapping={saveAccountMapping}
-                onSaveGlobalAlias={saveSymbolAlias}
-              />
-            ) : null}
+              {showTrades ? (
+                <HistoryPage
+                  accounts={snapshot.mt5Accounts}
+                  activeTab={historyTab}
+                  currency={
+                    (focusedAccount as { currency?: string } | undefined)?.currency ??
+                    (snapshot.mt5Accounts[0] as { currency?: string } | undefined)?.currency
+                  }
+                  focusedAccountId={selectedAccountId}
+                  onTabChange={setHistoryTab}
+                  onExportJournal={() => void exportTradeJournal()}
+                  onResolveTrade={resolveTrade}
+                  trades={snapshot.logicalTrades}
+                />
+              ) : null}
 
-            {showSettings ? (
-              <SettingsPage
-                accounts={snapshot.mt5Accounts.map((account) => ({
-                  id: account.id,
-                  accountNumber: account.accountNumber,
-                  currency: account.currency ?? "USD",
-                  drawdownWarnPctOverride: account.drawdownWarnPctOverride ?? null,
-                  drawdownDangerPctOverride: account.drawdownDangerPctOverride ?? null,
-                }))}
-                onAccountRiskThresholdsSave={(accountId, warnPct, dangerPct) =>
-                  void saveAccountRiskThresholds(accountId, warnPct, dangerPct)
-                }
-                onSubmit={saveExecutionSettings}
-                onSaveForm={(formElement) => void saveExecutionSettingsForm(formElement)}
-                onAlertTest={sendAlertTest}
-                onBackup={backupDatabase}
-                settings={snapshot.appSettings}
-              />
-            ) : null}
-          </section>
+              {showMt5 ? (
+                <LinkedAccountsPage
+                  accounts={snapshot.mt5Accounts}
+                  slots={snapshot.accountSlots ?? []}
+                  onCreateSlot={(event) => void createAccountSlot(event)}
+                  onDeleteAccount={(account) => void deleteAccount(account)}
+                  onDeleteSlot={(slot) => void deleteAccountSlot(slot)}
+                  onEditProviderLinks={() => {
+                    setActiveView("dashboard");
+                    setActiveTab("providers");
+                  }}
+                  providers={snapshot.providers}
+                  providerLinks={snapshot.accountProviderLinks ?? []}
+                />
+              ) : null}
+
+              {showMapping ? (
+                <SymbolSettingsPage
+                  availableBrokerSymbols={focusedAccount?.availableSymbols ?? []}
+                  defaultAccountId={focusedAccount?.id ?? ""}
+                  defaultProviderId={snapshot.providers[0]?.id}
+                  loading={initialLoading}
+                  mappings={snapshot.symbolMappings}
+                  onDelete={deleteSymbolMapping}
+                  onSaveAccountMapping={saveAccountMapping}
+                  onSaveGlobalAlias={saveSymbolAlias}
+                />
+              ) : null}
+
+              {showSettings ? (
+                <SettingsPage
+                  accounts={snapshot.mt5Accounts.map((account) => ({
+                    id: account.id,
+                    accountNumber: account.accountNumber,
+                    currency: account.currency ?? "USD",
+                    drawdownWarnPctOverride: account.drawdownWarnPctOverride ?? null,
+                    drawdownDangerPctOverride: account.drawdownDangerPctOverride ?? null,
+                  }))}
+                  onAccountRiskThresholdsSave={(accountId, warnPct, dangerPct) =>
+                    void saveAccountRiskThresholds(accountId, warnPct, dangerPct)
+                  }
+                  onSubmit={saveExecutionSettings}
+                  onSaveForm={(formElement) => void saveExecutionSettingsForm(formElement)}
+                  onAlertTest={sendAlertTest}
+                  onBackup={backupDatabase}
+                  settings={snapshot.appSettings}
+                />
+              ) : null}
+            </section>
+          </Suspense>
         </section>
       </ErrorBoundary>
 

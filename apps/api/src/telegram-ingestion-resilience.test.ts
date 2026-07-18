@@ -66,6 +66,40 @@ async function enableProviders(app: ReturnType<typeof createApi>) {
 }
 
 describe("Telegram ingestion resilience", () => {
+  test("waits for an active ingestion run before stopping", async () => {
+    const releases: Array<() => void> = [];
+    let started: (() => void) | undefined;
+    const began = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: adapter(
+        async () =>
+          await new Promise<TelegramCapturedMessage[]>((resolve) => {
+            started?.();
+            releases.push(() => resolve([]));
+          }),
+      ),
+      telegramPollingEnabled: false,
+    });
+    await enableProviders(app);
+
+    const run = app.runTelegramIngestionOnce();
+    await began;
+    let stopped = false;
+    const stop = app.stopTelegramIngestion().then(() => {
+      stopped = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stopped).toBe(false);
+
+    for (const release of releases) release();
+    await Promise.all([run, stop]);
+    expect(stopped).toBe(true);
+  });
+
   test("times out a stuck provider without delaying a concurrent provider", async () => {
     let fastCalls = 0;
     const app = createApi({

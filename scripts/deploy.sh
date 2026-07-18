@@ -43,7 +43,7 @@ echo "==> [3/5] Building image (old container keeps serving)"
 sshx "cd ${REMOTE_DIR} && docker compose build"
 
 echo "==> [4/5] Swapping container"
-sshx "docker rm -f ${CONTAINER} >/dev/null 2>&1 || true; cd ${REMOTE_DIR} && docker compose up -d"
+sshx "docker exec ${CONTAINER} sh -c 'mkdir -p /app/data/asset-archive/assets && cp -a /app/apps/web/dist/assets/. /app/data/asset-archive/assets/' >/dev/null 2>&1 || true; docker rm -f ${CONTAINER} >/dev/null 2>&1 || true; cd ${REMOTE_DIR} && docker compose up -d"
 
 echo "==> [5/5] Verifying"
 sshx "
@@ -51,6 +51,7 @@ sshx "
   echo -n '   served build: '; curl -sS -m 5 ${BASE_URL}/ 2>/dev/null | grep -oE '/assets/index-[A-Za-z0-9_-]+\.js' | head -1
   echo -n '   live accounts: '; curl -sS -m 5 ${BASE_URL}/api/mt5/accounts 2>/dev/null | grep -oE '\"id\"' | wc -l | tr -d ' '
   echo -n '   telegram: '; curl -sS -m 6 ${BASE_URL}/api/telegram/status 2>/dev/null | grep -oE '\"connected\":(true|false)' | head -1
+  echo -n '   archived assets: '; docker exec ${CONTAINER} sh -c 'find /app/data/asset-archive/assets -type f | wc -l' | tr -d ' '
   docker ps --filter name=${CONTAINER} --format '   container: {{.Status}}'
 "
 echo "==> Done. ${BR}@${REV} is live at ${BASE_URL}."
