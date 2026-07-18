@@ -1,6 +1,13 @@
 import "./test-setup";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, render as rtlRender, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import packageJson from "../../../package.json";
 import { App, type DashboardSnapshot, dashboardSnapshotsEqual } from "./App";
@@ -166,6 +173,114 @@ function fixtureResponse(url: string | URL | Request, payload: unknown = snapsho
   return Response.json(payload);
 }
 
+function installFakeEventSource() {
+  const original = globalThis.EventSource;
+  const instances: FakeEventSource[] = [];
+  class FakeEventSource {
+    onerror: (() => void) | null = null;
+    onopen: (() => void) | null = null;
+    private listeners = new Map<string, Array<(event: MessageEvent<string>) => void>>();
+
+    constructor(_url: string) {
+      instances.push(this);
+    }
+
+    addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+
+    emit(type: string, data?: unknown) {
+      const event = new MessageEvent(type, {
+        data: data === undefined ? "" : JSON.stringify(data),
+      });
+      for (const listener of this.listeners.get(type) ?? []) listener(event);
+    }
+
+    close() {}
+  }
+  globalThis.EventSource = FakeEventSource as unknown as typeof EventSource;
+  return {
+    instances,
+    restore: () => {
+      globalThis.EventSource = original;
+    },
+  };
+}
+
+function heartbeatDashboard(heartbeatStatus = "online"): DashboardSnapshot {
+  const current = heartbeatStatus === "online";
+  const performance = {
+    accountId: "mt5-demo-1",
+    currency: "USD",
+    heartbeatStatus,
+    lastHeartbeatAt: "2026-07-18T08:00:00.000Z",
+    initialBalance: 100,
+    currentBalance: current ? 100 : null,
+    currentEquity: current ? 105 : null,
+    currentProfit: current ? 5 : null,
+    totalProfit: current ? 5 : null,
+    realizedPnl: 0,
+    floatingPnl: current ? 5 : null,
+    netDeposits: current ? 0 : null,
+    today: 0,
+    thisWeek: 0,
+    thisMonth: 0,
+    equityCurve: [],
+  };
+  return {
+    ...snapshot,
+    mt5Accounts: snapshot.mt5Accounts.map((account) =>
+      account.id === "mt5-demo-1"
+        ? {
+            ...account,
+            currency: "USD",
+            balance: 100,
+            equity: 105,
+            profit: 5,
+            heartbeatStatus,
+            lastHeartbeatAt: performance.lastHeartbeatAt,
+          }
+        : account,
+    ),
+    accountPerformance: performance,
+    accountPerformanceByAccount: { "mt5-demo-1": performance },
+  };
+}
+
+const heartbeatDelta = {
+  type: "heartbeat",
+  accountId: "mt5-demo-1",
+  balance: 125,
+  equity: 130,
+  profit: 5,
+  heartbeatStatus: "online",
+  now: "2026-07-18T08:00:05.000Z",
+};
+
+async function renderEventSourceApp(initial: DashboardSnapshot, refreshed = initial) {
+  const eventSource = installFakeEventSource();
+  let dashboardLoads = 0;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const requestUrl = String(url);
+    if (requestUrl === "/api/dashboard") {
+      dashboardLoads += 1;
+      return Response.json(dashboardLoads === 1 ? initial : refreshed);
+    }
+    if (requestUrl === "/api/telegram/status") {
+      return Response.json({
+        connected: true,
+        telegramAdapter: "mock",
+        telegramSessions: initial.telegramSessions,
+      });
+    }
+    return fixtureResponse(url, initial);
+  }) as typeof fetch;
+  const view = render(<App />);
+  await view.findByRole("heading", { name: "TG-TC · Operations" });
+  await waitFor(() => expect(eventSource.instances).toHaveLength(1));
+  return { ...eventSource, view, dashboardLoads: () => dashboardLoads };
+}
+
 describe("App dashboard", () => {
   test("compares dashboard snapshots deeply without depending on object key order", () => {
     expect(
@@ -181,28 +296,7 @@ describe("App dashboard", () => {
   });
 
   test("coalesces dashboard event bursts while a load is in flight", async () => {
-    const originalEventSource = globalThis.EventSource;
-    const instances: FakeEventSource[] = [];
-    class FakeEventSource {
-      onerror: (() => void) | null = null;
-      onopen: (() => void) | null = null;
-      private listeners = new Map<string, Array<() => void>>();
-
-      constructor(_url: string) {
-        instances.push(this);
-      }
-
-      addEventListener(type: string, listener: () => void) {
-        this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
-      }
-
-      emit(type: string) {
-        for (const listener of this.listeners.get(type) ?? []) listener();
-      }
-
-      close() {}
-    }
-    globalThis.EventSource = FakeEventSource as unknown as typeof EventSource;
+    const { instances, restore } = installFakeEventSource();
     let resolveDashboard: (response: Response) => void = () => {};
     const dashboardResponse = new Promise<Response>((resolve) => {
       resolveDashboard = resolve;
@@ -226,16 +320,87 @@ describe("App dashboard", () => {
     try {
       const view = render(<App />);
       await waitFor(() => expect(instances).toHaveLength(1));
-      instances[0]?.emit("queue");
-      instances[0]?.emit("trade");
-      instances[0]?.emit("heartbeat");
+      act(() => {
+        instances[0]?.emit("queue");
+        instances[0]?.emit("trade");
+        instances[0]?.emit("heartbeat");
+      });
       await new Promise((resolve) => setTimeout(resolve, 250));
       expect(dashboardLoads).toBe(1);
 
       resolveDashboard(Response.json(snapshot));
       await view.findByRole("heading", { name: "TG-TC · Operations" });
     } finally {
-      globalThis.EventSource = originalEventSource;
+      restore();
+    }
+  });
+
+  test("applies heartbeat deltas without fetching the dashboard", async () => {
+    const app = await renderEventSourceApp(heartbeatDashboard());
+
+    try {
+      expect(app.dashboardLoads()).toBe(1);
+      act(() => app.instances[0]?.emit("heartbeat", heartbeatDelta));
+
+      await waitFor(() => expect(app.view.getByText(/125\.00/)).toBeTruthy());
+      expect(app.view.getByText(/130\.00/)).toBeTruthy();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(app.dashboardLoads()).toBe(1);
+    } finally {
+      app.restore();
+    }
+  });
+
+  test("ignores another account's heartbeat for the focused performance panel", async () => {
+    const base = heartbeatDashboard();
+    const primary = base.mt5Accounts.find((account) => account.id === "mt5-demo-1");
+    if (!primary) throw new Error("fixture account mt5-demo-1 missing");
+    const app = await renderEventSourceApp({
+      ...base,
+      mt5Accounts: [...base.mt5Accounts, { ...primary, id: "mt5-demo-2", accountNumber: "222" }],
+    });
+
+    try {
+      expect(app.dashboardLoads()).toBe(1);
+      act(() =>
+        app.instances[0]?.emit("heartbeat", {
+          ...heartbeatDelta,
+          accountId: "mt5-demo-2",
+          balance: 900,
+          equity: 950,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(app.dashboardLoads()).toBe(1);
+      const panel = app.view.getByRole("region", { name: "Account performance" });
+      expect(within(panel).getByText(/105\.00/)).toBeTruthy();
+      expect(within(panel).queryByText(/950\.00/)).toBeNull();
+    } finally {
+      app.restore();
+    }
+  });
+
+  test("reloads the dashboard when heartbeat status transitions", async () => {
+    const app = await renderEventSourceApp(heartbeatDashboard("offline"), heartbeatDashboard());
+
+    try {
+      expect(app.dashboardLoads()).toBe(1);
+      act(() => app.instances[0]?.emit("heartbeat", heartbeatDelta));
+      await waitFor(() => expect(app.dashboardLoads()).toBe(2));
+    } finally {
+      app.restore();
+    }
+  });
+
+  test("keeps queue events on the full dashboard reload path", async () => {
+    const app = await renderEventSourceApp(heartbeatDashboard());
+
+    try {
+      expect(app.dashboardLoads()).toBe(1);
+      act(() => app.instances[0]?.emit("queue"));
+      await waitFor(() => expect(app.dashboardLoads()).toBe(2));
+    } finally {
+      app.restore();
     }
   });
 

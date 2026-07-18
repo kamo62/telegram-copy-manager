@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.39.0 - 2026-07-18 (Minor)
+
+Release impact: Minor because this adds fields to the heartbeat SSE payload and changes dashboard synchronization behavior without breaking existing event consumers.
+
+- Added balance, equity, floating profit, heartbeat status, and timestamp fields to heartbeat SSE events.
+- Applied stable-status heartbeats as client-side account and performance deltas, while retaining full dashboard reloads for invalid payloads, unknown accounts, status transitions, and all other state-changing events.
+- Emitted an audit event when Equity Guardian first latches paused so heartbeat-driven drawdown breaches still force a prompt full dashboard refresh.
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.39.0`.
+
 ## 1.38.1 - 2026-07-18 (Patch)
 
 Release impact: Patch because it trims payload and render churn without changing behavior or contracts.

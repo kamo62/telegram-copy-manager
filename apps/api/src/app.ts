@@ -4036,7 +4036,15 @@ class AppStore {
       }
     }
     this.recordEquityCurveSamples(input, now);
-    this.emitEvent({ type: "heartbeat", accountId: input.accountId });
+    this.emitEvent({
+      type: "heartbeat",
+      accountId: input.accountId,
+      balance: input.balance,
+      equity: input.equity,
+      profit: input.profit,
+      heartbeatStatus: "online",
+      now,
+    });
     return { accountId: input.accountId, heartbeatStatus: "online", at: now };
   }
 
@@ -4222,6 +4230,11 @@ class AppStore {
         new Date().toISOString(),
       );
     if (paused && !current.paused) {
+      this.audit("equity-guardian.pause", "warn", "Equity Guardian paused after drawdown breach", {
+        accountId,
+        currentDrawdown,
+        threshold,
+      });
       this.dispatchAlert(
         "guardian-paused",
         accountId,

@@ -199,12 +199,33 @@ describe("operator audit trail (Task 2)", () => {
 });
 
 describe("SSE event stream (Task 1)", () => {
-  test("delivers a delta within ~1s of a state change", async () => {
+  test("delivers enriched heartbeat deltas and guardian pause audits", async () => {
     const app = createApi({
       databasePath: ":memory:",
       seedDemoData: false,
       telegram: mockAdapter([]),
       telegramPollingEnabled: false,
+    });
+    const registered = await json<{ accountId: string }>(
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "9001",
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes",
+          currency: "USD",
+          balance: 1_000,
+          equity: 1_000,
+          profit: 0,
+          marginMode: "HEDGING",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/equity-guardian/${registered.accountId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ threshold: 10 }),
+      headers: { "content-type": "application/json" },
     });
 
     const res = await app.request("/api/events");
@@ -228,20 +249,44 @@ describe("SSE event stream (Task 1)", () => {
     const hello = await readChunk();
     expect(hello).toContain("event: hello");
 
-    // Trigger a state change that emits an audit event.
-    await app.request("/api/settings", {
-      method: "PATCH",
-      body: JSON.stringify({ pollSeconds: 9 }),
+    await app.request("/api/mt5/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: registered.accountId,
+        balance: 1_000,
+        equity: 800,
+        profit: -200,
+      }),
       headers: { "content-type": "application/json" },
     });
 
-    let sawAudit = false;
-    for (let i = 0; i < 12 && !sawAudit; i += 1) {
-      const chunk = await readChunk();
-      if (chunk.includes("event: audit")) sawAudit = true;
+    let events = "";
+    for (
+      let i = 0;
+      i < 12 &&
+      (!events.includes("event: heartbeat") || !events.includes('"event":"equity-guardian.pause"'));
+      i += 1
+    ) {
+      events += await readChunk();
     }
     await reader.cancel();
-    expect(sawAudit).toBe(true);
+
+    expect(events).toContain("event: audit");
+    expect(events).toContain('"event":"equity-guardian.pause"');
+    const heartbeatBlock = events.split("\n\n").find((block) => block.includes("event: heartbeat"));
+    const dataLine = heartbeatBlock?.split("\n").find((line) => line.startsWith("data: "));
+    expect(dataLine).toBeDefined();
+    const heartbeat = JSON.parse(dataLine?.slice(6) ?? "{}") as Record<string, unknown>;
+    expect(heartbeat).toEqual({
+      type: "heartbeat",
+      accountId: registered.accountId,
+      balance: 1_000,
+      equity: 800,
+      profit: -200,
+      heartbeatStatus: "online",
+      now: expect.any(String),
+    });
+    expect(Number.isFinite(Date.parse(String(heartbeat.now)))).toBe(true);
   });
 });
 

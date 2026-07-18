@@ -525,6 +525,125 @@ export function dashboardSnapshotsEqual(left: unknown, right: unknown): boolean 
   );
 }
 
+interface HeartbeatDelta {
+  accountId: string;
+  balance: number;
+  equity: number;
+  profit: number;
+  heartbeatStatus: string;
+  now: string;
+}
+
+function parseHeartbeatDelta(event: Event): HeartbeatDelta | null {
+  try {
+    const data = JSON.parse((event as MessageEvent<string>).data) as Partial<HeartbeatDelta>;
+    if (
+      typeof data.accountId !== "string" ||
+      !data.accountId ||
+      !Number.isFinite(data.balance) ||
+      !Number.isFinite(data.equity) ||
+      !Number.isFinite(data.profit) ||
+      typeof data.heartbeatStatus !== "string" ||
+      !data.heartbeatStatus ||
+      typeof data.now !== "string" ||
+      !Number.isFinite(Date.parse(data.now))
+    ) {
+      return null;
+    }
+    return data as HeartbeatDelta;
+  } catch {
+    return null;
+  }
+}
+
+function applyHeartbeatDelta(
+  snapshot: DashboardSnapshot,
+  delta: HeartbeatDelta,
+): DashboardSnapshot | null {
+  const previousAccount = snapshot.mt5Accounts.find((account) => account.id === delta.accountId);
+  if (!previousAccount || previousAccount.heartbeatStatus !== delta.heartbeatStatus) return null;
+
+  const mt5Accounts = snapshot.mt5Accounts.map((account) =>
+    account.id === delta.accountId
+      ? {
+          ...account,
+          balance: delta.balance,
+          equity: delta.equity,
+          profit: delta.profit,
+          heartbeatStatus: delta.heartbeatStatus,
+          lastHeartbeatAt: delta.now,
+        }
+      : account,
+  );
+  const performanceFields = {
+    currentBalance: delta.balance,
+    currentEquity: delta.equity,
+    currentProfit: delta.profit,
+    floatingPnl: delta.profit,
+    heartbeatStatus: delta.heartbeatStatus,
+    lastHeartbeatAt: delta.now,
+  };
+  let accountPerformance = snapshot.accountPerformance;
+  if (accountPerformance && accountPerformance.accountId === delta.accountId) {
+    accountPerformance = { ...accountPerformance, ...performanceFields };
+  } else if (accountPerformance?.accountId === "aggregate") {
+    const normalizeCurrency = (currency?: string) => {
+      const normalized = currency?.trim().toUpperCase();
+      return normalized === "$" ? "USD" : normalized === "R" ? "ZAR" : normalized;
+    };
+    const sourceCurrency = normalizeCurrency(previousAccount.currency);
+    const reportingCurrency = normalizeCurrency(accountPerformance.currency);
+    const convert = (value: number) => {
+      if (sourceCurrency === reportingCurrency) return value;
+      if (sourceCurrency === "USD" && reportingCurrency === "ZAR") {
+        return value * snapshot.appSettings.usdZarRate;
+      }
+      if (sourceCurrency === "ZAR" && reportingCurrency === "USD") {
+        return value / snapshot.appSettings.usdZarRate;
+      }
+      return value;
+    };
+    const add = (current: number | null | undefined, change: number) =>
+      current == null ? current : Math.round((current + convert(change)) * 100) / 100;
+    const previousProfit =
+      previousAccount.profit ?? (previousAccount.equity ?? 0) - (previousAccount.balance ?? 0);
+    const profitChange = delta.profit - previousProfit;
+    accountPerformance = {
+      ...accountPerformance,
+      currentBalance: add(
+        accountPerformance.currentBalance,
+        delta.balance - (previousAccount.balance ?? 0),
+      ),
+      currentEquity: add(
+        accountPerformance.currentEquity,
+        delta.equity - (previousAccount.equity ?? 0),
+      ),
+      currentProfit: add(accountPerformance.currentProfit, profitChange),
+      floatingPnl: add(accountPerformance.floatingPnl, profitChange),
+      heartbeatStatus: accountPerformance.heartbeatStatus,
+      lastHeartbeatAt: delta.now,
+    };
+  }
+
+  const perAccountPerformance = snapshot.accountPerformanceByAccount?.[delta.accountId];
+  const accountPerformanceByAccount = perAccountPerformance
+    ? {
+        ...snapshot.accountPerformanceByAccount,
+        [delta.accountId]: {
+          ...perAccountPerformance,
+          ...performanceFields,
+        },
+      }
+    : snapshot.accountPerformanceByAccount;
+
+  return {
+    ...snapshot,
+    mt5Accounts,
+    accountPerformance,
+    accountPerformanceByAccount,
+  };
+}
+
 export function App({
   initialDialogs = [],
   initialSnapshot,
@@ -533,6 +652,8 @@ export function App({
   initialSnapshot?: DashboardSnapshot;
 }) {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot>(initialSnapshot ?? emptySnapshot);
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
   const [heldItems, setHeldItems] = useState<HeldQueueItem[]>([]);
   const [availableDialogs, setAvailableDialogs] = useState<TelegramDialogSummary[]>(initialDialogs);
   const [initialLoading, setInitialLoading] = useState(!initialSnapshot);
@@ -699,17 +820,21 @@ export function App({
       try {
         source = new EventSource("/api/events");
         const onEvent = () => scheduleLoad();
-        for (const type of [
-          "queue",
-          "trade",
-          "snapshot",
-          "heartbeat",
-          "audit",
-          "reconciliation",
-          "score",
-        ]) {
+        const onHeartbeat = (event: Event) => {
+          const delta = parseHeartbeatDelta(event);
+          const account = delta
+            ? snapshotRef.current.mt5Accounts.find((item) => item.id === delta.accountId)
+            : undefined;
+          if (!delta || !account || account.heartbeatStatus !== delta.heartbeatStatus) {
+            scheduleLoad();
+            return;
+          }
+          setSnapshot((current) => applyHeartbeatDelta(current, delta) ?? current);
+        };
+        for (const type of ["queue", "trade", "snapshot", "audit", "reconciliation", "score"]) {
           source.addEventListener(type, onEvent);
         }
+        source.addEventListener("heartbeat", onHeartbeat);
         source.onopen = () => {
           pollMs = 60_000;
           stopPolling();
