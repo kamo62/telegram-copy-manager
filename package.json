@@ -1,6 +1,6 @@
 {
   "name": "telegram-tc",
-  "version": "1.37.0",
+  "version": "1.37.1",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
@@ -39,8 +39,7 @@
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-router-dom": "^7.15.1",
-    "telegram": "^2.26.22",
-    "zod": "^4.2.1"
+    "telegram": "^2.26.22"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.9",

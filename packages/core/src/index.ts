@@ -353,11 +353,11 @@ const COMMAND_ALIASES = new Set([
   "OUTLOOK",
 ]);
 
-export function normalizeSymbolText(symbol: string): string {
+function normalizeSymbolText(symbol: string): string {
   return symbol.toUpperCase().replace(/\s+/g, "").replace("-", "").trim();
 }
 
-export function canonicalKey(value: string): string {
+function canonicalKey(value: string): string {
   return value.toUpperCase().trim();
 }
 
@@ -969,16 +969,6 @@ function canonicalFromBrokerVariant(rawSymbol: string): string | undefined {
 
 function isRecognizedCanonical(symbol: string): boolean {
   return DEFAULT_CANONICAL_SYMBOLS.has(symbol) || /^[A-Z]{6}$/.test(symbol);
-}
-
-/**
- * True when a broker-reported symbol maps to a canonical instrument the parser
- * already understands (a known canonical or a known broker variant). Used to
- * flag genuinely unconfigured EA symbols for operator attention.
- */
-export function isKnownBrokerSymbol(symbol: string): boolean {
-  if (isRecognizedCanonical(canonicalKey(symbol))) return true;
-  return Boolean(canonicalFromBrokerVariant(symbol));
 }
 
 function brokerVariantCandidates(canonicalSymbol: string): string[] {

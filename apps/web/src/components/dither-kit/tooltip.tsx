@@ -1,6 +1,5 @@
 "use client";
 
-import { AnimatePresence, motion } from "motion/react";
 import { useState } from "react";
 import { useCommonChart } from "./common-context";
 import { cn } from "./lib";
@@ -41,64 +40,44 @@ export function Tooltip({
   const heading = chart.heading(index, labelKey);
   const items = chart.itemsAt(index);
 
-  return (
-    <AnimatePresence>
-      {show && items.length > 0 && (
-        <motion.div
-          key="dither-tooltip"
-          initial={{
-            opacity: 0,
-            x: "-50%",
-            y: "-115%",
-            top: chart.tooltipTop,
-            left: chart.tooltipLeft,
-          }}
-          animate={{
-            opacity: 1,
-            x: "-50%",
-            y: "-115%",
-            top: chart.tooltipTop,
-            left: chart.tooltipLeft,
-          }}
-          exit={{ opacity: 0 }}
-          transition={{
-            type: "spring",
-            stiffness: 520,
-            damping: 38,
-            mass: 0.6,
-          }}
-          className={cn(
-            "pointer-events-none absolute z-10 rounded-md border px-2 py-1 shadow-sm",
-            VARIANT[variant],
-          )}
-        >
-          {heading && (
-            <div className="mb-0.5 font-mono text-[10px] text-muted-foreground">{heading}</div>
-          )}
-          <div className="flex flex-col gap-0.5">
-            {items.map((item) => (
-              <div
-                key={item.name}
-                className="flex items-center gap-1.5 font-mono text-[11px] text-popover-foreground tabular-nums"
-                style={{ opacity: item.dimmed ? 0.4 : 1 }}
-              >
-                <span
-                  className="size-2 rounded-[1px]"
-                  style={{ backgroundColor: rgb(item.seed.fill) }}
-                />
-                <span className="text-muted-foreground">{item.label}</span>
-                <span className="ml-auto pl-2 text-foreground">
-                  {valueFormatter
-                    ? valueFormatter(item.value, item.name)
-                    : item.value.toLocaleString()}
-                </span>
-              </div>
-            ))}
-          </div>
-        </motion.div>
+  return items.length > 0 ? (
+    <div
+      aria-hidden={!show}
+      className={cn(
+        "pointer-events-none absolute z-10 rounded-md border px-2 py-1 shadow-sm",
+        VARIANT[variant],
       )}
-    </AnimatePresence>
-  );
+      style={{
+        left: chart.tooltipLeft,
+        opacity: show ? 1 : 0,
+        top: chart.tooltipTop,
+        transform: "translate(-50%, -115%)",
+        transition: "opacity 120ms ease, top 100ms ease-out, left 100ms ease-out",
+      }}
+    >
+      {heading && (
+        <div className="mb-0.5 font-mono text-[10px] text-muted-foreground">{heading}</div>
+      )}
+      <div className="flex flex-col gap-0.5">
+        {items.map((item) => (
+          <div
+            key={item.name}
+            className="flex items-center gap-1.5 font-mono text-[11px] text-popover-foreground tabular-nums"
+            style={{ opacity: item.dimmed ? 0.4 : 1 }}
+          >
+            <span
+              className="size-2 rounded-[1px]"
+              style={{ backgroundColor: rgb(item.seed.fill) }}
+            />
+            <span className="text-muted-foreground">{item.label}</span>
+            <span className="ml-auto pl-2 text-foreground">
+              {valueFormatter ? valueFormatter(item.value, item.name) : item.value.toLocaleString()}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  ) : null;
 }
 
 Tooltip.chartLayer = "dom" as const;

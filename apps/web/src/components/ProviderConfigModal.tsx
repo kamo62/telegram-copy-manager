@@ -238,29 +238,6 @@ export function validateProviderConfigDraft(draft: ProviderConfigDraft): {
   return { valid: errors.length === 0, errors };
 }
 
-/** Best-effort migration of legacy freeform strings into the structured shape. */
-export function parseLegacyStrategy(value: string): TpStrategy {
-  const trimmed = value.trim().toLowerCase();
-  if (!trimmed || trimmed.includes("unchanged") || trimmed.includes("no change"))
-    return { kind: "no-change" };
-  const tpMatch = trimmed.match(/tp(\d+).*?([+-]?\s*\d+)\s*pips?/);
-  if (tpMatch) {
-    return {
-      kind: "set-sl-to-tp",
-      tpLeg: Number(tpMatch[1]) || 1,
-      offsetPips: Math.abs(Number(tpMatch[2]?.replace(/\s+/g, "") ?? 0)) || 0,
-    };
-  }
-  if (trimmed.includes("entry")) {
-    const pipsMatch = trimmed.match(/([+-]?\s*\d+)\s*pips?/);
-    return {
-      kind: "set-sl-to-entry",
-      offsetPips: pipsMatch ? Math.abs(Number(pipsMatch[1]?.replace(/\s+/g, "") ?? 0)) || 0 : 0,
-    };
-  }
-  return { kind: "no-change" };
-}
-
 export interface ProviderConfigTestResult {
   ok: boolean;
   summary: string;

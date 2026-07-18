@@ -1,7 +1,6 @@
 import { Server } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import packageJson from "../../../package.json";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AccountsOverview } from "./components/AccountsOverview";
 import { AlertsBanner } from "./components/AlertsBanner";
@@ -46,6 +45,7 @@ import {
   type HeldRequeueMode,
   type TradeResolutionAction,
 } from "./lib/api";
+import { downsample } from "./lib/downsample";
 import type { ExposurePosition } from "./lib/exposure";
 import { EquityGuardianPage } from "./pages/EquityGuardianPage";
 import { HistoryPage } from "./pages/HistoryPage";
@@ -887,21 +887,23 @@ export function App({
     // approximation — exact per-window aggregation would need a separate
     // backend roll-up and isn't worth the round-trip for a 28px chart.
     const equityPoints = usePerformanceSeries ? (perf?.equityCurve ?? []) : [];
-    const equitySeries = equityPoints.map((point) => point.equity);
+    const fullEquitySeries = equityPoints.map((point) => point.equity);
+    const equitySeries = downsample(fullEquitySeries, 96);
     const initialBalance = perf?.initialBalance ?? null;
-    const profitSeries =
-      initialBalance !== null && equitySeries.length > 0
-        ? equitySeries.map((value) => value - initialBalance)
+    const fullProfitSeries =
+      initialBalance !== null && fullEquitySeries.length > 0
+        ? fullEquitySeries.map((value) => value - initialBalance)
         : [];
+    const profitSeries = downsample(fullProfitSeries, 96);
     const tail = (arr: number[], count: number) =>
       arr.length > count ? arr.slice(arr.length - count) : arr;
     const series: AccountHeaderData["series"] = {
       balance: equitySeries,
       equity: equitySeries,
       totalProfit: profitSeries,
-      today: tail(profitSeries, 12),
-      thisWeek: tail(profitSeries, 24),
-      thisMonth: tail(profitSeries, 48),
+      today: tail(fullProfitSeries, 12),
+      thisWeek: tail(fullProfitSeries, 24),
+      thisMonth: tail(fullProfitSeries, 48),
     };
 
     return {
@@ -1865,7 +1867,9 @@ export function App({
       <LiveRegion />
       <KeyboardShortcutsOverlay onClose={() => setShortcutsOpen(false)} open={shortcutsOpen} />
       <StatusBar
-        appVersion={packageJson.version}
+        appVersion={
+          (globalThis as typeof globalThis & { __APP_VERSION__?: string }).__APP_VERSION__ ?? "dev"
+        }
         database={snapshot.health.database}
         lastPollError={lastPollError}
         lastSyncAt={lastSyncAt}

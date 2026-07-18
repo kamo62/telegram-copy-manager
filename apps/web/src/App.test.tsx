@@ -11,6 +11,8 @@ const render = (ui: Parameters<typeof rtlRender>[0], options?: Parameters<typeof
   rtlRender(ui, { wrapper: MemoryRouter, ...options });
 
 beforeEach(() => {
+  (globalThis as typeof globalThis & { __APP_VERSION__?: string }).__APP_VERSION__ =
+    packageJson.version;
   globalThis.fetch = (() => new Promise<Response>(() => {})) as unknown as typeof fetch;
 });
 

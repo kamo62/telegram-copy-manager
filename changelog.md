@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.37.1 - 2026-07-17 (Patch)
+
+Release impact: Patch because this removes idle UI work and confirmed dead code without changing public contracts.
+
+- Renamed the SSE transport keepalive so idle connections no longer trigger a full dashboard rebuild every 10 seconds, and capped header sparkline inputs with the existing 96-point sampler.
+- Replaced the chart tooltip's animation dependency with native CSS transitions and stopped shipping the root package manifest to the browser.
+- Removed import-graph-confirmed dead web components and helpers, narrowed internal-only core exports, and dropped the unused `zod` dependency.
+
 ## 1.37.0 - 2026-07-17 (Minor)
 
 Release impact: Minor. Consolidates the parser template to two modes and folds the shorthand-level parser into the default path behind an opt-in capability; existing providers map to Automatic and behave as before.
