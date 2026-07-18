@@ -28,7 +28,7 @@ import type { ProviderRowData } from "./components/ProvidersTable";
 import type { SetupFormState, SetupStep } from "./components/SetupFlow";
 import { navItems, Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
-import { StatusBar } from "./components/StatusBar";
+import { LiveStatusBar } from "./components/StatusBar";
 import { SummaryPanel } from "./components/SummaryPanel";
 import { type TabId, WorkspaceTabs } from "./components/WorkspaceTabs";
 import { useToast } from "./contexts/ToastContext";
@@ -47,6 +47,7 @@ import {
 } from "./lib/api";
 import { downsample } from "./lib/downsample";
 import type { ExposurePosition } from "./lib/exposure";
+import { setSyncStatus } from "./lib/syncStatus";
 
 const EquityGuardianPage = lazy(() =>
   import("./pages/EquityGuardianPage").then((module) => ({ default: module.EquityGuardianPage })),
@@ -535,11 +536,10 @@ export function App({
   const [heldItems, setHeldItems] = useState<HeldQueueItem[]>([]);
   const [availableDialogs, setAvailableDialogs] = useState<TelegramDialogSummary[]>(initialDialogs);
   const [initialLoading, setInitialLoading] = useState(!initialSnapshot);
-  const [refreshing, setRefreshing] = useState(false);
   const [lastPollError, setLastPollError] = useState(false);
-  const [lastSyncAt, setLastSyncAt] = useState<string | null>(
-    initialSnapshot ? new Date().toISOString() : null,
-  );
+  useEffect(() => {
+    if (initialSnapshot) setSyncStatus({ lastSyncAt: new Date().toISOString() });
+  }, [initialSnapshot]);
   const location = useLocation();
   const navigate = useNavigate();
   const route = useMemo(() => parseRoute(location.pathname), [location.pathname]);
@@ -613,7 +613,8 @@ export function App({
   const [selectedSlotId, setSelectedSlotId] = useState<string | null>(null);
   const refreshHeldItems = useCallback(async () => {
     const data = await apiGet<HeldQueueItemsResponse>("/api/queue-items/held");
-    setHeldItems(Array.isArray(data.items) ? data.items : []);
+    const items = Array.isArray(data.items) ? data.items : [];
+    setHeldItems((current) => (dashboardSnapshotsEqual(current, items) ? current : items));
   }, []);
 
   // Navigation setters — keep the original names so existing call sites are unchanged, but
@@ -653,22 +654,20 @@ export function App({
     if (initialSnapshot) return;
     let active = true;
     async function load() {
-      setRefreshing(true);
+      setSyncStatus({ refreshing: true });
       try {
         const data = await loadDashboard();
         if (active) {
           applyDashboardSnapshot(data);
           setLastPollError(false);
-          setLastSyncAt(new Date().toISOString());
+          setSyncStatus({ lastSyncAt: new Date().toISOString() });
           void refreshHeldItems().catch(() => undefined);
         }
       } catch {
         if (active) setLastPollError(true);
       } finally {
-        if (active) {
-          setInitialLoading(false);
-          setRefreshing(false);
-        }
+        setSyncStatus({ refreshing: false });
+        if (active) setInitialLoading(false);
       }
     }
     void load();
@@ -1163,16 +1162,16 @@ export function App({
   }, [focusedAccount, snapshot.accountPerformance, snapshot.accountPerformanceByAccount]);
 
   async function refreshDashboard() {
-    setRefreshing(true);
+    setSyncStatus({ refreshing: true });
     try {
       const data = await loadDashboard();
       applyDashboardSnapshot(data);
       setLastPollError(false);
-      setLastSyncAt(new Date().toISOString());
+      setSyncStatus({ lastSyncAt: new Date().toISOString() });
     } catch {
       setLastPollError(true);
     } finally {
-      setRefreshing(false);
+      setSyncStatus({ refreshing: false });
     }
   }
 
@@ -1926,17 +1925,15 @@ export function App({
       </a>
       <LiveRegion />
       <KeyboardShortcutsOverlay onClose={() => setShortcutsOpen(false)} open={shortcutsOpen} />
-      <StatusBar
+      <LiveStatusBar
         appVersion={
           (globalThis as typeof globalThis & { __APP_VERSION__?: string }).__APP_VERSION__ ?? "dev"
         }
         database={snapshot.health.database}
         lastPollError={lastPollError}
-        lastSyncAt={lastSyncAt}
         onCommandPalette={() => setCommandPaletteOpen(true)}
         onRefresh={refreshDashboard}
         queuePending={queuePending}
-        refreshing={refreshing}
         telegramAdapter={snapshot.health.telegramAdapter}
       />
 

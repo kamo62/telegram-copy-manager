@@ -8,6 +8,7 @@ import {
   createLogicalTradeFromSignal,
   createMessageFingerprint,
   type Direction,
+  downsampleSeries,
   type ExecutionMode,
   type ExecutionQueueItem,
   type LogicalTrade,
@@ -91,7 +92,15 @@ const defaultGlobalAliases = {
 const defaultProviderAliases: Record<string, Record<string, string>> = {};
 const CLOSE_VOLUME_EPSILON = 0.000001;
 const EQUITY_CURVE_RETENTION_DAYS = 90;
+// Wire cap for dashboard equity curves: charts render a few hundred columns at
+// most, while raw snapshot curves grow into the thousands and dominated the
+// /api/dashboard payload (~295 KB per curve at ~6k points).
+const EQUITY_CURVE_MAX_POINTS = 500;
 const MAX_EXECUTION_LOG_LIMIT = 500;
+
+function capEquityCurve<T extends { equity: number }>(points: T[]): T[] {
+  return downsampleSeries(points, EQUITY_CURVE_MAX_POINTS, (point) => point.equity);
+}
 
 type SymbolAliasScope = "global" | "provider";
 type AccountMappingInput = AccountSymbolMapping & {
@@ -6003,7 +6012,7 @@ class AppStore {
       today,
       thisWeek,
       thisMonth,
-      equityCurve: this.equityCurve(primary.id, initial, accountOrders),
+      equityCurve: capEquityCurve(this.equityCurve(primary.id, initial, accountOrders)),
       monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders, floatingPnl ?? 0),
     };
   }
@@ -6109,7 +6118,7 @@ class AppStore {
       today: sumPnl(accountOrders.filter((order) => withinCurrentDay(order.createdAt))),
       thisWeek: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 7))),
       thisMonth: sumPnl(accountOrders.filter((order) => withinCurrentMonth(order.createdAt))),
-      equityCurve: aggregateEquityCurve(initial, accountOrders, floatingPnl ?? 0),
+      equityCurve: capEquityCurve(aggregateEquityCurve(initial, accountOrders, floatingPnl ?? 0)),
       monthlyReturns: aggregateMonthlyReturns(initial, accountOrders, floatingPnl ?? 0),
     };
   }

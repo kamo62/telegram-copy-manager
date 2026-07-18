@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.38.1 - 2026-07-18 (Patch)
+
+Release impact: Patch because it trims payload and render churn without changing behavior or contracts.
+
+- Capped dashboard equity curves at 500 extreme-preserving points server-side; raw snapshot curves (~6k points) made every `/api/dashboard` response ~664 KB and each EA heartbeat re-transferred and re-parsed it all.
+- Moved the sync clock (`lastSyncAt`/`refreshing`) out of App state into an external store subscribed by the status bar, so the every-few-seconds heartbeat reload cycle no longer re-renders the whole tree when data is unchanged; held-queue items also keep their identity when unchanged.
+
 ## 1.38.0 - 2026-07-18 (Minor)
 
 Release impact: Minor because this adds persistent asset retention during deploys and backward-compatible route-level code splitting without changing API, SSE, database, or EA protocol contracts.

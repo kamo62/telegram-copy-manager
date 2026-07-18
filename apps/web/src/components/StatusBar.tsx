@@ -1,4 +1,26 @@
 import { RefreshCw, TerminalSquare } from "lucide-react";
+import { useSyncStatus } from "../lib/syncStatus";
+
+interface StatusBarProps {
+  appVersion: string;
+  database: string;
+  lastPollError: boolean;
+  lastSyncAt: string | null;
+  onCommandPalette: () => void;
+  onRefresh: () => void;
+  queuePending: number;
+  refreshing: boolean;
+  telegramAdapter: string;
+}
+
+/**
+ * StatusBar bound to the external sync store, so the frequent SSE reload
+ * cycle re-renders this subtree only instead of the whole App.
+ */
+export function LiveStatusBar(props: Omit<StatusBarProps, "lastSyncAt" | "refreshing">) {
+  const { lastSyncAt, refreshing } = useSyncStatus();
+  return <StatusBar {...props} lastSyncAt={lastSyncAt} refreshing={refreshing} />;
+}
 
 export function StatusBar({
   appVersion,
@@ -10,17 +32,7 @@ export function StatusBar({
   queuePending,
   refreshing,
   telegramAdapter,
-}: {
-  appVersion: string;
-  database: string;
-  lastPollError: boolean;
-  lastSyncAt: string | null;
-  onCommandPalette: () => void;
-  onRefresh: () => void;
-  queuePending: number;
-  refreshing: boolean;
-  telegramAdapter: string;
-}) {
+}: StatusBarProps) {
   const liveDotClass = lastPollError
     ? "live-dot error"
     : refreshing

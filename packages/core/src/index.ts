@@ -1911,3 +1911,50 @@ export function correlateMessages<T extends CorrelatableMessage>(
   flush();
   return out;
 }
+
+/**
+ * Cap a chart series to `maxPoints` while retaining the first/last points and
+ * each bucket's low and high of `selectValue(point)`, in chronological order.
+ * Point averaging would flatten peaks and drawdown depth; this keeps them.
+ */
+export function downsampleSeries<T>(
+  points: T[],
+  maxPoints: number,
+  selectValue: (point: T) => number,
+): T[] {
+  const target = Math.max(0, Math.floor(maxPoints));
+  if (points.length <= target) return points;
+  if (target === 0) return [];
+
+  const values = points.map(selectValue);
+  const lastIndex = values.length - 1;
+  let lowIndex = 0;
+  let highIndex = 0;
+  for (let index = 1; index < values.length; index += 1) {
+    if ((values[index] as number) < (values[lowIndex] as number)) lowIndex = index;
+    if ((values[index] as number) > (values[highIndex] as number)) highIndex = index;
+  }
+  if (target === 1) return [points[lowIndex] as T];
+
+  const selected = new Set([lowIndex, highIndex, 0, lastIndex]);
+  const bucketCount = Math.floor(Math.max(0, target - selected.size) / 2);
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const start = 1 + Math.floor((bucket * (values.length - 2)) / bucketCount);
+    const end = 1 + Math.floor(((bucket + 1) * (values.length - 2)) / bucketCount);
+    let bucketLow = start;
+    let bucketHigh = start;
+    for (let index = start + 1; index < end; index += 1) {
+      if ((values[index] as number) < (values[bucketLow] as number)) bucketLow = index;
+      if ((values[index] as number) > (values[bucketHigh] as number)) bucketHigh = index;
+    }
+    selected.add(bucketLow);
+    selected.add(bucketHigh);
+  }
+  for (let slot = 1; selected.size < target && slot < target; slot += 1) {
+    selected.add(Math.floor((slot * lastIndex) / target));
+  }
+  return [...selected]
+    .sort((a, b) => a - b)
+    .slice(0, target)
+    .map((index) => points[index] as T);
+}
