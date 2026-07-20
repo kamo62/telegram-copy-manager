@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 
 export interface GlobalAliasPayload {
@@ -57,18 +57,16 @@ export function SymbolMappingModal({
   const [tab, setTab] = useState<Tab>("global");
   const [onlyProvider, setOnlyProvider] = useState(false);
   const [source, setSource] = useState<Source>("canonical");
+  const [brokerSymbols] = useState(() => [...availableBrokerSymbols]);
+  const [advanced, setAdvanced] = useState<Record<AdvancedField, string>>({
+    prefix: "",
+    suffix: "",
+    includeSymbols: "",
+    excludeSymbols: "",
+  });
   const advancedDirty = useRef<Partial<Record<AdvancedField, true>>>({});
   const [saveError, setSaveError] = useState("");
   const hasFocusedAccount = Boolean(defaultAccountId);
-
-  useLayoutEffect(() => {
-    if (!open) return;
-    setTab("global");
-    setOnlyProvider(false);
-    setSource("canonical");
-    advancedDirty.current = {};
-    setSaveError("");
-  }, [open]);
 
   useFocusTrap(dialogRef, open, onClose);
 
@@ -77,6 +75,7 @@ export function SymbolMappingModal({
   function selectTab(nextTab: Tab) {
     if (nextTab === "account" && !hasFocusedAccount) return;
     setTab(nextTab);
+    setAdvanced({ prefix: "", suffix: "", includeSymbols: "", excludeSymbols: "" });
     advancedDirty.current = {};
     setSaveError("");
   }
@@ -122,17 +121,13 @@ export function SymbolMappingModal({
         accountId: defaultAccountId,
         canonicalSymbol: sourceSymbol,
         ...(brokerSymbol ? { brokerSymbol } : {}),
-        ...(advancedDirty.current.prefix
-          ? { prefix: String(data.get("accountPrefix") ?? "").trim() }
-          : {}),
-        ...(advancedDirty.current.suffix
-          ? { suffix: String(data.get("accountSuffix") ?? "").trim() }
-          : {}),
+        ...(advancedDirty.current.prefix ? { prefix: advanced.prefix.trim() } : {}),
+        ...(advancedDirty.current.suffix ? { suffix: advanced.suffix.trim() } : {}),
         ...(advancedDirty.current.includeSymbols
-          ? { includeSymbols: commaList(String(data.get("accountInclude") ?? "")) }
+          ? { includeSymbols: commaList(advanced.includeSymbols) }
           : {}),
         ...(advancedDirty.current.excludeSymbols
-          ? { excludeSymbols: commaList(String(data.get("accountExclude") ?? "")) }
+          ? { excludeSymbols: commaList(advanced.excludeSymbols) }
           : {}),
       });
     } catch (error) {
@@ -267,6 +262,7 @@ export function SymbolMappingModal({
                       aria-label="Map from provider symbol"
                       checked={source === "provider"}
                       name="mapSource"
+                      onClick={() => setSource("provider")}
                       onChange={() => setSource("provider")}
                       type="radio"
                     />
@@ -277,6 +273,7 @@ export function SymbolMappingModal({
                       aria-label="Map from canonical symbol"
                       checked={source === "canonical"}
                       name="mapSource"
+                      onClick={() => setSource("canonical")}
                       onChange={() => setSource("canonical")}
                       type="radio"
                     />
@@ -301,16 +298,15 @@ export function SymbolMappingModal({
                       <span className="config-label">Broker symbol (this account)</span>
                       <select
                         aria-label="Broker symbol for this account"
-                        disabled={availableBrokerSymbols.length === 0}
                         name="accountBroker"
                         required
                       >
                         <option disabled value="">
-                          {availableBrokerSymbols.length
+                          {brokerSymbols.length
                             ? "Select a broker symbol"
                             : "No broker symbols reported"}
                         </option>
-                        {availableBrokerSymbols.map((symbol) => (
+                        {brokerSymbols.map((symbol) => (
                           <option key={symbol} value={symbol}>
                             {symbol}
                           </option>
@@ -322,13 +318,12 @@ export function SymbolMappingModal({
                       <span className="config-label">Broker symbol (this account)</span>
                       <input
                         aria-label="Broker symbol for this account"
-                        list="available-broker-symbols"
                         name="accountBroker"
                         placeholder="XAUUSD.raw"
                         type="text"
                       />
                       <datalist id="available-broker-symbols">
-                        {availableBrokerSymbols.map((symbol) => (
+                        {brokerSymbols.map((symbol) => (
                           <option key={symbol} value={symbol} />
                         ))}
                       </datalist>
@@ -350,9 +345,18 @@ export function SymbolMappingModal({
                       aria-label="Mapping prefix"
                       name="accountPrefix"
                       onBlur={() => markAdvancedDirty("prefix")}
-                      onChange={() => markAdvancedDirty("prefix")}
+                      onChange={(event) => {
+                        markAdvancedDirty("prefix");
+                        setAdvanced((current) => ({ ...current, prefix: event.target.value }));
+                      }}
+                      onInput={(event) => {
+                        const value = event.currentTarget.value;
+                        markAdvancedDirty("prefix");
+                        setAdvanced((current) => ({ ...current, prefix: value }));
+                      }}
                       placeholder="m."
                       type="text"
+                      value={advanced.prefix}
                     />
                   </label>
                   <label className="config-field config-field-narrow">
@@ -361,9 +365,18 @@ export function SymbolMappingModal({
                       aria-label="Mapping suffix"
                       name="accountSuffix"
                       onBlur={() => markAdvancedDirty("suffix")}
-                      onChange={() => markAdvancedDirty("suffix")}
+                      onChange={(event) => {
+                        markAdvancedDirty("suffix");
+                        setAdvanced((current) => ({ ...current, suffix: event.target.value }));
+                      }}
+                      onInput={(event) => {
+                        const value = event.currentTarget.value;
+                        markAdvancedDirty("suffix");
+                        setAdvanced((current) => ({ ...current, suffix: value }));
+                      }}
                       placeholder=".raw or r"
                       type="text"
+                      value={advanced.suffix}
                     />
                   </label>
                   <label className="config-field config-field-grow">
@@ -372,9 +385,21 @@ export function SymbolMappingModal({
                       aria-label="Mapping include symbols"
                       name="accountInclude"
                       onBlur={() => markAdvancedDirty("includeSymbols")}
-                      onChange={() => markAdvancedDirty("includeSymbols")}
+                      onChange={(event) => {
+                        markAdvancedDirty("includeSymbols");
+                        setAdvanced((current) => ({
+                          ...current,
+                          includeSymbols: event.target.value,
+                        }));
+                      }}
+                      onInput={(event) => {
+                        const value = event.currentTarget.value;
+                        markAdvancedDirty("includeSymbols");
+                        setAdvanced((current) => ({ ...current, includeSymbols: value }));
+                      }}
                       placeholder="XAUUSD.r, EURUSD.raw"
                       type="text"
+                      value={advanced.includeSymbols}
                     />
                   </label>
                   <label className="config-field config-field-grow">
@@ -383,9 +408,21 @@ export function SymbolMappingModal({
                       aria-label="Mapping exclude symbols"
                       name="accountExclude"
                       onBlur={() => markAdvancedDirty("excludeSymbols")}
-                      onChange={() => markAdvancedDirty("excludeSymbols")}
+                      onChange={(event) => {
+                        markAdvancedDirty("excludeSymbols");
+                        setAdvanced((current) => ({
+                          ...current,
+                          excludeSymbols: event.target.value,
+                        }));
+                      }}
+                      onInput={(event) => {
+                        const value = event.currentTarget.value;
+                        markAdvancedDirty("excludeSymbols");
+                        setAdvanced((current) => ({ ...current, excludeSymbols: value }));
+                      }}
                       placeholder="US30.raw"
                       type="text"
+                      value={advanced.excludeSymbols}
                     />
                   </label>
                 </div>

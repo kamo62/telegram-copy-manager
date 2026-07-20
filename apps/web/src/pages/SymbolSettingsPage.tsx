@@ -70,6 +70,7 @@ export function SymbolSettingsPage({
         availableBrokerSymbols={availableBrokerSymbols}
         defaultAccountId={defaultAccountId}
         defaultProviderId={defaultProviderId}
+        key={mappingModalOpen ? "open" : "closed"}
         onClose={() => setMappingModalOpen(false)}
         onSaveAccountMapping={async (payload) => {
           await onSaveAccountMapping(payload);

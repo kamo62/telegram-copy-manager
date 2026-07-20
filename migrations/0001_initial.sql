@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS mt5_accounts (
   margin_mode TEXT NOT NULL,
   heartbeat_status TEXT NOT NULL,
   available_symbols_json TEXT NOT NULL,
+  ea_version TEXT,
+  ea_capabilities_json TEXT NOT NULL DEFAULT '[]',
   last_heartbeat_at TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
@@ -237,6 +239,9 @@ CREATE TABLE IF NOT EXISTS execution_reports (
   requested_price REAL,
   filled_price REAL,
   volume REAL,
+  requested_volume REAL,
+  filled_volume REAL,
+  remaining_volume REAL,
   error_text TEXT,
   created_at TEXT NOT NULL
 );

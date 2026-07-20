@@ -91,7 +91,7 @@ export interface ProviderPerformanceRow {
 
 // Raw per-account provider config override (subset of provider config fields).
 export type PerAccountProviderConfig = Partial<
-  Pick<ProviderRowData, "riskMode" | "riskAmount" | "takeProfitLevels" | "runner">
+  Pick<ProviderRowData, "riskMode" | "riskAmount" | "takeProfitLevels" | "runner" | "workFromTpLeg">
 >;
 
 export interface AccountPerformanceSnapshot {
@@ -168,6 +168,7 @@ export interface DashboardSnapshot {
     threshold: number;
     currentDrawdown: number;
     paused: boolean;
+    enabled: boolean;
     breaches: unknown[];
   }>;
   telegramSessions: Array<{ id: string; phone: string; status: string; profileId?: string }>;
@@ -192,6 +193,8 @@ export interface DashboardSnapshot {
     server: string;
     heartbeatStatus: string;
     marginMode: string;
+    eaVersion?: string;
+    eaCapabilities?: string[];
     availableSymbols?: string[];
     currency?: string;
     balance?: number;
@@ -282,6 +285,7 @@ export interface DashboardSnapshot {
       targetSource?: string;
       defaultDistance?: { value: number; unit: string };
       allocationPercent: number;
+      volume?: number;
       status: string;
     }>;
   }>;
@@ -1549,6 +1553,7 @@ export function App({
             riskMode: payload.riskMode,
             riskAmount: payload.riskAmount,
             takeProfitLevels: payload.takeProfitLevels,
+            workFromTpLeg: payload.workFromTpLeg,
             runner: payload.runner,
           },
         },
@@ -1566,6 +1571,7 @@ export function App({
       riskMode: payload.riskMode,
       riskAmount: payload.riskAmount,
       takeProfitLevels: payload.takeProfitLevels,
+      workFromTpLeg: payload.workFromTpLeg,
       runner: payload.runner,
     });
     setConfigProvider(null);
@@ -1595,6 +1601,7 @@ export function App({
         riskMode: payload.riskMode,
         riskAmount: payload.riskAmount,
         takeProfitLevels: payload.takeProfitLevels,
+        workFromTpLeg: payload.workFromTpLeg,
         runner: payload.runner,
       },
     });
@@ -1895,6 +1902,7 @@ export function App({
     const data = new FormData(formElement);
     await apiPatch(`/api/equity-guardian/${accountId}`, {
       threshold: Number(data.get("threshold")),
+      enabled: data.get("enabled") === "on",
     });
     await refreshDashboard();
   }

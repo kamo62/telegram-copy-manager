@@ -10,6 +10,7 @@ interface AccountsOverviewProps {
     server: string;
     marginMode: string;
     heartbeatStatus: string;
+    eaVersion?: string;
     openPositionCount?: number;
     pendingOrderCount?: number;
     equity?: number;
@@ -123,7 +124,8 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
                 <div className="accounts-overview-row-body">
                   <strong>{account.accountNumber || account.id}</strong>
                   <span className="accounts-overview-row-meta">
-                    {account.server} · {account.marginMode}
+                    {account.server} · {account.marginMode} · EA{" "}
+                    {account.eaVersion ?? "legacy/unknown"}
                   </span>
                 </div>
                 <div className="accounts-overview-row-stats">

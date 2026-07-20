@@ -24,6 +24,7 @@ import {
   shouldRequireManualReview,
   type TakeProfitStrategy,
   type TradeSource,
+  withTakeProfitVolumes,
 } from "@telegram-tc/core";
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
@@ -97,6 +98,10 @@ const EQUITY_CURVE_RETENTION_DAYS = 90;
 // /api/dashboard payload (~295 KB per curve at ~6k points).
 const EQUITY_CURVE_MAX_POINTS = 500;
 const MAX_EXECUTION_LOG_LIMIT = 500;
+// Snapshots arrive with each heartbeat, seconds apart. Anything older than this is a
+// silent EA, not a market price, and must not drive an execution decision.
+const QUOTE_FRESHNESS_MAX_AGE_MS = 5 * 60_000;
+const LANE2_CLOSE_CAPABILITY = "lane2-close-contract";
 
 function capEquityCurve<T extends { equity: number }>(points: T[]): T[] {
   return downsampleSeries(points, EQUITY_CURVE_MAX_POINTS, (point) => point.equity);
@@ -118,6 +123,7 @@ type AlertSetting =
   | "alertOnEaOffline"
   | "alertOnExecFailed"
   | "alertOnHeld"
+  | "alertOnDroppedLifecycle"
   | "alertOnTelegramStall";
 
 interface AppSettings {
@@ -143,6 +149,7 @@ interface AppSettings {
   alertOnEaOffline: boolean;
   alertOnExecFailed: boolean;
   alertOnHeld: boolean;
+  alertOnDroppedLifecycle: boolean;
   alertOnTelegramStall: boolean;
 }
 
@@ -158,6 +165,7 @@ interface ProviderExecutionConfig {
   riskMode: "fixed" | "percent";
   riskAmount: number;
   takeProfitLevels: ProviderTakeProfitLevel[];
+  workFromTpLeg?: number;
   runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
 }
 
@@ -200,6 +208,7 @@ const defaultAppSettings: AppSettings = {
   alertOnEaOffline: false,
   alertOnExecFailed: false,
   alertOnHeld: false,
+  alertOnDroppedLifecycle: true,
   alertOnTelegramStall: false,
 };
 const pendingOpenMissingGraceSeconds = 10;
@@ -211,6 +220,32 @@ const MANUAL_PUSH_DEDUP_SECONDS = 10;
 const OPEN_SIGNAL_DEDUP_SECONDS = 24 * 60 * 60;
 
 const appOrderTypes = new Set<AppOrderType>(["MARKET", "LIMIT", "STOP"]);
+const BROKER_AFFIX_CANONICALS = [
+  "AUDCAD",
+  "AUDJPY",
+  "AUDUSD",
+  "BTCUSD",
+  "DJI30",
+  "EURCAD",
+  "EURGBP",
+  "EURJPY",
+  "EURUSD",
+  "GBPJPY",
+  "GBPUSD",
+  "NAS100",
+  "NZDUSD",
+  "US30",
+  "US100",
+  "SPX500",
+  "GER40",
+  "UK100",
+  "JP225",
+  "USDCHF",
+  "USDJPY",
+  "USOIL",
+  "XAGUSD",
+  "XAUUSD",
+];
 
 function defaultAccountMapping(accountId = demoAccountId): AccountSymbolMapping {
   return {
@@ -437,6 +472,7 @@ export function createApi(options: ApiOptions = {}) {
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
       takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
+      workFromTpLeg?: number;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     }>();
     return c.json(store.updateProvider(c.req.param("id"), body));
@@ -724,6 +760,7 @@ export function createApi(options: ApiOptions = {}) {
         riskMode?: "fixed" | "percent";
         riskAmount?: number;
         takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
+        workFromTpLeg?: number;
         runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
       };
     }>();
@@ -745,10 +782,11 @@ export function createApi(options: ApiOptions = {}) {
 
   app.get("/api/equity-guardian", (c) => c.json({ guardians: store.equityGuardians() }));
   app.patch("/api/equity-guardian/:accountId", async (c) => {
-    const body = await c.req.json<{ threshold?: number; paused?: boolean }>();
+    const body = await c.req.json<{ threshold?: number; enabled?: boolean; paused?: boolean }>();
     const accountId = c.req.param("accountId");
     const guardian = store.updateEquityGuardian(accountId, {
       threshold: body.threshold,
+      enabled: body.enabled,
       paused: body.paused,
     });
     if (body.paused !== false) return c.json({ guardian });
@@ -816,6 +854,8 @@ export function createApi(options: ApiOptions = {}) {
       profit?: number;
       marginMode: "HEDGING" | "NETTING";
       availableSymbols?: string[];
+      eaVersion?: string;
+      eaCapabilities?: string[];
       linkCode?: string;
     }>(c.req.raw);
     if ("error" in parsed) return c.json({ error: parsed.error }, 400);
@@ -832,6 +872,8 @@ export function createApi(options: ApiOptions = {}) {
       equity: number;
       profit?: number;
       availableSymbols?: string[];
+      eaVersion?: string;
+      eaCapabilities?: string[];
       linkCode?: string;
     }>(c.req.raw);
     if ("error" in parsed) return c.json({ error: parsed.error }, 400);
@@ -1144,7 +1186,7 @@ function manualTicketSummary(
 interface ExecutionReportInput {
   accountId: string;
   queueItemId: string;
-  status: "EXECUTED" | "FAILED";
+  status: "EXECUTED" | "PARTIAL" | "FAILED" | "UNKNOWN";
   retcode: number;
   retcodeExternal: number;
   brokerComment: string;
@@ -1153,6 +1195,10 @@ interface ExecutionReportInput {
   dealTicket?: string;
   requestedPrice?: number;
   filledPrice?: number;
+  requestedVolume?: number;
+  filledVolume?: number;
+  remainingVolume?: number;
+  /** Legacy EA compatibility; replaced by requestedVolume/filledVolume. */
   volume?: number;
   errorText?: string;
 }
@@ -1247,7 +1293,7 @@ export function brokerOrderSourceForDealReason(reason: number | undefined): stri
 type RawMessageClassification = "entry" | "management" | "noise" | "unknown";
 type CorrelationMode = "off" | "shadow";
 type LifecycleResolution = {
-  method: "reply-link" | "none";
+  method: "provider-order-id" | "reply-link" | "none";
   status: "MATCHED" | "AMBIGUOUS" | "UNMATCHED";
   tradeId?: string;
   reason?: string;
@@ -1353,6 +1399,7 @@ class AppStore {
   private dashboardPerformanceCache:
     | {
         revision: number;
+        heartbeatStatusKey: string;
         accountPerformance: ReturnType<AppStore["accountPerformance"]>;
         accountPerformanceByAccount: Record<string, ReturnType<AppStore["accountPerformance"]>>;
         providerPerformance: ReturnType<AppStore["providerPerformance"]>;
@@ -1467,6 +1514,7 @@ class AppStore {
             config && "takeProfitLevels" in config
               ? normalizeProviderTpLevels(config.takeProfitLevels)
               : undefined,
+          workFromTpLeg: normalizeWorkFromTpLeg(config?.workFromTpLeg),
           runner: config?.runner,
           lastMessageAt: String(row.last_message_at),
         };
@@ -1597,6 +1645,7 @@ class AppStore {
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
       takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
+      workFromTpLeg?: number;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     },
   ) {
@@ -1620,6 +1669,7 @@ class AppStore {
       input.riskMode !== undefined ||
       input.riskAmount !== undefined ||
       "takeProfitLevels" in input ||
+      "workFromTpLeg" in input ||
       input.runner !== undefined;
     if (hasProviderConfigPatch) {
       const existingConfig = this.providerConfig(id);
@@ -1630,6 +1680,10 @@ class AppStore {
           "takeProfitLevels" in input
             ? normalizeProviderTpLevels(input.takeProfitLevels)
             : existingConfig.takeProfitLevels,
+        workFromTpLeg:
+          "workFromTpLeg" in input
+            ? normalizeWorkFromTpLeg(input.workFromTpLeg)
+            : existingConfig.workFromTpLeg,
         runner: input.runner === undefined ? existingConfig.runner : input.runner,
         lockedSymbol:
           "lockedSymbol" in input
@@ -1669,6 +1723,7 @@ class AppStore {
       riskMode: config.riskMode === "percent" ? "percent" : "fixed",
       riskAmount: positiveNumber(config.riskAmount, fallbackAmount),
       takeProfitLevels: normalizeProviderTpLevels(config.takeProfitLevels),
+      workFromTpLeg: normalizeWorkFromTpLeg(config.workFromTpLeg),
       runner: config.runner,
     };
     // Per-account override takes precedence; NULL config_json (or no link row) inherits
@@ -1690,6 +1745,7 @@ class AppStore {
           riskMode: override.riskMode === "percent" ? "percent" : "fixed",
           riskAmount: positiveNumber(override.riskAmount, fallbackAmount),
           takeProfitLevels: normalizeProviderTpLevels(override.takeProfitLevels),
+          workFromTpLeg: normalizeWorkFromTpLeg(override.workFromTpLeg),
           runner: override.runner,
         };
       }
@@ -1739,6 +1795,10 @@ class AppStore {
             "takeProfitLevels" in input.config
               ? normalizeProviderTpLevels(input.config.takeProfitLevels)
               : currentConfig.takeProfitLevels,
+          workFromTpLeg:
+            "workFromTpLeg" in input.config
+              ? normalizeWorkFromTpLeg(input.config.workFromTpLeg)
+              : currentConfig.workFromTpLeg,
           runner: input.config.runner === undefined ? currentConfig.runner : input.config.runner,
         }
       : currentConfig;
@@ -1813,6 +1873,7 @@ class AppStore {
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
       takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
+      workFromTpLeg?: number;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
     },
   ) {
@@ -1826,6 +1887,10 @@ class AppStore {
           "takeProfitLevels" in input
             ? normalizeProviderTpLevels(input.takeProfitLevels)
             : existing.takeProfitLevels,
+        workFromTpLeg:
+          "workFromTpLeg" in input
+            ? normalizeWorkFromTpLeg(input.workFromTpLeg)
+            : existing.workFromTpLeg,
         runner: input.runner === undefined ? existing.runner : input.runner,
       },
       accountId,
@@ -2140,7 +2205,27 @@ class AppStore {
     lifecycleRawMessageId: string,
     command: ParsedSignal,
   ): LifecycleResolution {
-    void command;
+    const providerOrderCandidates = command.providerOrderId
+      ? this.logicalTrades().filter(
+          (trade) =>
+            trade.accountId === accountId &&
+            trade.providerId === providerId &&
+            trade.providerOrderId === command.providerOrderId &&
+            (command.canonicalSymbol && trade.symbol.canonicalSymbol
+              ? trade.symbol.canonicalSymbol === command.canonicalSymbol
+              : !command.brokerSymbol ||
+                !trade.symbol.brokerSymbol ||
+                trade.symbol.brokerSymbol === command.brokerSymbol) &&
+            (trade.status === "OPEN" || trade.status === "PENDING" || trade.status === "PLANNED"),
+        )
+      : [];
+    if (providerOrderCandidates.length === 1) {
+      return {
+        method: "provider-order-id",
+        status: "MATCHED",
+        tradeId: providerOrderCandidates[0]!.id,
+      };
+    }
     const lifecycle = this.db
       .query("SELECT reply_to_message_id FROM raw_messages WHERE id = ? AND provider_id = ?")
       .get(lifecycleRawMessageId, providerId) as Row | null;
@@ -2168,7 +2253,14 @@ class AppStore {
         return { method: "reply-link", status: "AMBIGUOUS", reason: "multiple-origins" };
       }
       if (tradeIds.length === 1) {
-        return { method: "reply-link", status: "MATCHED", tradeId: tradeIds[0] };
+        const trade = this.logicalTrade(tradeIds[0]!);
+        if (
+          trade &&
+          (trade.status === "OPEN" || trade.status === "PENDING" || trade.status === "PLANNED")
+        ) {
+          return { method: "reply-link", status: "MATCHED", tradeId: tradeIds[0] };
+        }
+        return { method: "reply-link", status: "UNMATCHED", reason: "inactive-origin" };
       }
       const alias = this.db
         .query(
@@ -2418,18 +2510,43 @@ class AppStore {
             });
           }
         }
-        if (!isAutoQueueableIngestionCommand(item.result.commandType) || item.reviewRequired) {
+        const mappingReviewOnly =
+          item.result.commandType === "OPEN_TRADE" && item.result.mappingStatus !== "mapped";
+        if (
+          !isAutoQueueableIngestionCommand(item.result.commandType) ||
+          (item.reviewRequired && !mappingReviewOnly)
+        ) {
           continue;
         }
         const approval = this.approveSignal(item.parsedSignalId);
         if ("body" in approval) {
-          result.queued += approval.body.queueItems?.length ?? (approval.body.queueItemId ? 1 : 0);
+          result.queued +=
+            approval.body.queuedCount ??
+            approval.body.queueItems?.length ??
+            (approval.body.queueItemId ? 1 : 0);
         } else if (approval.statusCode !== 409) {
           result.errors += 1;
-          this.audit("telegram.ingest.queue-failed", "warn", approval.error, {
-            providerId: provider.id,
-            parsedSignalId: item.parsedSignalId,
-          });
+          const lifecycleCommand =
+            item.result.commandType !== "OPEN_TRADE" &&
+            item.result.commandType !== "NO_SIGNAL" &&
+            item.result.commandType !== "TRADE_SETUP";
+          this.audit(
+            "telegram.ingest.queue-failed",
+            lifecycleCommand ? "error" : "warn",
+            approval.error,
+            {
+              providerId: provider.id,
+              parsedSignalId: item.parsedSignalId,
+            },
+          );
+          if (lifecycleCommand) {
+            this.dispatchAlert(
+              "lifecycle-dropped",
+              item.parsedSignalId,
+              `Telegram TC dropped ${item.result.commandType} for provider ${provider.id}: ${approval.error}`,
+              "alertOnDroppedLifecycle",
+            );
+          }
           if (isUnmatchedLifecycleError(approval.error)) {
             const linked = this.linkDroppedLifecycle(provider.id, item.parsedSignalId, item.result);
             if (linked > 0) {
@@ -3042,6 +3159,7 @@ class AppStore {
           logicalTradeId?: string;
           queueItems?: string[];
           logicalTradeIds?: string[];
+          queuedCount?: number;
           status: string;
         };
       }
@@ -3156,7 +3274,25 @@ class AppStore {
           }),
         };
       });
-      for (const target of targetSignals) {
+      const accountFreshness = new Map(
+        this.mt5Accounts().map((account) => [account.id, account.heartbeatStatus]),
+      );
+      // Hold only a genuinely silent EA (>30s), not the "stale" 10-30s tier. Heartbeats
+      // arrive every ~5s, so gating on "online" (<=10s) would hold live signals for manual
+      // approval on a single missed cycle and cost real trades.
+      const offlineTargetSignals = targetSignals.filter(
+        (target) => accountFreshness.get(target.accountId) === "offline",
+      );
+      const onlineTargetSignals = targetSignals.filter(
+        (target) => accountFreshness.get(target.accountId) !== "offline",
+      );
+      const mappingHolds = onlineTargetSignals.filter(
+        (target) => target.signal.mappingStatus !== "mapped",
+      );
+      const routableTargets = onlineTargetSignals.filter(
+        (target) => target.signal.mappingStatus === "mapped",
+      );
+      for (const target of routableTargets) {
         const targetTradedSymbolHoldReason = this.tradedSymbolHoldReason(
           providerId,
           target.signal,
@@ -3165,16 +3301,24 @@ class AppStore {
         if (targetTradedSymbolHoldReason) {
           return { statusCode: 422, error: targetTradedSymbolHoldReason };
         }
+        // Infer first, then review the signal we will actually send. Reviewing the
+        // pre-inference signal let a held "no quote, away-from-market entry" fall back
+        // to MARKET and execute immediately — the exact 4028-intended/4023.8-filled
+        // failure this inference exists to prevent.
+        const inferred = this.inferPendingOrderType(target.signal, target.accountId);
         if (
-          target.signal.commandType !== "OPEN_TRADE" ||
-          shouldRequireManualReview(target.signal, target.config.parserMode === "aggressive")
+          inferred.commandType !== "OPEN_TRADE" ||
+          shouldRequireManualReview(inferred, target.config.parserMode === "aggressive")
         ) {
           return {
             statusCode: 422,
-            error: signalApprovalReviewError(target.accountId, target.signal),
+            error: signalApprovalReviewError(target.accountId, inferred),
           };
         }
-        const orderType = target.signal.orderType ?? "MARKET";
+        // Validate the type we will actually send, not the pre-inference one: a defaulted
+        // MARKET can still become LIMIT/STOP below, which would otherwise let an inferred
+        // order bypass allowedOrderTypes (or be rejected for a type it never ends up as).
+        const orderType = inferred.orderType ?? "MARKET";
         if (!settings.allowedOrderTypes.includes(orderType)) {
           return { statusCode: 422, error: `${orderType} orders are not allowed by settings` };
         }
@@ -3186,7 +3330,7 @@ class AppStore {
           };
         }
       }
-      const parameterDuplicate = targetSignals.find((target) =>
+      const parameterDuplicate = routableTargets.find((target) =>
         this.hasDuplicateOpenSignal(providerId, target.accountId, target.signal),
       );
       if (parameterDuplicate) {
@@ -3200,31 +3344,93 @@ class AppStore {
           .run("DUPLICATE", parsedSignalId);
         return { statusCode: 409, error: "Matching open signal has already been queued" };
       }
-      const queueItems: string[] = [];
-      const logicalTradeIds: string[] = [];
-      for (const target of targetSignals) {
-        const targetLogicalTradeId = `trade_${nanoid(10)}`;
-        const targetQueueId = `queue_${nanoid(10)}`;
-        const trade = createLogicalTradeFromSignal(target.signal, {
-          id: targetLogicalTradeId,
+      const heldQueueItems = mappingHolds.map((target) => {
+        const heldReason = `SYMBOL_MAPPING_${target.signal.mappingStatus.toUpperCase()}`;
+        const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, target.signal, "HELD", {
+          accountId: target.accountId,
+          executionMode,
+          settings,
+          heldReason,
+        });
+        this.audit(
+          "signal.symbol-mapping",
+          "warn",
+          "Signal held for one account's symbol mapping",
+          {
+            parsedSignalId,
+            providerId,
+            accountId: target.accountId,
+            rawSymbol: target.signal.rawSymbol,
+            canonicalSymbol: target.signal.canonicalSymbol,
+            mappingStatus: target.signal.mappingStatus,
+            queueItemId,
+            heldReason,
+          },
+        );
+        this.alertHeldQueueItem(queueItemId, `${heldReason}:${target.accountId}`);
+        return queueItemId;
+      });
+      for (const target of offlineTargetSignals) {
+        const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, target.signal, "HELD", {
+          accountId: target.accountId,
+          executionMode,
+          settings,
+          heldReason: "EA_OFFLINE",
+        });
+        heldQueueItems.push(queueItemId);
+        this.audit("signal.ea-offline", "warn", "OPEN_TRADE held for a silent MT5 account", {
+          parsedSignalId,
           providerId,
           accountId: target.accountId,
-          source,
-          executionMode,
+          queueItemId,
+          heldReason: "EA_OFFLINE",
         });
+        this.alertHeldQueueItem(queueItemId, `EA_OFFLINE:${target.accountId}`);
+      }
+      if (routableTargets.length === 0) {
+        this.db
+          .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+          .run("HELD", parsedSignalId);
+        return {
+          body: {
+            queueItemId: heldQueueItems[0],
+            queueItems: heldQueueItems,
+            queuedCount: 0,
+            status: "HELD",
+          },
+        };
+      }
+      const queueItems: string[] = [];
+      const logicalTradeIds: string[] = [];
+      for (const target of routableTargets) {
+        const targetLogicalTradeId = `trade_${nanoid(10)}`;
+        const targetQueueId = `queue_${nanoid(10)}`;
+        const item = buildExecutionCommand(
+          this.inferPendingOrderType(target.signal, target.accountId),
+          {
+            id: targetQueueId,
+            accountId: target.accountId,
+            logicalTradeId: targetLogicalTradeId,
+            executionMode,
+            volume: target.config.riskMode === "fixed" ? target.config.riskAmount : 0,
+            riskPercent:
+              target.config.riskMode === "percent"
+                ? target.config.riskAmount
+                : settings.defaultRiskPercent,
+            runner: target.config.runner,
+          },
+        );
+        const trade = createLogicalTradeFromSignal(
+          { ...target.signal, takeProfits: item.payload.takeProfits },
+          {
+            id: targetLogicalTradeId,
+            providerId,
+            accountId: target.accountId,
+            source,
+            executionMode,
+          },
+        );
         this.insertTrade(trade);
-        const item = buildExecutionCommand(target.signal, {
-          id: targetQueueId,
-          accountId: target.accountId,
-          logicalTradeId: targetLogicalTradeId,
-          executionMode,
-          volume: target.config.riskMode === "fixed" ? target.config.riskAmount : 0,
-          riskPercent:
-            target.config.riskMode === "percent"
-              ? target.config.riskAmount
-              : settings.defaultRiskPercent,
-          runner: target.config.runner,
-        });
         this.insertQueueItem(item, parsedSignalId);
         queueItems.push(targetQueueId);
         logicalTradeIds.push(targetLogicalTradeId);
@@ -3269,10 +3475,31 @@ class AppStore {
           targetConfig,
           { defaultTakeProfit },
         );
-        const match = matchLifecycleCommandToTrade(
+        const resolved = this.resolveLifecycleTarget(
+          providerId,
+          targetAccountId,
+          source?.rawMessageId ?? "",
           targetSignal,
-          this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
         );
+        const match =
+          resolved.status === "MATCHED" && resolved.tradeId
+            ? {
+                status: "MATCHED" as const,
+                tradeId: resolved.tradeId,
+                confidence: resolved.method === "provider-order-id" ? 0.99 : 0.97,
+                requiresManualReview: false,
+              }
+            : resolved.status === "AMBIGUOUS"
+              ? {
+                  status: "AMBIGUOUS" as const,
+                  confidence: 0.45,
+                  requiresManualReview: true,
+                  reason: "Multiple open logical trades match this provider command",
+                }
+              : matchLifecycleCommandToTrade(
+                  targetSignal,
+                  this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
+                );
         return { accountId: targetAccountId, config: targetConfig, signal: targetSignal, match };
       });
 
@@ -3328,7 +3555,29 @@ class AppStore {
           return { statusCode: 422, error: "Matched logical trade could not be loaded" };
         }
         const targetQueueId = `queue_${nanoid(10)}`;
-        const enrichedSignal = enrichLifecycleSignalFromTrade(target.signal, trade);
+        const actionState = evaluateLifecycleActionState(target.signal.commandType, trade.status);
+        if (actionState.verdict === "noop" || actionState.verdict === "hold") {
+          return {
+            statusCode: 422,
+            error: `Lifecycle command cannot run while trade is ${trade.status}`,
+          };
+        }
+        const routedSignal =
+          actionState.verdict === "cancel"
+            ? { ...target.signal, commandType: "CANCEL_PENDING" as const, partialClose: undefined }
+            : target.signal;
+        const enrichedSignal = enrichLifecycleSignalFromTrade(routedSignal, trade);
+        const absoluteSignal = this.withAbsolutePartialCloseTarget(
+          enrichedSignal,
+          trade,
+          target.accountId,
+        );
+        if (!absoluteSignal) {
+          return {
+            statusCode: 422,
+            error: "Percentage close requires a current broker position snapshot",
+          };
+        }
         this.appendTradeCommand(trade.id, target.signal);
         const queueItem = buildExecutionCommand(enrichedSignal, {
           id: targetQueueId,
@@ -3344,6 +3593,9 @@ class AppStore {
               ? target.config.riskAmount
               : settings.defaultRiskPercent,
         });
+        if (absoluteSignal.partialClose?.kind === "PERCENT") {
+          queueItem.payload.partialClose = absoluteSignal.partialClose;
+        }
         Object.assign(queueItem.payload, this.brokerTargetForCommand(trade.id, queueItem.payload));
         this.insertQueueItem(queueItem, parsedSignalId);
         queueItems.push(targetQueueId);
@@ -3908,6 +4160,15 @@ class AppStore {
     return price === undefined ? undefined : { price, updatedAt: snapshot.updatedAt };
   }
 
+  private supportsLane2CloseContract(accountId: string) {
+    const row = this.db
+      .query("SELECT ea_capabilities_json FROM mt5_accounts WHERE id = ?")
+      .get(accountId) as Row | null;
+    return parseJson<string[]>(String(row?.ea_capabilities_json ?? "[]")).includes(
+      LANE2_CLOSE_CAPABILITY,
+    );
+  }
+
   registerMt5Account(input: {
     accountNumber: string;
     server: string;
@@ -3918,6 +4179,8 @@ class AppStore {
     profit?: number;
     marginMode: "HEDGING" | "NETTING";
     availableSymbols?: string[];
+    eaVersion?: string;
+    eaCapabilities?: string[];
     linkCode?: string;
   }): { accountId: string; status: "REGISTERED" } | { statusCode: 404 | 409; error: string } {
     const slot = input.linkCode ? this.accountSlotByCode(input.linkCode) : undefined;
@@ -3932,8 +4195,8 @@ class AppStore {
     this.db
       .query(
         `INSERT INTO mt5_accounts
-          (id, account_number, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (id, account_number, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, ea_version, ea_capabilities_json, last_heartbeat_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
           server = excluded.server,
           company = excluded.company,
@@ -3944,6 +4207,8 @@ class AppStore {
           margin_mode = excluded.margin_mode,
           heartbeat_status = excluded.heartbeat_status,
           available_symbols_json = excluded.available_symbols_json,
+          ea_version = excluded.ea_version,
+          ea_capabilities_json = excluded.ea_capabilities_json,
           last_heartbeat_at = excluded.last_heartbeat_at`,
       )
       .run(
@@ -3959,6 +4224,8 @@ class AppStore {
         input.marginMode,
         "online",
         JSON.stringify(input.availableSymbols ?? []),
+        input.eaVersion ?? null,
+        JSON.stringify(input.eaCapabilities ?? []),
         now,
         now,
       );
@@ -3983,6 +4250,8 @@ class AppStore {
     equity: number;
     profit?: number;
     availableSymbols?: string[];
+    eaVersion?: string;
+    eaCapabilities?: string[];
     linkCode?: string;
   }) {
     if (input.linkCode) {
@@ -4005,7 +4274,7 @@ class AppStore {
     const now = nowIso();
     this.db
       .query(
-        "UPDATE mt5_accounts SET balance = ?, equity = ?, profit = ?, heartbeat_status = ?, available_symbols_json = ?, last_heartbeat_at = ? WHERE id = ?",
+        "UPDATE mt5_accounts SET balance = ?, equity = ?, profit = ?, heartbeat_status = ?, available_symbols_json = ?, ea_version = ?, ea_capabilities_json = ?, last_heartbeat_at = ? WHERE id = ?",
       )
       .run(
         input.balance,
@@ -4013,6 +4282,8 @@ class AppStore {
         input.profit ?? null,
         "online",
         JSON.stringify(input.availableSymbols ?? []),
+        input.eaVersion ?? null,
+        JSON.stringify(input.eaCapabilities ?? []),
         now,
         input.accountId,
       );
@@ -4064,6 +4335,25 @@ class AppStore {
           .all() as Row[]);
     const row = rows.find((candidate) => {
       const item = queueRow(candidate);
+      if (
+        requiresLane2CloseContract(item.payload) &&
+        !this.supportsLane2CloseContract(item.accountId)
+      ) {
+        const now = new Date().toISOString();
+        this.db
+          .query(
+            "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
+          )
+          .run("HELD", "EA_CAPABILITY_UNAVAILABLE", now, item.id);
+        this.audit(
+          "queue.ea-capability-hold",
+          "warn",
+          "Lifecycle command held for legacy EA",
+          item,
+        );
+        this.alertHeldQueueItem(item.id, "EA_CAPABILITY_UNAVAILABLE");
+        return false;
+      }
       if (item.payload.commandType !== "OPEN_TRADE") return true;
       if (!this.isEquityGuardianPaused(item.accountId)) return true;
       const now = new Date().toISOString();
@@ -4103,13 +4393,15 @@ class AppStore {
     for (const row of stale) {
       const leaseCount = Number(row.lease_count ?? 0);
       const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      const mustReconcileBeforeReplay = payload.commandType !== "OPEN_TRADE";
       const openTrade = payload.commandType === "OPEN_TRADE";
-      const nextStatus = openTrade
-        ? "HELD"
-        : leaseCount >= settings.maxLeaseAttempts
-          ? "EXPIRED"
-          : "PENDING";
-      const heldReason = openTrade ? "DELIVERY_UNKNOWN" : null;
+      const nextStatus =
+        openTrade || mustReconcileBeforeReplay
+          ? "HELD"
+          : leaseCount >= settings.maxLeaseAttempts
+            ? "EXPIRED"
+            : "PENDING";
+      const heldReason = openTrade || mustReconcileBeforeReplay ? "DELIVERY_UNKNOWN" : null;
       this.db
         .query(
           "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
@@ -4185,7 +4477,7 @@ class AppStore {
     const account = this.mt5Accounts().find((item) => item.id === accountId);
     const row = this.db
       .query(
-        "SELECT account_id, threshold, current_drawdown, paused, breach_json, updated_at FROM equity_guardians WHERE account_id = ?",
+        "SELECT account_id, threshold, current_drawdown, paused, enabled, breach_json, updated_at FROM equity_guardians WHERE account_id = ?",
       )
       .get(accountId) as Row | null;
     const currentDrawdown = row
@@ -4194,9 +4486,11 @@ class AppStore {
     return {
       accountId,
       accountNumber: account?.accountNumber ?? "",
-      threshold: row ? Number(row.threshold) : 10,
+      threshold: row ? Number(row.threshold) : 0,
       currentDrawdown,
       paused: row ? Boolean(row.paused) : false,
+      // Existing rows predate this field and remain active so configured guardians keep working.
+      enabled: row ? row.enabled === undefined || Boolean(row.enabled) : false,
       breaches: row ? parseJson<unknown[]>(String(row.breach_json || "[]")) : [],
       updatedAt: row ? String(row.updated_at) : "",
     };
@@ -4204,14 +4498,19 @@ class AppStore {
 
   updateEquityGuardian(
     accountId: string,
-    input: { threshold?: number; paused?: boolean; currentDrawdown?: number },
+    input: { threshold?: number; enabled?: boolean; paused?: boolean; currentDrawdown?: number },
   ) {
     const current = this.equityGuardian(accountId);
-    const threshold = positiveNumber(input.threshold, current.threshold);
+    const enabled =
+      input.enabled ??
+      (input.threshold !== undefined || input.paused === true ? true : current.enabled);
+    const threshold = enabled
+      ? positiveNumber(input.threshold, current.threshold || 10)
+      : current.threshold;
     const currentDrawdown = Number.isFinite(input.currentDrawdown)
       ? Number(input.currentDrawdown)
       : current.currentDrawdown;
-    const breached = currentDrawdown >= threshold;
+    const breached = enabled && currentDrawdown >= threshold;
     const paused = input.paused === true || current.paused || breached;
     const breaches = [...current.breaches];
     if (breached && !current.paused) {
@@ -4219,13 +4518,14 @@ class AppStore {
     }
     this.db
       .query(
-        "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
+        "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, enabled, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, enabled = excluded.enabled, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
       )
       .run(
         accountId,
         threshold,
         currentDrawdown,
         Number(paused),
+        Number(enabled),
         JSON.stringify(breaches),
         new Date().toISOString(),
       );
@@ -4259,13 +4559,14 @@ class AppStore {
       ];
       this.db
         .query(
-          "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
+          "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, enabled, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, enabled = excluded.enabled, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
         )
         .run(
           accountId,
           current.threshold,
           current.currentDrawdown,
           1,
+          Number(current.enabled),
           JSON.stringify(breaches),
           new Date().toISOString(),
         );
@@ -4293,13 +4594,14 @@ class AppStore {
     ];
     this.db
       .query(
-        "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
+        "INSERT INTO equity_guardians (account_id, threshold, current_drawdown, paused, enabled, breach_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(account_id) DO UPDATE SET threshold = excluded.threshold, current_drawdown = excluded.current_drawdown, paused = excluded.paused, enabled = excluded.enabled, breach_json = excluded.breach_json, updated_at = excluded.updated_at",
       )
       .run(
         accountId,
         current.threshold,
         current.currentDrawdown,
         0,
+        Number(current.enabled),
         JSON.stringify(breaches),
         new Date().toISOString(),
       );
@@ -4374,7 +4676,8 @@ class AppStore {
   }
 
   private isEquityGuardianPaused(accountId?: string) {
-    return accountId ? this.equityGuardian(accountId).paused : false;
+    const guardian = accountId ? this.equityGuardian(accountId) : undefined;
+    return Boolean(guardian?.enabled && guardian.paused);
   }
 
   executionReport(input: ExecutionReportInput) {
@@ -4383,8 +4686,8 @@ class AppStore {
     this.db
       .query(
         `INSERT INTO execution_reports
-          (id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, error_text, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, queue_item_id, account_id, status, retcode, retcode_external, broker_comment, order_ticket, position_ticket, deal_ticket, requested_price, filled_price, volume, requested_volume, filled_volume, remaining_volume, error_text, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -4399,30 +4702,41 @@ class AppStore {
         input.dealTicket ?? "",
         input.requestedPrice ?? null,
         input.filledPrice ?? null,
-        input.volume ?? null,
+        input.filledVolume ?? input.volume ?? null,
+        input.requestedVolume ?? input.volume ?? null,
+        input.filledVolume ?? input.volume ?? null,
+        input.remainingVolume ?? null,
         input.errorText ?? "",
         now,
       );
+    const queueStatus =
+      input.status === "PARTIAL" || input.status === "UNKNOWN" ? "HELD" : input.status;
+    const heldReason =
+      input.status === "PARTIAL"
+        ? "PARTIAL_FILL"
+        : input.status === "UNKNOWN"
+          ? "DELIVERY_UNKNOWN"
+          : null;
     this.db
-      .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?")
-      .run(input.status, now, input.queueItemId);
-    this.reconcileExecutionReport(input);
+      .query("UPDATE queue_items SET status = ?, held_reason = ?, updated_at = ? WHERE id = ?")
+      .run(queueStatus, heldReason, now, input.queueItemId);
     this.recordBrokerOrder(input);
+    this.reconcileExecutionReport(input);
     this.audit(
       "mt5.report",
-      input.status === "EXECUTED" ? "info" : "error",
+      input.status === "EXECUTED" ? "info" : "warn",
       "MT5 execution report received",
       input,
     );
-    if (input.status === "FAILED") {
+    if (input.status !== "EXECUTED") {
       this.dispatchAlert(
         "execution-failed",
         input.queueItemId,
-        `MT5 execution failed for queue item ${input.queueItemId}: ${input.brokerComment || input.errorText || "unknown error"}.`,
+        `MT5 execution ${input.status.toLowerCase()} for queue item ${input.queueItemId}: ${input.brokerComment || input.errorText || "unknown error"}.`,
         "alertOnExecFailed",
       );
     }
-    log(input.status === "EXECUTED" ? "info" : "error", "mt5.report", {
+    log(input.status === "EXECUTED" ? "info" : "warn", "mt5.report", {
       accountId: input.accountId,
       queueItemId: input.queueItemId,
       status: input.status,
@@ -4431,7 +4745,7 @@ class AppStore {
       orderTicket: input.orderTicket,
       errorText: input.errorText,
     });
-    return { reportId: id, status: input.status };
+    return { reportId: id, status: queueStatus };
   }
 
   saveSnapshot(input: {
@@ -4478,6 +4792,82 @@ class AppStore {
     };
   }
 
+  /**
+   * Latest broker quote for a symbol, plus whether the account is quoting anything at
+   * all. The distinction matters: no snapshot means we simply have no market data, while
+   * a snapshot that omits this symbol means the EA is not watching it (quotes only cover
+   * MarketWatch-selected symbols) and we genuinely cannot price the entry.
+   */
+  private latestQuote(accountId: string, brokerSymbol: string | undefined) {
+    const row = this.db
+      .query("SELECT symbols_json, updated_at FROM mt5_snapshots WHERE account_id = ?")
+      .get(accountId) as Row | null;
+    // Snapshots refresh with the heartbeat (seconds apart). A stale one means the EA has
+    // gone quiet — an account sat 145 minutes silent while still reading "online" — and a
+    // two-hour-old price must not be used to decide whether an entry is away from market.
+    // Treat it as unpriceable so the caller holds rather than firing at market.
+    const updatedAt = Date.parse(String(row?.updated_at ?? ""));
+    const fresh =
+      Number.isFinite(updatedAt) && Date.now() - updatedAt <= QUOTE_FRESHNESS_MAX_AGE_MS;
+    const quotes =
+      row && fresh ? quotesBySymbol(parseJson<unknown[]>(String(row.symbols_json)) ?? []) : null;
+    return {
+      // A stale snapshot still counts as "this account quotes things", so an unpriceable
+      // entry is held for review instead of silently falling through to MARKET.
+      hasQuoteData: (quotes?.size ?? 0) > 0 || (row !== null && !fresh),
+      quote: brokerSymbol ? quotes?.get(brokerSymbol.toUpperCase()) : undefined,
+    };
+  }
+
+  /**
+   * A signal carrying an explicit entry away from the current market is a pending
+   * order, even when the provider omitted the words "limit" or "stop". Without this
+   * "Gold sell / 4028-29 / Sl 4034" fired at market and filled 4-5 points worse than
+   * the provider intended. Entries at or near market stay MARKET; with no quote to
+   * compare against the signal is left untouched.
+   */
+  private inferPendingOrderType(signal: ParsedSignal, accountId: string): ParsedSignal {
+    if (signal.commandType !== "OPEN_TRADE") return signal;
+    if (signal.orderType && signal.orderType !== "MARKET") return signal;
+    const entry = signal.entry?.from;
+    if (!entry || !signal.direction) return signal;
+    // "BUY XAUUSD NOW @ 4020" means market even though it carries an entry price.
+    // Only a MARKET that was defaulted (no explicit market wording) may be inferred.
+    if (/\b(?:NOW|MARKET|CMP|INSTANT|CURRENT\s+PRICE)\b/i.test(signal.originalText ?? "")) {
+      return signal;
+    }
+    const { hasQuoteData, quote } = this.latestQuote(accountId, signal.brokerSymbol);
+    const mid = quote ? (quote.bid + quote.ask) / 2 : 0;
+    if (!mid) {
+      // The account is quoting other symbols but not this one, so the EA is not watching
+      // it and we cannot tell a pending entry from a market one. Firing at market would
+      // repeat the incident where an intended 4028 sell limit filled at 4023.8, so hold.
+      // With no quote data at all there is nothing to reason from; leave the signal be.
+      if (!hasQuoteData) return signal;
+      return {
+        ...signal,
+        missingFields: [...signal.missingFields, "orderType"],
+        warnings: [
+          ...signal.warnings,
+          `Entry ${entry} given without an order type and ${signal.brokerSymbol ?? "the symbol"} is not quoted by this account, so LIMIT or STOP could not be inferred; held for review.`,
+        ],
+      };
+    }
+    const tolerance = Math.max((quote?.point ?? 0) * 20, mid * 0.0002);
+    if (Math.abs(entry - mid) <= tolerance) return signal;
+    const below = entry < mid;
+    const orderType: OrderType =
+      signal.direction === "BUY" ? (below ? "LIMIT" : "STOP") : below ? "STOP" : "LIMIT";
+    return {
+      ...signal,
+      orderType,
+      warnings: [
+        ...signal.warnings,
+        `Inferred ${orderType} order: entry ${entry} is away from market ${mid.toFixed(2)} and the signal named no order type.`,
+      ],
+    };
+  }
+
   private evaluateVirtualTakeProfits(input: {
     accountId: string;
     positions: unknown[];
@@ -4508,10 +4898,22 @@ class AppStore {
         brokerOpenPriceFromSnapshot(position) ??
         this.openPriceForTrade(trade.id) ??
         trade.entry?.from;
+      const payload = this.originalOpenQueue(trade.id)?.payload;
+      const brokerManagedLeg = brokerManagedVirtualTpLeg(payload);
       for (const leg of trade.legs) {
-        if (leg.status !== "OPEN") continue;
+        if (leg.status !== "OPEN" || isReferenceVirtualTpLeg(leg)) continue;
         const targetPrice = virtualTpTargetPrice(trade, leg, openPrice, quote.point);
         if (!targetPrice) continue;
+        if (
+          leg.leg === brokerManagedLeg &&
+          brokerTakeProfitMatchesTarget(
+            position,
+            targetPrice,
+            trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "",
+          )
+        ) {
+          continue;
+        }
         const hit = trade.direction === "BUY" ? price >= targetPrice : price <= targetPrice;
         if (!hit) continue;
         const queued = this.queueVirtualTpClose(trade, leg.leg, positionTicket, price);
@@ -4903,19 +5305,24 @@ class AppStore {
     const plannedTp = open.payload.takeProfits.find((item) => item.leg === legNumber);
     const brokerOpenVolume = this.openVolumeForTrade(trade.id, positionTicket);
     const managedVolume = managedVirtualTpVolume(open.payload, brokerOpenVolume);
-    const allocatedVolume =
-      managedVolume > 0 ? Number(((managedVolume * leg.allocationPercent) / 100).toFixed(2)) : 0;
-    const plannedVolume = plannedTp?.volume && plannedTp.volume > 0 ? plannedTp.volume : 0;
-    const fallbackVolume =
-      plannedVolume > 0 && managedVolume > 0
-        ? Number(Math.min(plannedVolume, managedVolume).toFixed(2))
-        : 0;
-    const volume =
-      brokerOpenVolume !== undefined
-        ? allocatedVolume > 0
-          ? allocatedVolume
-          : fallbackVolume
-        : (plannedTp?.volume ?? allocatedVolume);
+    const plannedVolume =
+      plannedTp?.volume && plannedTp.volume > 0
+        ? plannedTp.volume
+        : Math.max(0, leg.allocationPercent);
+    const plannedTotalByVolume = open.payload.takeProfits.reduce(
+      (sum, target) => sum + Math.max(0, Number(target.volume) || 0),
+      0,
+    );
+    const plannedTotal =
+      plannedTotalByVolume > 0
+        ? plannedTotalByVolume
+        : trade.legs.reduce((sum, item) => sum + Math.max(0, item.allocationPercent), 0);
+    const volume = virtualTpCloseVolume({
+      plannedVolume,
+      plannedTotal,
+      managedVolume,
+      brokerOpenVolume,
+    });
     if (!volume || volume <= 0) return false;
     const item: ExecutionQueueItem = {
       id: `queue_${nanoid(10)}`,
@@ -5356,7 +5763,7 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, account_number, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, last_heartbeat_at, drawdown_warn_pct, drawdown_danger_pct FROM mt5_accounts ORDER BY account_number",
+          "SELECT id, account_number, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, ea_version, ea_capabilities_json, last_heartbeat_at, drawdown_warn_pct, drawdown_danger_pct FROM mt5_accounts ORDER BY account_number",
         )
         .all() as Row[]
     ).map((row) => {
@@ -5391,6 +5798,8 @@ class AppStore {
         marginMode: String(row.margin_mode),
         heartbeatStatus: heartbeatFreshness(String(row.last_heartbeat_at)),
         availableSymbols: parseJson<string[]>(String(row.available_symbols_json)),
+        eaVersion: row.ea_version ? String(row.ea_version) : undefined,
+        eaCapabilities: parseJson<string[]>(String(row.ea_capabilities_json ?? "[]")),
         lastHeartbeatAt: String(row.last_heartbeat_at),
         // Counts split into app-driven vs external so the UI can show both
         // without conflating manual positions with our auto-copy state.
@@ -7889,6 +8298,8 @@ class AppStore {
         initialBalance: account.initialBalance,
         heartbeatStatus: account.heartbeatStatus,
         marginMode: account.marginMode,
+        eaVersion: account.eaVersion,
+        eaCapabilities: account.eaCapabilities,
         availableSymbols: account.availableSymbols,
         openPositionCount: account.openPositionCount,
         pendingOrderCount: account.pendingOrderCount,
@@ -7967,11 +8378,19 @@ class AppStore {
   }
 
   private dashboardPerformance(accounts: ReturnType<AppStore["mt5Accounts"]>) {
-    if (this.dashboardPerformanceCache?.revision === this.storeRevision) {
+    const heartbeatStatusKey = accounts
+      .map((account) => `${account.id}:${account.heartbeatStatus}`)
+      .sort()
+      .join("|");
+    if (
+      this.dashboardPerformanceCache?.revision === this.storeRevision &&
+      this.dashboardPerformanceCache.heartbeatStatusKey === heartbeatStatusKey
+    ) {
       return this.dashboardPerformanceCache;
     }
     const projections = {
       revision: this.storeRevision,
+      heartbeatStatusKey,
       accountPerformance: this.accountPerformance(accounts),
       accountPerformanceByAccount: Object.fromEntries(
         accounts.map((account) => [account.id, this.accountPerformance([account])]),
@@ -8007,6 +8426,8 @@ class AppStore {
       equity: 10000,
       marginMode: "HEDGING",
       availableSymbols: ["EURUSD.raw", "XAUUSD.r", "DJI30.raw"],
+      eaVersion: "1.40.0",
+      eaCapabilities: [LANE2_CLOSE_CAPABILITY],
     });
     const rawText =
       "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900\nTP2 1.0950\nTP3 1.1000\nTP4 1.1050";
@@ -8223,12 +8644,16 @@ class AppStore {
         margin_mode TEXT NOT NULL,
         heartbeat_status TEXT NOT NULL,
         available_symbols_json TEXT NOT NULL,
+        ea_version TEXT,
+        ea_capabilities_json TEXT NOT NULL DEFAULT '[]',
         last_heartbeat_at TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
     `);
     this.ensureColumn("mt5_accounts", "profit", "REAL");
     this.ensureColumn("mt5_accounts", "initial_balance", "REAL NOT NULL DEFAULT 0");
+    this.ensureColumn("mt5_accounts", "ea_version", "TEXT");
+    this.ensureColumn("mt5_accounts", "ea_capabilities_json", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn("mt5_accounts", "drawdown_warn_pct", "REAL");
     this.ensureColumn("mt5_accounts", "drawdown_danger_pct", "REAL");
     this.db.run(`
@@ -8267,10 +8692,12 @@ class AppStore {
         threshold REAL NOT NULL,
         current_drawdown REAL NOT NULL,
         paused INTEGER NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
         breach_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
     `);
+    this.ensureColumn("equity_guardians", "enabled", "INTEGER NOT NULL DEFAULT 1");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS account_symbol_mappings (
         account_id TEXT PRIMARY KEY,
@@ -8378,11 +8805,17 @@ class AppStore {
         requested_price REAL,
         filled_price REAL,
         volume REAL,
+        requested_volume REAL,
+        filled_volume REAL,
+        remaining_volume REAL,
         error_text TEXT,
         created_at TEXT NOT NULL
       );
     `);
     this.ensureColumn("execution_reports", "position_ticket", "TEXT");
+    this.ensureColumn("execution_reports", "requested_volume", "REAL");
+    this.ensureColumn("execution_reports", "filled_volume", "REAL");
+    this.ensureColumn("execution_reports", "remaining_volume", "REAL");
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_execution_reports_created ON execution_reports(created_at DESC)",
     );
@@ -8998,7 +9431,8 @@ class AppStore {
     accountId: string,
     availableSymbols: string[] | undefined,
   ): AccountSymbolMapping {
-    const existing = this.storedAccountMapping(accountId) ?? defaultAccountMapping(accountId);
+    const stored = this.storedAccountMapping(accountId);
+    const existing = stored ?? defaultAccountMapping(accountId);
     const nextAvailable = availableSymbols ?? existing.availableBrokerSymbols ?? [];
     if (isLegacyDemoAccountMapping(existing) && brokerReportsPlainCoreSymbols(nextAvailable)) {
       return {
@@ -9012,9 +9446,14 @@ class AppStore {
         availableBrokerSymbols: nextAvailable,
       };
     }
+    // A stored mapping is operator-owned. Only infer affixes for a new account so a
+    // dashboard heartbeat can never overwrite a prefix/suffix the operator set.
+    if (stored) return { ...existing, accountId, availableBrokerSymbols: nextAvailable };
+    const inferred = inferBrokerAffixes(nextAvailable);
     return {
       ...existing,
       accountId,
+      ...inferred,
       availableBrokerSymbols: nextAvailable,
     };
   }
@@ -9549,6 +9988,7 @@ class AppStore {
           targetSource: leg.targetSource,
           defaultDistance: leg.defaultDistance,
           allocationPercent: leg.allocationPercent,
+          volume: leg.volume,
           status: leg.status,
         })),
       };
@@ -9620,6 +10060,43 @@ class AppStore {
       .run(JSON.stringify(updated), tradeId);
   }
 
+  private resizePartialOpen(
+    trade: LogicalTrade,
+    payload: ExecutionQueueItem["payload"],
+    input: ExecutionReportInput,
+  ) {
+    const filledVolume = Number(input.filledVolume ?? 0);
+    if (!Number.isFinite(filledVolume) || filledVolume <= 0) return trade;
+    const takeProfits = withTakeProfitVolumes(
+      payload.takeProfits,
+      "OPEN_TRADE",
+      filledVolume,
+      payload.runner,
+    );
+    const byLeg = new Map(takeProfits.map((target) => [target.leg, target]));
+    const updated: LogicalTrade = {
+      ...trade,
+      status: "OPEN",
+      outOfSyncReason: `Partial open fill: ${filledVolume} filled of ${input.requestedVolume ?? payload.volume ?? "unknown"}`,
+      legs: trade.legs.map((leg) => {
+        const target = byLeg.get(leg.leg);
+        return target
+          ? {
+              ...leg,
+              allocationPercent: target.allocationPercent,
+              volume: target.volume,
+              status: "OPEN" as const,
+              brokerEvidence: executionEvidence(input),
+            }
+          : { ...leg, allocationPercent: 0, volume: undefined, status: "SKIPPED" as const };
+      }),
+    };
+    this.db
+      .query("UPDATE queue_items SET payload_json = ? WHERE id = ?")
+      .run(JSON.stringify({ ...payload, takeProfits, volume: filledVolume }), input.queueItemId);
+    return updated;
+  }
+
   private reconcileExecutionReport(input: ExecutionReportInput) {
     const row = this.db
       .query("SELECT logical_trade_id, payload_json FROM queue_items WHERE id = ?")
@@ -9635,14 +10112,26 @@ class AppStore {
     const virtualTpLeg = virtualTpLegFromExecutionReport(payload, input);
     let updated: LogicalTrade = trade;
 
-    if (input.status === "FAILED") {
+    if (
+      input.status === "PARTIAL" &&
+      payload.commandType === "OPEN_TRADE" &&
+      Number(input.filledVolume ?? 0) > 0
+    ) {
+      // Keep the partially filled position manageable, but hold its original
+      // queue item so no retry can enlarge it.
+      updated = this.resizePartialOpen(trade, payload, input);
+    } else if (input.status === "UNKNOWN" || input.status === "PARTIAL") {
+      // A broker action may already have happened. Keep the trade live and the
+      // queue held until snapshot/history evidence reconciles it; never replay.
+      updated = trade;
+    } else if (input.status === "FAILED") {
       if (payload.commandType === "OPEN_TRADE") {
         updated = {
           ...trade,
           status: "OUT_OF_SYNC",
           legs: trade.legs.map((leg) => ({ ...leg, status: "FAILED", brokerEvidence: evidence })),
         };
-      } else if (isPositionGoneFailure(input)) {
+      } else if (isPositionGoneFailure(input) && trade.status !== "PENDING") {
         // The targeted position is already gone, so the close/SL-modify is
         // effectively done. Mark the targeted leg(s) terminal so nothing
         // re-queues this command against a vanished position (the virtual-TP
@@ -9708,9 +10197,19 @@ class AppStore {
         ),
       };
     } else if (payload.commandType === "CLOSE_TRADE") {
+      if (this.coveringCloseForTrade(trade.id)) {
+        updated = {
+          ...trade,
+          status: "CLOSED",
+          legs: trade.legs.map((leg) => ({ ...leg, status: "CLOSED", brokerEvidence: evidence })),
+        };
+      }
+    } else if (payload.commandType === "CANCEL_PENDING") {
       updated = {
         ...trade,
-        status: "CLOSED",
+        status: "CANCELLED",
+        livePositionExists: false,
+        matchedBrokerTickets: [],
         legs: trade.legs.map((leg) => ({ ...leg, status: "CLOSED", brokerEvidence: evidence })),
       };
     } else if (payload.commandType === "CLOSE_PARTIAL" && payload.partialClose?.kind === "TP_LEG") {
@@ -9760,8 +10259,8 @@ class AppStore {
         input.orderTicket ?? "",
         input.positionTicket ?? "",
         input.dealTicket ?? "",
-        payload.volume ?? null,
-        input.volume ?? null,
+        input.requestedVolume ?? payload.volume ?? null,
+        input.filledVolume ?? input.volume ?? null,
         input.requestedPrice ?? null,
         input.filledPrice ?? null,
         input.retcode,
@@ -9777,14 +10276,10 @@ class AppStore {
   private brokerTargetForCommand(logicalTradeId: string, payload: ExecutionQueueItem["payload"]) {
     const action = brokerAction(payload.commandType);
     const rows = this.brokerOrders(logicalTradeId).slice().reverse();
-    if (action === "CANCEL_PENDING") {
-      const order = rows.find(
-        (row) =>
-          truthyBrokerTicket(row.orderTicket) &&
-          (row.action === "OPEN" || row.action === "PENDING_OPEN"),
-      );
-      return { targetOrderTicket: order?.orderTicket, targetPositionTicket: order?.positionTicket };
-    }
+    // Pending cancellations deliberately omit a target ticket: the EA matches
+    // every still-live order bearing this logical trade comment and confirms
+    // the command only after all removals succeed.
+    if (action === "CANCEL_PENDING") return {};
     const position = rows.find(
       (row) =>
         truthyBrokerTicket(row.positionTicket) &&
@@ -9796,6 +10291,33 @@ class AppStore {
       targetPositionTicket: position?.positionTicket,
       targetOrderTicket: position?.orderTicket,
       targetDealTicket: position?.dealTicket,
+    };
+  }
+
+  private withAbsolutePartialCloseTarget(
+    signal: ParsedSignal,
+    trade: LogicalTrade,
+    accountId: string,
+  ) {
+    if (signal.commandType !== "CLOSE_PARTIAL" || signal.partialClose?.kind !== "PERCENT") {
+      return signal;
+    }
+    const snapshot = this.mt5SnapshotsByAccount()[accountId];
+    if (!snapshot) return undefined;
+    const position = matchedBrokerRecordForTrade(
+      snapshot.positions,
+      trade,
+      this.brokerOrderTicketsForTrade(trade.id),
+    );
+    const currentVolume = Number((position as Record<string, unknown> | undefined)?.volume ?? 0);
+    if (!Number.isFinite(currentVolume) || currentVolume <= 0) return undefined;
+    const targetRemainingVolume = Number(
+      (currentVolume * (1 - signal.partialClose.value / 100)).toFixed(8),
+    );
+    if (targetRemainingVolume < 0 || targetRemainingVolume >= currentVolume) return undefined;
+    return {
+      ...signal,
+      partialClose: { ...signal.partialClose, targetRemainingVolume },
     };
   }
 
@@ -9961,7 +10483,8 @@ class AppStore {
     input: ExecutionReportInput,
     action = brokerAction(payload.commandType),
   ) {
-    if (!input.filledPrice || !input.volume || !payload.direction) {
+    const filledVolume = input.filledVolume ?? input.volume;
+    if (!input.filledPrice || !filledVolume || !payload.direction) {
       return { pnlCurrency: null, pnlPips: null };
     }
     if (
@@ -10386,6 +10909,14 @@ function brokerAction(commandType: string) {
   return commandType;
 }
 
+function requiresLane2CloseContract(payload: ExecutionQueueItem["payload"]) {
+  return (
+    payload.commandType === "CLOSE_TRADE" ||
+    payload.commandType === "CLOSE_PARTIAL" ||
+    payload.commandType === "CANCEL_PENDING"
+  );
+}
+
 function isPendingOrderAcceptance(
   payload: ExecutionQueueItem["payload"],
   input: ExecutionReportInput,
@@ -10621,7 +11152,12 @@ function virtualTpStatusAfterLegClose(
   payload?: ExecutionQueueItem["payload"],
 ) {
   const runnerEnabled = Boolean(payload?.runner?.enabled && Number(payload.runner.lotSize) > 0);
-  if (legs.every((leg) => leg.status === "CLOSED") && !runnerEnabled) return "CLOSED";
+  if (
+    legs.filter((leg) => !isReferenceVirtualTpLeg(leg)).every((leg) => leg.status === "CLOSED") &&
+    !runnerEnabled
+  ) {
+    return "CLOSED";
+  }
   return trade.status === "CLOSED" ? "CLOSED" : "OPEN";
 }
 
@@ -11297,6 +11833,11 @@ function normalizeProviderTpLevels(
   }));
 }
 
+function normalizeWorkFromTpLeg(value: unknown): number | undefined {
+  const leg = Math.round(Number(value));
+  return Number.isFinite(leg) && leg >= 1 && leg <= MAX_PROVIDER_TP_LEVELS ? leg : undefined;
+}
+
 function normalizeParserMode(value: unknown): ParserMode {
   return value === "aggressive" ? "aggressive" : "automatic";
 }
@@ -11382,17 +11923,16 @@ function applyProviderExecutionConfig(
     };
   }
   const levelsByLeg = new Map(config.takeProfitLevels.map((level) => [level.leg, level]));
-  const configuredLegs = new Set(config.takeProfitLevels.map((level) => level.leg));
-  const takeProfits = signal.takeProfits
-    .filter((target) => configuredLegs.has(target.leg))
-    .map((target, index) => {
-      const level = levelsByLeg.get(target.leg) ?? config.takeProfitLevels[index];
-      return {
-        ...target,
-        allocationPercent: level?.percentage ?? target.allocationPercent,
-        strategy: level?.strategy ?? target.strategy ?? { kind: "no-change" },
-      };
-    });
+  const unconfiguredLegs: number[] = [];
+  let takeProfits = signal.takeProfits.map((target) => {
+    const level = levelsByLeg.get(target.leg);
+    if (!levelsByLeg.has(target.leg)) unconfiguredLegs.push(target.leg);
+    return {
+      ...target,
+      allocationPercent: level?.percentage ?? target.allocationPercent,
+      strategy: level?.strategy ?? target.strategy ?? { kind: "no-change" },
+    };
+  });
   if (takeProfits.length === 0) {
     return {
       ...signal,
@@ -11400,10 +11940,99 @@ function applyProviderExecutionConfig(
       defaultTakeProfit: signal.defaultTakeProfit ?? defaults?.defaultTakeProfit,
     };
   }
+  const actionable = takeProfits.filter(
+    (target) => (target.price ?? 0) > 0 && target.allocationPercent > 0,
+  );
+  const workFrom =
+    actionable.find((target) => target.leg === config.workFromTpLeg) ?? actionable[0];
+  if (workFrom && config.workFromTpLeg !== undefined) {
+    takeProfits = takeProfits.map((target) =>
+      target.allocationPercent > 0
+        ? { ...target, allocationPercent: target.leg === workFrom.leg ? 100 : 0 }
+        : target,
+    );
+  }
+  if (actionable.length === 1) {
+    takeProfits = takeProfits.map((target) =>
+      target.leg === actionable[0]?.leg ? { ...target, allocationPercent: 100 } : target,
+    );
+  } else {
+    const totalAllocation = takeProfits.reduce((sum, target) => sum + target.allocationPercent, 0);
+    if (totalAllocation > 0 && totalAllocation !== 100) {
+      // Rescale only the legs that actually close volume, and give the rounding
+      // remainder to the last of those. A leg configured at 0% is a stop-loss
+      // reference for set-sl-to-tp (KAL VIP runs 50/0/0/50); handing it leftover
+      // percent would turn it into a closing leg and break SL trailing.
+      const lastAllocatedLeg = takeProfits
+        .filter((target) => target.allocationPercent > 0)
+        .at(-1)?.leg;
+      let allocated = 0;
+      takeProfits = takeProfits.map((target) => {
+        if (target.allocationPercent <= 0) return target;
+        if (target.leg === lastAllocatedLeg) {
+          return { ...target, allocationPercent: Number((100 - allocated).toFixed(2)) };
+        }
+        const allocationPercent = Number(
+          ((target.allocationPercent / totalAllocation) * 100).toFixed(2),
+        );
+        allocated += allocationPercent;
+        return { ...target, allocationPercent };
+      });
+    }
+  }
   return {
     ...signal,
     takeProfits,
+    warnings:
+      unconfiguredLegs.length > 0
+        ? [
+            ...signal.warnings,
+            `Provider TP configuration has no leg ${unconfiguredLegs.join(", ")}; retained signal target allocation.`,
+          ]
+        : signal.warnings,
   };
+}
+
+function brokerManagedVirtualTpLeg(payload: ExecutionQueueItem["payload"] | undefined) {
+  if (payload?.runner?.enabled) return undefined;
+  return payload?.takeProfits
+    .filter(
+      (target) =>
+        (target.price ?? 0) > 0 && target.allocationPercent > 0 && (target.volume ?? 0) > 0,
+    )
+    .at(-1)?.leg;
+}
+
+function isReferenceVirtualTpLeg(leg: LogicalTrade["legs"][number]) {
+  return leg.allocationPercent <= 0;
+}
+
+function brokerTakeProfitMatchesTarget(record: unknown, targetPrice: number, symbol: string) {
+  if (!record || typeof record !== "object") return false;
+  const brokerTakeProfit = Number((record as Record<string, unknown>).tp ?? 0);
+  if (!Number.isFinite(brokerTakeProfit) || brokerTakeProfit <= 0) return false;
+  return Math.abs(brokerTakeProfit - targetPrice) <= brokerPipSize(symbol);
+}
+
+function virtualTpCloseVolume(input: {
+  plannedVolume: number;
+  plannedTotal: number;
+  managedVolume: number;
+  brokerOpenVolume?: number;
+}) {
+  if (input.plannedVolume <= 0) return 0;
+  if (input.brokerOpenVolume !== undefined && input.managedVolume <= 0) return 0;
+  const baseVolume = input.managedVolume > 0 ? input.managedVolume : input.plannedTotal;
+  if (baseVolume <= 0 || input.plannedTotal <= 0) return 0;
+  let volume = Number(((input.plannedVolume / input.plannedTotal) * baseVolume).toFixed(2));
+  if (
+    input.brokerOpenVolume &&
+    volume >= input.brokerOpenVolume &&
+    input.plannedVolume < input.plannedTotal
+  ) {
+    volume = Number(Math.max(0, input.brokerOpenVolume - 0.01).toFixed(2));
+  }
+  return volume;
 }
 
 function virtualTpLegFromBrokerComment(comment: string) {
@@ -11420,7 +12049,7 @@ function virtualTpLegFromExecutionReport(
   if (payload.commandType !== "OPEN_TRADE" || payload.executionMode !== "VIRTUAL_TP") {
     return undefined;
   }
-  const filledVolume = Number(input.volume ?? 0);
+  const filledVolume = Number(input.filledVolume ?? input.volume ?? 0);
   const plannedVolume = Number(payload.volume ?? 0);
   if (!filledVolume || !plannedVolume || filledVolume >= plannedVolume) return undefined;
   const price = Number(input.filledPrice ?? input.requestedPrice ?? 0);
@@ -11847,6 +12476,28 @@ function brokerReportsPlainCoreSymbols(symbols: string[]) {
   return available.has("BTCUSD") || available.has("XAUUSD") || available.has("EURUSD");
 }
 
+function inferBrokerAffixes(symbols: string[]) {
+  const prefixes = new Map<string, number>();
+  const suffixes = new Map<string, number>();
+  for (const symbol of symbols) {
+    const upper = symbol.trim().toUpperCase();
+    for (const canonical of BROKER_AFFIX_CANONICALS) {
+      const index = upper.indexOf(canonical);
+      if (index === -1) continue;
+      const prefix = symbol.slice(0, index);
+      const suffix = symbol.slice(index + canonical.length);
+      if (prefix) prefixes.set(prefix, (prefixes.get(prefix) ?? 0) + 1);
+      if (suffix) suffixes.set(suffix, (suffixes.get(suffix) ?? 0) + 1);
+    }
+  }
+  // A global affix affects every resolution, so require 60% of all broker symbols
+  // (and at least two matches). One outlier such as XAUUSDb must stay a direct override.
+  const majority = Math.max(2, Math.ceil(symbols.length * 0.6));
+  const best = (values: Map<string, number>) =>
+    [...values.entries()].find(([, count]) => count >= majority)?.[0] ?? "";
+  return { prefix: best(prefixes), suffix: best(suffixes) };
+}
+
 function listMatches(left: string[] | undefined, right: string[]) {
   if (!left || left.length !== right.length) return false;
   const normalized = left.map((item) => item.toUpperCase()).sort();
@@ -11952,6 +12603,7 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     alertOnEaOffline: input.alertOnEaOffline === true,
     alertOnExecFailed: input.alertOnExecFailed === true,
     alertOnHeld: input.alertOnHeld === true,
+    alertOnDroppedLifecycle: input.alertOnDroppedLifecycle !== false,
     alertOnTelegramStall: input.alertOnTelegramStall === true,
   };
 }
@@ -12111,6 +12763,8 @@ function toMt5LinePayload(item: ReturnType<typeof queueRow>, settings: AppSettin
     `partialCloseValue=${item.payload.partialClose?.value ?? ""}`,
     `partialCloseVolume=${item.payload.partialClose?.volume ?? ""}`,
     `partialCloseAllocation=${item.payload.partialClose?.allocationPercent ?? ""}`,
+    `targetRemainingVolume=${item.payload.partialClose?.targetRemainingVolume ?? ""}`,
+    `idempotencyKey=${item.payload.idempotencyKey ?? item.id}`,
     `runnerEnabled=${item.payload.runner?.enabled ? "true" : "false"}`,
     `runnerVolume=${item.payload.runner?.lotSize ?? ""}`,
     `runnerSlBehavior=${item.payload.runner?.slBehavior ?? ""}`,

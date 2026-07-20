@@ -119,4 +119,71 @@ describe("provider TP validation", () => {
     expect(validation.valid).toBe(false);
     expect(validation.errors).toContain("TP1 cannot move SL to a prior TP.");
   });
+
+  test("rejects a 50/50 split at 0.01 lots", () => {
+    const validation = validateProviderConfigDraft({
+      riskMode: "fixed",
+      riskAmountText: "0.01",
+      tps: [tp(1, "50"), tp(2, "50")],
+      runner: runnerOff,
+    });
+    expect(validation.valid).toBe(false);
+    expect(validation.errors.join(" ")).toContain(
+      "0.01 lots can support at most 1 positive TP leg",
+    );
+  });
+
+  test("accepts one 100% TP at 0.01 lots and two at 0.02 lots", () => {
+    expect(
+      validateProviderConfigDraft({
+        riskMode: "fixed",
+        riskAmountText: "0.01",
+        tps: [tp(1, "100")],
+        runner: runnerOff,
+      }).valid,
+    ).toBe(true);
+    expect(
+      validateProviderConfigDraft({
+        riskMode: "fixed",
+        riskAmountText: "0.02",
+        tps: [tp(1, "50"), tp(2, "50")],
+        runner: runnerOff,
+      }).valid,
+    ).toBe(true);
+  });
+
+  test("accepts KAL VIP 50/0/0/50 at 0.02 lots", () => {
+    expect(
+      validateProviderConfigDraft({
+        riskMode: "fixed",
+        riskAmountText: "0.02",
+        tps: [tp(1, "50"), tp(2, "0"), tp(3, "0"), tp(4, "50")],
+        runner: runnerOff,
+      }).valid,
+    ).toBe(true);
+  });
+
+  test("rejects TP totals other than 100 in both risk modes", () => {
+    for (const riskMode of ["fixed", "percent"] as const) {
+      const validation = validateProviderConfigDraft({
+        riskMode,
+        riskAmountText: riskMode === "fixed" ? "0.02" : "1",
+        tps: [tp(1, "60"), tp(2, "30")],
+        runner: runnerOff,
+      });
+      expect(validation.valid).toBe(false);
+      expect(validation.errors).toContain("TP percentages must total 100% (currently 90%).");
+    }
+  });
+
+  test("does not apply fixed-lot split feasibility to percent risk", () => {
+    expect(
+      validateProviderConfigDraft({
+        riskMode: "percent",
+        riskAmountText: "1",
+        tps: [tp(1, "25"), tp(2, "25"), tp(3, "25"), tp(4, "25")],
+        runner: runnerOff,
+      }).valid,
+    ).toBe(true);
+  });
 });

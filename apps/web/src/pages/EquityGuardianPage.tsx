@@ -12,6 +12,7 @@ interface Guardian {
   threshold: number;
   currentDrawdown: number;
   paused: boolean;
+  enabled: boolean;
 }
 
 function severity(currentDrawdown: number, threshold: number): "ok" | "warn" | "breach" {
@@ -51,7 +52,9 @@ export function EquityGuardianPage({
           />
         ) : null}
         {guardians.map((guardian) => {
-          const tone = severity(guardian.currentDrawdown, guardian.threshold);
+          const tone = guardian.enabled
+            ? severity(guardian.currentDrawdown, guardian.threshold)
+            : "ok";
           const ratio =
             guardian.threshold > 0
               ? Math.min(100, (guardian.currentDrawdown / guardian.threshold) * 100)
@@ -68,13 +71,15 @@ export function EquityGuardianPage({
               <div className="guardian-row-head">
                 <strong>{guardian.accountNumber || guardian.accountId}</strong>
                 <span className={`guardian-status guardian-status-${tone}`}>
-                  {guardian.paused
-                    ? "Paused for new opens"
-                    : tone === "breach"
-                      ? "Threshold reached"
-                      : tone === "warn"
-                        ? "Approaching threshold"
-                        : "Accepting new opens"}
+                  {!guardian.enabled
+                    ? "Off"
+                    : guardian.paused
+                      ? "Paused for new opens"
+                      : tone === "breach"
+                        ? "Threshold reached"
+                        : tone === "warn"
+                          ? "Approaching threshold"
+                          : "Accepting new opens"}
                 </span>
               </div>
               <div
@@ -110,11 +115,16 @@ export function EquityGuardianPage({
                 </span>
               </div>
               <div className="guardian-actions">
+                <label className="config-toggle">
+                  <input defaultChecked={guardian.enabled} name="enabled" type="checkbox" />
+                  <span>On</span>
+                </label>
                 <input
                   aria-label="Threshold percent"
-                  defaultValue={guardian.threshold}
+                  defaultValue={guardian.threshold || 10}
                   min="0"
                   name="threshold"
+                  required={guardian.enabled}
                   step="0.1"
                   type="number"
                 />

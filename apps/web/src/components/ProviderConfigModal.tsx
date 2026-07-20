@@ -37,6 +37,7 @@ export interface ProviderConfigSubmission {
   riskMode: "fixed" | "percent";
   riskAmount: number;
   takeProfitLevels: TpStrategyLevel[];
+  workFromTpLeg?: number;
   runner: RunnerConfig;
 }
 
@@ -139,6 +140,8 @@ export interface ProviderConfigDraft {
   runnerLotText?: string;
 }
 
+export const MIN_TRADEABLE_LOT = 0.01;
+
 function runnerLotValue(draft: ProviderConfigDraft): number | null {
   if (!draft.runner.enabled) return 0;
   if (draft.runnerLotText !== undefined) return parseDecimal(draft.runnerLotText);
@@ -218,6 +221,21 @@ export function validateProviderConfigDraft(draft: ProviderConfigDraft): {
 
   if (draft.tps.length > 0 && positiveTpPercentages === 0) {
     errors.push("Enter a positive percentage for at least one TP.");
+  }
+  const totalAllocation = draft.tps.reduce(
+    (total, tp) => total + Math.max(0, parseDecimal(tp.percentage) ?? 0),
+    0,
+  );
+  if (draft.tps.length > 0 && Math.abs(totalAllocation - 100) > 0.0001) {
+    errors.push(`TP percentages must total 100% (currently ${formatPercent(totalAllocation)}%).`);
+  }
+  if (draft.riskMode === "fixed" && riskValue !== null && riskValue > 0) {
+    const supportedLegs = Math.floor((riskValue + 1e-9) / MIN_TRADEABLE_LOT);
+    if (positiveTpPercentages > supportedLegs) {
+      errors.push(
+        `${formatDraftNumber(riskValue)} lots can support at most ${supportedLegs} positive TP ${supportedLegs === 1 ? "leg" : "legs"}; each closing leg needs at least ${formatDraftNumber(MIN_TRADEABLE_LOT)} lots.`,
+      );
+    }
   }
 
   const runnerLot = runnerLotValue(draft);
@@ -302,6 +320,7 @@ export function ProviderConfigModal({
   const [tps, setTps] = useState<TpDraftLevel[]>(() => toDraftTpLevels(DEFAULT_TPS));
   const [runner, setRunner] = useState<RunnerConfig>(DEFAULT_RUNNER);
   const [runnerLotText, setRunnerLotText] = useState(formatDraftNumber(DEFAULT_RUNNER.lotSize));
+  const [workFromTpLeg, setWorkFromTpLeg] = useState<number | undefined>();
   const [testRawText, setTestRawText] = useState(DEFAULT_TEST_MESSAGE);
   const [testResult, setTestResult] = useState<ProviderConfigTestResult | null>(null);
   const [testBusy, setTestBusy] = useState(false);
@@ -318,6 +337,7 @@ export function ProviderConfigModal({
       );
       setRunner(nextRunner);
       setRunnerLotText(formatDraftNumber(nextRunner.lotSize));
+      setWorkFromTpLeg(provider.workFromTpLeg);
       setTestRawText(DEFAULT_TEST_MESSAGE);
       setTestResult(null);
       setTestBusy(false);
@@ -357,6 +377,7 @@ export function ProviderConfigModal({
       riskMode,
       riskAmount: lotValue,
       takeProfitLevels: toSubmissionTpLevels(tps),
+      workFromTpLeg,
       runner: nextRunner,
     };
   }
@@ -445,14 +466,11 @@ export function ProviderConfigModal({
     riskMode === "fixed" ? (allocationPreview.runnerLots ?? 0) : runnerLotNumeric;
   const tradedPortion = allocationPreview.tpCloseLots ?? 0;
   const totalPercent = allocationPreview.totalEnteredPercent;
+  const maxPositiveTpLegs =
+    riskMode === "fixed" && riskValueNumeric > 0
+      ? Math.floor((riskValueNumeric + 1e-9) / MIN_TRADEABLE_LOT)
+      : null;
   const lastTpLabel = tps.length ? `TP${tps[tps.length - 1]!.leg}` : "the TP sequence";
-  const tpCloseBasis = runner.enabled
-    ? allocationPreview.canPreviewLots
-      ? `${numberFmt.format(tradedPortion)} lots assigned to TP closes`
-      : "the execution-sized TP pool"
-    : allocationPreview.canPreviewLots
-      ? "the full order"
-      : "the execution-sized order";
 
   return (
     <div className="modal-overlay">
@@ -683,15 +701,39 @@ export function ProviderConfigModal({
                   Add a take-profit level
                 </button>
               ) : null}
-              {totalPercent !== 100 && totalPercent > 0 && tps.length > 0 ? (
-                <p className="config-hint">
-                  TP percentages total {formatPercent(totalPercent)}%; the app treats them as
-                  weights across {tpCloseBasis}.{runner.enabled ? " Runner stays separate." : ""}
-                </p>
+              {maxPositiveTpLegs === 1 && tps.length > 0 ? (
+                <label className="config-field">
+                  <span className="config-label">Work from</span>
+                  <select
+                    aria-label="Working take-profit leg"
+                    onChange={(event) => {
+                      const leg = Number(event.target.value) || undefined;
+                      setWorkFromTpLeg(leg);
+                      if (leg) {
+                        setTps(
+                          tps.map((tp) => ({ ...tp, percentage: tp.leg === leg ? "100" : "0" })),
+                        );
+                      }
+                    }}
+                    value={workFromTpLeg ?? ""}
+                  >
+                    <option value="">First positive TP (default)</option>
+                    {tps.map((tp) => (
+                      <option key={tp.leg} value={tp.leg}>
+                        Work from TP{tp.leg}
+                      </option>
+                    ))}
+                  </select>
+                  <small className="config-hint config-hint-soft">
+                    {formatDraftNumber(riskValueNumeric)} lots can close one TP leg. Choose the
+                    broker target.
+                  </small>
+                </label>
               ) : null}
               {riskMode === "percent" && tps.length > 0 ? (
                 <p className="config-hint config-hint-soft">
-                  Exact TP lots calculate at execution.
+                  Exact TP lots calculate at execution; split feasibility depends on the runtime
+                  lot.
                 </p>
               ) : null}
             </div>
@@ -802,9 +844,7 @@ export function ProviderConfigModal({
                 </strong>
                 <small>
                   {tps.length} levels ·{" "}
-                  {totalPercent === 100
-                    ? "100%"
-                    : `${formatPercent(totalPercent)}% entered, scaled`}
+                  {totalPercent === 100 ? "100%" : `${formatPercent(totalPercent)}% entered`}
                 </small>
               </div>
               <div className="config-resume-stat">

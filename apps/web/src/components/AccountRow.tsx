@@ -10,6 +10,7 @@ export function AccountRow({
     server: string;
     marginMode: string;
     heartbeatStatus: string;
+    eaVersion?: string;
     openPositionCount?: number;
     pendingOrderCount?: number;
   };
@@ -28,6 +29,10 @@ export function AccountRow({
             ·
           </span>
           <span>{account.marginMode}</span>
+          <span className="dot-sep" aria-hidden="true">
+            ·
+          </span>
+          <span>EA {account.eaVersion ?? "legacy/unknown"}</span>
         </span>
         <span className="account-row-stats">
           <span>

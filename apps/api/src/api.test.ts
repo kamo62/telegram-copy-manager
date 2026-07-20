@@ -105,6 +105,8 @@ async function configureProviderWithAccount(
       equity: 10000,
       marginMode: "HEDGING",
       availableSymbols: input.availableSymbols,
+      eaVersion: "1.40.0",
+      eaCapabilities: ["lane2-close-contract"],
     }),
     headers: { "content-type": "application/json" },
   });
@@ -419,6 +421,70 @@ describe("Telegram TC API", () => {
       balance: 10000,
       equity: 10000,
     });
+  });
+
+  test("routes a mapped account while holding only the linked account with an unavailable symbol", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter([
+        {
+          telegramMessageId: "mapping-isolation-1",
+          messageDate: "2026-07-20T10:00:00.000Z",
+          rawText: "BUY XAUUSD\nSL 4500\nTP 4520",
+        },
+      ]),
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "54870107",
+        server: "HFMarketsSA",
+        company: "HF Markets SA (Pty) Ltd",
+        currency: "ZAR",
+        balance: 20000,
+        equity: 20000,
+        marginMode: "HEDGING",
+        availableSymbols: ["EURUSD"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request(`/api/account-provider-links/mt5-54870107/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(await app.runTelegramIngestionOnce()).toMatchObject({ queued: 1 });
+    const signals = await json<{
+      queue: Array<{
+        accountId: string;
+        status: string;
+        heldReason?: string;
+        payload: { brokerSymbol?: string };
+      }>;
+    }>(await app.request("/api/signals"));
+    expect(signals.queue).toContainEqual(
+      expect.objectContaining({
+        accountId: "mt5-63442826",
+        status: "PENDING",
+        payload: expect.objectContaining({ brokerSymbol: "XAUUSD" }),
+      }),
+    );
+    expect(signals.queue).toContainEqual(
+      expect.objectContaining({
+        accountId: "mt5-54870107",
+        status: "HELD",
+        heldReason: "SYMBOL_MAPPING_UNAVAILABLE",
+      }),
+    );
   });
 
   test("approved logical trades keep their source Telegram message lineage", async () => {
@@ -1004,6 +1070,37 @@ describe("Telegram TC API", () => {
       await app.request("/api/dashboard"),
     );
     expect(dashboard.signalQueue.some((item) => item.status === "HELD")).toBe(true);
+  });
+
+  test("defaults a new Equity Guardian to off until an operator sets a threshold", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "900100200",
+        server: "MetaQuotes-Demo",
+        company: "MetaQuotes Ltd",
+        currency: "USD",
+        balance: 100,
+        equity: 50,
+        marginMode: "HEDGING",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const before = await json<{
+      guardians: Array<{ enabled: boolean; paused: boolean; threshold: number }>;
+    }>(await app.request("/api/equity-guardian"));
+    expect(before.guardians).toContainEqual(
+      expect.objectContaining({ enabled: false, paused: false, threshold: 0 }),
+    );
+    const enabled = await json<{ guardian: { enabled: boolean; threshold: number } }>(
+      await app.request("/api/equity-guardian/mt5-900100200", {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: true, threshold: 10 }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(enabled.guardian).toMatchObject({ enabled: true, threshold: 10 });
   });
 
   test("releases guardian-held work at market on safe unpause when configured", async () => {
@@ -1981,6 +2078,187 @@ describe("Telegram TC API", () => {
     expect(approval.status).toBe(422);
     expect((await json<{ error: string }>(approval)).error).toContain(
       "Multiple open logical trades",
+    );
+  });
+
+  test("replays VIP Gold order, activation reply, and close without a phantom trade", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-vipgold-lifecycle-"));
+    const databasePath = join(tempDir, "app.db");
+    const order =
+      "NEW ORDER - XAUUSD Buy Stop 🚀\n# 300424022\n\n----------{ NEW }----------\nEntry: 4023.80 [Lots: 0.01]\nSL:    4017.80\nTP:    4035.80\n---------------------------";
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter([
+          { telegramMessageId: "484", messageDate: "2026-07-19T22:15:00.000Z", rawText: order },
+          {
+            telegramMessageId: "485",
+            replyToMessageId: "484",
+            messageDate: "2026-07-20T02:48:49.000Z",
+            quotedText: order,
+            rawText: "🚀 Buy Stop activated 🚀\n# 300424022",
+          },
+          {
+            telegramMessageId: "487",
+            replyToMessageId: "484",
+            messageDate: "2026-07-20T02:48:58.000Z",
+            quotedText: order,
+            rawText:
+              "🟢 CLOSED - XAUUSD Buy 🟢\n# 300424022\n\n--------{ CLOSED }---------\nProfit: 3.98$\nProfit: 0.38%",
+          },
+        ]),
+        telegramPollingEnabled: false,
+      });
+      await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.runTelegramIngestionOnce();
+
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const trades = db.query("SELECT id, data_json FROM logical_trades").all() as Array<{
+          id: string;
+          data_json: string;
+        }>;
+        const queues = db
+          .query("SELECT logical_trade_id, payload_json FROM queue_items ORDER BY created_at")
+          .all() as Array<{ logical_trade_id: string; payload_json: string }>;
+        expect(trades).toHaveLength(1);
+        expect(JSON.parse(trades[0]!.data_json).providerOrderId).toBe("300424022");
+        expect(queues).toHaveLength(2);
+        expect(
+          queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE"),
+        ).toEqual([expect.objectContaining({ logical_trade_id: trades[0]!.id })]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("uses a reply link to disambiguate duplicate provider order ids", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-reply-lifecycle-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter([
+          {
+            telegramMessageId: "1",
+            messageDate: "2026-07-20T02:00:00.000Z",
+            rawText: "BUY XAUUSD 4500\nSL 4490\nTP 4520\n# 300424022",
+          },
+          {
+            telegramMessageId: "2",
+            messageDate: "2026-07-20T02:01:00.000Z",
+            rawText: "BUY XAUUSD 4501\nSL 4491\nTP 4521\n# 300424022",
+          },
+          {
+            telegramMessageId: "3",
+            replyToMessageId: "1",
+            messageDate: "2026-07-20T02:02:00.000Z",
+            rawText: "CLOSED - XAUUSD Buy\n# 300424022",
+          },
+        ]),
+        telegramPollingEnabled: false,
+      });
+      await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.runTelegramIngestionOnce();
+
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const queues = db
+          .query("SELECT logical_trade_id, payload_json FROM queue_items ORDER BY created_at")
+          .all() as Array<{ logical_trade_id: string; payload_json: string }>;
+        const close = queues.find(
+          (queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE",
+        );
+        expect(close?.logical_trade_id).toBe(queues[0]!.logical_trade_id);
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not route a reused provider order id to another symbol", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-symbol-lifecycle-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter([
+          {
+            telegramMessageId: "1",
+            messageDate: "2026-07-20T02:00:00.000Z",
+            rawText: "BUY EURUSD 1.0850\nSL 1.0800\nTP 1.0950",
+          },
+          {
+            telegramMessageId: "2",
+            messageDate: "2026-07-20T02:01:00.000Z",
+            rawText: "BUY XAUUSD 4500\nSL 4490\nTP 4520\n# 300424022",
+          },
+          {
+            telegramMessageId: "3",
+            messageDate: "2026-07-20T02:02:00.000Z",
+            rawText: "CLOSED - EURUSD Buy\n# 300424022",
+          },
+        ]),
+        telegramPollingEnabled: false,
+      });
+      await configureProviderWithAccount(app, { availableSymbols: ["EURUSD.raw", "XAUUSD"] });
+      await app.runTelegramIngestionOnce();
+
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const queues = db
+          .query("SELECT logical_trade_id, payload_json FROM queue_items ORDER BY created_at")
+          .all() as Array<{ logical_trade_id: string; payload_json: string }>;
+        const close = queues.find(
+          (queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE",
+        );
+        expect(close?.logical_trade_id).toBe(queues[0]!.logical_trade_id);
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("records an error audit for an ambiguous dropped close with default settings", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter([
+        {
+          telegramMessageId: "1",
+          messageDate: "2026-07-20T02:00:00.000Z",
+          rawText: "BUY XAUUSD\nSL 4017\nTP 4035",
+        },
+        {
+          telegramMessageId: "2",
+          messageDate: "2026-07-20T02:01:00.000Z",
+          rawText: "BUY XAUUSD\nSL 4016\nTP 4036",
+        },
+        {
+          telegramMessageId: "3",
+          messageDate: "2026-07-20T02:02:00.000Z",
+          rawText: "🟢 CLOSED - XAUUSD Buy 🟢",
+        },
+      ]),
+      telegramPollingEnabled: false,
+    });
+    await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.runTelegramIngestionOnce();
+    const audit = await json<{ logs: Array<{ eventType: string; level: string }> }>(
+      await app.request("/api/audit-logs?event=telegram.ingest.queue-failed"),
+    );
+    expect(audit.logs).toContainEqual(
+      expect.objectContaining({ eventType: "telegram.ingest.queue-failed", level: "error" }),
     );
   });
 
@@ -3970,6 +4248,7 @@ describe("Telegram TC API", () => {
         alertOnEaOffline: boolean;
         alertOnExecFailed: boolean;
         alertOnHeld: boolean;
+        alertOnDroppedLifecycle: boolean;
         alertOnTelegramStall: boolean;
       };
     }>(await app.request("/api/settings"));
@@ -3996,6 +4275,7 @@ describe("Telegram TC API", () => {
       alertOnEaOffline: false,
       alertOnExecFailed: false,
       alertOnHeld: false,
+      alertOnDroppedLifecycle: true,
       alertOnTelegramStall: false,
     });
 
@@ -4182,6 +4462,90 @@ describe("Telegram TC API", () => {
     }
   });
 
+  test("refreshes cached performance when a heartbeat ages offline", async () => {
+    const originalDateNow = Date.now;
+    const now = originalDateNow();
+    try {
+      const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "54945785",
+          server: "HF-Live",
+          company: "HF",
+          currency: "USD",
+          balance: 1000,
+          equity: 1000,
+          profit: 0,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const immediate = await json<{
+        accountPerformance: { heartbeatStatus: string; currentBalance: number | null };
+      }>(await app.request("/api/dashboard"));
+      expect(immediate.accountPerformance).toMatchObject({
+        heartbeatStatus: "online",
+        currentBalance: 1000,
+      });
+
+      Date.now = () => now + 145 * 60_000;
+      const stale = await json<{
+        accountPerformance: {
+          heartbeatStatus: string;
+          currentBalance: number | null;
+          currentEquity: number | null;
+          currentProfit: number | null;
+        };
+      }>(await app.request("/api/dashboard"));
+      expect(stale.accountPerformance).toMatchObject({
+        heartbeatStatus: "offline",
+        currentBalance: null,
+        currentEquity: null,
+        currentProfit: null,
+      });
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("holds new open trades for a silent account instead of queueing them for reconnect", async () => {
+    const originalDateNow = Date.now;
+    const now = originalDateNow();
+    try {
+      const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      Date.now = () => now + 145 * 60_000;
+      const parsed = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "BUY XAUUSD NOW\nSL 4010\nTP 4040",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const approval = await json<{ status: string }>(
+        await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(approval.status).toBe("HELD");
+      const held = await json<{ items: Array<{ heldReason: string }> }>(
+        await app.request("/api/queue-items/held"),
+      );
+      expect(held.items).toContainEqual(expect.objectContaining({ heldReason: "EA_OFFLINE" }));
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
   test("mixed-currency performance blanks unsupported currency aggregates", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
 
@@ -4301,6 +4665,40 @@ describe("Telegram TC API", () => {
       { leg: 3, percentage: 25, strategy: { kind: "no-change" } },
       { leg: 4, percentage: 25, strategy: { kind: "no-change" } },
     ]);
+  });
+
+  test("uses the configured work-from TP as the sole closing target", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+    await app.request("/api/providers/provider-alpha", {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.01,
+        workFromTpLeg: 2,
+        takeProfitLevels: [
+          { leg: 1, percentage: 50, strategy: { kind: "no-change" } },
+          { leg: 2, percentage: 50, strategy: { kind: "no-change" } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: "provider-alpha",
+          rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    ).toHaveProperty("status", 200);
+    const payload = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+    expect(payload).toContain("tp1Allocation=0");
+    expect(payload).toContain("tp2Allocation=100");
   });
 
   test("normalizes null provider TP config without failing provider updates", async () => {
@@ -5088,6 +5486,77 @@ describe("Telegram TC API", () => {
     ).toMatchObject({ status: "excluded", hint: "Symbol is excluded for this account" });
   });
 
+  test("parses a reply cancel before its comment-only replacement and infers the replacement limit", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ lockedSymbol: "XAUUSD" }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/symbol-mappings/aliases", {
+      method: "PUT",
+      body: JSON.stringify({ scope: "global", rawSymbol: "GOLD", canonicalSymbol: "XAUUSD" }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [],
+        orders: [],
+        symbols: [{ symbol: "XAUUSD", bid: 4019.8, ask: 4020.2, point: 0.01 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{
+      parsedSignalIds: string[];
+      results: Array<{
+        commandType: string;
+        direction?: string;
+        entry?: { from: number };
+        mappingStatus?: string;
+        brokerSymbol?: string;
+      }>;
+    }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText:
+            "Quoted signal:\nGold sell\n\n4028-29\n\nSl 4034\n\nTp 4023\nTp 4016\nTp 4010\n\nComment:\nCancel this … price dropped from 24 instead of 28 soo it's technically missed . We can sell from 4043 instead",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    expect(parsed.results).toMatchObject([
+      { commandType: "CANCEL_PENDING" },
+      {
+        commandType: "OPEN_TRADE",
+        direction: "SELL",
+        entry: { from: 4043 },
+        mappingStatus: "mapped",
+        brokerSymbol: "XAUUSD",
+      },
+    ]);
+    const approval = await app.request(`/api/signals/${parsed.parsedSignalIds[1]}/approve`, {
+      method: "POST",
+    });
+    expect(approval.status).toBe(200);
+    expect(await json<{ status: string }>(approval)).toMatchObject({ status: "PENDING" });
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("commandType=OPEN_TRADE");
+    expect(work).toContain("orderType=LIMIT");
+    expect(work).toContain("entryFrom=4043");
+  });
+
   test("merges account symbol mapping edits with EA-reported symbols", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
 
@@ -5173,7 +5642,65 @@ describe("Telegram TC API", () => {
     expect(parsed.result.mappingStatus).toBe("mapped");
   });
 
-  test("names the target account and symbol when approval is blocked by mapping review", async () => {
+  test("does not infer a global suffix from one HF-Markets-shaped outlier", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const majors = ["EURUSD", "GBPUSD", "AUDUSD"];
+    const availableSymbols = [
+      ...Array.from({ length: 386 }, (_, index) => majors[index % majors.length]!),
+      "XAUUSDb",
+    ];
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "700001",
+        server: "HF-Markets",
+        company: "HF Markets",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const mappings = await json<{
+      accountMappings: Array<{ accountId: string; prefix: string; suffix: string }>;
+    }>(await app.request("/api/symbol-mappings"));
+    expect(mappings.accountMappings).toContainEqual(
+      expect.objectContaining({ accountId: "mt5-700001", prefix: "", suffix: "" }),
+    );
+  });
+
+  test("infers a .raw suffix when it covers a clear majority of a broker inventory", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const majors = ["EURUSD", "GBPUSD", "AUDUSD"];
+    const availableSymbols = [
+      ...Array.from({ length: 300 }, (_, index) => `${majors[index % majors.length]}.raw`),
+      ...Array.from({ length: 87 }, (_, index) => majors[index % majors.length]!),
+    ];
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "700002",
+        server: "Trive",
+        company: "Trive",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const mappings = await json<{
+      accountMappings: Array<{ accountId: string; prefix: string; suffix: string }>;
+    }>(await app.request("/api/symbol-mappings"));
+    expect(mappings.accountMappings).toContainEqual(
+      expect.objectContaining({ accountId: "mt5-700002", prefix: "", suffix: ".raw" }),
+    );
+  });
+
+  test("holds an approval when its only target lacks a symbol mapping", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, { availableSymbols: ["EURUSD"] });
 
@@ -5192,17 +5719,35 @@ describe("Telegram TC API", () => {
     const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
       method: "POST",
     });
-    const body = await json<{ error: string }>(approval);
-
-    expect(approval.status).toBe(422);
-    expect(body.error).toContain("mt5-63442826");
-    expect(body.error).toContain("XAUUSD");
-    expect(body.error).toContain("mapping-unavailable");
+    expect(approval.status).toBe(200);
+    expect(await json<{ status: string }>(approval)).toMatchObject({ status: "HELD" });
   });
 
   test("matches lifecycle commands to an existing logical trade and rejects duplicate management messages", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        positions: [
+          {
+            ticket: "70001",
+            symbol: "EURUSD.raw",
+            type: 0,
+            volume: 0.1,
+            openPrice: 1.085,
+            sl: 1.081,
+            tp: 0,
+            magic: 26050901,
+            isExternal: false,
+            comment: "ttc:demo-1",
+          },
+        ],
+        orders: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
 
     const firstParse = await json<{ parsedSignalId: string; reviewRequired: boolean }>(
       await app.request("/api/parser/parse", {
@@ -5244,6 +5789,375 @@ describe("Telegram TC API", () => {
       },
     );
     expect(duplicateApprove.status).toBe(409);
+  });
+
+  test("routes a close of a pending trade to cancellation and waits for broker confirmation", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    const opened = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY XAUUSD STOP @ 4500\nSL 4490\nTP 4520",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const opening = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request(`/api/signals/${opened.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    await app.request("/api/mt5/poll-line?accountId=mt5-63442826");
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: opening.queueItemId,
+        status: "EXECUTED",
+        retcode: 10008,
+        retcodeExternal: 0,
+        brokerComment: "pending accepted",
+        orderTicket: "50001",
+        requestedPrice: 4500,
+        filledPrice: 0,
+        requestedVolume: 0.04,
+        filledVolume: 0,
+        remainingVolume: 0.04,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const closing = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "CLOSED - XAUUSD Buy",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const cancellation = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${closing.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("commandType=CANCEL_PENDING");
+    expect(work).not.toContain("targetOrderTicket=50001");
+    expect(
+      (
+        await json<{ logicalTrades: Array<{ id: string; status: string }> }>(
+          await app.request("/api/dashboard"),
+        )
+      ).logicalTrades.find((trade) => trade.id === opening.logicalTradeId)?.status,
+    ).toBe("PENDING");
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: cancellation.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "pending order removed",
+        orderTicket: "50001",
+        requestedVolume: 0,
+        filledVolume: 0,
+        remainingVolume: 0,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(
+      (
+        await json<{ logicalTrades: Array<{ id: string; status: string }> }>(
+          await app.request("/api/dashboard"),
+        )
+      ).logicalTrades.find((trade) => trade.id === opening.logicalTradeId)?.status,
+    ).toBe("CANCELLED");
+  });
+
+  test("records a partial market open at its actual fill and resizes its TP legs", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const open = await json<{ item: { id: string } | null }>(
+      await app.request("/api/mt5/poll?accountId=mt5-100200300"),
+    );
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: open.item!.id,
+        status: "PARTIAL",
+        retcode: 10010,
+        retcodeExternal: 0,
+        brokerComment: "partial IOC fill",
+        orderTicket: "70001",
+        positionTicket: "70001",
+        dealTicket: "70001",
+        requestedVolume: 0.1,
+        filledVolume: 0.01,
+        remainingVolume: 0.09,
+        requestedPrice: 1.085,
+        filledPrice: 1.085,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const orders = await json<{ orders: Array<{ requestedVolume: number; filledVolume: number }> }>(
+      await app.request("/api/trades/trade-demo-1/broker-orders"),
+    );
+    expect(orders.orders[0]).toMatchObject({ requestedVolume: 0.1, filledVolume: 0.01 });
+    const dashboard = await json<{
+      logicalTrades: Array<{
+        id: string;
+        status: string;
+        legs: Array<{ leg: number; volume?: number; allocationPercent: number; status: string }>;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    const trade = dashboard.logicalTrades.find((item) => item.id === "trade-demo-1");
+    expect(trade?.status).toBe("OPEN");
+    expect(trade?.legs[0]).toMatchObject({
+      leg: 1,
+      volume: 0.01,
+      allocationPercent: 100,
+      status: "OPEN",
+    });
+    expect(trade?.legs.slice(1)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ leg: 2, allocationPercent: 0, status: "SKIPPED" }),
+      ]),
+    );
+  });
+
+  test("holds lane-2 close work for an EA that reports no version or capability", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const open = await json<{ item: { id: string } | null }>(
+      await app.request("/api/mt5/poll?accountId=mt5-100200300"),
+    );
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: open.item!.id,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "opened",
+        orderTicket: "70001",
+        positionTicket: "70001",
+        dealTicket: "70001",
+        requestedVolume: 0.1,
+        filledVolume: 0.1,
+        remainingVolume: 0.1,
+        requestedPrice: 1.085,
+        filledPrice: 1.085,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        balance: 10000,
+        equity: 10000,
+        availableSymbols: ["EURUSD.raw"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId: "provider-alpha", rawText: "Close EURUSD" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const close = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text(),
+    ).toContain("status=NO_WORK");
+    const dashboard = await json<{
+      mt5Accounts: Array<{ id: string; eaVersion?: string; eaCapabilities?: string[] }>;
+    }>(await app.request("/api/dashboard"));
+    expect(dashboard.mt5Accounts[0]?.eaVersion).toBeUndefined();
+    expect(dashboard.mt5Accounts[0]?.eaCapabilities).toEqual([]);
+    const queue = await json<{ queue: Array<{ id: string; status: string; heldReason?: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        id: close.queueItemId,
+        status: "HELD",
+        heldReason: "EA_CAPABILITY_UNAVAILABLE",
+      }),
+    );
+  });
+
+  test("holds a partial close with actual fill evidence instead of terminalizing the trade", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const open = await json<{ item: { id: string } | null }>(
+      await app.request("/api/mt5/poll?accountId=mt5-100200300"),
+    );
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: open.item!.id,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "opened",
+        orderTicket: "70001",
+        positionTicket: "70001",
+        dealTicket: "70001",
+        requestedVolume: 0.03,
+        filledVolume: 0.03,
+        remainingVolume: 0.03,
+        requestedPrice: 1.085,
+        filledPrice: 1.085,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId: "provider-alpha", rawText: "Close EURUSD" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const close = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: close.queueItemId,
+        status: "PARTIAL",
+        retcode: 10010,
+        retcodeExternal: 0,
+        brokerComment: "partial IOC fill",
+        orderTicket: "70002",
+        positionTicket: "70001",
+        dealTicket: "70002",
+        requestedVolume: 0.03,
+        filledVolume: 0.01,
+        remainingVolume: 0.02,
+        requestedPrice: 1.085,
+        filledPrice: 1.0849,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const dashboard = await json<{ logicalTrades: Array<{ id: string; status: string }> }>(
+      await app.request("/api/dashboard"),
+    );
+    const queue = await json<{ queue: Array<{ id: string; status: string; heldReason?: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(dashboard.logicalTrades.find((trade) => trade.id === "trade-demo-1")?.status).toBe(
+      "OPEN",
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        id: close.queueItemId,
+        status: "HELD",
+        heldReason: "PARTIAL_FILL",
+      }),
+    );
+  });
+
+  test("holds a lost percentage-close delivery rather than replaying it against the remainder", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-lifecycle-unknown-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({ databasePath, seedDemoData: true });
+      const open = await json<{ item: { id: string } | null }>(
+        await app.request("/api/mt5/poll?accountId=mt5-100200300"),
+      );
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-100200300",
+          queueItemId: open.item!.id,
+          status: "EXECUTED",
+          retcode: 10009,
+          retcodeExternal: 0,
+          brokerComment: "opened",
+          orderTicket: "70001",
+          positionTicket: "70001",
+          dealTicket: "70001",
+          requestedVolume: 0.04,
+          filledVolume: 0.04,
+          remainingVolume: 0.04,
+          requestedPrice: 1.085,
+          filledPrice: 1.085,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-100200300",
+          positions: [
+            {
+              ticket: "70001",
+              symbol: "EURUSD.raw",
+              type: 0,
+              volume: 0.04,
+              openPrice: 1.085,
+              sl: 1.081,
+              tp: 0,
+              magic: 26050901,
+              isExternal: false,
+              comment: "ttc:demo-1",
+            },
+          ],
+          orders: [],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const parsed = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({ providerId: "provider-alpha", rawText: "Close half EURUSD" }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const close = await json<{ queueItemId: string }>(
+        await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      const firstWork = await (
+        await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
+      ).text();
+      expect(firstWork).toContain("targetRemainingVolume=0.02");
+      expect(firstWork).toContain(`idempotencyKey=${close.queueItemId}`);
+
+      const db = new Database(databasePath);
+      db.query("UPDATE queue_items SET leased_at = ? WHERE id = ?").run(
+        new Date(0).toISOString(),
+        close.queueItemId,
+      );
+      db.close();
+
+      const retryWork = await (
+        await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
+      ).text();
+      expect(retryWork).toContain("status=NO_WORK");
+      const queue = await json<{
+        queue: Array<{ id: string; status: string; heldReason?: string }>;
+      }>(await app.request("/api/signals"));
+      expect(queue.queue).toContainEqual(
+        expect.objectContaining({
+          id: close.queueItemId,
+          status: "HELD",
+          heldReason: "DELIVERY_UNKNOWN",
+        }),
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("queues trailing-stop lifecycle commands with pips or points preserved for the EA", async () => {
@@ -5367,7 +6281,7 @@ describe("Telegram TC API", () => {
     expect(pollLine).toContain("partialCloseVolume=0.03");
   });
 
-  test("sends runner configuration to MT5 for virtual-TP work and blocks split-order runner mode", async () => {
+  test("preserves percent-risk runner configuration for MT5 and blocks split-order runner mode", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, {
       availableSymbols: ["EURUSD.raw"],
@@ -5375,8 +6289,8 @@ describe("Telegram TC API", () => {
     await app.request(`/api/providers/${providerId}`, {
       method: "PATCH",
       body: JSON.stringify({
-        riskMode: "fixed",
-        riskAmount: 0.1,
+        riskMode: "percent",
+        riskAmount: 1,
         runner: { enabled: true, lotSize: 0.02, slBehavior: "trail", trailPips: 25 },
       }),
       headers: { "content-type": "application/json" },
@@ -5422,6 +6336,7 @@ describe("Telegram TC API", () => {
 
     const pollLine = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
     expect(pollLine).toContain("executionMode=VIRTUAL_TP");
+    expect(pollLine).toContain("volume=0");
     expect(pollLine).toContain("runnerEnabled=true");
     expect(pollLine).toContain("runnerVolume=0.02");
     expect(pollLine).toContain("runnerSlBehavior=trail");
@@ -5552,7 +6467,7 @@ describe("Telegram TC API", () => {
     });
   });
 
-  test("single configured TP without runner uses provider-picked Telegram TP when present", async () => {
+  test("retains unconfigured Telegram TP legs instead of silently dropping them", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, {
       availableSymbols: ["EURUSD.raw"],
@@ -5588,8 +6503,9 @@ describe("Telegram TC API", () => {
     expect(openWork).not.toContain("defaultTakeProfitValue=200");
     expect(openWork).toContain("runnerEnabled=false");
     expect(openWork).toContain("tp1=1.091");
-    expect(openWork).toContain("tp1Allocation=100");
-    expect(openWork).not.toContain("tp2=1.095");
+    expect(openWork).toContain("tp1Allocation=50");
+    expect(openWork).toContain("tp2=1.095");
+    expect(openWork).toContain("tp2Allocation=50");
 
     await app.request("/api/mt5/report", {
       method: "POST",
@@ -5640,11 +6556,11 @@ describe("Telegram TC API", () => {
     expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
     expect(closeWork).toContain("partialCloseKind=TP_LEG");
     expect(closeWork).toContain("partialCloseValue=1");
-    expect(closeWork).toContain("partialCloseVolume=0.02");
+    expect(closeWork).toContain("partialCloseVolume=0.01");
     expect(closeWork).toContain("targetPositionTicket=70001");
   });
 
-  test("single configured TP falls back to app default TP when Telegram only sends an unconfigured leg", async () => {
+  test("uses an unconfigured single Telegram TP at 100 percent", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, {
       availableSymbols: ["EURUSD.raw"],
@@ -5672,15 +6588,60 @@ describe("Telegram TC API", () => {
         headers: { "content-type": "application/json" },
       }),
     );
-    const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
-      method: "POST",
-    });
-    expect(approval.status).toBe(200);
+    const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const shortId = approval.logicalTradeId.replace(/^trade[_-]/, "");
 
     const openWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
-    expect(openWork).toContain("defaultTakeProfitValue=200");
-    expect(openWork).toContain("defaultTakeProfitUnit=PIPS");
-    expect(openWork).not.toContain("tp2=1.095");
+    expect(openWork).toContain("tp2=1.095");
+    expect(openWork).toContain("tp2Allocation=100");
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approval.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: `ttc:${shortId}`,
+        orderTicket: "70002",
+        positionTicket: "70002",
+        dealTicket: "70002",
+        requestedPrice: 1.086,
+        filledPrice: 1.086,
+        volume: 0.02,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [
+          {
+            ticket: "70002",
+            symbol: "EURUSD.raw",
+            type: 0,
+            volume: 0.02,
+            openPrice: 1.086,
+            sl: 1.081,
+            tp: 0,
+            magic: 26050901,
+            isExternal: false,
+            comment: `ttc:${shortId}`,
+          },
+        ],
+        orders: [],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.095, ask: 1.0952, point: 0.00001 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
+    expect(closeWork).toContain("partialCloseValue=2");
   });
 
   test("single configured TP without runner falls back to app default TP when no Telegram TP exists", async () => {
@@ -5767,6 +6728,91 @@ describe("Telegram TC API", () => {
     expect(pollLine).toContain("tp2StrategyKind=set-sl-to-tp");
     expect(pollLine).toContain("tp2StrategyReferenceLeg=1");
     expect(pollLine).toContain("tp2StrategyOffsetPips=1");
+  });
+
+  test("keeps KAL VIP zero-percent TP references for its TP1 SL move", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 50, strategy: { kind: "set-sl-to-tp", tpLeg: 2, offsetPips: 0 } },
+          { leg: 2, percentage: 0, strategy: { kind: "no-change" } },
+          { leg: 3, percentage: 0, strategy: { kind: "no-change" } },
+          { leg: 4, percentage: 50, strategy: { kind: "no-change" } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY XAUUSD @ 4500\nSL 4490\nTP1 4510\nTP2 4520\nTP3 4530\nTP4 4540",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const shortId = approval.logicalTradeId.replace(/^trade[_-]/, "");
+    const openWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(openWork).toContain("tp1Volume=0.01");
+    expect(openWork).toContain("tp2Volume=");
+    expect(openWork).toContain("tp4Volume=0.01");
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approval.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request executed",
+        orderTicket: "9001",
+        positionTicket: "9001",
+        dealTicket: "9001",
+        requestedPrice: 4500,
+        filledPrice: 4500,
+        volume: 0.02,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await sendGoldSnapshot(app, { shortId, bid: 4510, positionTicket: "9001" });
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    const closeQueueId = closeWork.match(/queueItemId=([^\n]+)/)?.[1];
+    expect(closeWork).toContain("partialCloseValue=1");
+    expect(closeQueueId).toBeDefined();
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: closeQueueId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: `ttc:${shortId}:tp1`,
+        orderTicket: "9002",
+        positionTicket: "9001",
+        dealTicket: "9002",
+        requestedPrice: 4510,
+        filledPrice: 4510,
+        volume: 0.01,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const slWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(slWork).toContain("commandType=MODIFY_SL");
+    expect(slWork).toContain("newStopLoss=4520");
   });
 
   test("records SELL broker history pips in the profitable direction", async () => {

@@ -93,6 +93,8 @@ export interface PartialCloseInstruction {
   value: number;
   allocationPercent?: number;
   volume?: number;
+  /** Absolute broker volume that must remain after a percentage close. */
+  targetRemainingVolume?: number;
 }
 
 export interface DistanceInstruction {
@@ -152,6 +154,7 @@ export interface LogicalTrade {
   matchedBrokerTickets?: string[];
   brokerComment?: string;
   lastSnapshotAt?: string;
+  providerOrderId?: string;
 }
 
 export interface TradeSource {
@@ -168,6 +171,7 @@ export interface TradeLeg {
   targetSource?: "explicit" | "default-distance";
   defaultDistance?: DistanceInstruction;
   allocationPercent: number;
+  volume?: number;
   strategy?: TakeProfitStrategy;
   status: "PLANNED" | "OPEN" | "HIT" | "CLOSED" | "SKIPPED" | "FAILED" | "UNKNOWN";
   brokerEvidence?: string;
@@ -220,6 +224,7 @@ export interface ExecutionQueueItem {
     targetOrderTicket?: string;
     targetPositionTicket?: string;
     targetDealTicket?: string;
+    idempotencyKey?: string;
     originalText: string;
   };
 }
@@ -519,7 +524,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const original = originalText.replace(/\r\n/g, "\n").trim();
   const candidate = extractSignalCandidate(original);
   const text = candidate.text;
-  const upper = text.toUpperCase();
+  const upper = text.replace(/[‘’]/g, "'").replace(/[“”]/g, '"').toUpperCase();
   const matchedPatternIds: string[] = [...candidate.matchedPatternIds];
   const warnings: string[] = [];
   const missingFields: string[] = [];
@@ -610,9 +615,21 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const lotSize = commandType === "OPEN_TRADE" ? extractLotSize(text) : undefined;
   const riskPercent = commandType === "OPEN_TRADE" ? extractRiskPercent(text) : undefined;
   direction ??= inferDirectionFromPrices(entry, stopLoss, takeProfits);
-  const rawSymbol = geometryInferred
+  let rawSymbol = geometryInferred
     ? context.geometryInferenceSymbol
     : extractRawSymbol(text, context, commandType);
+  if (
+    commandType === "MODIFY_TP" &&
+    (!rawSymbol ||
+      resolveSymbol(rawSymbol, context).mappingStatus !== "mapped" ||
+      !hasModifyTakeProfitPrice(text))
+  ) {
+    commandType = "NO_SIGNAL";
+    const pattern = matchedPatternIds.indexOf("lifecycle.modify-tp");
+    if (pattern !== -1) matchedPatternIds.splice(pattern, 1);
+    matchedPatternIds.push("noise.no-signal");
+    rawSymbol = undefined;
+  }
   const symbol = rawSymbol
     ? resolveSymbol(rawSymbol, context)
     : {
@@ -754,6 +771,32 @@ export function parseSignalTexts(
   }
 
   const base = parseSignalText(originalText, context);
+  // A reply can cancel the quoted pending order and replace it in the same comment.
+  // Parse only the explicit replacement phrase: the quoted block remains context-only.
+  const replacement =
+    candidate.quotedText && candidate.commentText && base.commandType === "CANCEL_PENDING"
+      ? candidate.commentText.match(/\b(?:WE\s+CAN\s+)?(BUY|SELL)\s+(?:FROM|AT)\s+(\d+(?:\.\d+)?)/i)
+      : undefined;
+  if (replacement) {
+    const replacementSignal = parseSignalText(`${replacement[1]} FROM ${replacement[2]}`, context);
+    if (
+      replacementSignal.commandType === "OPEN_TRADE" &&
+      replacementSignal.direction &&
+      replacementSignal.entry
+    ) {
+      return [
+        base,
+        {
+          ...replacementSignal,
+          originalText,
+          matchedPatternIds: [...replacementSignal.matchedPatternIds, "quote.comment-replacement"],
+          fingerprint: createMessageFingerprint(
+            `${originalText}\ncomment-replacement:${replacementSignal.direction}:${replacementSignal.entry.from}`,
+          ),
+        },
+      ];
+    }
+  }
   const prices = extractDirectionalZonePrices(candidate.text);
   if (base.commandType !== "OPEN_TRADE" || prices.length <= 1) return [base];
 
@@ -822,6 +865,7 @@ export function createLogicalTradeFromSignal(
       { commandType: signal.commandType, text: signal.originalText, at: new Date().toISOString() },
     ],
     openedAt: new Date().toISOString(),
+    providerOrderId: signal.providerOrderId,
   };
 }
 
@@ -844,22 +888,42 @@ export function matchLifecycleCommandToTrade(
     const sameProvider =
       !command.providerId || !trade.providerId || command.providerId === trade.providerId;
     const sameSymbol =
-      !command.canonicalSymbol ||
-      !trade.symbol.canonicalSymbol ||
-      command.canonicalSymbol === trade.symbol.canonicalSymbol;
+      command.canonicalSymbol && trade.symbol.canonicalSymbol
+        ? command.canonicalSymbol === trade.symbol.canonicalSymbol
+        : !command.brokerSymbol ||
+          !trade.symbol.brokerSymbol ||
+          command.brokerSymbol === trade.symbol.brokerSymbol;
     return active && sameProvider && sameSymbol;
   });
 
-  if (candidates.length === 1) {
+  // An explicit provider id is authoritative when the trade has one too. A
+  // different id must never fall back to a same-symbol close/cancel.
+  const idCompatibleCandidates = command.providerOrderId
+    ? candidates.filter(
+        (trade) => !trade.providerOrderId || trade.providerOrderId === command.providerOrderId,
+      )
+    : candidates;
+  const providerOrderCandidates = command.providerOrderId
+    ? idCompatibleCandidates.filter((trade) => trade.providerOrderId === command.providerOrderId)
+    : [];
+  if (providerOrderCandidates.length === 1) {
     return {
       status: "MATCHED",
-      tradeId: candidates[0]!.id,
+      tradeId: providerOrderCandidates[0]!.id,
+      confidence: 0.99,
+      requiresManualReview: false,
+    };
+  }
+  if (idCompatibleCandidates.length === 1) {
+    return {
+      status: "MATCHED",
+      tradeId: idCompatibleCandidates[0]!.id,
       confidence: command.canonicalSymbol ? 0.92 : 0.8,
       requiresManualReview: false,
     };
   }
 
-  if (candidates.length > 1) {
+  if (idCompatibleCandidates.length > 1) {
     return {
       status: "AMBIGUOUS",
       confidence: 0.45,
@@ -889,7 +953,7 @@ export function buildExecutionCommand(
   },
 ): ExecutionQueueItem {
   const takeProfits = withTakeProfitVolumes(
-    normalizeTakeProfitAllocations(signal.takeProfits, signal.commandType),
+    signal.takeProfits,
     signal.commandType,
     options.volume,
     options.runner,
@@ -922,6 +986,7 @@ export function buildExecutionCommand(
       executionMode: options.executionMode ?? "VIRTUAL_TP",
       volume: options.volume,
       riskPercent: options.riskPercent,
+      idempotencyKey: options.id,
       originalText: signal.originalText,
     },
   };
@@ -1022,23 +1087,31 @@ function normalizeFrenchVocabulary(text: string): string {
 function extractSignalCandidate(text: string) {
   text = normalizeFrenchVocabulary(text);
   const quoted = text.match(/Quoted signal:\n([\s\S]*?)(?:\n\nComment:\n([\s\S]*))?$/i);
-  if (
-    quoted?.[1] &&
-    /\b(PUT\s+THIS\s+BACK|PUT\s+.*BACK|REINSTATE|BACK\s+ON)\b/i.test(quoted[2] ?? "")
-  ) {
+  // A quoted block is context, never an instruction. The ONLY comment that re-opens it
+  // is an explicit put-back. Anything else — ordinary reply prose, an empty comment, or
+  // no comment at all — must fall through to the comment (or to nothing), because
+  // re-opening a quoted order is exactly how a "Buy Stop activated" notice once created
+  // a phantom duplicate trade. The reinstatement phrases are matched narrowly: a loose
+  // `BACK ON` also matched "I will be back on Monday" and reopened the quoted order.
+  if (quoted?.[1]) {
+    const comment = quoted[2] ?? "";
+    if (
+      /\b(?:PUT\s+(?:THIS|IT|THAT)\s+BACK|REINSTATE|BACK\s+ON\s+(?:THIS|IT|THE\s+(?:SIGNAL|TRADE|ORDER)))\b/i.test(
+        comment,
+      )
+    ) {
+      return {
+        text: quoted[1].trim(),
+        matchedPatternIds: ["quote.reinstated-signal"],
+        quotedText: quoted[1].trim(),
+        commentText: comment.trim(),
+      };
+    }
     return {
-      text: quoted[1].trim(),
-      matchedPatternIds: ["quote.reinstated-signal"],
-      quotedText: quoted[1].trim(),
-      commentText: quoted[2]?.trim(),
-    };
-  }
-  if (quoted?.[1] && quoted[2]) {
-    return {
-      text: quoted[2].trim(),
+      text: comment.trim(),
       matchedPatternIds: ["quote.reply-context"],
       quotedText: quoted[1].trim(),
-      commentText: quoted[2].trim(),
+      commentText: comment.trim(),
     };
   }
 
@@ -1060,6 +1133,10 @@ function extractSignalCandidate(text: string) {
 }
 
 function detectCommandType(upper: string, matchedPatternIds: string[]): CommandType {
+  if (isDeferredOrNegatedInstruction(upper)) {
+    matchedPatternIds.push("noise.deferred-or-negated");
+    return "NO_SIGNAL";
+  }
   if (isEducationOrAnalysisOnly(upper)) {
     matchedPatternIds.push("noise.education-analysis");
     return "NO_SIGNAL";
@@ -1071,9 +1148,25 @@ function detectCommandType(upper: string, matchedPatternIds: string[]): CommandT
   // "Deleted <side> <type> on <symbol> # <id>" is a pending-order cancellation,
   // not a new open. Without this it parses as a BUY/SELL with the order id read
   // as an entry price. Keyed to the order id downstream via providerOrderId.
-  if (/\bDELETED\s+(?:BUY|SELL)\b/.test(upper)) {
+  if (
+    /\b(?:DELETED|CANCELLED|CANCELED)\b/.test(upper) &&
+    /\b(?:BUY|SELL)\s+(?:LIMIT|STOP)\b/.test(upper)
+  ) {
     matchedPatternIds.push("lifecycle.deleted-cancel");
     return "CANCEL_PENDING";
+  }
+  const activationNotice = upper
+    .replace(/[^A-Z0-9#\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    /^(?:BUY|SELL)\s+(?:LIMIT|STOP)\s+(?:ACTIVATED|TRIGGERED|FILLED)(?:\s*#\s*\d+)?$/.test(
+      activationNotice,
+    ) ||
+    /^(?:ACTIVATED|TRIGGERED|FILLED|ORDER\s+FILLED)$/.test(activationNotice)
+  ) {
+    matchedPatternIds.push("lifecycle.activation");
+    return "NO_SIGNAL";
   }
   // "CLOSED - <symbol> <side>" (with the "{ CLOSED }" block / profit report) is the
   // provider closing its position. Align by closing our matching trade.
@@ -1133,6 +1226,27 @@ function detectCommandType(upper: string, matchedPatternIds: string[]): CommandT
   if (hasOpenTradeIntent(upper)) return "OPEN_TRADE";
   matchedPatternIds.push("noise.no-signal");
   return "NO_SIGNAL";
+}
+
+function hasModifyTakeProfitPrice(text: string) {
+  return /\bTP\s*[1-4]?\b(?:(?!\b(?:PIPS?|POINTS?|PTS?)\b).){0,48}?\b\d+(?:\.\d+)?\b(?!\s*(?:PIPS?|POINTS?|PTS?)\b)/i.test(
+    text,
+  );
+}
+
+/**
+ * Commentary that mentions a direction without instructing a trade: "not now",
+ * "wait for NFP", "education only". Providers mix banter with signals in the same
+ * channel, and `isCloseCommand` treats a leading CLOSE as a command, so
+ * "Close watch on Gold today; wait for NFP" would otherwise close a live position.
+ * A message carrying real levels (SL/TP followed by a price) is a signal, never
+ * commentary, so it is exempt.
+ */
+function isDeferredOrNegatedInstruction(upper: string): boolean {
+  if (/\b(?:SL|S\/L|STOP\s*LOSS|TP\s*\d?|TAKE\s*PROFIT)\b\s*[:@-]?\s*\d/.test(upper)) return false;
+  return /\b(?:NOT\s+NOW|DO\s+NOT|DON'?T|NO\s+TRADE|NOT\s+A\s+SIGNAL|WAIT\s+FOR|ONLY\s+AFTER|AFTER\s+CONFIRMATION|EDUCATION\s+ONLY|FOR\s+EXAMPLE|JUST\s+AN\s+EXAMPLE|HYPOTHETICAL)\b/.test(
+    upper,
+  );
 }
 
 function isEducationOrAnalysisOnly(upper: string): boolean {
@@ -1675,24 +1789,17 @@ function calculateConfidence(input: {
   return Math.max(0, Math.min(0.99, Number(score.toFixed(2))));
 }
 
-function normalizeAllocation(allocation: number[] | undefined, takeProfitCount: number): number[] {
-  if (allocation?.length) return allocation;
-  if (takeProfitCount <= 0) return [];
-  const equal = Math.floor(100 / takeProfitCount);
-  const values = Array.from({ length: takeProfitCount }, () => equal);
-  values[values.length - 1]! += 100 - values.reduce((sum, value) => sum + value, 0);
-  return values;
-}
-
 function logicalTradeLegs(signal: ParsedSignal, allocationInput?: number[]): TradeLeg[] {
   if (signal.takeProfits.length > 0) {
-    const allocation = normalizeAllocation(allocationInput, signal.takeProfits.length);
+    const allocation =
+      allocationInput ?? signal.takeProfits.map((target) => target.allocationPercent);
     return signal.takeProfits.map((target, index) => ({
       leg: target.leg,
       targetPrice: target.price,
       targetSource: target.targetSource ?? "explicit",
       allocationPercent: allocation[index] ?? target.allocationPercent,
       strategy: target.strategy,
+      volume: target.volume,
       status: "PLANNED",
     }));
   }
@@ -1712,21 +1819,7 @@ function logicalTradeLegs(signal: ParsedSignal, allocationInput?: number[]): Tra
   return [];
 }
 
-function normalizeTakeProfitAllocations(
-  takeProfits: TakeProfitTarget[],
-  commandType: CommandType,
-): TakeProfitTarget[] {
-  if (commandType !== "OPEN_TRADE" || takeProfits.length === 0) {
-    return takeProfits;
-  }
-  const allocation = normalizeAllocation(undefined, takeProfits.length);
-  return takeProfits.map((target, index) => ({
-    ...target,
-    allocationPercent: allocation[index] ?? target.allocationPercent,
-  }));
-}
-
-function withTakeProfitVolumes(
+export function withTakeProfitVolumes(
   takeProfits: TakeProfitTarget[],
   commandType: CommandType,
   totalVolume?: number,
@@ -1738,11 +1831,31 @@ function withTakeProfitVolumes(
 
   const runnerVolume = runner?.enabled ? Math.min(runner.lotSize, totalVolume) : 0;
   const tradedVolume = Math.max(0, totalVolume - runnerVolume);
-  const volumes = splitVolumeByCent(tradedVolume, takeProfits.length);
-  return takeProfits.map((target, index) => ({
-    ...target,
-    volume: volumes[index],
-  }));
+  const actionable = takeProfits.filter(
+    (target) => (target.price ?? 0) > 0 && target.allocationPercent > 0,
+  );
+  const tradeableCount = Math.min(actionable.length, Math.round(tradedVolume * 100));
+  const tradeable = actionable.slice(0, tradeableCount);
+  const volumes = splitVolumeByAllocation(tradedVolume, tradeable);
+  const byLeg = new Map(
+    tradeable.map((target, index) => [
+      target.leg,
+      // Volumes are the executable plan. Reflect their cent-rounded shares in
+      // the payload rather than leaving percentages that ask the close path to
+      // do a different calculation.
+      {
+        volume: volumes[index] ?? 0,
+        allocationPercent:
+          tradedVolume > 0 ? Number((((volumes[index] ?? 0) / tradedVolume) * 100).toFixed(2)) : 0,
+      },
+    ]),
+  );
+  return takeProfits
+    .filter((target) => target.allocationPercent <= 0 || byLeg.has(target.leg))
+    .map((target) => {
+      const planned = byLeg.get(target.leg);
+      return planned ? { ...target, ...planned } : { ...target, volume: undefined };
+    });
 }
 
 function withPartialCloseVolume(
@@ -1765,7 +1878,8 @@ function normalizeRunnerConfig(
   runner: RunnerConfig | undefined,
   totalVolume?: number,
 ): RunnerConfig | undefined {
-  if (!runner?.enabled || !totalVolume) return undefined;
+  if (!runner?.enabled) return undefined;
+  if (!totalVolume) return runner;
   const lotSize = Math.min(Math.max(0, runner.lotSize), totalVolume);
   if (lotSize <= 0) return undefined;
   return {
@@ -1776,13 +1890,34 @@ function normalizeRunnerConfig(
   };
 }
 
-function splitVolumeByCent(totalVolume: number, count: number): number[] {
+function splitVolumeByAllocation(totalVolume: number, targets: TakeProfitTarget[]): number[] {
   const totalCents = Math.round(totalVolume * 100);
-  const baseCents = Math.floor(totalCents / count);
-  const remainder = totalCents - baseCents * count;
-  return Array.from({ length: count }, (_, index) =>
-    Number(((baseCents + (index < remainder ? 1 : 0)) / 100).toFixed(2)),
-  );
+  if (totalCents <= 0 || targets.length === 0) return [];
+  const totalAllocation = targets.reduce((sum, target) => sum + target.allocationPercent, 0);
+  const baseCents = Array.from({ length: targets.length }, () => 0);
+  const shares = targets.map((target, index) => {
+    const exact = (totalCents * target.allocationPercent) / totalAllocation;
+    const cents = Math.floor(exact);
+    baseCents[index]! += cents;
+    return { index, cents, remainder: exact - cents };
+  });
+  const remainingCents = totalCents - shares.reduce((sum, share) => sum + share.cents, 0);
+  for (const share of shares
+    .sort((left, right) => right.remainder - left.remainder)
+    .slice(0, remainingCents)) {
+    baseCents[share.index]! += 1;
+  }
+  for (const index of baseCents.keys()) {
+    if (baseCents[index] || totalCents < targets.length) continue;
+    const donor = baseCents.reduce(
+      (best, cents, candidate) => (cents > baseCents[best]! ? candidate : best),
+      0,
+    );
+    if (baseCents[donor]! <= 1) break;
+    baseCents[donor]! -= 1;
+    baseCents[index] = 1;
+  }
+  return baseCents.map((cents) => cents / 100);
 }
 
 function escapeRegExp(value: string): string {

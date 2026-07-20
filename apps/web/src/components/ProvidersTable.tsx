@@ -19,6 +19,7 @@ export interface ProviderRowData {
   lotSize: number;
   riskMode?: "fixed" | "percent";
   riskAmount?: number;
+  workFromTpLeg?: number;
   takeProfitLevels?: Array<{
     leg: number;
     percentage: number;

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  createLogicalTradeFromSignal,
+  matchLifecycleCommandToTrade,
   type ParserContext,
   parseSignalText,
   parseSignalTexts,
@@ -196,6 +198,16 @@ describe("deterministic signal parser", () => {
     expect(modifySl.newStopLoss).toBe(1.083);
     expect(modifyTp.commandType).toBe("MODIFY_TP");
     expect(modifyTp.takeProfits[0]).toEqual({ leg: 2, price: 1.0975, allocationPercent: 25 });
+  });
+
+  test("does not treat conversational TP prose as a modify command", () => {
+    const incident = parseSignalText(
+      "I mean technically london hasn't opened yet but come on ... yesterday we waiting hours for a set up to hit Tp ... But last night we had a 500pip fly",
+      context,
+    );
+
+    expect(incident.commandType).toBe("NO_SIGNAL");
+    expect(incident.matchedPatternIds).not.toContain("lifecycle.modify-tp");
   });
 
   test("preserves trailing stop pips and points for broker-side conversion", () => {
@@ -472,7 +484,7 @@ describe("deterministic signal parser", () => {
     expect(shouldRequireManualReview(signal)).toBe(false);
   });
 
-  test("uses Telegram quote context for put-this-back comments and extracts wall-of-text signals", () => {
+  test("reopens a quoted signal only on an explicit put-back and extracts wall-of-text signals", () => {
     const kalContext: ParserContext = {
       providerId: "kal-vip",
       accountId: "mt5-demo-1",
@@ -974,14 +986,135 @@ describe("WTI / crude oil recognition", () => {
   });
 });
 
+describe("a quoted block never re-opens except on an explicit put-back", () => {
+  const quoted =
+    "Quoted signal:\nNEW ORDER - XAUUSD Buy Stop\n# 300424022\n\n----------{ NEW }----------\nEntry: 4023.80 [Lots: 0.01]\nSL:    4017.80\nTP:    4035.80\n---------------------------";
+
+  test("ordinary reply prose and empty comments do not recreate the quoted order", () => {
+    // A loose BACK ON once matched "I will be back on Monday" and reopened the quoted
+    // order; an empty comment fell through to the quoted payload and did the same.
+    // Both recreate the phantom duplicate trade from the 2026-07-20 incident.
+    for (const comment of ["I will be back on Monday", "", "thanks mate", "watching this one"]) {
+      const result = parseSignalText(`${quoted}\n\nComment:\n${comment}`, context);
+      expect(result.commandType).toBe("NO_SIGNAL");
+      expect(result.entry).toBeUndefined();
+    }
+  });
+
+  test("an explicit put-back still reinstates the quoted signal", () => {
+    for (const comment of ["Put this back on", "put it back", "Reinstate this"]) {
+      const result = parseSignalText(`${quoted}\n\nComment:\n${comment}`, context);
+      expect(result.commandType).toBe("OPEN_TRADE");
+      expect(result.matchedPatternIds).toContain("quote.reinstated-signal");
+      expect(result.entry).toEqual({ from: 4023.8 });
+    }
+  });
+
+  test("keeps a cancel first and parses a replacement only from the comment", () => {
+    const results = parseSignalTexts(
+      "Quoted signal:\nGold sell\n\n4028-29\n\nSl 4034\n\nTp 4023\nTp 4016\nTp 4010\n\nComment:\nCancel this … price dropped from 24 instead of 28 soo it's technically missed . We can sell from 4043 instead",
+      context,
+    );
+
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({ commandType: "CANCEL_PENDING" });
+    expect(results[1]).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      entry: { from: 4043 },
+    });
+    expect(results[1]?.matchedPatternIds).toContain("quote.comment-replacement");
+  });
+});
+
+describe("deferred and negated prose never becomes a command", () => {
+  // Providers mix banter with signals in the same channel. "Close watch on Gold"
+  // previously became CLOSE_TRADE because isCloseCommand accepted any leading CLOSE,
+  // which would have closed a live position.
+  test("treats negated, deferred and educational prose as noise", () => {
+    for (const text of [
+      "Buy Gold only after confirmation — not now.",
+      "Close watch on Gold today; wait for NFP.",
+      "Education only: always set your SL below structure. Gold invalidation is 4000.",
+      "Don't buy gold here",
+      "No trade on gold today, wait for the retest",
+    ]) {
+      const result = parseSignalText(text, context);
+      expect(result.commandType).toBe("NO_SIGNAL");
+    }
+  });
+
+  test("treats typographic apostrophes the same as ASCII apostrophes", () => {
+    const ascii = parseSignalText("BUY GOLD NOW - don't miss", context);
+    const typographic = parseSignalText("BUY GOLD NOW - don’t miss", context);
+
+    expect(ascii.commandType).toBe("NO_SIGNAL");
+    expect(typographic.commandType).toBe(ascii.commandType);
+  });
+
+  test("still executes genuine signals that carry real levels", () => {
+    const signal = parseSignalText(
+      "Gold sell\n\n4028-29\n\nSl 4034\n\nTp 4023\nTp 4016\nTp 4010",
+      context,
+    );
+    expect(signal.commandType).toBe("OPEN_TRADE");
+    expect(signal.direction).toBe("SELL");
+    expect(signal.entry).toEqual({ from: 4028, to: 4029 });
+    expect(signal.stopLoss).toBe(4034);
+
+    const terse = parseSignalText("Close TP1 EURUSD", context);
+    expect(terse.commandType).toBe("CLOSE_PARTIAL");
+  });
+});
+
 describe("VIP Gold order lifecycle formats", () => {
+  test("treats activation replies as lifecycle context, never a new entry", () => {
+    const result = parseSignalText(
+      "Quoted signal:\nNEW ORDER - XAUUSD Buy Stop 🚀\n# 300424022\n\n----------{ NEW }----------\nEntry: 4023.80 [Lots: 0.01]\nSL:    4017.80\nTP:    4035.80\n---------------------------\n\nComment:\n🚀 Buy Stop activated 🚀\n# 300424022",
+      context,
+    );
+    expect(result.commandType).toBe("NO_SIGNAL");
+    expect(result.matchedPatternIds).toContain("quote.reply-context");
+    expect(result.matchedPatternIds).toContain("lifecycle.activation");
+  });
+
+  test("does not turn provider activation and fill notices into entries", () => {
+    for (const text of [
+      "Buy Stop activated",
+      "🚀 Sell Limit triggered 🚀",
+      "activated",
+      "Order filled",
+      "Buy Limit filled",
+    ]) {
+      expect(parseSignalText(text, context).commandType).toBe("NO_SIGNAL");
+    }
+  });
+
+  test("keeps complete entries containing lifecycle words executable", () => {
+    for (const text of [
+      "BUY XAUUSD NOW - setup triggered\nENTRY 4500\nSL 4490\nTP 4520",
+      "BUY EURUSD 1.0850 SL 1.0800 TP 1.0950 - order filled manually",
+    ]) {
+      expect(parseSignalText(text, context).commandType).toBe("OPEN_TRADE");
+    }
+  });
+
   test("classifies a Deleted order as a cancel keyed to its order id, not a new open", () => {
-    const result = parseSignalText("❌ Deleted Buy Stop on XAUUSD\n# 297968962", context);
+    const result = parseSignalText("❌ Deleted Buy Stop on XAUUSD\n# 300424022", context);
     expect(result.commandType).toBe("CANCEL_PENDING");
     expect(result.canonicalSymbol).toBe("XAUUSD");
-    expect(result.providerOrderId).toBe("297968962");
+    expect(result.providerOrderId).toBe("300424022");
     // The order id must never leak into an entry price.
     expect(result.entry).toBeUndefined();
+  });
+
+  test("classifies cancelled and canceled pending orders as cancellations", () => {
+    for (const text of [
+      "Cancelled Sell Limit on XAUUSD\n# 300424022",
+      "Canceled Buy Stop on XAUUSD\n# 300424022",
+    ]) {
+      expect(parseSignalText(text, context).commandType).toBe("CANCEL_PENDING");
+    }
   });
 
   test("still parses a NEW ORDER as an open and captures its order id", () => {
@@ -1007,6 +1140,45 @@ describe("VIP Gold order lifecycle formats", () => {
     expect(result.commandType).toBe("CLOSE_TRADE");
     expect(result.canonicalSymbol).toBe("XAUUSD");
     expect(result.providerOrderId).toBe("298696672");
+  });
+
+  test("prefers a provider order id and ignores an out-of-sync phantom", () => {
+    const opened = parseSignalText(
+      "NEW ORDER - XAUUSD Buy Stop 📈\n# 300424022\nEntry: 4023.80\nSL: 4017.80\nTP: 4035.80",
+      context,
+    );
+    const trade = createLogicalTradeFromSignal(opened, {
+      id: "trade_nX8RHUbhVl",
+      executionMode: "VIRTUAL_TP",
+    });
+    const command = parseSignalText(
+      "🟢 CLOSED - XAUUSD Buy 🟢\n# 300424022\nProfit: 3.98$",
+      context,
+    );
+    expect(
+      matchLifecycleCommandToTrade(command, [
+        { ...trade, id: "trade_c0I8FfiSOs", status: "OUT_OF_SYNC", providerOrderId: undefined },
+        trade,
+      ]),
+    ).toMatchObject({ status: "MATCHED", tradeId: "trade_nX8RHUbhVl" });
+  });
+
+  test("does not match a reused provider order id across symbols", () => {
+    const eurusd = createLogicalTradeFromSignal(
+      parseSignalText("BUY EURUSD 1.0850\nSL 1.0800\nTP 1.0950", context),
+      { id: "trade-eurusd", executionMode: "VIRTUAL_TP" },
+    );
+    const xauusd = createLogicalTradeFromSignal(
+      parseSignalText("BUY XAUUSD 4500\nSL 4490\nTP 4520", context),
+      { id: "trade-xauusd", executionMode: "VIRTUAL_TP" },
+    );
+    const command = parseSignalText("CLOSED - EURUSD Buy\n# 300424022", context);
+    expect(
+      matchLifecycleCommandToTrade(command, [
+        { ...eurusd, providerOrderId: undefined },
+        { ...xauusd, providerOrderId: "300424022" },
+      ]),
+    ).toMatchObject({ status: "MATCHED", tradeId: "trade-eurusd" });
   });
 });
 

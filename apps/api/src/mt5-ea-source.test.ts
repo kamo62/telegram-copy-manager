@@ -194,6 +194,12 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).not.toContain('availableSymbols\\":[\\"%s\\"]');
   });
 
+  test("reports its version and lane-2 close capability on registration and heartbeat", () => {
+    expect(source).toContain('\\"eaVersion\\"');
+    expect(source).toContain('\\"eaCapabilities\\"');
+    expect(source).toContain('\\"lane2-close-contract\\"');
+  });
+
   test("logs incoming lifecycle work with ticket and trade context for MT5 Journal tracing", () => {
     expect(source).toContain("Telegram TC WORK command=%s");
     expect(source).toContain("queue=%s logicalTradeId=%s");
@@ -258,6 +264,37 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("No valid partial-close volume provided");
   });
 
+  test("refuses unrepresentable partial closes instead of minimum-clamping them into full closes", () => {
+    expect(source).toContain(
+      "double NormalizeCloseVolume(string symbol, double requested, double currentVolume)",
+    );
+    expect(source).toContain("MathFloor((volume + step * 0.000001) / step) * step");
+    expect(source).toContain("if(volume < minVolume || volume >= currentVolume - step * 0.000001)");
+    expect(source).toContain(
+      "closeVolume = NormalizeCloseVolume(symbol, currentVolume - command.targetRemainingVolume, currentVolume)",
+    );
+    expect(source).not.toContain(
+      "closeVolume = NormalizeVolume(symbol, currentVolume * command.partialCloseValue / 100.0)",
+    );
+  });
+
+  test("reports actual open and close volumes, pending zero fills, and ticket-scoped lifecycle markers", () => {
+    expect(source).toContain('\\"requestedVolume\\":%.8f');
+    expect(source).toContain('\\"filledVolume\\":%.8f');
+    expect(source).toContain('\\"remainingVolume\\":%.8f');
+    expect(source).toContain('result.retcode == TRADE_RETCODE_DONE_PARTIAL ? "PARTIAL"');
+    expect(source).toContain("request.action == TRADE_ACTION_PENDING ? 0.0 : result.volume");
+    expect(source).toContain("request.action == TRADE_ACTION_PENDING\n      ? request.volume");
+    expect(source).toContain("GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket))");
+    expect(source).toContain("MarkLifecycleExecuted(command, ticket)");
+    expect(source).toMatch(
+      /for\(int index = 0; index < found; index\+\+\)\s*\{\s*if\(LifecycleAlreadyExecuted\(command, tickets\[index\]\)\)\s*continue;\s*pending\+\+;\s*ClosePositionTicket\(command, tickets\[index\]\);/,
+    );
+    expect(source).toContain(
+      'command.targetRemainingVolume = StringToDouble(ValueFor(body, "targetRemainingVolume"))',
+    );
+  });
+
   test("creates split child orders for each configured TP leg", () => {
     expect(source).toContain("ExecuteSplitOrders(command)");
     expect(source).toContain("for(int leg = 0; leg < 4; leg++)");
@@ -290,6 +327,15 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("double tpVolume[4];");
     expect(source).toContain('ValueFor(body, "tp" + leg + "Volume")');
     expect(source).toContain("LegVolume(command, leg, baseVolume)");
+  });
+
+  test("uses the final tradeable virtual TP as a broker backstop unless a runner is enabled", () => {
+    expect(source).toContain(
+      'else if(command.executionMode == "VIRTUAL_TP" && !command.runnerEnabled)',
+    );
+    expect(source).toContain("bool hasPlannedTpVolume = false;");
+    expect(source).toContain("(!hasPlannedTpVolume || command.tpVolume[index] > 0.0)");
+    expect(source).toContain('command.runnerEnabled = ValueFor(body, "runnerEnabled") == "true";');
   });
 
   test("applies backend-provided polling interval from line payloads", () => {

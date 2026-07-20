@@ -1,5 +1,73 @@
 # Changelog
 
+## 1.50.0 - 2026-07-20 (Minor)
+
+Release impact: Minor. Trade-safety release following a live incident that cost ~R397 on account
+mt5-3049603. Adds an EA capability handshake, changes execution and parsing behaviour on the money
+path, and requires an MT5 EA recompile.
+
+**REQUIRED: recompile and reattach `mt5/TelegramTC_EA.mq5` in MetaEditor.** The backend now emits
+fields (`targetRemainingVolume`, `idempotencyKey`) that only the rebuilt EA understands. Accounts
+running an older build are detected and held rather than sent commands they would misinterpret;
+after reconnecting, confirm the dashboard shows an EA version and the `lane2-close-contract`
+capability for each account.
+
+Incident fixes (the ~R397 loss):
+- Provider lifecycle notices ("Buy Stop activated") no longer parse as new entries and no longer
+  create phantom duplicate trades or dispatch duplicate orders.
+- A quoted-reply cancellation can now carry one explicit comment-only replacement entry; it is
+  parsed after the cancellation and still follows normal symbol, review, and pending-order inference.
+- Lifecycle commands route by provider order id (symbol-checked) then reply linkage; a mismatched
+  explicit order id can no longer close a different trade on the same symbol.
+- Dropped lifecycle commands raise an operator alert at error severity by default instead of a
+  warn-level audit row nobody sees.
+- Closing a pending trade now cancels the broker order and only terminalizes after confirmation,
+  instead of marking the trade closed while the order stayed live.
+
+Execution and take-profit correctness:
+- VIRTUAL_TP orders now carry a real broker take-profit at the last actionable leg as a survival
+  backstop; the server only stops managing that leg once the live snapshot confirms the broker TP.
+  Suppressed when a runner is enabled.
+- Take-profit close volumes are authoritative over percentages; a single actionable leg is forced to
+  100%; zero-percent legs are retained as stop-loss trailing references and never given volume.
+- Partial fills record requested, filled and remaining volume separately; logical legs are sized
+  from the actual fill. Partial closes floor to the broker volume step and refuse rather than
+  rounding up into a full close.
+- Lost execution reports hold as delivery-unknown and reconcile instead of replaying a close.
+- Split-close idempotency markers are ticket-scoped so an interrupted close can still finish.
+
+Parsing safety:
+- Quoted/reply blocks are context only; nothing but an explicit "put this back" reopens them.
+- Negated and deferred prose ("wait for NFP", "not now", "education only") can no longer open,
+  close or move stops. Typographic apostrophes are normalised.
+- A signal with an explicit entry away from market and no order-type keyword is inferred as
+  LIMIT/STOP rather than fired at market; where the symbol is unquoted it is held for review.
+- Cached performance projections now re-evaluate heartbeat freshness, so a silent EA cannot remain
+  displayed as online with stale balance or equity.
+- New OPEN_TRADE work for a stale or offline account is held instead of waiting to execute after
+  a reconnect; lifecycle commands retain their existing routing behaviour.
+- Conversational prose no longer produces MODIFY_TP commands with arbitrary words as symbols.
+
+Routing, mapping and operations:
+- Signals resolve per linked account, so one account's unmapped symbol no longer blocks accounts
+  that map correctly.
+- Broker prefix/suffix inference requires majority agreement instead of a single symbol.
+- The symbol mapping modal keeps its state across dashboard refreshes and validates that configured
+  take-profit splits are executable at the account's lot size.
+- Equity Guardian defaults to off rather than an unreachable threshold.
+
+## 1.40.0 - 2026-07-20 (Minor)
+
+Release impact: Minor because this adds a broker-side virtual-TP backstop and an EA command field.
+
+- Attached the final tradeable TP to VIRTUAL_TP orders as a broker-side survival backstop, while the app continues to manage earlier partial closes and leaves runner orders TP-free.
+- Kept zero-percent TP legs as stop-loss strategy references, forced a single actionable TP to 100%, retained unconfigured signal targets with warnings, and avoided zero-volume TP closes.
+- Fixed VIP Gold lifecycle safety: quoted activation/cancel notices no longer open trades, lifecycle matching prefers provider order IDs then reply links, and dropped lifecycle commands now alert.
+- Provider configuration now rejects TP allocations that do not total 100% or cannot produce one minimum 0.01-lot close per positive leg, and lets single-lot configurations choose the working TP.
+- Equity Guardian now starts explicitly off; it only evaluates drawdown after an operator enables it with a threshold, while existing configured guardians remain active.
+- **Operators must recompile and reattach `mt5/TelegramTC_EA.mq5` in MetaEditor before using 1.40.0.**
+- Kept `package.json` and the MT5 EA `#property version` aligned at `1.40.0`.
+
 ## 1.39.0 - 2026-07-18 (Minor)
 
 Release impact: Minor because this adds fields to the heartbeat SSE payload and changes dashboard synchronization behavior without breaking existing event consumers.

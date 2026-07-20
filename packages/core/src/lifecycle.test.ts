@@ -48,6 +48,93 @@ describe("logical trade lifecycle", () => {
     ]);
   });
 
+  test("keeps zero-allocation TP references and assigns tradeable volume only to closing legs", () => {
+    const command = buildExecutionCommand(
+      {
+        ...openSignal,
+        takeProfits: openSignal.takeProfits.map((target, index) => ({
+          ...target,
+          allocationPercent: [50, 0, 0, 50][index] ?? 0,
+          strategy:
+            index === 0
+              ? { kind: "set-sl-to-tp" as const, tpLeg: 2, offsetPips: 0 }
+              : target.strategy,
+        })),
+      },
+      { id: "queue-kal", executionMode: "VIRTUAL_TP", volume: 0.02 },
+    );
+
+    expect(
+      command.payload.takeProfits.map((target) => [
+        target.leg,
+        target.allocationPercent,
+        target.volume,
+      ]),
+    ).toEqual([
+      [1, 50, 0.01],
+      [2, 0, undefined],
+      [3, 0, undefined],
+      [4, 50, 0.01],
+    ]);
+  });
+
+  test("uses cent-rounded TP volumes as the executable allocation plan", () => {
+    const command = buildExecutionCommand(
+      {
+        ...openSignal,
+        takeProfits: openSignal.takeProfits.slice(0, 2).map((target, index) => ({
+          ...target,
+          allocationPercent: index === 0 ? 80 : 20,
+        })),
+      },
+      { id: "queue-small", executionMode: "VIRTUAL_TP", volume: 0.02 },
+    );
+
+    expect(
+      command.payload.takeProfits.map((target) => [target.volume, target.allocationPercent]),
+    ).toEqual([
+      [0.01, 50],
+      [0.01, 50],
+    ]);
+
+    const sizedCommand = buildExecutionCommand(
+      {
+        ...openSignal,
+        takeProfits: openSignal.takeProfits.slice(0, 2).map((target, index) => ({
+          ...target,
+          allocationPercent: index === 0 ? 80 : 20,
+        })),
+      },
+      { id: "queue-weighted", executionMode: "VIRTUAL_TP", volume: 0.1 },
+    );
+    expect(sizedCommand.payload.takeProfits.map((target) => target.volume)).toEqual([0.08, 0.02]);
+  });
+
+  test("puts an unsplittable KAL-style trade entirely on TP1", () => {
+    const command = buildExecutionCommand(
+      {
+        ...openSignal,
+        takeProfits: openSignal.takeProfits.map((target, index) => ({
+          ...target,
+          allocationPercent: [50, 0, 0, 50][index] ?? 0,
+        })),
+      },
+      { id: "queue-kal-small", executionMode: "VIRTUAL_TP", volume: 0.01 },
+    );
+
+    expect(
+      command.payload.takeProfits.map((target) => [
+        target.leg,
+        target.volume,
+        target.allocationPercent,
+      ]),
+    ).toEqual([
+      [1, 0.01, 100],
+      [2, undefined, 0],
+      [3, undefined, 0],
+    ]);
+  });
+
   test("matches a provider management command to the correct open logical trade", () => {
     const trade = createLogicalTradeFromSignal(openSignal, {
       id: "trade-1",
@@ -68,6 +155,30 @@ describe("logical trade lifecycle", () => {
     expect(match.status).toBe("MATCHED");
     expect(match.tradeId).toBe("trade-1");
     expect(match.confidence).toBeGreaterThanOrEqual(0.8);
+  });
+
+  test("never falls back to a same-symbol trade when explicit provider ids disagree", () => {
+    const trade = {
+      ...createLogicalTradeFromSignal(openSignal, {
+        id: "trade-111",
+        providerId,
+        accountId: "mt5-demo-1",
+        executionMode: "VIRTUAL_TP",
+      }),
+      providerOrderId: "300424111",
+    };
+    const command = parseSignalText("CLOSED - EURUSD Buy # 300424222", {
+      providerId,
+      accountId: "mt5-demo-1",
+      globalAliases: {},
+      providerAliases: {},
+      accountMappings: {},
+    });
+
+    expect(matchLifecycleCommandToTrade(command, [trade])).toMatchObject({
+      status: "UNMATCHED",
+      requiresManualReview: true,
+    });
   });
 
   test("allows a symbol-less lifecycle command only when one active provider trade matches", () => {

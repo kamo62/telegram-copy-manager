@@ -1248,7 +1248,7 @@ describe("App dashboard", () => {
     });
   });
 
-  test("explains scaled TP allocations without final-TP wording when a runner is configured", () => {
+  test("shows invalid TP totals while retaining the runner summary", () => {
     const view = render(
       <App
         initialSnapshot={{
@@ -1278,8 +1278,7 @@ describe("App dashboard", () => {
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
 
     const modalText = view.getByRole("dialog").textContent ?? "";
-    expect(modalText).toContain("TP percentages total 60%");
-    expect(modalText).toContain("0.02 lots assigned to TP closes");
+    expect(modalText).toContain("TP percentages must total 100% (currently 60%).");
     expect(modalText).toContain("Runner remains open");
     expect(modalText).toContain("after TP3");
     expect(modalText).toContain("50% effective");
@@ -2365,6 +2364,7 @@ describe("App dashboard", () => {
               threshold: 10,
               currentDrawdown: 12,
               paused: true,
+              enabled: true,
               breaches: [],
             },
           ],

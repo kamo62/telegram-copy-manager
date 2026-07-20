@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.39.0"
+#property version   "1.50.0"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -55,6 +55,9 @@ struct SignalCommand
    double partialCloseValue;
    double partialCloseVolume;
    double partialCloseAllocation;
+   double targetRemainingVolume;
+   string idempotencyKey;
+   bool runnerEnabled;
    ulong targetOrderTicket;
    ulong targetPositionTicket;
    ulong targetDealTicket;
@@ -79,6 +82,7 @@ int trailingStopStateCount = 0;
 int CurrentPollSeconds = 0;
 datetime LastHeartbeatSentAt = 0;
 datetime LastHistoryBackfillAt = 0;
+string EaCapabilitiesJson = "[\"lane2-close-contract\"]";
 
 int OnInit()
 {
@@ -139,12 +143,14 @@ void RegisterAccount()
 void SendHeartbeat()
 {
    string body = StringFormat(
-      "{\"accountId\":\"mt5-%I64d\",\"balance\":%.2f,\"equity\":%.2f,\"profit\":%.2f,\"availableSymbols\":%s,\"linkCode\":\"%s\"}",
+      "{\"accountId\":\"mt5-%I64d\",\"balance\":%.2f,\"equity\":%.2f,\"profit\":%.2f,\"availableSymbols\":%s,\"eaVersion\":\"%s\",\"eaCapabilities\":%s,\"linkCode\":\"%s\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
+      "1.40.0",
+      EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
    string response = "";
@@ -339,7 +345,24 @@ bool ExecuteOpenTrade(SignalCommand &command)
    }
 
    request.sl = SafeStopPrice(command.brokerSymbol, referencePrice, command.stopLoss, command.direction, true);
-   double rawTp = command.executionMode == "SPLIT_ORDER" ? command.tp[0] : 0.0;
+   double rawTp = 0.0;
+   if(command.executionMode == "SPLIT_ORDER")
+      rawTp = command.tp[0];
+   else if(command.executionMode == "VIRTUAL_TP" && !command.runnerEnabled)
+   {
+      bool hasPlannedTpVolume = false;
+      for(int index = 0; index < 4; index++)
+      {
+         if(command.tpVolume[index] > 0.0)
+            hasPlannedTpVolume = true;
+      }
+      for(int index = 0; index < 4; index++)
+      {
+         if(command.tp[index] > 0.0 && command.tpAllocation[index] > 0.0 &&
+            (!hasPlannedTpVolume || command.tpVolume[index] > 0.0))
+            rawTp = command.tp[index];
+      }
+   }
    request.tp = rawTp > 0.0
       ? SafeStopPrice(command.brokerSymbol, referencePrice, rawTp, command.direction, false)
       : 0.0;
@@ -358,9 +381,13 @@ bool ExecuteOpenTrade(SignalCommand &command)
       result.retcode, result.comment,
       result.deal, result.order, result.price, sendErr);
 
-   Report(
+   double filledVolume = request.action == TRADE_ACTION_PENDING ? 0.0 : result.volume;
+   double remainingVolume = request.action == TRADE_ACTION_PENDING
+      ? request.volume
+      : MathMax(0.0, request.volume - filledVolume);
+   ReportWithVolumes(
       command.queueItemId,
-      IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED",
+      result.retcode == TRADE_RETCODE_DONE_PARTIAL ? "PARTIAL" : (IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED"),
       result.retcode,
       result.retcode_external,
       result.comment,
@@ -370,6 +397,8 @@ bool ExecuteOpenTrade(SignalCommand &command)
       request.price,
       result.price,
       request.volume,
+      filledVolume,
+      remainingVolume,
       sent ? "" : IntegerToString(sendErr)
    );
    bool ok = sent && IsTradeSuccess(result.retcode);
@@ -454,6 +483,11 @@ bool ExecuteSplitOrders(SignalCommand &command)
 
 void ExecuteCancelPending(SignalCommand &command)
 {
+   if(LifecycleAlreadyExecuted(command))
+   {
+      ReportUnknown(command.queueItemId, "Lifecycle command was already executed; reconcile broker snapshot/history", command.commandType);
+      return;
+   }
    ulong tickets[];
    int found = CollectPendingOrderTickets(command, tickets);
    if(found <= 0)
@@ -461,19 +495,32 @@ void ExecuteCancelPending(SignalCommand &command)
       ReportFailure(command.queueItemId, "No matching pending order found", command.brokerSymbol);
       return;
    }
+   int removed = 0;
+   MqlTradeResult lastResult = {};
    for(int index = 0; index < found; index++)
-      RemovePendingOrder(command, tickets[index]);
+   {
+      MqlTradeResult result = {};
+      if(RemovePendingOrder(command, tickets[index], result))
+         removed++;
+      lastResult = result;
+   }
+   if(removed == found)
+   {
+      MarkLifecycleExecuted(command);
+      Report(command.queueItemId, "EXECUTED", lastResult.retcode, lastResult.retcode_external, lastResult.comment, lastResult.order, 0, lastResult.deal, 0, lastResult.price, 0.0, "");
+      return;
+   }
+   Report(command.queueItemId, removed > 0 ? "PARTIAL" : "FAILED", lastResult.retcode, lastResult.retcode_external, lastResult.comment, lastResult.order, 0, lastResult.deal, 0, lastResult.price, 0.0, "Pending-order cancellation was not confirmed for every ticket");
 }
 
-void RemovePendingOrder(SignalCommand &command, ulong ticket)
+bool RemovePendingOrder(SignalCommand &command, ulong ticket, MqlTradeResult &result)
 {
    MqlTradeRequest request = {};
-   MqlTradeResult result = {};
    request.action = TRADE_ACTION_REMOVE;
    request.order = ticket;
    request.symbol = command.brokerSymbol;
    bool sent = OrderSend(request, result);
-   Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, 0, result.deal, 0, result.price, 0.0, sent ? "" : IntegerToString(GetLastError()));
+   return sent && IsTradeSuccess(result.retcode);
 }
 
 void ExecuteMoveSlToBreakeven(SignalCommand &command)
@@ -713,8 +760,16 @@ void ExecuteClose(SignalCommand &command)
       return;
    }
 
+   int pending = 0;
    for(int index = 0; index < found; index++)
+   {
+      if(LifecycleAlreadyExecuted(command, tickets[index]))
+         continue;
+      pending++;
       ClosePositionTicket(command, tickets[index]);
+   }
+   if(pending == 0)
+      ReportUnknown(command.queueItemId, "Lifecycle command was already executed; reconcile broker snapshot/history", command.commandType);
 }
 
 void ClosePositionTicket(SignalCommand &command, ulong ticket)
@@ -730,16 +785,16 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
    double currentVolume = PositionGetDouble(POSITION_VOLUME);
    double closeVolume = command.commandType == "CLOSE_PARTIAL" ? 0.0 : currentVolume;
    if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "PERCENT")
-      closeVolume = NormalizeVolume(symbol, currentVolume * command.partialCloseValue / 100.0);
+      closeVolume = NormalizeCloseVolume(symbol, currentVolume - command.targetRemainingVolume, currentVolume);
    else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "TP_LEG")
    {
       if(command.partialCloseVolume > 0.0)
-         closeVolume = NormalizeVolume(symbol, command.partialCloseVolume);
+         closeVolume = NormalizeCloseVolume(symbol, command.partialCloseVolume, currentVolume);
       else if(command.partialCloseAllocation > 0.0)
-         closeVolume = NormalizeVolume(symbol, currentVolume * command.partialCloseAllocation / 100.0);
+         closeVolume = NormalizeCloseVolume(symbol, currentVolume * command.partialCloseAllocation / 100.0, currentVolume);
    }
    else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "LOTS")
-      closeVolume = NormalizeVolume(symbol, command.partialCloseValue);
+      closeVolume = NormalizeCloseVolume(symbol, command.partialCloseValue, currentVolume);
 
    if(closeVolume <= 0.0)
    {
@@ -752,7 +807,7 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
    request.action = TRADE_ACTION_DEAL;
    request.position = ticket;
    request.symbol = symbol;
-   request.volume = MathMin(closeVolume, currentVolume);
+   request.volume = closeVolume;
    request.deviation = DeviationPoints;
    request.magic = MagicNumber;
    request.type_filling = FillingModeForSymbol(symbol, false);
@@ -774,7 +829,11 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
       command.targetPositionTicket);
 
    bool sent = OrderSend(request, result);
-    Report(command.queueItemId, IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED", result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.price, result.price, request.volume, sent ? "" : IntegerToString(GetLastError()));
+   if(sent && IsTradeSuccess(result.retcode))
+      MarkLifecycleExecuted(command, ticket);
+   double filledVolume = result.volume;
+   double remainingVolume = MathMax(0.0, currentVolume - filledVolume);
+   ReportWithVolumes(command.queueItemId, result.retcode == TRADE_RETCODE_DONE_PARTIAL ? "PARTIAL" : (IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED"), result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.price, result.price, request.volume, filledVolume, remainingVolume, sent ? "" : IntegerToString(GetLastError()));
 }
 
 ulong FindPositionTicket(SignalCommand &command)
@@ -1106,6 +1165,9 @@ bool ParseCommand(string body, SignalCommand &command)
    command.partialCloseValue = StringToDouble(ValueFor(body, "partialCloseValue"));
    command.partialCloseVolume = StringToDouble(ValueFor(body, "partialCloseVolume"));
    command.partialCloseAllocation = StringToDouble(ValueFor(body, "partialCloseAllocation"));
+   command.targetRemainingVolume = StringToDouble(ValueFor(body, "targetRemainingVolume"));
+   command.idempotencyKey = ValueFor(body, "idempotencyKey");
+   command.runnerEnabled = ValueFor(body, "runnerEnabled") == "true";
    command.targetOrderTicket = (ulong)StringToInteger(ValueFor(body, "targetOrderTicket"));
    command.targetPositionTicket = (ulong)StringToInteger(ValueFor(body, "targetPositionTicket"));
    command.targetDealTicket = (ulong)StringToInteger(ValueFor(body, "targetDealTicket"));
@@ -1367,6 +1429,28 @@ double NormalizeVolume(string symbol, double requested)
    return NormalizeDouble(MathFloor(volume / step) * step, 2);
 }
 
+int VolumeDigits(double step)
+{
+   for(int digits = 0; digits < 8; digits++)
+      if(MathAbs(step - NormalizeDouble(step, digits)) < 0.000000001)
+         return digits;
+   return 8;
+}
+
+double NormalizeCloseVolume(string symbol, double requested, double currentVolume)
+{
+   double minVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double maxVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0.0 || requested <= 0.0 || currentVolume <= 0.0)
+      return 0.0;
+   double volume = MathMin(maxVolume, requested);
+   volume = NormalizeDouble(MathFloor((volume + step * 0.000001) / step) * step, VolumeDigits(step));
+   if(volume < minVolume || volume >= currentVolume - step * 0.000001)
+      return 0.0;
+   return volume;
+}
+
 bool IsTradeSuccess(uint retcode)
 {
    return retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_PLACED || retcode == TRADE_RETCODE_DONE_PARTIAL;
@@ -1375,6 +1459,11 @@ bool IsTradeSuccess(uint retcode)
 void ReportFailure(string queueItemId, string brokerComment, string errorText)
 {
    Report(queueItemId, "FAILED", 0, 0, brokerComment, 0, 0, 0, 0.0, 0.0, 0.0, errorText);
+}
+
+void ReportUnknown(string queueItemId, string brokerComment, string errorText)
+{
+   Report(queueItemId, "UNKNOWN", 0, 0, brokerComment, 0, 0, 0, 0.0, 0.0, 0.0, errorText);
 }
 
 void Report(
@@ -1392,8 +1481,28 @@ void Report(
    string errorText
 )
 {
+   ReportWithVolumes(queueItemId, status, retcode, retcodeExternal, brokerComment, orderTicket, positionTicket, dealTicket, requestedPrice, filledPrice, volume, volume, 0.0, errorText);
+}
+
+void ReportWithVolumes(
+   string queueItemId,
+   string status,
+   uint retcode,
+   int retcodeExternal,
+   string brokerComment,
+   ulong orderTicket,
+   ulong positionTicket,
+   ulong dealTicket,
+   double requestedPrice,
+   double filledPrice,
+   double requestedVolume,
+   double filledVolume,
+   double remainingVolume,
+   string errorText
+)
+{
    string body = StringFormat(
-      "{\"accountId\":\"mt5-%I64d\",\"queueItemId\":\"%s\",\"status\":\"%s\",\"retcode\":%u,\"retcodeExternal\":%d,\"brokerComment\":\"%s\",\"orderTicket\":\"%I64u\",\"positionTicket\":\"%I64u\",\"dealTicket\":\"%I64u\",\"requestedPrice\":%.8f,\"filledPrice\":%.8f,\"volume\":%.2f,\"errorText\":\"%s\"}",
+      "{\"accountId\":\"mt5-%I64d\",\"queueItemId\":\"%s\",\"status\":\"%s\",\"retcode\":%u,\"retcodeExternal\":%d,\"brokerComment\":\"%s\",\"orderTicket\":\"%I64u\",\"positionTicket\":\"%I64u\",\"dealTicket\":\"%I64u\",\"requestedPrice\":%.8f,\"filledPrice\":%.8f,\"requestedVolume\":%.8f,\"filledVolume\":%.8f,\"remainingVolume\":%.8f,\"errorText\":\"%s\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       JsonEscape(queueItemId),
       status,
@@ -1405,11 +1514,29 @@ void Report(
       dealTicket,
       requestedPrice,
       filledPrice,
-      volume,
+      requestedVolume,
+      filledVolume,
+      remainingVolume,
       JsonEscape(errorText)
    );
    string response = "";
    HttpPost("/mt5/report", body, response);
+}
+
+string LifecycleIdempotencyVariable(SignalCommand &command, ulong ticket = 0)
+{
+   string key = command.idempotencyKey == "" ? command.queueItemId : command.idempotencyKey;
+   return StringSubstr("TelegramTC.lifecycle." + key + "." + IntegerToString(ticket), 0, 63);
+}
+
+bool LifecycleAlreadyExecuted(SignalCommand &command, ulong ticket = 0)
+{
+   return GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket));
+}
+
+void MarkLifecycleExecuted(SignalCommand &command, ulong ticket = 0)
+{
+   GlobalVariableSet(LifecycleIdempotencyVariable(command, ticket), (double)TimeCurrent());
 }
 
 string AccountPayload()
@@ -1418,7 +1545,7 @@ string AccountPayload()
       ? "HEDGING"
       : "NETTING";
    return StringFormat(
-      "{\"accountNumber\":\"%I64d\",\"server\":\"%s\",\"company\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"profit\":%.2f,\"marginMode\":\"%s\",\"availableSymbols\":%s,\"linkCode\":\"%s\"}",
+      "{\"accountNumber\":\"%I64d\",\"server\":\"%s\",\"company\":\"%s\",\"currency\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"profit\":%.2f,\"marginMode\":\"%s\",\"availableSymbols\":%s,\"eaVersion\":\"%s\",\"eaCapabilities\":%s,\"linkCode\":\"%s\"}",
       AccountInfoInteger(ACCOUNT_LOGIN),
       JsonEscape(AccountInfoString(ACCOUNT_SERVER)),
       JsonEscape(AccountInfoString(ACCOUNT_COMPANY)),
@@ -1428,6 +1555,8 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
+      "1.40.0",
+      EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
 }
