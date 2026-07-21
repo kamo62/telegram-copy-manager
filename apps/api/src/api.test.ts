@@ -5791,7 +5791,7 @@ describe("Telegram TC API", () => {
     expect(duplicateApprove.status).toBe(409);
   });
 
-  test("routes a close of a pending trade to cancellation and waits for broker confirmation", async () => {
+  test("keeps a just-accepted pending order PENDING against a stale snapshot", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
     const opened = await json<{ parsedSignalId: string }>(
@@ -5819,11 +5819,22 @@ describe("Telegram TC API", () => {
         retcodeExternal: 0,
         brokerComment: "pending accepted",
         orderTicket: "50001",
+        positionTicket: "70001",
         requestedPrice: 4500,
-        filledPrice: 0,
+        filledPrice: 4500,
         requestedVolume: 0.04,
         filledVolume: 0,
         remainingVolume: 0.04,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [],
+        orders: [],
+        symbols: [],
       }),
       headers: { "content-type": "application/json" },
     });

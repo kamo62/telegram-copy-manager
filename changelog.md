@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.50.1 - 2026-07-21 (Patch)
+
+Release impact: Patch because this hardens backend Telegram health reporting, logging, and pending-order reconciliation without changing the MT5 protocol.
+
+- Raised the default Telegram RPC timeout to 20 seconds and require two consecutive RPC timeouts before raising the provider-stalled alert; a recovered one-off timeout remains visible at warn level.
+- Configured GramJS client logging through `TELEGRAM_LOG_LEVEL` (default `error`) so reconnect chatter no longer drowns structured application events.
+- Keep zero-fill LIMIT/STOP placements pending even if the EA reports an incidental position ticket, and defer missing-order reconciliation through the existing pending-order grace window while the next snapshot arrives.
+- Kept the application and EA source version metadata aligned at 1.50.1; this backend-only release does not require deploying a recompiled EA.
+
 ## 1.50.0 - 2026-07-20 (Minor)
 
 Release impact: Minor. Trade-safety release following a live incident that cost ~R397 on account

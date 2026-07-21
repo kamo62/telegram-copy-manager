@@ -1,10 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createApi } from "./app";
-import {
-  type TelegramAdapter,
-  type TelegramCapturedMessage,
-  TelegramRpcTimeoutError,
-} from "./telegram";
+import type { TelegramAdapter, TelegramCapturedMessage } from "./telegram";
 
 const json = async <T>(response: Response) => (await response.json()) as T;
 
@@ -100,7 +96,7 @@ describe("Telegram ingestion resilience", () => {
     expect(stopped).toBe(true);
   });
 
-  test("times out a stuck provider without delaying a concurrent provider", async () => {
+  test("marks a provider stalled only after consecutive timed-out ingestions", async () => {
     let fastCalls = 0;
     const app = createApi({
       databasePath: ":memory:",
@@ -116,9 +112,19 @@ describe("Telegram ingestion resilience", () => {
     });
     await enableProviders(app);
 
+    const first = await app.runTelegramIngestionOnce();
+    const dashboardAfterFirst = await json<{
+      telegramProviderHealth: Array<{ stalled: boolean; consecutiveFailures: number }>;
+    }>(await app.request("/api/dashboard"));
     const result = await app.runTelegramIngestionOnce();
 
-    expect(fastCalls).toBe(1);
+    expect(fastCalls).toBe(2);
+    expect(first).toMatchObject({ providers: 2, errors: 1 });
+    expect(
+      dashboardAfterFirst.telegramProviderHealth.some(
+        (health) => !health.stalled && health.consecutiveFailures === 1,
+      ),
+    ).toBe(true);
     expect(result).toMatchObject({ providers: 2, errors: 1 });
     const dashboard = await json<{
       telegramProviderHealth: Array<{ stalled: boolean; error?: string }>;
@@ -130,37 +136,30 @@ describe("Telegram ingestion resilience", () => {
     ).toBe(true);
   });
 
-  test("records a timed-out provider before another provider finishes", async () => {
-    let releaseSlow: (() => void) | undefined;
+  test("a slow RPC that recovers does not raise an error-level provider stall", async () => {
+    let attempts = 0;
     const app = createApi({
       databasePath: ":memory:",
       seedDemoData: false,
       telegram: adapter(async (_sessionId, dialogId) => {
-        if (dialogId === "dialog-stuck") throw new TelegramRpcTimeoutError(1);
-        return await new Promise<TelegramCapturedMessage[]>((resolve) => {
-          releaseSlow = () => resolve([]);
-        });
+        if (dialogId === "dialog-stuck" && attempts++ === 0) {
+          return await new Promise<TelegramCapturedMessage[]>((resolve) =>
+            setTimeout(() => resolve([]), 20),
+          );
+        }
+        return [];
       }),
       telegramPollingEnabled: false,
-      telegramRpcTimeoutMs: 100,
+      telegramRpcTimeoutMs: 10,
     });
     await enableProviders(app);
 
-    let completed = false;
-    const run = app.runTelegramIngestionOnce().finally(() => {
-      completed = true;
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await app.runTelegramIngestionOnce();
+    await app.runTelegramIngestionOnce();
 
-    const dashboard = await json<{
-      alerts: Array<{ kind: string }>;
-      telegramProviderHealth: Array<{ stalled: boolean }>;
-    }>(await app.request("/api/dashboard"));
-    expect(completed).toBe(false);
-    expect(dashboard.telegramProviderHealth.some((health) => health.stalled)).toBe(true);
-    expect(dashboard.alerts.some((alert) => alert.kind === "telegram-provider-stalled")).toBe(true);
-
-    releaseSlow?.();
-    await run;
+    const stalled = await json<{ logs: Array<{ level: string }> }>(
+      await app.request("/api/audit-logs?event=telegram.provider.stalled"),
+    );
+    expect(stalled.logs.filter((log) => log.level === "error")).toHaveLength(0);
   });
 });

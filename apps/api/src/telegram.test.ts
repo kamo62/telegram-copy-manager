@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createTelegramAdapter } from "./telegram";
+import { createTelegramAdapter, GRAMJS_CLIENT_OPTIONS, telegramLogLevel } from "./telegram";
 
 type GramjsAdapterTestSeam = {
   clients: Map<string, unknown>;
@@ -36,5 +36,18 @@ describe("GramJS reply-link capture", () => {
     const messages = await gramjsAdapterWithReply().fetchRecentMessages("session", "dialog", 1);
 
     expect(messages[0]?.replyToMessageId).toBeUndefined();
+  });
+});
+
+describe("GramJS logging", () => {
+  test("defaults GramJS to error-only logging while accepting supported overrides", () => {
+    expect(String(GRAMJS_CLIENT_OPTIONS.baseLogger.logLevel)).toBe("error");
+    expect(String(telegramLogLevel("warn"))).toBe("warn");
+    expect(String(telegramLogLevel("invalid"))).toBe("error");
+  });
+
+  test("passes the configured logger to every TelegramClient construction site", async () => {
+    const source = await Bun.file(new URL("./telegram.ts", import.meta.url)).text();
+    expect(source.match(/new TelegramClient\([\s\S]*?GRAMJS_CLIENT_OPTIONS,/g)).toHaveLength(3);
   });
 });

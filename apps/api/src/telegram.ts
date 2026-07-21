@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { Logger } from "telegram";
 
 export type TelegramSessionStatus =
   | "CODE_REQUIRED"
@@ -70,6 +71,8 @@ export interface TelegramAdapter {
 
 const DEFAULT_RECONNECT_RETRY_DELAY_MS = 2_000;
 const MAX_RECONNECT_RETRY_DELAY_MS = 10_000;
+const DEFAULT_TELEGRAM_LOG_LEVEL = "error";
+const TELEGRAM_LOG_LEVELS = new Set(["none", "error", "warn", "info", "debug"]);
 
 export class TelegramRpcTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -113,10 +116,20 @@ export async function withTelegramRpcTimeout<T>(operation: Promise<T>, timeoutMs
 
 const TELEGRAM_CONNECTION_RETRIES = parseConnectionRetries(process.env.TELEGRAM_CONNECTION_RETRIES);
 
-const GRAMJS_CLIENT_OPTIONS = {
+type TelegramLogLevel = ConstructorParameters<typeof Logger>[0];
+
+export function telegramLogLevel(raw = process.env.TELEGRAM_LOG_LEVEL): TelegramLogLevel {
+  const level = raw?.trim().toLowerCase();
+  return (
+    level && TELEGRAM_LOG_LEVELS.has(level) ? level : DEFAULT_TELEGRAM_LOG_LEVEL
+  ) as TelegramLogLevel;
+}
+
+export const GRAMJS_CLIENT_OPTIONS = {
   connectionRetries: TELEGRAM_CONNECTION_RETRIES,
   autoReconnect: true,
   retryDelay: parseReconnectRetryDelay(process.env.TELEGRAM_RECONNECT_RETRY_DELAY_MS),
+  baseLogger: new Logger(telegramLogLevel()),
 };
 
 // How long without a successful Telegram RPC before the session is considered

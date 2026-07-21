@@ -56,8 +56,9 @@ export interface ApiOptions {
   telegramRpcTimeoutMs?: number;
 }
 
-const DEFAULT_TELEGRAM_RPC_TIMEOUT_MS = 5_000;
+const DEFAULT_TELEGRAM_RPC_TIMEOUT_MS = 20_000;
 const MAX_TELEGRAM_RPC_TIMEOUT_MS = 30_000;
+const TELEGRAM_PROVIDER_STALL_FAILURES = 2;
 
 function telegramRpcTimeoutMs(value?: number) {
   const configured = value ?? Number(process.env.TELEGRAM_RPC_TIMEOUT_MS);
@@ -1090,6 +1091,7 @@ interface TelegramProviderHealth {
   sessionId: string;
   healthy: boolean;
   stalled: boolean;
+  consecutiveFailures: number;
   checkedAt: string;
   error?: string;
 }
@@ -2567,10 +2569,15 @@ class AppStore {
       }
     } catch (error) {
       result.errors += 1;
-      this.audit("telegram.ingest.error", "error", "Telegram provider ingestion failed", {
-        providerId: provider.id,
-        error: error instanceof Error ? error.message : "Unknown ingestion error",
-      });
+      this.audit(
+        "telegram.ingest.error",
+        error instanceof TelegramRpcTimeoutError ? "warn" : "error",
+        "Telegram provider ingestion failed",
+        {
+          providerId: provider.id,
+          error: error instanceof Error ? error.message : "Unknown ingestion error",
+        },
+      );
       this.recordProviderHealth(telegram, provider, sessionId, error);
       recordedHealth = true;
       // A revoked/expired GramJS auth key keeps the DB row CONNECTED forever
@@ -2699,14 +2706,18 @@ class AppStore {
   ) {
     const sessionHealth = telegram.sessionHealth?.(sessionId);
     const timeout = error instanceof TelegramRpcTimeoutError;
-    const stalled = timeout || Boolean(sessionHealth?.stalled);
-    const healthy = !error && !sessionHealth?.stalled;
     const previous = this.telegramProviderHealth.get(provider.id);
+    const consecutiveFailures = error ? (previous?.consecutiveFailures ?? 0) + 1 : 0;
+    const stalled =
+      Boolean(sessionHealth?.stalled) ||
+      (timeout && consecutiveFailures >= TELEGRAM_PROVIDER_STALL_FAILURES);
+    const healthy = !error && !sessionHealth?.stalled;
     const health: TelegramProviderHealth = {
       providerId: provider.id,
       sessionId,
       healthy,
       stalled,
+      consecutiveFailures,
       checkedAt: nowIso(),
       error: error instanceof Error ? error.message : error ? String(error) : undefined,
     };
@@ -9793,8 +9804,9 @@ class AppStore {
         trade,
         this.brokerOrderTicketsForTrade(trade.id),
       );
-      const missingPendingOpen =
-        match.status === "missing" ? this.missingPendingOpenOrder(trade.id) : null;
+      const pendingOpen = match.status === "missing" ? this.pendingOpenOrder(trade.id) : null;
+      if (match.status === "missing" && this.pendingOpenMissingGraceActive(pendingOpen)) continue;
+      const missingPendingOpen = pendingOpen ? this.missingPendingOpenOrder(pendingOpen) : null;
       const updated = missingPendingOpen
         ? cancelLogicalTrade(trade, {
             evidence: [
@@ -9848,8 +9860,8 @@ class AppStore {
     }
   }
 
-  private missingPendingOpenOrder(tradeId: string) {
-    const row = this.db
+  private pendingOpenOrder(tradeId: string) {
+    return this.db
       .query(
         `SELECT order_ticket, broker_comment, created_at
          FROM broker_orders
@@ -9869,13 +9881,21 @@ class AppStore {
          ORDER BY created_at DESC LIMIT 1`,
       )
       .get(tradeId) as Row | null;
+  }
+
+  private pendingOpenMissingGraceActive(row: Row | null) {
     if (!row) return null;
     const createdAt = String(row.created_at ?? "");
     const created = Date.parse(normalizedDateInput(createdAt));
     const graceMs =
       Math.max(pendingOpenMissingGraceSeconds, this.appSettings().pollingIntervalSeconds * 2) *
       1000;
-    if (Number.isFinite(created) && Date.now() - created < graceMs) return null;
+    return Number.isFinite(created) && Date.now() - created < graceMs;
+  }
+
+  private missingPendingOpenOrder(row: Row) {
+    if (this.pendingOpenMissingGraceActive(row)) return null;
+    const createdAt = String(row.created_at ?? "");
     return {
       orderTicket: String(row.order_ticket ?? ""),
       brokerComment: String(row.broker_comment ?? ""),
@@ -10922,11 +10942,12 @@ function isPendingOrderAcceptance(
   input: ExecutionReportInput,
 ) {
   return (
+    input.status === "EXECUTED" &&
     payload.commandType === "OPEN_TRADE" &&
     (payload.orderType === "LIMIT" || payload.orderType === "STOP") &&
-    !truthyBrokerTicket(input.positionTicket) &&
-    !truthyBrokerTicket(input.dealTicket) &&
-    Number(input.filledPrice ?? 0) <= 0
+    truthyBrokerTicket(input.orderTicket) &&
+    Number(input.filledVolume ?? 0) <= 0 &&
+    Number(input.remainingVolume ?? input.requestedVolume ?? input.volume ?? 0) > 0
   );
 }
 
