@@ -144,6 +144,7 @@ interface AppSettings {
   reportingCurrency: ReportingCurrency;
   usdZarRate: number;
   releaseHeldOnGuardianUnpause: boolean;
+  releaseHeldOnEaReconnect: boolean;
   alertBotToken: string;
   alertChatId: string;
   alertOnGuardianPause: boolean;
@@ -203,6 +204,7 @@ const defaultAppSettings: AppSettings = {
   reportingCurrency: "USD",
   usdZarRate: 16,
   releaseHeldOnGuardianUnpause: false,
+  releaseHeldOnEaReconnect: true,
   alertBotToken: "",
   alertChatId: "",
   alertOnGuardianPause: false,
@@ -216,6 +218,7 @@ const pendingOpenMissingGraceSeconds = 10;
 const EA_HEARTBEAT_SECONDS = 5;
 const EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS = 30;
 const GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS = 60 * 60;
+const EA_OFFLINE_RELEASE_MAX_AGE_SECONDS = 15 * 60;
 const ALERT_DEDUP_MS = 30 * 60 * 1000;
 const MANUAL_PUSH_DEDUP_SECONDS = 10;
 const OPEN_SIGNAL_DEDUP_SECONDS = 24 * 60 * 60;
@@ -4243,9 +4246,13 @@ class AppStore {
     this.saveAccountMapping(accountId, {
       ...this.accountMappingForBroker(accountId, input.availableSymbols),
     });
+    const releasedQueueItemIds = this.appSettings().releaseHeldOnEaReconnect
+      ? this.releaseEaOfflineHeldQueueItems(accountId)
+      : [];
     this.audit("mt5.register", "info", "MT5 account registered", {
       accountId,
       marginMode: input.marginMode,
+      releasedQueueItemIds,
     });
     if (slot) this.attachAccountSlot(slot.id, accountId, input);
     else this.ensureLegacyAccountSlot(accountId, input);
@@ -4282,6 +4289,13 @@ class AppStore {
         };
       }
     }
+    const previousHeartbeat = this.db
+      .query("SELECT last_heartbeat_at FROM mt5_accounts WHERE id = ?")
+      .get(input.accountId) as Row | null;
+    const previousHeartbeatAt = Date.parse(String(previousHeartbeat?.last_heartbeat_at ?? ""));
+    const wasOffline =
+      !Number.isFinite(previousHeartbeatAt) ||
+      Date.now() - previousHeartbeatAt > EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS * 1000;
     const now = nowIso();
     this.db
       .query(
@@ -4317,6 +4331,10 @@ class AppStore {
           .run(input.accountId, input.balance, input.equity, now, now, "linked", slot.id);
       }
     }
+    const releasedQueueItemIds =
+      wasOffline && this.appSettings().releaseHeldOnEaReconnect
+        ? this.releaseEaOfflineHeldQueueItems(input.accountId)
+        : [];
     this.recordEquityCurveSamples(input, now);
     this.emitEvent({
       type: "heartbeat",
@@ -4327,7 +4345,7 @@ class AppStore {
       heartbeatStatus: "online",
       now,
     });
-    return { accountId: input.accountId, heartbeatStatus: "online", at: now };
+    return { accountId: input.accountId, heartbeatStatus: "online", at: now, releasedQueueItemIds };
   }
 
   leaseNextQueueItem(accountId?: string): ReturnType<typeof queueRow> | null {
@@ -4653,6 +4671,54 @@ class AppStore {
       }
       const result = this.requeueQueueItem(String(row.id), "market");
       return "queueItemId" in result && result.queueItemId ? [result.queueItemId] : [];
+    });
+  }
+
+  private releaseEaOfflineHeldQueueItems(accountId: string): string[] {
+    const held = this.db
+      .query(
+        `SELECT queue_items.id, queue_items.created_at, queue_items.payload_json, logical_trades.data_json
+         FROM queue_items
+         LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
+         WHERE queue_items.account_id = ? AND queue_items.status = 'HELD' AND queue_items.held_reason = 'EA_OFFLINE'`,
+      )
+      .all(accountId) as Row[];
+    return held.flatMap((row) => {
+      const queueItemId = String(row.id);
+      const trade = row.data_json ? parseJson<LogicalTrade>(String(row.data_json)) : undefined;
+      const sourceDate = trade?.source?.messageDate || String(row.created_at);
+      const sourceTimestamp = Date.parse(normalizedDateInput(sourceDate));
+      if (
+        Number.isFinite(sourceTimestamp) &&
+        Date.now() - sourceTimestamp > EA_OFFLINE_RELEASE_MAX_AGE_SECONDS * 1000
+      ) {
+        this.audit(
+          "queue.ea-offline-release-skipped",
+          "warn",
+          "EA_OFFLINE held item too old to auto-release",
+          { accountId, queueItemId, sourceDate, reason: "too_old" },
+        );
+        return [];
+      }
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      if (payload.orderType !== "LIMIT" && payload.orderType !== "STOP") {
+        this.audit(
+          "queue.ea-offline-release-skipped",
+          "warn",
+          "EA_OFFLINE held item is not a pending order",
+          { accountId, queueItemId, sourceDate, reason: "market_not_auto_released" },
+        );
+        return [];
+      }
+      const result = this.requeueQueueItem(queueItemId, "original");
+      if ("queueItemId" in result && result.queueItemId) return [result.queueItemId];
+      this.audit(
+        "queue.ea-offline-release-skipped",
+        "warn",
+        "EA_OFFLINE held item could not be requeued",
+        { accountId, queueItemId, sourceDate, reason: "requeue_blocked", error: result.error },
+      );
+      return [];
     });
   }
 
@@ -12618,6 +12684,7 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     reportingCurrency,
     usdZarRate: positiveNumber(input.usdZarRate, defaultAppSettings.usdZarRate),
     releaseHeldOnGuardianUnpause: input.releaseHeldOnGuardianUnpause === true,
+    releaseHeldOnEaReconnect: input.releaseHeldOnEaReconnect !== false,
     alertBotToken: typeof input.alertBotToken === "string" ? input.alertBotToken.trim() : "",
     alertChatId: typeof input.alertChatId === "string" ? input.alertChatId.trim() : "",
     alertOnGuardianPause: input.alertOnGuardianPause === true,

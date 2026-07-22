@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.51.0 - 2026-07-22 (Minor)
+
+Release impact: Minor because this adds a configurable automatic reconnect release for held pending orders.
+
+- Automatically requeue fresh EA_OFFLINE LIMIT and STOP items on an EA register or offline-to-online heartbeat transition, retaining their original pending-order payload.
+- Keep stale and MARKET EA_OFFLINE items held for operator review, with audit records explaining each skip.
+- Added `releaseHeldOnEaReconnect`, enabled by default; no EA source behavior changed, so an EA recompile is not required for this release.
+
 ## 1.50.1 - 2026-07-21 (Patch)
 
 Release impact: Patch because this hardens backend Telegram health reporting, logging, and pending-order reconciliation without changing the MT5 protocol.

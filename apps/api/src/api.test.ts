@@ -113,7 +113,11 @@ async function configureProviderWithAccount(
   return selected.provider.id;
 }
 
-async function approveGoldBuyLimit(app: ReturnType<typeof createApi>) {
+async function approveGoldBuyLimit(
+  app: ReturnType<typeof createApi>,
+  rawText = "Gold buy limit\n\n4541-40\n\nSL 4535\n\nTP 4546\nTP 4553\nTP 4561\nTP 4579",
+  beforeApprove?: () => void,
+) {
   const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
   await app.request(`/api/providers/${providerId}`, {
     method: "PATCH",
@@ -135,15 +139,40 @@ async function approveGoldBuyLimit(app: ReturnType<typeof createApi>) {
       body: JSON.stringify({
         providerId,
         accountId: "mt5-63442826",
-        rawText: "Gold buy limit\n\n4541-40\n\nSL 4535\n\nTP 4546\nTP 4553\nTP 4561\nTP 4579",
+        rawText,
       }),
       headers: { "content-type": "application/json" },
     }),
   );
+  beforeApprove?.();
   const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
     await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
   );
-  return { ...approval, shortId: approval.logicalTradeId.replace(/^trade[_-]/, "") };
+  return { ...approval, shortId: approval.logicalTradeId?.replace(/^trade[_-]/, "") ?? "" };
+}
+
+async function createEaOfflineApproval(
+  input: { rawText?: string; releaseHeldOnEaReconnect?: boolean } = {},
+) {
+  const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-ea-offline-"));
+  const databasePath = join(tempDir, "app.db");
+  const app = createApi({ databasePath, seedDemoData: false, telegramAdapter: "mock" });
+  if (input.releaseHeldOnEaReconnect === false) {
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ releaseHeldOnEaReconnect: false }),
+      headers: { "content-type": "application/json" },
+    });
+  }
+  const approved = await approveGoldBuyLimit(app, input.rawText, () => {
+    const db = new Database(databasePath);
+    db.query("UPDATE mt5_accounts SET last_heartbeat_at = ? WHERE id = ?").run(
+      new Date(Date.now() - 31_000).toISOString(),
+      "mt5-63442826",
+    );
+    db.close();
+  });
+  return { app, approved, databasePath, tempDir };
 }
 
 async function approveGoldSellSmallRunnerLimit(app: ReturnType<typeof createApi>) {
@@ -1612,20 +1641,27 @@ describe("Telegram TC API", () => {
     }
   });
 
-  test("defaults releaseHeldOnGuardianUnpause to false and allows setting it", async () => {
+  test("defaults held-release settings and allows updating them", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
-    const initial = await json<{ settings: { releaseHeldOnGuardianUnpause: boolean } }>(
-      await app.request("/api/settings"),
-    );
+    const initial = await json<{
+      settings: { releaseHeldOnGuardianUnpause: boolean; releaseHeldOnEaReconnect: boolean };
+    }>(await app.request("/api/settings"));
     expect(initial.settings.releaseHeldOnGuardianUnpause).toBe(false);
-    const updated = await json<{ settings: { releaseHeldOnGuardianUnpause: boolean } }>(
+    expect(initial.settings.releaseHeldOnEaReconnect).toBe(true);
+    const updated = await json<{
+      settings: { releaseHeldOnGuardianUnpause: boolean; releaseHeldOnEaReconnect: boolean };
+    }>(
       await app.request("/api/settings", {
         method: "PATCH",
-        body: JSON.stringify({ releaseHeldOnGuardianUnpause: true }),
+        body: JSON.stringify({
+          releaseHeldOnGuardianUnpause: true,
+          releaseHeldOnEaReconnect: false,
+        }),
         headers: { "content-type": "application/json" },
       }),
     );
     expect(updated.settings.releaseHeldOnGuardianUnpause).toBe(true);
+    expect(updated.settings.releaseHeldOnEaReconnect).toBe(false);
   });
 
   test("accepts MT5 JSON requests with trailing null bytes and rejects malformed MT5 JSON cleanly", async () => {
@@ -4242,6 +4278,7 @@ describe("Telegram TC API", () => {
         reportingCurrency: string;
         usdZarRate: number;
         releaseHeldOnGuardianUnpause: boolean;
+        releaseHeldOnEaReconnect: boolean;
         alertBotConfigured: boolean;
         alertChatId: string;
         alertOnGuardianPause: boolean;
@@ -4269,6 +4306,7 @@ describe("Telegram TC API", () => {
       reportingCurrency: "USD",
       usdZarRate: 16,
       releaseHeldOnGuardianUnpause: false,
+      releaseHeldOnEaReconnect: true,
       alertBotConfigured: false,
       alertChatId: "",
       alertOnGuardianPause: false,
@@ -4543,6 +4581,171 @@ describe("Telegram TC API", () => {
       expect(held.items).toContainEqual(expect.objectContaining({ heldReason: "EA_OFFLINE" }));
     } finally {
       Date.now = originalDateNow;
+    }
+  });
+
+  test("releases fresh EA_OFFLINE LIMIT work when the EA registers again", async () => {
+    const prepared = await createEaOfflineApproval();
+    try {
+      const { app, approved } = prepared;
+      const before = await json<{ queue: Array<{ id: string; status: string }> }>(
+        await app.request("/api/signals"),
+      );
+      expect(before.queue.find((item) => item.id === approved.queueItemId)?.status).toBe("HELD");
+
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442826",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const after = await json<{
+        queue: Array<{
+          id: string;
+          status: string;
+          originQueueItemId?: string;
+          accountId: string;
+          payload: { orderType: string };
+        }>;
+      }>(await app.request("/api/signals"));
+      expect(after.queue).toContainEqual(
+        expect.objectContaining({ id: approved.queueItemId, status: "DISMISSED" }),
+      );
+      expect(after.queue).toContainEqual(
+        expect.objectContaining({
+          accountId: "mt5-63442826",
+          originQueueItemId: approved.queueItemId,
+          status: "PENDING",
+          payload: expect.objectContaining({ orderType: "LIMIT" }),
+        }),
+      );
+    } finally {
+      await rm(prepared.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not auto-release EA_OFFLINE MARKET work on reconnect", async () => {
+    const prepared = await createEaOfflineApproval({ rawText: "BUY XAUUSD NOW\nSL 4535\nTP 4546" });
+    try {
+      const { app, approved } = prepared;
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442826",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const queue = await json<{
+        queue: Array<{ id: string; status: string; payload: { orderType: string } }>;
+      }>(await app.request("/api/signals"));
+      expect(queue.queue.find((item) => item.id === approved.queueItemId)).toMatchObject({
+        status: "HELD",
+        payload: { orderType: "MARKET" },
+      });
+    } finally {
+      await rm(prepared.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not auto-release EA_OFFLINE work older than fifteen minutes", async () => {
+    const prepared = await createEaOfflineApproval();
+    try {
+      const { app, approved, databasePath } = prepared;
+      const db = new Database(databasePath);
+      db.query("UPDATE queue_items SET created_at = ? WHERE id = ?").run(
+        new Date(Date.now() - 16 * 60_000).toISOString(),
+        approved.queueItemId,
+      );
+      db.close();
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442826",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const queue = await json<{ queue: Array<{ id: string; status: string }> }>(
+        await app.request("/api/signals"),
+      );
+      expect(queue.queue.find((item) => item.id === approved.queueItemId)?.status).toBe("HELD");
+    } finally {
+      await rm(prepared.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("releases EA_OFFLINE work only on a heartbeat after an offline transition", async () => {
+    const prepared = await createEaOfflineApproval();
+    try {
+      const { app, approved } = prepared;
+      const heartbeat = () =>
+        app.request("/api/mt5/heartbeat", {
+          method: "POST",
+          body: JSON.stringify({ accountId: "mt5-63442826", balance: 10000, equity: 10000 }),
+          headers: { "content-type": "application/json" },
+        });
+      expect(
+        (await json<{ releasedQueueItemIds: string[] }>(await heartbeat())).releasedQueueItemIds,
+      ).toHaveLength(1);
+      expect(
+        (await json<{ releasedQueueItemIds: string[] }>(await heartbeat())).releasedQueueItemIds,
+      ).toEqual([]);
+      const queue = await json<{ queue: Array<{ originQueueItemId?: string }> }>(
+        await app.request("/api/signals"),
+      );
+      expect(
+        queue.queue.filter((item) => item.originQueueItemId === approved.queueItemId),
+      ).toHaveLength(1);
+    } finally {
+      await rm(prepared.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps EA_OFFLINE work held when reconnect release is disabled", async () => {
+    const prepared = await createEaOfflineApproval({ releaseHeldOnEaReconnect: false });
+    try {
+      const { app, approved } = prepared;
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442826",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const queue = await json<{ queue: Array<{ id: string; status: string }> }>(
+        await app.request("/api/signals"),
+      );
+      expect(queue.queue.find((item) => item.id === approved.queueItemId)?.status).toBe("HELD");
+    } finally {
+      await rm(prepared.tempDir, { recursive: true, force: true });
     }
   });
 
