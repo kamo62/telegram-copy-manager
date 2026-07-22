@@ -200,6 +200,55 @@ describe("deterministic signal parser", () => {
     expect(modifyTp.takeProfits[0]).toEqual({ leg: 2, price: 1.0975, allocationPercent: 25 });
   });
 
+  test("reads remove/scrap/take-off replies on a pending order as a cancel", () => {
+    const kalRemove = parseSignalText(
+      "Quoted signal:\nGold sell limit \n\n4126-27\n\nSl 4132\n\nTp 4121\nTp 4114\nTp 4108\n\nComment:\nRemove … I don't like this heavy consolidation",
+      context,
+    );
+    const scrap = parseSignalText(
+      "Quoted signal:\nGold buy limit 4112 sl 4106 tp 4117\n\nComment:\nscrap it",
+      context,
+    );
+    const takeOff = parseSignalText(
+      "Quoted signal:\nGold sell limit 4126 sl 4132 tp 4121\n\nComment:\ntake it off",
+      context,
+    );
+    const positives = [
+      "pull this order",
+      "delete the limit",
+      "remove this pending order",
+      "Take this order off.",
+      "Remove pending.",
+      "Remove this pending order — SL is too wide.",
+    ].map((text) => parseSignalText(text, context));
+
+    expect(kalRemove.commandType).toBe("CANCEL_PENDING");
+    expect(scrap.commandType).toBe("CANCEL_PENDING");
+    expect(takeOff.commandType).toBe("CANCEL_PENDING");
+    for (const signal of positives) {
+      expect(signal.commandType).toBe("CANCEL_PENDING");
+    }
+  });
+
+  test("does not treat SL/TP edits, partials, chatter, negation, or teaching as a cancel", () => {
+    const negatives = [
+      "remove your SL",
+      "remove the tp",
+      "take off half",
+      "remove partial",
+      "removed 50% at tp",
+      "price will pull back to entry then continue",
+      "I'll remove this later",
+      "might scrap it",
+      "Don't get rid of this order.",
+      "Gold should remove this resistance before the next push.",
+      "For example, remove this order from your chart and redraw it.",
+    ];
+    for (const text of negatives) {
+      expect(parseSignalText(text, context).commandType).not.toBe("CANCEL_PENDING");
+    }
+  });
+
   test("does not treat conversational TP prose as a modify command", () => {
     const incident = parseSignalText(
       "I mean technically london hasn't opened yet but come on ... yesterday we waiting hours for a set up to hit Tp ... But last night we had a 500pip fly",
@@ -1024,6 +1073,36 @@ describe("a quoted block never re-opens except on an explicit put-back", () => {
       entry: { from: 4043 },
     });
     expect(results[1]?.matchedPatternIds).toContain("quote.comment-replacement");
+  });
+
+  test("recognizes conservative pending-order removal replies", () => {
+    const removeReply = parseSignalText(
+      "Quoted signal:\nGold sell limit 4126 sl 4132 tp 4121\n\nComment:\nRemove, I don't like this heavy consolidation",
+      context,
+    );
+    expect(removeReply.commandType).toBe("CANCEL_PENDING");
+
+    for (const text of [
+      // Pronoun-only removals need real context: a quoted pending order or an order noun.
+      "Quoted signal:\nGold buy limit 4112 sl 4106 tp 4117\n\nComment:\nscrap it",
+      "Quoted signal:\nGold sell limit 4126 sl 4132 tp 4121\n\nComment:\ntake it off",
+      "pull this order",
+      "delete the limit",
+    ]) {
+      expect(parseSignalText(text, context).commandType).toBe("CANCEL_PENDING");
+    }
+  });
+
+  test("does not treat risk or partial removal as a pending-order cancel", () => {
+    for (const text of [
+      "remove your SL",
+      "remove the tp",
+      "take off half",
+      "remove partial",
+      "removed 50% at tp",
+    ]) {
+      expect(parseSignalText(text, context).commandType).not.toBe("CANCEL_PENDING");
+    }
   });
 });
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.52.0 - 2026-07-22 (Minor)
+
+Release impact: Minor because this adds an operator-triggered pending-order cancellation workflow.
+
+- Added `POST /api/trades/:id/cancel-pending` to enqueue `CANCEL_PENDING` for a PENDING logical trade so an operator can cancel a live pending order.
+- Recognize conservative remove, scrap, take-off, pull, and delete pending-order cancellations. Guards exclude SL/TP/target/partial/percentage edits, negations ("don't remove"), future or tentative intent ("I'll remove later", "might scrap it"), teaching framing ("for example"), and chart chatter ("pull back to entry"); a cancel only fires with a quoted pending order or an explicit order noun.
+
 ## 1.51.0 - 2026-07-22 (Minor)
 
 Release impact: Minor because this adds a configurable automatic reconnect release for held pending orders.

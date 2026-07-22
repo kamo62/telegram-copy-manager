@@ -2578,6 +2578,60 @@ describe("Telegram TC API", () => {
     expect(noWork).toContain("status=NO_WORK");
   });
 
+  test("queues an operator pending-order cancellation and rejects open trades", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+
+    const cancellation = await app.request(
+      `/api/trades/${approved.logicalTradeId}/cancel-pending`,
+      { method: "POST" },
+    );
+    expect(cancellation.status).toBe(200);
+    const result = await json<{
+      queueItemId: string;
+      tradeId: string;
+      accountId: string;
+      status: string;
+    }>(cancellation);
+    expect(result).toMatchObject({
+      tradeId: approved.logicalTradeId,
+      accountId: "mt5-63442826",
+      status: "CANCELLING",
+    });
+    const signals = await json<{
+      queue: Array<{
+        id: string;
+        accountId?: string;
+        logicalTradeId?: string;
+        payload: { commandType: string; targetOrderTicket?: string };
+      }>;
+    }>(await app.request("/api/signals"));
+    expect(signals.queue).toContainEqual(
+      expect.objectContaining({
+        id: result.queueItemId,
+        accountId: "mt5-63442826",
+        logicalTradeId: approved.logicalTradeId,
+        payload: expect.objectContaining({ commandType: "CANCEL_PENDING" }),
+      }),
+    );
+
+    const openApp = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const openTrade = await approveGoldBuyLimit(openApp);
+    await reportPendingAccepted(openApp, openTrade);
+    await reportGoldFill(openApp, openTrade);
+    const rejected = await openApp.request(
+      `/api/trades/${openTrade.logicalTradeId}/cancel-pending`,
+      {
+        method: "POST",
+      },
+    );
+    expect(rejected.status).toBe(409);
+    expect(await json<{ error: string }>(rejected)).toEqual({
+      error: "Only PENDING trades can be cancelled; use close for open trades",
+    });
+  });
+
   test("queues one app-managed TP1 partial close only after the pending order fills", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const approved = await approveGoldBuyLimit(app);

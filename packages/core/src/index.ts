@@ -528,7 +528,11 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const matchedPatternIds: string[] = [...candidate.matchedPatternIds];
   const warnings: string[] = [];
   const missingFields: string[] = [];
-  let commandType = detectCommandType(upper, matchedPatternIds);
+  let commandType = detectCommandType(
+    upper,
+    matchedPatternIds,
+    Boolean(candidate.quotedText && /\b(?:LIMIT|STOP|ENTRY)\b/i.test(candidate.quotedText)),
+  );
   let direction = detectDirection(upper);
   let orderType: OrderType | undefined = detectOrderType(upper);
   let entry = commandType === "OPEN_TRADE" ? extractEntry(text, direction, orderType) : undefined;
@@ -1132,8 +1136,13 @@ function extractSignalCandidate(text: string) {
   return { text, matchedPatternIds: [], quotedText: undefined, commentText: undefined };
 }
 
-function detectCommandType(upper: string, matchedPatternIds: string[]): CommandType {
-  if (isDeferredOrNegatedInstruction(upper)) {
+function detectCommandType(
+  upper: string,
+  matchedPatternIds: string[],
+  hasQuotedPendingSignal = false,
+): CommandType {
+  const pendingOrderRemoval = isPendingOrderRemoval(upper, hasQuotedPendingSignal);
+  if (isDeferredOrNegatedInstruction(upper) && !pendingOrderRemoval) {
     matchedPatternIds.push("noise.deferred-or-negated");
     return "NO_SIGNAL";
   }
@@ -1194,6 +1203,10 @@ function detectCommandType(upper: string, matchedPatternIds: string[]): CommandT
     matchedPatternIds.push("lifecycle.cancel");
     return "CANCEL_PENDING";
   }
+  if (pendingOrderRemoval) {
+    matchedPatternIds.push("lifecycle.remove-pending");
+    return "CANCEL_PENDING";
+  }
   if (/\bMOVE\s+SL\b.*\b(BE|BREAK\s*EVEN|ENTRY)\b|\bSL\s+(TO\s+)?(BE|ENTRY)\b/.test(upper)) {
     matchedPatternIds.push("lifecycle.move-sl-be");
     return "MOVE_SL_TO_BE";
@@ -1226,6 +1239,55 @@ function detectCommandType(upper: string, matchedPatternIds: string[]): CommandT
   if (hasOpenTradeIntent(upper)) return "OPEN_TRADE";
   matchedPatternIds.push("noise.no-signal");
   return "NO_SIGNAL";
+}
+
+function isPendingOrderRemoval(upper: string, hasQuotedPendingSignal: boolean): boolean {
+  const removalVerb =
+    /\b(?:REMOVE|SCRAP|DELETE|DISREGARD|VOID)\b/.test(upper) ||
+    // "PULL" only as an order reference, never bare ("pull back to entry" is chart chatter).
+    /\bPULL\s+(?:IT|THIS|THAT|THEM|THE\s+(?:ORDER|LIMIT|STOP|TRADE|ENTRY|POSITION))\b/.test(upper) ||
+    // "take it off" and "take this order off" both cancel; allow an optional order noun.
+    /\bTAKE\s+(?:IT|THIS|THAT|THEM|THE)(?:\s+(?:ORDER|LIMIT|STOP|TRADE|ENTRY|POSITION))?\s+OFF\b/.test(
+      upper,
+    ) ||
+    /\bTAKE\s+OFF\s+THE\b|\bGET\s+RID\s+OF\b/.test(upper);
+  // Negation directly on the removal verb ("don't remove/take/get rid") is a keep, not a cancel.
+  const negatedRemoval =
+    /\b(?:DO\s+NOT|DON'?T|NEVER|NOT)\s+(?:REMOVE|SCRAP|PULL|DELETE|DISREGARD|VOID|TAKE|GET\s+RID)\b/.test(
+      upper,
+    );
+  // A future or tentative removal ("I'll remove this later", "might scrap it") is not an
+  // actionable cancel; only present-tense imperatives are.
+  const deferredRemoval =
+    /\b(?:NOT\s+NOW|NO\s+TRADE|WAIT\s+FOR|ONLY\s+AFTER|AFTER\s+CONFIRMATION)\b/.test(upper) ||
+    /\b(?:I'?LL|WE'?LL|GONNA|GOING\s+TO)\b/.test(upper) ||
+    /\b(?:LATER|MIGHT|MAYBE|SOON)\b/.test(upper) ||
+    /\bWILL\s+(?:REMOVE|SCRAP|PULL|DELETE|DISREGARD|VOID|TAKE)\b/.test(upper);
+  // Hypothetical or teaching framing ("for example, remove this order") is commentary.
+  const educationalFraming =
+    /\b(?:FOR\s+EXAMPLE|FOR\s+INSTANCE|E\.?G\.?|SUCH\s+AS|IMAGINE|SUPPOSE)\b/.test(upper);
+  // Removing the order itself is a real cancel even when an SL/TP is named as the reason
+  // ("remove this order, SL too wide"); removing a bare SL/TP ("remove your SL") is not.
+  const explicitOrderRemoval =
+    /\b(?:REMOVE|SCRAP|PULL|DELETE|DISREGARD|VOID|CANCEL)\b(?:(?!\bSL\b|\bTP\b).){0,24}?\b(?:ORDER|LIMIT|ENTRY|ENTRIES|PENDING|POSITION|TRADE)\b/.test(
+      upper,
+    );
+  const removalTargetsRisk =
+    (/\b(?:SL|STOP\s+LOSS|T\.?\s*P\.?|TARGET|TAKE\s+PROFIT|PARTIAL|HALF)\b/.test(upper) ||
+      /\b\d{1,3}\s*%/.test(upper)) &&
+    !explicitOrderRemoval;
+  // A bare pronoun is not enough context; require a quoted pending order or a real order noun.
+  const pendingOrderContext =
+    hasQuotedPendingSignal ||
+    /\b(?:ORDER|LIMIT|STOP|ENTRY|ENTRIES|PENDING|POSITION|TRADE)\b/.test(upper);
+  return (
+    removalVerb &&
+    !negatedRemoval &&
+    !deferredRemoval &&
+    !educationalFraming &&
+    pendingOrderContext &&
+    !removalTargetsRisk
+  );
 }
 
 function hasModifyTakeProfitPrice(text: string) {

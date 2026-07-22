@@ -958,6 +958,11 @@ export function createApi(options: ApiOptions = {}) {
     if ("error" in result) return c.json({ error: result.error }, result.statusCode);
     return c.json(result);
   });
+  app.post("/api/trades/:id/cancel-pending", (c) => {
+    const result = store.cancelPendingTrade(c.req.param("id"));
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
 
   app.get("/api/audit-logs", (c) =>
     c.json({
@@ -6263,6 +6268,56 @@ class AppStore {
         )
         .all(logicalTradeId) as Row[]
     ).map((row) => this.brokerOrderFromRow(row));
+  }
+
+  cancelPendingTrade(tradeId: string) {
+    const trade = this.logicalTrade(tradeId);
+    if (!trade) return { statusCode: 404 as const, error: "Logical trade not found" };
+    if (trade.status !== "PENDING") {
+      return {
+        statusCode: 409 as const,
+        error: "Only PENDING trades can be cancelled; use close for open trades",
+      };
+    }
+    if (!trade.accountId) return { statusCode: 409 as const, error: "Trade has no account" };
+
+    const enrichedSignal = enrichLifecycleSignalFromTrade(
+      {
+        originalText: "Operator requested pending order cancellation",
+        commandType: "CANCEL_PENDING",
+        mappingStatus: trade.symbol.mappingStatus,
+        mappingSource: trade.symbol.mappingSource,
+        mappingWarnings: [],
+        takeProfits: [],
+        confidence: 1,
+        matchedPatternIds: ["operator.cancel-pending"],
+        missingFields: [],
+        warnings: [],
+        fingerprint: `operator-cancel:${trade.id}`,
+      },
+      trade,
+    );
+    const queueItemId = `queue_${nanoid(10)}`;
+    const settings = this.appSettings();
+    const queueItem = buildExecutionCommand(enrichedSignal, {
+      id: queueItemId,
+      accountId: trade.accountId,
+      logicalTradeId: trade.id,
+      executionMode: trade.executionMode ?? "VIRTUAL_TP",
+      volume: settings.defaultLotSize,
+      riskPercent: settings.defaultRiskPercent,
+    });
+    Object.assign(queueItem.payload, this.brokerTargetForCommand(trade.id, queueItem.payload));
+    this.appendTradeCommand(trade.id, enrichedSignal);
+    this.insertQueueItem(queueItem, "");
+    this.audit(
+      "trade.cancel-pending",
+      "info",
+      "Pending order cancel requested by operator",
+      { tradeId, accountId: trade.accountId, queueItemId },
+      "operator",
+    );
+    return { queueItemId, tradeId, accountId: trade.accountId, status: "CANCELLING" as const };
   }
 
   resolveTrade(tradeId: string, action?: string) {
