@@ -3417,6 +3417,94 @@ describe("Telegram TC API", () => {
     expect(noWork).toContain("status=NO_WORK");
   });
 
+  test("keeps live PnL in memory while persisting only structural snapshot changes", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-live-snapshot-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({ databasePath, seedDemoData: false });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountNumber: "100200300",
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+      });
+      const sendSnapshot = (profit: number, bid: number, stopLoss: number, point = 0.01) =>
+        app.request("/api/mt5/snapshot", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            accountId: "mt5-100200300",
+            positions: [
+              {
+                ticket: "50001",
+                symbol: "XAUUSD",
+                volume: 0.1,
+                openPrice: 2400,
+                sl: stopLoss,
+                tp: 2450,
+                profit,
+                isExternal: false,
+              },
+            ],
+            orders: [],
+            symbols: [
+              {
+                symbol: "XAUUSD",
+                bid,
+                ask: bid + 0.02,
+                timeMsc: Date.now(),
+                point,
+                digits: point === 0.01 ? 2 : 3,
+              },
+            ],
+          }),
+        });
+
+      await sendSnapshot(10, 2410, 2380);
+      await sendSnapshot(25, 2415, 2380);
+
+      let db = new Database(databasePath, { readonly: true });
+      let persisted = db
+        .query("SELECT positions_json, symbols_json FROM mt5_snapshots WHERE account_id = ?")
+        .get("mt5-100200300") as { positions_json: string; symbols_json: string };
+      db.close();
+      expect(JSON.parse(persisted.positions_json)[0].profit).toBe(10);
+      expect(JSON.parse(persisted.symbols_json)[0].bid).toBe(2410);
+
+      const dashboard = await json<{
+        mt5Accounts: Array<{
+          appPositions: Array<{ profit: number }>;
+          symbols: Array<{ bid: number }>;
+        }>;
+      }>(await app.request("/api/dashboard"));
+      expect(dashboard.mt5Accounts[0]?.appPositions[0]?.profit).toBe(25);
+      expect(dashboard.mt5Accounts[0]?.symbols[0]?.bid).toBe(2415);
+
+      await sendSnapshot(30, 2420, 2390, 0.001);
+      db = new Database(databasePath, { readonly: true });
+      persisted = db
+        .query("SELECT positions_json, symbols_json FROM mt5_snapshots WHERE account_id = ?")
+        .get("mt5-100200300") as { positions_json: string; symbols_json: string };
+      const metadata = db
+        .query("SELECT point, digits FROM symbol_metadata WHERE account_id = ? AND symbol = ?")
+        .get("mt5-100200300", "XAUUSD") as { point: number; digits: number };
+      db.close();
+      expect(JSON.parse(persisted.positions_json)[0]).toMatchObject({ profit: 30, sl: 2390 });
+      expect(JSON.parse(persisted.symbols_json)[0].bid).toBe(2420);
+      expect(metadata).toMatchObject({ point: 0.001, digits: 3 });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("persists MT5 snapshots and marks logical trades out of sync when broker state is missing", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     const lease = await json<{ item: { id: string } | null }>(

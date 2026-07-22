@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.52.1 - 2026-07-22 (Patch)
+
+Release impact: Patch because this removes redundant MT5 snapshot persistence without changing the API, EA protocol, or execution behaviour.
+
+- Kept tick-level position P/L and market quotes in memory so the live dashboard and execution safety continue to use the freshest MT5 snapshot.
+- Persist MT5 snapshots and symbol metadata only when positions, orders, stops, or symbol specifications change, avoiding one-second SQLite rewrites for quote and floating-P/L ticks.
+- Added regression coverage proving volatile P/L remains live while structural broker changes are persisted immediately.
+- Aligned application and EA source version metadata at 1.52.1; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.52.0 - 2026-07-22 (Minor)
 
 Release impact: Minor because this adds an operator-triggered pending-order cancellation workflow.

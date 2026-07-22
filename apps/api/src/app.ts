@@ -1383,10 +1383,50 @@ export function isTelegramDeadSessionError(error: unknown): boolean {
   return TELEGRAM_DEAD_SESSION_ERROR_CODES.some((code) => message.includes(code));
 }
 
+interface Mt5SnapshotState {
+  positions: unknown[];
+  orders: unknown[];
+  symbols: unknown[];
+  updatedAt: string;
+}
+
+const volatilePositionFields = new Set(["profit"]);
+const volatileSymbolFields = new Set(["ask", "bid", "timeMsc"]);
+const noVolatileSnapshotFields = new Set<string>();
+
+function stableSnapshotRecords(records: unknown[], volatileFields: ReadonlySet<string>) {
+  return records
+    .map((record) => {
+      if (!record || typeof record !== "object" || Array.isArray(record)) {
+        return JSON.stringify(record);
+      }
+      return JSON.stringify(
+        Object.fromEntries(
+          Object.entries(record as Record<string, unknown>)
+            .filter(([key]) => !volatileFields.has(key))
+            .sort(([left], [right]) => left.localeCompare(right)),
+        ),
+      );
+    })
+    .sort();
+}
+
+function durableMt5SnapshotSignature(snapshot: Mt5SnapshotState) {
+  return JSON.stringify({
+    positions: stableSnapshotRecords(snapshot.positions, volatilePositionFields),
+    orders: stableSnapshotRecords(snapshot.orders, noVolatileSnapshotFields),
+    symbols: stableSnapshotRecords(snapshot.symbols, volatileSymbolFields),
+  });
+}
+
 class AppStore {
   private readonly db: Database;
   private readonly databasePath: string;
   private readonly allowDemoData: boolean;
+  // Tick-level P/L and quotes are live telemetry, not durable business events.
+  // Keep the latest full snapshot in memory while SQLite stores only structural changes.
+  private readonly liveMt5Snapshots = new Map<string, Mt5SnapshotState>();
+  private readonly persistedMt5SnapshotSignatures = new Map<string, string>();
   // Tracks providers we've already warned about for the "no connected
   // Telegram session" state, so we log once per offline→online edge instead
   // of once per poll. Reset when a session connects.
@@ -4837,24 +4877,53 @@ class AppStore {
     symbols?: unknown[];
   }) {
     const now = new Date().toISOString();
-    this.db
-      .query(
-        `INSERT INTO mt5_snapshots (account_id, positions_json, orders_json, symbols_json, updated_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(account_id) DO UPDATE SET
-           positions_json = excluded.positions_json,
-           orders_json = excluded.orders_json,
-           symbols_json = excluded.symbols_json,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        input.accountId,
-        JSON.stringify(input.positions),
-        JSON.stringify(input.orders),
-        JSON.stringify(input.symbols ?? []),
-        now,
-      );
-    this.persistSymbolMetadata(input.accountId, input.symbols ?? []);
+    const snapshot = {
+      positions: input.positions,
+      orders: input.orders,
+      symbols: input.symbols ?? [],
+      updatedAt: now,
+    };
+    this.liveMt5Snapshots.set(input.accountId, snapshot);
+
+    const signature = durableMt5SnapshotSignature(snapshot);
+    let persistedSignature = this.persistedMt5SnapshotSignatures.get(input.accountId);
+    if (persistedSignature === undefined) {
+      const row = this.db
+        .query(
+          "SELECT positions_json, orders_json, symbols_json, updated_at FROM mt5_snapshots WHERE account_id = ?",
+        )
+        .get(input.accountId) as Row | null;
+      persistedSignature = row
+        ? durableMt5SnapshotSignature({
+            positions: parseJson<unknown[]>(String(row.positions_json)),
+            orders: parseJson<unknown[]>(String(row.orders_json)),
+            symbols: parseJson<unknown[]>(String(row.symbols_json)),
+            updatedAt: String(row.updated_at),
+          })
+        : "";
+      this.persistedMt5SnapshotSignatures.set(input.accountId, persistedSignature);
+    }
+    if (signature !== persistedSignature) {
+      this.db
+        .query(
+          `INSERT INTO mt5_snapshots (account_id, positions_json, orders_json, symbols_json, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(account_id) DO UPDATE SET
+             positions_json = excluded.positions_json,
+             orders_json = excluded.orders_json,
+             symbols_json = excluded.symbols_json,
+             updated_at = excluded.updated_at`,
+        )
+        .run(
+          input.accountId,
+          JSON.stringify(input.positions),
+          JSON.stringify(input.orders),
+          JSON.stringify(input.symbols ?? []),
+          now,
+        );
+      this.persistSymbolMetadata(input.accountId, input.symbols ?? []);
+      this.persistedMt5SnapshotSignatures.set(input.accountId, signature);
+    }
     this.reconcileSnapshotState(input.accountId, input.positions, input.orders);
     this.reconcileManualBrokerClosures(input.accountId, input.positions, input.orders);
     this.evaluateVirtualTakeProfits({
@@ -4863,9 +4932,8 @@ class AppStore {
       symbols: input.symbols,
     });
     this.invalidateDashboardCaches();
-    // Snapshots arrive every ~2 s per account. The full payload is already
-    // persisted in mt5_snapshots; writing an audit_logs row per poll was
-    // producing ~43k rows/day per account with zero diagnostic value.
+    // Snapshot telemetry arrives every second; auditing each poll would add
+    // ~86k rows/day per account without recording a business event.
     return {
       accountId: input.accountId,
       status: "RECORDED",
@@ -9887,7 +9955,7 @@ class AppStore {
         "SELECT account_id, positions_json, orders_json, symbols_json, updated_at FROM mt5_snapshots",
       )
       .all() as Row[];
-    return Object.fromEntries(
+    const persisted = Object.fromEntries(
       rows.map((row) => [
         String(row.account_id),
         {
@@ -9898,6 +9966,7 @@ class AppStore {
         },
       ]),
     );
+    return { ...persisted, ...Object.fromEntries(this.liveMt5Snapshots) };
   }
 
   private reconcileSnapshotState(accountId: string, positions: unknown[], orders: unknown[]) {
