@@ -2,9 +2,11 @@ import {
   Bell,
   DatabaseBackup,
   DollarSign,
+  Moon,
   ShieldAlert,
   Sliders,
   Sparkles,
+  Sun,
   Timer,
   TrendingUp,
 } from "lucide-react";
@@ -12,6 +14,7 @@ import { useEffect, useState } from "react";
 import type { DashboardSnapshot } from "../App";
 import { Panel } from "../components/Panel";
 import { useColorAccents } from "../contexts/ColorAccentsContext";
+import { useTheme } from "../contexts/ThemeContext";
 
 interface AccountThresholdsRow {
   id: string;
@@ -88,6 +91,7 @@ export function SettingsPage({
   onBackup?: () => Promise<string>;
 }) {
   const { colorAccents, setColorAccents } = useColorAccents();
+  const { theme, setTheme } = useTheme();
   const [testSending, setTestSending] = useState(false);
   const [backupRunning, setBackupRunning] = useState(false);
   const [backupFilename, setBackupFilename] = useState("");
@@ -114,6 +118,27 @@ export function SettingsPage({
           icon={<Sparkles aria-hidden="true" size={18} />}
           title="Display"
         >
+          <fieldset className="settings-theme-picker">
+            <legend className="visually-hidden">Colour theme</legend>
+            <button
+              aria-pressed={theme === "light"}
+              className={theme === "light" ? "active" : ""}
+              onClick={() => setTheme("light")}
+              type="button"
+            >
+              <Sun aria-hidden="true" size={14} />
+              Light
+            </button>
+            <button
+              aria-pressed={theme === "dark"}
+              className={theme === "dark" ? "active" : ""}
+              onClick={() => setTheme("dark")}
+              type="button"
+            >
+              <Moon aria-hidden="true" size={14} />
+              Dark
+            </button>
+          </fieldset>
           <label className="settings-checkbox">
             <input
               aria-label="Colour accents"

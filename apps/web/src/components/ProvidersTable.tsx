@@ -10,6 +10,7 @@ import { Tag } from "./Tag";
 
 export interface ProviderRowData {
   id: string;
+  currency?: string;
   dialogId: string;
   title: string;
   enabled: boolean;
@@ -169,13 +170,27 @@ export function ProvidersTable({
                 )}
               </td>
               <td className="num-cell">
-                <Money value={provider.averageDrawdown} currency={currency} locale={locale} />
+                <Money
+                  value={provider.averageDrawdown}
+                  currency={provider.currency ?? currency}
+                  locale={locale}
+                />
               </td>
               <td className="num-cell">
-                <Money value={provider.pnl} currency={currency} locale={locale} signTone />
+                <Money
+                  value={provider.pnl}
+                  currency={provider.currency ?? currency}
+                  locale={locale}
+                  signTone
+                />
               </td>
               <td className="num-cell">
-                <Money value={provider.profit} currency={currency} locale={locale} signTone />
+                <Money
+                  value={provider.profit}
+                  currency={provider.currency ?? currency}
+                  locale={locale}
+                  signTone
+                />
               </td>
               <td className="num-cell">
                 <Stat value={provider.gainPct} unit="percent" locale={locale} signTone />

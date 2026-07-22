@@ -8,7 +8,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { BrowserRouter, MemoryRouter } from "react-router-dom";
 import packageJson from "../../../package.json";
 import { App, type DashboardSnapshot, dashboardSnapshotsEqual } from "./App";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -142,23 +142,52 @@ const snapshot: DashboardSnapshot = {
 };
 
 function clickTab(view: ReturnType<typeof render>, label: string) {
-  fireEvent.click(view.getByRole("tab", { name: label }));
+  if (label === "Symbol Settings") {
+    clickSidebar(view, "Symbols");
+    return;
+  }
+  const currentLabel =
+    label === "History"
+      ? "Positions"
+      : label === "Summary"
+        ? "Signals"
+        : label === "Equity Guardian"
+          ? "Guardian"
+          : label;
+  fireEvent.click(view.getByRole("tab", { name: currentLabel }));
 }
 
 async function clickTabAsync(view: ReturnType<typeof render>, label: string) {
-  fireEvent.click(view.getByRole("tab", { name: label }));
+  if (label === "Symbol Settings") {
+    clickSidebar(view, "Symbols");
+    await view.findByRole("heading", { name: "Symbol routing" });
+    return;
+  }
+  const currentLabel =
+    label === "History"
+      ? "Positions"
+      : label === "Summary"
+        ? "Signals"
+        : label === "Equity Guardian"
+          ? "Guardian"
+          : label;
+  fireEvent.click(view.getByRole("tab", { name: currentLabel }));
   // Some tab changes trigger async data loads. Wait for the tab selection
   // state before asserting on the rendered panel.
   await waitFor(() =>
-    expect(view.getByRole("tab", { name: label }).getAttribute("aria-selected")).toBe("true"),
+    expect(view.getByRole("tab", { name: currentLabel }).getAttribute("aria-selected")).toBe(
+      "true",
+    ),
   );
 }
 
 function clickSidebar(view: ReturnType<typeof render>, label: string) {
-  const buttons = view.getAllByRole("button", { name: label });
+  const currentLabel =
+    label === "Telegram Setup" ? "Telegram" : label === "Linked Accounts" ? "Add account" : label;
+  const buttons = view.getAllByRole("button", { name: currentLabel });
   // Sidebar buttons are full-width; pick the first one (sidebar comes before tabs).
   const sidebarButton = buttons.find((button) => button.closest("aside"));
-  if (!sidebarButton) throw new Error(`No sidebar button labelled ${label}`);
+  if (!sidebarButton) throw new Error(`No sidebar button labelled ${currentLabel}`);
   fireEvent.click(sidebarButton);
 }
 
@@ -351,7 +380,7 @@ describe("App dashboard", () => {
     }
   });
 
-  test("ignores another account's heartbeat for the focused performance panel", async () => {
+  test("ignores another account's heartbeat in each native account card", async () => {
     const base = heartbeatDashboard();
     const primary = base.mt5Accounts.find((account) => account.id === "mt5-demo-1");
     if (!primary) throw new Error("fixture account mt5-demo-1 missing");
@@ -372,9 +401,11 @@ describe("App dashboard", () => {
       );
       await new Promise((resolve) => setTimeout(resolve, 250));
       expect(app.dashboardLoads()).toBe(1);
-      const panel = app.view.getByRole("region", { name: "Account performance" });
-      expect(within(panel).getByText(/105\.00/)).toBeTruthy();
-      expect(within(panel).queryByText(/950\.00/)).toBeNull();
+      const accountButton = app.view.getAllByRole("button", { name: "100200300" }).at(-1);
+      const accountCard = accountButton?.closest("article");
+      expect(accountCard).not.toBeNull();
+      expect(within(accountCard as HTMLElement).getByText(/105\.00/)).toBeTruthy();
+      expect(within(accountCard as HTMLElement).queryByText(/950\.00/)).toBeNull();
     } finally {
       app.restore();
     }
@@ -404,7 +435,7 @@ describe("App dashboard", () => {
     }
   });
 
-  test("allows lazy workspace pages only with the persistent asset fallback wired", async () => {
+  test("renders workspace routes eagerly while retaining the deployed asset fallback", async () => {
     const [source, apiSource, serverSource, deploySource] = await Promise.all([
       Bun.file(new URL("./App.tsx", import.meta.url)).text(),
       Bun.file(new URL("../../api/src/app.ts", import.meta.url)).text(),
@@ -412,7 +443,8 @@ describe("App dashboard", () => {
       Bun.file(new URL("../../../scripts/deploy.sh", import.meta.url)).text(),
     ]);
 
-    expect(source.match(/lazy\(\(\) =>\s*import\("\.\/pages\//g)).toHaveLength(9);
+    expect(source).not.toContain("lazy(() =>");
+    expect(source).not.toContain("<Suspense");
     expect(apiSource).toContain('app.use(\n        "/assets/*"');
     expect(apiSource).toContain("root: options.assetArchiveRoot");
     expect(serverSource).toContain("archiveStaticAssets(staticRoot, assetArchiveRoot)");
@@ -454,17 +486,42 @@ describe("App dashboard", () => {
     const view = render(<App initialSnapshot={snapshot} />);
 
     expect(view.getByRole("heading", { name: "TG-TC · Operations" })).toBeTruthy();
-    expect(view.getAllByText("Telegram Setup").length).toBeGreaterThan(0);
-    expect(view.getAllByText("Linked Accounts").length).toBeGreaterThan(0);
-    expect(view.getAllByText("Live").length).toBeGreaterThan(0);
+    expect(view.getByRole("button", { name: "Operations" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "Review queue" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "Telegram" })).toBeTruthy();
+    expect(view.getByRole("heading", { name: "Signal ledger" })).toBeTruthy();
     expect(view.queryByText("Get started today")).toBeNull();
-    expect(view.getByRole("tab", { name: "Summary" })).toBeTruthy();
-    expect(view.getByRole("tab", { name: "Summary" }).getAttribute("aria-selected")).toBe("true");
+    expect(view.getByRole("tab", { name: "Signals" })).toBeTruthy();
+    expect(view.getByRole("tab", { name: "Signals" }).getAttribute("aria-selected")).toBe("true");
     // The heavy growth chart now lives behind the Performance tab, not on the landing.
     expect(view.queryByLabelText("Account growth chart")).toBeNull();
     expect(view.getByRole("tab", { name: "Performance" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Providers" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Logs" })).toBeTruthy();
+  });
+
+  test("BrowserRouter mounts the clicked workspace immediately without a refresh", async () => {
+    (
+      window as typeof window & {
+        happyDOM?: { setURL: (url: string) => void };
+      }
+    ).happyDOM?.setURL("http://localhost/");
+    window.history.replaceState({}, "", "http://localhost/");
+    const view = rtlRender(
+      <BrowserRouter>
+        <App initialSnapshot={snapshot} />
+      </BrowserRouter>,
+    );
+
+    fireEvent.click(view.getByRole("tab", { name: "Providers" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/providers"));
+    expect((await view.findAllByRole("heading", { name: "Providers" })).length).toBeGreaterThan(0);
+    expect(view.queryByRole("heading", { name: "Signal ledger" })).toBeNull();
+
+    fireEvent.click(view.getByRole("button", { name: "Operations" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/"));
+    expect(await view.findByRole("heading", { name: "Signal ledger" })).toBeTruthy();
   });
 
   test("does not show Telegram login while a saved session is confirmed before the dashboard loads", async () => {
@@ -522,6 +579,8 @@ describe("App dashboard", () => {
         }}
       />,
     );
+
+    clickTab(view, "Performance");
 
     expect(view.getByText("Balance")).toBeTruthy();
     expect(view.getByText("Equity")).toBeTruthy();
@@ -620,9 +679,50 @@ describe("App dashboard", () => {
       />,
     );
 
+    clickTab(view, "Performance");
+
     expect(view.getByText(/200\.00/)).toBeTruthy();
     expect(view.getByText(/220\.00/)).toBeTruthy();
     expect(view.getByText("EA WORKING")).toBeTruthy();
+  });
+
+  test("operations keeps USD and ZAR accounts in their native currencies without a false total", () => {
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          mt5Accounts: [
+            {
+              ...snapshot.mt5Accounts[0]!,
+              id: "mt5-zar",
+              accountNumber: "54870107",
+              currency: "ZAR",
+              balance: 1600,
+              equity: 1760,
+            },
+            {
+              ...snapshot.mt5Accounts[1]!,
+              id: "mt5-usd",
+              accountNumber: "63442826",
+              currency: "USD",
+              balance: 100,
+              equity: 110,
+            },
+          ],
+        }}
+      />,
+    );
+
+    const operatingState = within(view.getByRole("region", { name: "Account operating state" }));
+    const zarCard = operatingState.getByRole("button", { name: "54870107" }).closest("article");
+    const usdCard = operatingState.getByRole("button", { name: "63442826" }).closest("article");
+
+    expect(zarCard?.textContent).toContain("ZAR");
+    expect(zarCard?.textContent).toMatch(/1[,.\s]760/);
+    expect(usdCard?.textContent).toContain("USD");
+    expect(usdCard?.textContent).toMatch(/110/);
+    expect(operatingState.queryByText(/1[,.\s]870/)).toBeNull();
+    expect(view.queryByRole("region", { name: "Account performance" })).toBeNull();
   });
 
   test("account scoped pages use the selected account currency instead of reporting currency", () => {
@@ -837,6 +937,8 @@ describe("App dashboard", () => {
         }}
       />,
     );
+
+    clickTab(view, "Performance");
 
     expect(view.getByText("EA OFFLINE")).toBeTruthy();
     expect(view.queryByText(/12,345\.67/)).toBeNull();

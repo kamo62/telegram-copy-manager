@@ -10,12 +10,11 @@ export type TabId =
   | "logs";
 
 export const tabOptions: Array<{ id: TabId; label: string }> = [
-  { id: "summary", label: "Summary" },
-  { id: "performance", label: "Performance" },
+  { id: "summary", label: "Signals" },
+  { id: "history", label: "Positions" },
   { id: "providers", label: "Providers" },
-  { id: "history", label: "History" },
-  { id: "equity-guardian", label: "Equity Guardian" },
-  { id: "symbols", label: "Symbol Settings" },
+  { id: "performance", label: "Performance" },
+  { id: "equity-guardian", label: "Guardian" },
   { id: "logs", label: "Logs" },
 ];
 

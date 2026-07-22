@@ -10100,6 +10100,111 @@ describe("Telegram TC API", () => {
     }
   });
 
+  test("global provider performance converts USD and ZAR accounts into reporting currency", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      telegramAdapter: "mock",
+      seedDemoData: true,
+    });
+
+    const lease = await json<{ item: { id: string } | null }>(
+      await app.request("/api/mt5/poll?accountId=mt5-100200300"),
+    );
+    expect(lease.item).not.toBeNull();
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        queueItemId: lease.item!.id,
+        accountId: "mt5-100200300",
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "ttc:demo-1",
+        orderTicket: "currency-order-open",
+        positionTicket: "currency-position-1",
+        dealTicket: "currency-deal-open",
+        requestedPrice: 1.085,
+        filledPrice: 1.085,
+        volume: 0.1,
+      }),
+    });
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        queueItemId: lease.item!.id,
+        accountId: "mt5-100200300",
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "ttc:demo-1:tp1",
+        orderTicket: "currency-order-close",
+        positionTicket: "currency-position-1",
+        dealTicket: "currency-deal-close",
+        requestedPrice: 1.09,
+        filledPrice: 1.09,
+        volume: 0.03,
+      }),
+    });
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        deals: [
+          {
+            dealTicket: "currency-deal-close",
+            orderTicket: "currency-order-close",
+            positionTicket: "currency-position-1",
+            entry: "1",
+            type: "1",
+            reason: 5,
+            symbol: "EURUSD.raw",
+            price: 1.09,
+            volume: 0.03,
+            profit: 20,
+            commission: -0.25,
+            swap: 0,
+            fee: -0.05,
+            comment: "ttc:demo-1:tp1",
+            timeMsc: Date.UTC(2026, 4, 18, 10, 42, 14),
+          },
+        ],
+      }),
+    });
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        accountNumber: "54870107",
+        server: "HFMarketsSA-Live",
+        company: "HF Markets SA",
+        currency: "ZAR",
+        balance: 160000,
+        equity: 160000,
+        marginMode: "HEDGING",
+        availableSymbols: ["XAUUSD"],
+      }),
+    });
+
+    const dashboard = await json<{
+      providerPerformance: Array<{
+        id: string;
+        currency: string;
+        pnl: number;
+        gainPct: number;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    const provider = dashboard.providerPerformance.find((row) => row.id === "provider-alpha");
+
+    expect(provider).toMatchObject({
+      currency: "USD",
+      pnl: 19.7,
+      gainPct: 0.1,
+    });
+  });
+
   test("provider performance CSV export includes provider rows and copied drawdown columns", async () => {
     const app = createApi({
       databasePath: ":memory:",

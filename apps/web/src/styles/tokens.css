@@ -1,88 +1,77 @@
-/* Design tokens — modern editorial finance palette. Light theme; dark theme
-   can override these values without touching component classes. */
+/* Telegram TC signal-desk design system.
+   Components consume semantic tokens only; theme changes stay in this file. */
 
-:root {
+:root,
+:root[data-theme="light"] {
   color-scheme: light;
 
-  /* ── Surfaces ─────────────────────────────────────────────────────── */
-  --bg: hsl(220 16% 97%);
-  --bg-elevated: hsl(0 0% 100%);
-  --panel: hsl(0 0% 100%);
-  --panel-2: hsl(220 16% 96%);
-  --panel-hover: hsl(220 14% 94%);
-  --overlay: hsl(220 25% 12% / 0.35);
+  --bg: hsl(42 22% 95%);
+  --bg-elevated: hsl(42 30% 98%);
+  --panel: hsl(42 32% 99%);
+  --panel-2: hsl(40 20% 94%);
+  --panel-hover: hsl(42 24% 91%);
+  --sidebar: hsl(155 17% 13%);
+  --sidebar-2: hsl(155 14% 17%);
+  --topbar: hsl(155 18% 10% / 0.96);
+  --overlay: hsl(155 24% 8% / 0.62);
 
-  /* ── Lines ────────────────────────────────────────────────────────── */
-  --line: hsl(220 15% 90%);
-  --line-strong: hsl(220 13% 84%);
-  --line-subtle: hsl(220 16% 94%);
+  --line: hsl(42 13% 84%);
+  --line-strong: hsl(42 11% 72%);
+  --line-subtle: hsl(42 18% 90%);
+  --grid-line: hsl(155 12% 24% / 0.055);
 
-  /* ── Ink (text) ───────────────────────────────────────────────────── */
-  --ink: hsl(220 28% 11%);
-  --ink-2: hsl(220 14% 28%);
-  --ink-dim: hsl(220 12% 38%);
-  --ink-3: hsl(220 10% 46%);
-  --ink-faint: hsl(220 10% 46%);
+  --ink: hsl(155 18% 11%);
+  --ink-2: hsl(155 10% 26%);
+  --ink-dim: hsl(155 8% 37%);
+  --ink-3: hsl(155 7% 46%);
+  --ink-faint: hsl(155 6% 53%);
+  --inverse-ink: hsl(42 30% 95%);
+  --inverse-dim: hsl(42 12% 68%);
 
-  /* ── Accent: monochrome ink ─────────────────────────────────────── */
-  --accent: hsl(220 25% 12%);
-  --accent-9: hsl(220 25% 12%);
-  --accent-10: hsl(220 25% 12%);
-  --accent-dim: hsl(220 25% 12%);
-  --accent-soft: hsl(220 14% 92%);
-  --accent-ring: hsl(220 25% 12% / 0.72);
+  --accent: hsl(155 65% 28%);
+  --accent-9: hsl(155 65% 28%);
+  --accent-10: hsl(155 68% 23%);
+  --accent-dim: hsl(155 55% 23%);
+  --accent-soft: hsl(155 42% 88%);
+  --accent-ring: hsl(155 67% 31% / 0.52);
+  --accent-contrast: hsl(42 35% 97%);
 
-  /* ── Telegram brand (sign-in chrome only) ─────────────────────────── */
-  --tg-blue: hsl(220 25% 12%);
-  --tg-blue-deep: hsl(220 25% 12%);
-  --tg-blue-dim: hsl(220 25% 12%);
+  --tg-blue: hsl(203 78% 40%);
+  --tg-blue-deep: hsl(203 83% 31%);
+  --tg-blue-dim: hsl(203 78% 40% / 0.16);
 
-  /* ── Direction (up / down / warn) ─────────────────────────────────── */
-  --up: hsl(155 62% 32%);
-  --up-9: hsl(155 62% 32%);
-  --up-dim: hsl(155 62% 26%);
-  --up-soft: hsl(155 62% 32% / 0.12);
-  --down: hsl(355 78% 46%);
-  --down-9: hsl(355 78% 46%);
-  --down-dim: hsl(355 78% 38%);
-  --down-soft: hsl(355 78% 46% / 0.12);
-  --warn: hsl(35 88% 46%);
-  --warn-9: hsl(35 88% 46%);
-  --warn-dim: hsl(35 88% 36%);
-  --warn-soft: hsl(35 88% 46% / 0.14);
-  --info: hsl(214 68% 43%);
-  --info-soft: hsl(214 68% 43% / 0.12);
+  --up: hsl(155 65% 28%);
+  --up-9: hsl(155 65% 28%);
+  --up-dim: hsl(155 66% 22%);
+  --up-soft: hsl(155 48% 88%);
+  --down: hsl(3 70% 47%);
+  --down-9: hsl(3 70% 47%);
+  --down-dim: hsl(3 68% 38%);
+  --down-soft: hsl(3 75% 93%);
+  --warn: hsl(35 88% 42%);
+  --warn-9: hsl(35 88% 42%);
+  --warn-dim: hsl(35 86% 32%);
+  --warn-soft: hsl(36 85% 90%);
+  --info: hsl(208 66% 42%);
+  --info-soft: hsl(208 65% 91%);
 
-  /* ── Typography ───────────────────────────────────────────────────── */
-  /* Variable font names come from @fontsource-variable/* packages imported
-     in main.tsx. The legacy non-variable names sit behind them as a courtesy
-     for any environment that still has them installed locally. */
-  --font-display:
-    "Geist Variable", "Geist", "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", sans-serif;
-  --font-ui:
-    "Geist Variable", "Geist", "Geist Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "Helvetica Neue", sans-serif;
-  --font-mono:
-    "JetBrains Mono Variable", "JetBrains Mono", "Geist Mono", ui-monospace, SFMono-Regular,
-    "SF Mono", Menlo, Consolas, monospace;
+  --font-display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --font-ui: "IBM Plex Sans Variable", "IBM Plex Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
-  /* Type scale (ratio ~1.2) */
-  --fs-1: 11px;
-  --fs-2: 12px;
-  --fs-3: 13px;
-  --fs-4: 14px;
-  --fs-5: 16px;
-  --fs-6: 19px;
+  --fs-1: 10px;
+  --fs-2: 11px;
+  --fs-3: 12px;
+  --fs-4: 13px;
+  --fs-5: 15px;
+  --fs-6: 18px;
   --fs-7: 24px;
-  --fs-8: 32px;
-  --fs-9: 44px;
-
-  --lh-tight: 1.15;
+  --fs-8: 34px;
+  --fs-9: 48px;
+  --lh-tight: 1.12;
   --lh-normal: 1.45;
-  --lh-loose: 1.6;
+  --lh-loose: 1.62;
 
-  /* ── Spacing ──────────────────────────────────────────────────────── */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -92,30 +81,84 @@
   --space-7: 48px;
   --space-8: 64px;
 
-  /* ── Radius ───────────────────────────────────────────────────────── */
-  --radius-1: 4px;
-  --radius-2: 8px;
-  --radius-3: 12px;
+  --radius-1: 2px;
+  --radius-2: 5px;
+  --radius-3: 9px;
   --radius-pill: 999px;
-  /* Legacy aliases used by existing rules */
-  --radius: 8px;
-  --radius-sm: 6px;
+  --radius: var(--radius-2);
+  --radius-sm: var(--radius-1);
 
-  /* ── Motion ───────────────────────────────────────────────────────── */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-  --duration-1: 120ms;
-  --duration-2: 200ms;
-  --duration-3: 320ms;
+  --duration-1: 110ms;
+  --duration-2: 180ms;
+  --duration-3: 280ms;
 
-  /* ── Shadows (HSL alpha for depth without colour cast) ────────────── */
-  --shadow-1: none;
-  --shadow-2: 0 8px 24px hsl(220 25% 12% / 0.08);
-  --shadow-3: 0 16px 40px hsl(220 25% 12% / 0.14), 0 2px 8px hsl(220 25% 12% / 0.08);
-  --shadow-glass: none;
-  /* Legacy aliases used by existing rules */
+  --shadow-1: 0 1px 0 hsl(155 20% 10% / 0.04);
+  --shadow-2: 0 12px 30px hsl(155 20% 8% / 0.08);
+  --shadow-3: 0 24px 60px hsl(155 24% 7% / 0.16);
+  --shadow-glass: 0 1px 0 hsl(0 0% 100% / 0.06);
   --shadow-sm: var(--shadow-1);
   --shadow-md: var(--shadow-2);
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: hsl(154 12% 7%);
+  --bg-elevated: hsl(154 12% 9%);
+  --panel: hsl(154 11% 11%);
+  --panel-2: hsl(154 10% 14%);
+  --panel-hover: hsl(154 10% 17%);
+  --sidebar: hsl(154 15% 6%);
+  --sidebar-2: hsl(154 12% 9%);
+  --topbar: hsl(154 17% 5% / 0.96);
+  --overlay: hsl(154 25% 3% / 0.78);
+
+  --line: hsl(154 8% 20%);
+  --line-strong: hsl(154 8% 29%);
+  --line-subtle: hsl(154 9% 15%);
+  --grid-line: hsl(154 22% 64% / 0.045);
+
+  --ink: hsl(42 24% 92%);
+  --ink-2: hsl(42 10% 76%);
+  --ink-dim: hsl(42 7% 62%);
+  --ink-3: hsl(42 6% 51%);
+  --ink-faint: hsl(42 5% 44%);
+  --inverse-ink: hsl(42 24% 92%);
+  --inverse-dim: hsl(42 7% 62%);
+
+  --accent: hsl(154 62% 52%);
+  --accent-9: hsl(154 62% 52%);
+  --accent-10: hsl(154 70% 60%);
+  --accent-dim: hsl(154 54% 41%);
+  --accent-soft: hsl(154 49% 16%);
+  --accent-ring: hsl(154 62% 52% / 0.46);
+  --accent-contrast: hsl(154 20% 7%);
+
+  --tg-blue: hsl(199 72% 58%);
+  --tg-blue-deep: hsl(199 78% 68%);
+  --tg-blue-dim: hsl(199 72% 52% / 0.18);
+
+  --up: hsl(154 62% 52%);
+  --up-9: hsl(154 62% 52%);
+  --up-dim: hsl(154 57% 42%);
+  --up-soft: hsl(154 48% 15%);
+  --down: hsl(4 78% 65%);
+  --down-9: hsl(4 78% 65%);
+  --down-dim: hsl(4 66% 54%);
+  --down-soft: hsl(4 46% 16%);
+  --warn: hsl(37 90% 60%);
+  --warn-9: hsl(37 90% 60%);
+  --warn-dim: hsl(37 78% 49%);
+  --warn-soft: hsl(37 52% 16%);
+  --info: hsl(204 72% 64%);
+  --info-soft: hsl(204 44% 17%);
+
+  --shadow-1: 0 1px 0 hsl(0 0% 100% / 0.025);
+  --shadow-2: 0 14px 34px hsl(154 30% 2% / 0.3);
+  --shadow-3: 0 28px 70px hsl(154 30% 2% / 0.48);
+  --shadow-glass: 0 1px 0 hsl(0 0% 100% / 0.035);
 }
 
 @media (prefers-reduced-motion: reduce) {

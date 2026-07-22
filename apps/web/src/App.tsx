@@ -1,8 +1,7 @@
 import { Server } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
-import { AccountsOverview } from "./components/AccountsOverview";
 import { AlertsBanner } from "./components/AlertsBanner";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { useConfirm } from "./components/ConfirmDialog";
@@ -29,7 +28,7 @@ import type { SetupFormState, SetupStep } from "./components/SetupFlow";
 import { navItems, Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { LiveStatusBar } from "./components/StatusBar";
-import { SummaryPanel } from "./components/SummaryPanel";
+import { WorkspaceHeading } from "./components/WorkspaceHeading";
 import { type TabId, WorkspaceTabs } from "./components/WorkspaceTabs";
 import { useToast } from "./contexts/ToastContext";
 import { useAnnouncer } from "./hooks/useAnnouncer";
@@ -48,37 +47,20 @@ import {
 import { downsample } from "./lib/downsample";
 import type { ExposurePosition } from "./lib/exposure";
 import { setSyncStatus } from "./lib/syncStatus";
-
-const EquityGuardianPage = lazy(() =>
-  import("./pages/EquityGuardianPage").then((module) => ({ default: module.EquityGuardianPage })),
-);
-const HistoryPage = lazy(() =>
-  import("./pages/HistoryPage").then((module) => ({ default: module.HistoryPage })),
-);
-const LinkedAccountsPage = lazy(() =>
-  import("./pages/LinkedAccountsPage").then((module) => ({ default: module.LinkedAccountsPage })),
-);
-const LogsPage = lazy(() =>
-  import("./pages/LogsPage").then((module) => ({ default: module.LogsPage })),
-);
-const PerformancePage = lazy(() =>
-  import("./pages/PerformancePage").then((module) => ({ default: module.PerformancePage })),
-);
-const ProvidersPage = lazy(() =>
-  import("./pages/ProvidersPage").then((module) => ({ default: module.ProvidersPage })),
-);
-const SettingsPage = lazy(() =>
-  import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })),
-);
-const SymbolSettingsPage = lazy(() =>
-  import("./pages/SymbolSettingsPage").then((module) => ({ default: module.SymbolSettingsPage })),
-);
-const TelegramSetupPage = lazy(() =>
-  import("./pages/TelegramSetupPage").then((module) => ({ default: module.TelegramSetupPage })),
-);
+import { EquityGuardianPage } from "./pages/EquityGuardianPage";
+import { HistoryPage } from "./pages/HistoryPage";
+import { LinkedAccountsPage } from "./pages/LinkedAccountsPage";
+import { LogsPage } from "./pages/LogsPage";
+import { OperationsPage } from "./pages/OperationsPage";
+import { PerformancePage } from "./pages/PerformancePage";
+import { ProvidersPage } from "./pages/ProvidersPage";
+import { SettingsPage } from "./pages/SettingsPage";
+import { SymbolSettingsPage } from "./pages/SymbolSettingsPage";
+import { TelegramSetupPage } from "./pages/TelegramSetupPage";
 
 export interface ProviderPerformanceRow {
   id: string;
+  currency?: string;
   pips: number;
   pnl: number;
   profit: number;
@@ -472,6 +454,37 @@ const TAB_IDS: TabId[] = [
   "logs",
 ];
 
+const TAB_COPY: Record<TabId, { title: string; description: string }> = {
+  summary: {
+    title: "Operations",
+    description: "Live account posture, exposure and the latest desk activity.",
+  },
+  performance: {
+    title: "Performance",
+    description: "Equity, realised results and provider attribution without invented data.",
+  },
+  providers: {
+    title: "Providers",
+    description: "Copy status, account assignments, execution rules and provider health.",
+  },
+  history: {
+    title: "Trade ledger",
+    description: "Open broker exposure, pending orders and reconciled closing history.",
+  },
+  "equity-guardian": {
+    title: "Equity Guardian",
+    description: "Opt-in drawdown protection for new opens; lifecycle management stays active.",
+  },
+  symbols: {
+    title: "Symbol routing",
+    description: "Trace aliases and account-specific broker mappings from source to execution.",
+  },
+  logs: {
+    title: "Signals & logs",
+    description: "Review parsed intent, held signals, queue state and broker execution reports.",
+  },
+};
+
 interface RouteState {
   view: string;
   accountId: string | null;
@@ -497,6 +510,10 @@ function pathForView(viewId: string, accountId: string | null, tab: TabId): stri
   if (viewId === "telegram") return "/telegram";
   if (viewId === "mt5") return "/linked-accounts";
   if (viewId === "settings") return "/settings";
+  if (viewId === "providers") return "/providers";
+  if (viewId === "parser") return "/logs";
+  if (viewId === "trades") return "/history";
+  if (viewId === "mapping") return "/symbols";
   if (accountId) return `/accounts/${accountId}/${tab}`;
   return tab === "summary" ? "/" : `/${tab}`;
 }
@@ -1247,9 +1264,12 @@ export function App({
 
   useEffect(() => {
     if (typeof document === "undefined") return;
-    const view = navItems.find(([id]) => id === activeView)?.[1] ?? "Operations";
+    const view =
+      activeView === "dashboard"
+        ? TAB_COPY[activeTab].title
+        : (navItems.find(([id]) => id === activeView)?.[1] ?? "Operations");
     document.title = `TG-TC · ${view}`;
-  }, [activeView]);
+  }, [activeTab, activeView]);
 
   const activeProfileId =
     form.profileId ||
@@ -2022,6 +2042,53 @@ export function App({
   const showEquityGuardian = dashTab("equity-guardian");
   const showPerformance = dashTab("performance");
   const showSummary = dashTab("summary");
+  const sidebarActiveView = showDashboard
+    ? activeTab === "logs"
+      ? "parser"
+      : activeTab === "providers"
+        ? "providers"
+        : activeTab === "symbols"
+          ? "mapping"
+          : "dashboard"
+    : activeView;
+  const workspaceHeading = (() => {
+    if (activeView === "telegram") {
+      return {
+        eyebrow: "Source control",
+        title: "Telegram setup",
+        description: "Connect the Telegram session and choose which channels enter the desk.",
+      };
+    }
+    if (activeView === "mt5") {
+      return {
+        eyebrow: "Execution network",
+        title: "Linked accounts",
+        description: "Create link slots, inspect EA health and manage provider assignments.",
+      };
+    }
+    if (activeView === "settings") {
+      return {
+        eyebrow: "Desk controls",
+        title: "Settings",
+        description: "Configure execution defaults, alerts, risk displays and recovery tools.",
+      };
+    }
+    if (focusedSlot) {
+      return {
+        eyebrow: "Awaiting EA",
+        title: focusedSlot.name || "Pending account link",
+        description:
+          "Use this slot's code in MT5; the account will appear as soon as the EA checks in.",
+      };
+    }
+    const copy = TAB_COPY[activeTab];
+    return {
+      eyebrow: focusedAccount
+        ? `Account ${focusedAccount.accountNumber || focusedAccount.id}`
+        : "All accounts",
+      ...copy,
+    };
+  })();
 
   function navigateSidebar(viewId: string) {
     if (viewId === "dashboard") {
@@ -2072,10 +2139,13 @@ export function App({
 
       <Sidebar
         accounts={sidebarAccounts}
-        activeView={activeView}
+        activeView={sidebarActiveView}
         onAddAccount={() => setActiveView("mt5")}
         onNavigate={navigateSidebar}
-        onSelectAccount={(id) => setSelectedAccountId(id)}
+        onSelectAccount={(id) => {
+          setSelectedSlotId(null);
+          navigate(id ? `/accounts/${id}/summary` : "/");
+        }}
         onSelectSlot={(id) => selectSlot(id)}
         pendingSlots={sidebarPendingSlots}
         selectedAccountId={selectedAccountId}
@@ -2085,16 +2155,19 @@ export function App({
 
       <ErrorBoundary fallbackLabel="This view hit an unexpected error">
         <section className="workspace" id="main-content" tabIndex={-1}>
+          <WorkspaceHeading {...workspaceHeading} />
           <AlertsBanner alerts={snapshot.alerts ?? []} onViewHeld={() => navigate("/logs#held")} />
           {showDashboard && focusedSlot ? (
             <PendingSlotView slot={focusedSlot} />
           ) : showDashboard ? (
             <>
-              <AccountHeader
-                className={activeTab === "summary" ? undefined : "account-context-secondary"}
-                data={accountHeaderData}
-                loading={initialLoading}
-              />
+              {!showSummary ? (
+                <AccountHeader
+                  className="account-context-secondary"
+                  data={accountHeaderData}
+                  loading={initialLoading}
+                />
+              ) : null}
               {snapshot.providers.length === 0 &&
               snapshot.mt5Accounts.length === 0 &&
               sidebarPendingSlots.length === 0 ? (
@@ -2111,10 +2184,10 @@ export function App({
               <OutOfSyncBanner
                 trades={snapshot.logicalTrades.filter((trade) => trade.status === "OUT_OF_SYNC")}
               />
-              {focusedAccount ? (
+              {focusedAccount && !showSummary ? (
                 <ExposurePanel
                   accountId={focusedAccount.id}
-                  className={activeTab === "summary" ? undefined : "account-context-secondary"}
+                  className="account-context-secondary"
                   positions={[
                     ...((focusedAccount as { appPositions?: ExposurePosition[] }).appPositions ??
                       []),
@@ -2152,25 +2225,26 @@ export function App({
                   </button>
                 </section>
               ) : null}
-              {!selectedAccountId && snapshot.mt5Accounts.length > 0 ? (
-                <AccountsOverview
-                  accounts={snapshot.mt5Accounts}
-                  onSelectAccount={(id) => setSelectedAccountId(id)}
-                />
-              ) : null}
               <WorkspaceTabs onChange={setActiveTab} value={activeTab} />
             </>
           ) : null}
 
-          <Suspense
-            fallback={
-              <section className="panel" aria-busy="true">
-                Loading view…
-              </section>
-            }
-          >
+          <div className="route-surface">
             {showSummary ? (
-              <SummaryPanel data={growthData} currency={accountHeaderData.currency} />
+              <OperationsPage
+                focusedAccountId={selectedAccountId}
+                onOpenPositions={() => {
+                  setHistoryTab("Open");
+                  setActiveTab("history");
+                }}
+                onOpenProviders={() => setActiveTab("providers")}
+                onReviewSignals={() => {
+                  setParserTab("Recent Parses");
+                  setActiveTab("logs");
+                }}
+                onSelectAccount={(id) => navigate(`/accounts/${id}/summary`)}
+                snapshot={snapshot}
+              />
             ) : null}
 
             {showPerformance ? (
@@ -2248,7 +2322,7 @@ export function App({
                   }))}
                   currency={
                     (focusedAccount as { currency?: string } | undefined)?.currency ??
-                    (snapshot.mt5Accounts[0] as { currency?: string } | undefined)?.currency
+                    snapshot.appSettings.reportingCurrency
                   }
                   loading={initialLoading}
                   onConfigure={(provider) => setConfigProvider(provider)}
@@ -2306,7 +2380,7 @@ export function App({
                   activeTab={historyTab}
                   currency={
                     (focusedAccount as { currency?: string } | undefined)?.currency ??
-                    (snapshot.mt5Accounts[0] as { currency?: string } | undefined)?.currency
+                    snapshot.appSettings.reportingCurrency
                   }
                   focusedAccountId={selectedAccountId}
                   onTabChange={setHistoryTab}
@@ -2365,7 +2439,7 @@ export function App({
                 />
               ) : null}
             </section>
-          </Suspense>
+          </div>
         </section>
       </ErrorBoundary>
 

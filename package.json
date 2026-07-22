@@ -1,6 +1,6 @@
 {
   "name": "telegram-tc",
-  "version": "1.52.1",
+  "version": "1.53.0",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
@@ -30,8 +30,9 @@
     "mt5:smoke": "bun scripts/mt5-smoke.ts"
   },
   "dependencies": {
-    "@fontsource-variable/geist": "^5.2.9",
-    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@fontsource-variable/ibm-plex-sans": "^5.3.0",
+    "@fontsource/barlow-condensed": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
     "@vitejs/plugin-react": "^5.1.1",
     "hono": "^4.10.7",
     "lucide-react": "^0.561.0",
@@ -52,7 +53,7 @@
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "tailwindcss": "4",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vite": "^7.2.7"
   }
 }

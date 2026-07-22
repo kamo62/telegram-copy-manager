@@ -1245,7 +1245,9 @@ function isPendingOrderRemoval(upper: string, hasQuotedPendingSignal: boolean): 
   const removalVerb =
     /\b(?:REMOVE|SCRAP|DELETE|DISREGARD|VOID)\b/.test(upper) ||
     // "PULL" only as an order reference, never bare ("pull back to entry" is chart chatter).
-    /\bPULL\s+(?:IT|THIS|THAT|THEM|THE\s+(?:ORDER|LIMIT|STOP|TRADE|ENTRY|POSITION))\b/.test(upper) ||
+    /\bPULL\s+(?:IT|THIS|THAT|THEM|THE\s+(?:ORDER|LIMIT|STOP|TRADE|ENTRY|POSITION))\b/.test(
+      upper,
+    ) ||
     // "take it off" and "take this order off" both cancel; allow an optional order noun.
     /\bTAKE\s+(?:IT|THIS|THAT|THEM|THE)(?:\s+(?:ORDER|LIMIT|STOP|TRADE|ENTRY|POSITION))?\s+OFF\b/.test(
       upper,

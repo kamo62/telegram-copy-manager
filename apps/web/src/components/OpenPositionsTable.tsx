@@ -8,6 +8,7 @@ import { Money } from "./Money";
 interface OpenPositionsAccount {
   id: string;
   accountNumber: string;
+  currency?: string;
   appPositions?: ExternalBrokerPosition[];
   appOrders?: ExternalBrokerPosition[];
   externalPositions?: ExternalBrokerPosition[];
@@ -28,6 +29,7 @@ type Side = "buy" | "sell";
 interface PositionRow extends ExternalBrokerPosition {
   origin: Origin;
   accountNumber: string;
+  currency: string;
   currentPrice: number | undefined;
 }
 
@@ -82,12 +84,14 @@ export function OpenPositionsTable({
       ...p,
       origin: "ea",
       accountNumber: account.accountNumber,
+      currency: account.currency ?? currency ?? "USD",
       currentPrice: currentPriceFor(p, symbols),
     }));
     const ext = (account.externalPositions ?? []).map<PositionRow>((p) => ({
       ...p,
       origin: "external",
       accountNumber: account.accountNumber,
+      currency: account.currency ?? currency ?? "USD",
       currentPrice: currentPriceFor(p, symbols),
     }));
     return [...ea, ...ext];
@@ -99,12 +103,14 @@ export function OpenPositionsTable({
       ...o,
       origin: "ea",
       accountNumber: account.accountNumber,
+      currency: account.currency ?? currency ?? "USD",
       currentPrice: currentPriceFor(o, symbols),
     }));
     const ext = (account.externalOrders ?? []).map<PositionRow>((o) => ({
       ...o,
       origin: "external",
       accountNumber: account.accountNumber,
+      currency: account.currency ?? currency ?? "USD",
       currentPrice: currentPriceFor(o, symbols),
     }));
     return [...ea, ...ext];
@@ -125,7 +131,12 @@ export function OpenPositionsTable({
     );
   }
 
-  const totalFloating = positions.reduce((sum, p) => sum + (p.profit ?? 0), 0);
+  const currencies = new Set(positions.map((position) => position.currency));
+  const canTotal = currencies.size <= 1;
+  const totalFloating = canTotal
+    ? positions.reduce((sum, position) => sum + (position.profit ?? 0), 0)
+    : null;
+  const totalCurrency = [...currencies][0] ?? currency;
   const eaCount = positions.filter((p) => p.origin === "ea").length;
   const externalCount = positions.filter((p) => p.origin === "external").length;
 
@@ -149,14 +160,20 @@ export function OpenPositionsTable({
           </span>
         </div>
         <div className="open-positions-head-pnl">
-          <span className="open-positions-head-pnl-label">Floating P/L</span>
-          <Money
-            value={totalFloating}
-            currency={currency}
-            locale={locale}
-            signTone
-            className="open-positions-head-pnl-value"
-          />
+          <span className="open-positions-head-pnl-label">
+            {canTotal ? "Floating P/L" : "Mixed currencies"}
+          </span>
+          {canTotal ? (
+            <Money
+              value={totalFloating}
+              currency={totalCurrency}
+              locale={locale}
+              signTone
+              className="open-positions-head-pnl-value"
+            />
+          ) : (
+            <strong className="open-positions-head-pnl-value">Per account below</strong>
+          )}
         </div>
       </header>
 
@@ -196,7 +213,7 @@ export function OpenPositionsTable({
                 position={p}
                 aggregate={aggregate}
                 locale={locale}
-                currency={currency}
+                currency={p.currency}
               />
             ))}
           </tbody>

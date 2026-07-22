@@ -6746,18 +6746,49 @@ class AppStore {
   }
 
   providerPerformance(accountId?: string, accounts = this.mt5Accounts()) {
+    const settings = this.appSettings();
+    const accountsById = new Map(accounts.map((account) => [account.id, account]));
+    const providerCurrency = accountId
+      ? (accountsById.get(accountId)?.currency ?? settings.reportingCurrency)
+      : settings.reportingCurrency;
+    const convertForAccount = (value: number | null | undefined, sourceAccountId?: string) => {
+      if (accountId) return roundCurrency(value ?? 0);
+      const sourceCurrency = sourceAccountId
+        ? (accountsById.get(sourceAccountId)?.currency ?? providerCurrency)
+        : providerCurrency;
+      return convertMoney(value, sourceCurrency, settings.reportingCurrency, settings.usdZarRate);
+    };
     const initialBalanceDenominator = accountId
       ? (accounts.find((account) => account.id === accountId)?.initialBalance ?? 0)
-      : accounts.reduce((sum, account) => sum + (account.initialBalance ?? 0), 0);
+      : accounts.reduce(
+          (sum, account) =>
+            sum +
+            convertMoney(
+              account.initialBalance ?? 0,
+              account.currency,
+              settings.reportingCurrency,
+              settings.usdZarRate,
+            ),
+          0,
+        );
     return this.providers().map((provider) => {
       const trades = this.logicalTrades().filter(
         (trade) =>
           trade.providerId === provider.id && (!accountId || trade.accountId === accountId),
       );
-      const orders = trades.flatMap((trade) => this.brokerOrders(trade.id));
+      const ordersByTrade = new Map(
+        trades.map((trade) => [
+          trade.id,
+          this.brokerOrders(trade.id).map((order) => ({
+            ...order,
+            pnlCurrency: convertForAccount(order.pnlCurrency, trade.accountId),
+          })),
+        ]),
+      );
+      const orders = [...ordersByTrade.values()].flat();
       const pnl = orders.reduce((sum, order) => sum + (order.pnlCurrency ?? 0), 0);
       const pips = orders.reduce((sum, order) => sum + (order.pnlPips ?? 0), 0);
-      const pnlByTrade = trades.map((trade) => sumPnl(this.brokerOrders(trade.id)));
+      const pnlByTrade = trades.map((trade) => sumPnl(ordersByTrade.get(trade.id) ?? []));
       const closed = pnlByTrade.filter((value) => value !== 0);
       const copiedDrawdown = this.maxCurveDrawdown("provider", accountId, provider.id);
       const totalVolume = orders.reduce(
@@ -6772,6 +6803,7 @@ class AppStore {
       return {
         id: provider.id,
         title: provider.title,
+        currency: providerCurrency,
         lots: provider.lotSize,
         tradeCount: trades.length,
         pips,

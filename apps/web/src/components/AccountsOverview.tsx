@@ -35,18 +35,29 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
       value: account.equity ?? 0,
       pattern: SLICE_PATTERNS[index % SLICE_PATTERNS.length] ?? 0,
     }));
-  const totalEquity = equitySlices.reduce((sum, slice) => sum + slice.value, 0);
-  // Single-account donuts read as a flat ring with no information; only
-  // surface the panel when there's actually a split to show.
-  const showEquityDonut = equitySlices.length >= 2;
-  const donutCurrency = accounts.find((account) => account.currency)?.currency ?? "USD";
+  const equityCurrencies = new Set(
+    accounts
+      .filter((account) => (account.equity ?? 0) > 0)
+      .map((account) => account.currency?.trim().toUpperCase() || "USD"),
+  );
+  const singleCurrency = equityCurrencies.size === 1;
+  const totalEquity = singleCurrency
+    ? equitySlices.reduce((sum, slice) => sum + slice.value, 0)
+    : null;
+  // Equity shares only make sense when every slice uses the same unit. Mixed-currency
+  // accounts stay in their native units until a reporting-currency conversion is supplied.
+  const showEquityDonut = equitySlices.length >= 2 && singleCurrency;
+  const donutCurrency = [...equityCurrencies][0] ?? "USD";
 
   return (
     <section className="accounts-overview" aria-label="All accounts overview">
       <header className="accounts-overview-head">
         <div>
           <span className="accounts-overview-eyebrow">All accounts</span>
-          <h3 className="accounts-overview-title">Consolidated view</h3>
+          <h3 className="accounts-overview-title">Account fleet</h3>
+          {!singleCurrency ? (
+            <span className="accounts-overview-currency-note">Native currencies</span>
+          ) : null}
         </div>
         <div className="accounts-overview-stats">
           <div>
@@ -94,7 +105,7 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
           <Donut
             ariaLabel="Equity by account"
             centerLabel="Total"
-            centerValue={formatMoney(totalEquity, donutCurrency, locale)}
+            centerValue={formatMoney(totalEquity ?? 0, donutCurrency, locale)}
             size={120}
             slices={equitySlices}
             thickness={16}
@@ -129,6 +140,14 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
                   </span>
                 </div>
                 <div className="accounts-overview-row-stats">
+                  <span className="accounts-overview-row-equity">
+                    <strong>
+                      {account.equity == null
+                        ? "—"
+                        : formatMoney(account.equity, account.currency ?? "USD", locale)}
+                    </strong>
+                    equity
+                  </span>
                   <span>
                     <strong>{account.openPositionCount ?? 0}</strong> pos
                   </span>

@@ -9,6 +9,7 @@ import { Money } from "./Money";
 interface ClosedPositionsAccount {
   id: string;
   accountNumber: string;
+  currency?: string;
   closedTrades?: ClosedTradeRow[];
   externalCloses?: ClosedTradeRow[];
 }
@@ -20,7 +21,7 @@ interface ClosedPositionsTableProps {
   currency?: string;
 }
 
-type FlatRow = ClosedTradeRow & { accountNumber: string };
+type FlatRow = ClosedTradeRow & { accountNumber: string; currency: string };
 
 function legSourceLabel(source: string, legIndex?: number): string {
   if (source === "tp-hit") return legIndex !== undefined ? `TP${legIndex} hit` : "TP hit";
@@ -98,6 +99,7 @@ export function ClosedPositionsTable({
     [...(account.closedTrades ?? []), ...(account.externalCloses ?? [])].map((trade) => ({
       ...trade,
       accountNumber: account.accountNumber,
+      currency: account.currency ?? currency ?? "USD",
     })),
   );
   rows.sort((a, b) => (a.closedAt < b.closedAt ? 1 : -1));
@@ -112,7 +114,10 @@ export function ClosedPositionsTable({
     );
   }
 
-  const totalRealized = rows.reduce((sum, r) => sum + r.realizedPnl, 0);
+  const currencies = new Set(rows.map((row) => row.currency));
+  const canTotal = currencies.size <= 1;
+  const totalRealized = canTotal ? rows.reduce((sum, row) => sum + row.realizedPnl, 0) : null;
+  const totalCurrency = [...currencies][0] ?? currency;
   const wins = rows.filter((r) => r.realizedPnl > 0).length;
   const losses = rows.filter((r) => r.realizedPnl < 0).length;
 
@@ -140,14 +145,20 @@ export function ClosedPositionsTable({
           </span>
         </div>
         <div className="closed-positions-head-pnl">
-          <span className="closed-positions-head-pnl-label">Realized P/L</span>
-          <Money
-            value={totalRealized}
-            currency={currency}
-            locale={locale}
-            signTone
-            className="closed-positions-head-pnl-value"
-          />
+          <span className="closed-positions-head-pnl-label">
+            {canTotal ? "Realized P/L" : "Mixed currencies"}
+          </span>
+          {canTotal ? (
+            <Money
+              value={totalRealized}
+              currency={totalCurrency}
+              locale={locale}
+              signTone
+              className="closed-positions-head-pnl-value"
+            />
+          ) : (
+            <strong className="closed-positions-head-pnl-value">Per account below</strong>
+          )}
         </div>
       </header>
 
@@ -246,7 +257,12 @@ export function ClosedPositionsTable({
                       />
                     </td>
                     <td className="num-cell closed-positions-pnl">
-                      <Money value={row.realizedPnl} currency={currency} locale={locale} signTone />
+                      <Money
+                        value={row.realizedPnl}
+                        currency={row.currency}
+                        locale={locale}
+                        signTone
+                      />
                     </td>
                     <td>
                       <span
@@ -263,7 +279,7 @@ export function ClosedPositionsTable({
                   {isOpen ? (
                     <tr className="closed-positions-detail-row">
                       <td colSpan={columnCount + 1}>
-                        <ClosedTradeDetail row={row} locale={locale} currency={currency} />
+                        <ClosedTradeDetail row={row} locale={locale} currency={row.currency} />
                       </td>
                     </tr>
                   ) : null}

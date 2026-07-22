@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.53.0 - 2026-07-22 (Minor)
+
+Release impact: Minor because this introduces a new Operations-first frontend, persistent theme behaviour, and corrected reporting-currency provider metrics without breaking the API or MT5 execution protocol.
+
+- Rebuilt the default desk around operational exceptions, native-currency account truth, the signal execution path, working orders, and provider health instead of generic dashboard totals.
+- Reorganized navigation around Operations, Review queue, Accounts, and Setup while retaining the existing performance, provider, position, history, guardian, symbol, Telegram, linked-account, settings, parser, and recovery workflows.
+- Added a persistent light/dark theme and moved the frontend to TypeScript 7 with explicit module paths.
+- Eagerly mount workspace routes so a click changes both the URL and visible screen immediately without requiring a manual refresh.
+- Keep USD and ZAR account cards, open positions, and closed trades in their native currencies; mixed native amounts are no longer displayed as one false total.
+- Convert global provider P/L, profit, and gain calculations into the configured reporting currency before aggregating across USD and ZAR accounts, while account-scoped provider views remain native.
+- Added browser-routing, mixed-currency, theme, and provider-aggregation regression coverage plus a frontend workflow parity contract.
+- Aligned application and EA source version metadata at 1.53.0; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.52.1 - 2026-07-22 (Patch)
 
 Release impact: Patch because this removes redundant MT5 snapshot persistence without changing the API, EA protocol, or execution behaviour.

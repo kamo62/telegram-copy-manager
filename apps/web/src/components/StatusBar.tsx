@@ -1,4 +1,5 @@
-import { RefreshCw, TerminalSquare } from "lucide-react";
+import { Moon, RefreshCw, Sun, TerminalSquare } from "lucide-react";
+import { useTheme } from "../contexts/ThemeContext";
 import { useSyncStatus } from "../lib/syncStatus";
 
 interface StatusBarProps {
@@ -33,6 +34,7 @@ export function StatusBar({
   refreshing,
   telegramAdapter,
 }: StatusBarProps) {
+  const { theme, toggleTheme } = useTheme();
   const liveDotClass = lastPollError
     ? "live-dot error"
     : refreshing
@@ -100,6 +102,19 @@ export function StatusBar({
         ) : null}
       </div>
       <div className="status-actions">
+        <button
+          aria-label={`Switch to ${theme === "light" ? "dark" : "light"} mode`}
+          className="refresh-btn theme-toggle"
+          onClick={toggleTheme}
+          title={`Switch to ${theme === "light" ? "dark" : "light"} mode`}
+          type="button"
+        >
+          {theme === "light" ? (
+            <Moon aria-hidden="true" size={14} />
+          ) : (
+            <Sun aria-hidden="true" size={14} />
+          )}
+        </button>
         <button
           aria-label="Open command palette"
           className="refresh-btn"
