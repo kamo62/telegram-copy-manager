@@ -522,6 +522,45 @@ describe("App dashboard", () => {
     expect(view.getByText("No recent signals")).toBeTruthy();
   });
 
+  test("summarises attention counts without repeating review signals in the ledger", () => {
+    const firstReviewText = "BUY XAUUSD - review price";
+    const secondReviewText = "SELL EURUSD - review mapping";
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          alerts: [
+            { kind: "telegram-stalled", severity: "error", message: "Telegram stalled" },
+            { kind: "unmapped-symbols", severity: "warn", message: "One symbol is unmapped" },
+          ],
+          parserResults: [
+            {
+              ...snapshot.parserResults[0]!,
+              id: "review-1",
+              rawText: firstReviewText,
+              reviewRequired: true,
+              status: "PARSED",
+            },
+            {
+              ...snapshot.parserResults[0]!,
+              id: "review-2",
+              rawText: secondReviewText,
+              reviewRequired: true,
+              status: "PARSED",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(view.getByRole("status", { name: "Attention summary" })).toBeTruthy();
+    expect(view.getByText("4 items need attention")).toBeTruthy();
+    expect(view.getByText("2 signals · 2 alerts")).toBeTruthy();
+    expect(view.queryByText(firstReviewText)).toBeNull();
+    expect(view.queryByText(secondReviewText)).toBeNull();
+    expect(view.getByTitle("2 signals need review").textContent).toBe("2");
+  });
+
   test("BrowserRouter mounts the clicked workspace immediately without a refresh", async () => {
     (
       window as typeof window & {
@@ -2409,7 +2448,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    await view.findByTitle("1 held signals");
+    await view.findByTitle("1 signal needs review");
     await clickTabAsync(view, "Logs");
     const heldPanel = within(view.getByTestId("held-signals-panel"));
     expect(heldPanel.getByText("GUARDIAN")).toBeTruthy();
@@ -2527,7 +2566,7 @@ describe("App dashboard", () => {
       />,
     );
 
-    await view.findByTitle("1 held signals");
+    await view.findByTitle("1 signal needs review");
     await clickTabAsync(view, "Equity Guardian");
     fireEvent.click(view.getByRole("button", { name: "Unpause" }));
     expect(view.getByRole("button", { name: "Unpause only" })).toBeTruthy();

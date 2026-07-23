@@ -32,4 +32,10 @@ describe("Sidebar", () => {
       "Waiting for EA",
     );
   });
+
+  test("shows the complete signal review count", () => {
+    const view = render(<Sidebar activeView="dashboard" onNavigate={() => {}} reviewCount={4} />);
+
+    expect(view.getByTitle("4 signals need review").textContent).toBe("4");
+  });
 });

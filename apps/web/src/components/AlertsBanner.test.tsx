@@ -23,8 +23,15 @@ describe("AlertsBanner", () => {
     expect(container.querySelector(".alerts-banner")).toBeNull();
   });
 
-  test("renders each alert with a dismiss button and hides one on click", () => {
-    const { getByText, queryByText, getAllByRole } = render(<AlertsBanner alerts={sample} />);
+  test("summarises alerts until opened, then lets the operator dismiss one", () => {
+    const { getByText, queryByText, getAllByRole, getByLabelText } = render(
+      <AlertsBanner alerts={sample} />,
+    );
+    expect(getByText("2 operational alerts")).toBeDefined();
+    expect(getByText("1 critical · 1 warning")).toBeDefined();
+    expect((getByLabelText("Operational alerts") as HTMLDetailsElement).open).toBe(false);
+
+    fireEvent.click(getByText("2 operational alerts"));
     expect(getByText("2 provider symbols could not be mapped")).toBeDefined();
     expect(getByText("Telegram session is not receiving updates")).toBeDefined();
 
@@ -39,11 +46,13 @@ describe("AlertsBanner", () => {
 
   test("keeps dismissed alerts hidden after remount", () => {
     const first = render(<AlertsBanner alerts={sample} />);
+    fireEvent.click(first.getByText("2 operational alerts"));
     fireEvent.click(first.getAllByRole("button", { name: "Dismiss alert" })[0] as HTMLElement);
     first.unmount();
 
     const second = render(<AlertsBanner alerts={sample} />);
     expect(second.queryByText("2 provider symbols could not be mapped")).toBeNull();
+    expect(second.getByText("1 operational alert")).toBeDefined();
     expect(second.getByText("Telegram session is not receiving updates")).toBeDefined();
   });
 });

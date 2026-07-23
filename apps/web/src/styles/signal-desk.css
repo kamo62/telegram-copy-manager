@@ -822,6 +822,15 @@ textarea {
   font-size: 9px;
 }
 
+.operations-attention-summary {
+  background: color-mix(in srgb, var(--warn-soft) 58%, var(--panel));
+  border-color: color-mix(in srgb, var(--warn) 65%, var(--line));
+}
+
+.operations-attention-summary .operations-blocker-icon {
+  color: var(--warn);
+}
+
 .operations-account-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

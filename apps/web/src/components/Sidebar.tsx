@@ -48,7 +48,7 @@ export function Sidebar({
   onSelectAccount,
   onSelectSlot,
   onAddAccount,
-  heldCount = 0,
+  reviewCount = 0,
 }: {
   activeView: string;
   onNavigate: (id: string) => void;
@@ -59,7 +59,7 @@ export function Sidebar({
   onSelectAccount?: (accountId: string | null) => void;
   onSelectSlot?: (slotId: string | null) => void;
   onAddAccount?: () => void;
-  heldCount?: number;
+  reviewCount?: number;
 }) {
   return (
     <aside className="sidebar" aria-label="Primary">
@@ -93,12 +93,12 @@ export function Sidebar({
               >
                 <Icon size={15} aria-hidden="true" />
                 {label}
-                {id === "parser" && heldCount > 0 ? (
+                {id === "parser" && reviewCount > 0 ? (
                   <span
                     className="sidebar-count sidebar-count-held"
-                    title={`${heldCount} held signals`}
+                    title={`${reviewCount} ${reviewCount === 1 ? "signal needs" : "signals need"} review`}
                   >
-                    {heldCount}
+                    {reviewCount}
                   </span>
                 ) : null}
               </button>

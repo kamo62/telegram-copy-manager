@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.53.3 - 2026-07-23 (Patch)
+
+Release impact: Patch because this reduces dashboard notification noise without changing review actions, API contracts, or the MT5 execution protocol.
+
+- Replaced individual Operations review blockers with one attention summary showing total items, signal-review count, and operational-alert count.
+- Kept review-required signals out of the live signal ledger while retaining their full detail and actions in the review queue.
+- Collapsed operational alert messages behind a single count summary while preserving persistent per-alert dismissal.
+- Updated the Review queue badge to include active parsed signals as well as held signals.
+- Added regression coverage for attention counts, collapsed alerts, and the complete review badge.
+- Aligned application and EA source version metadata at 1.53.3; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.53.2 - 2026-07-23 (Patch)
 
 Release impact: Patch because this preserves operator dismissals and correctly honors existing terminal signal states without changing the API or MT5 execution protocol.

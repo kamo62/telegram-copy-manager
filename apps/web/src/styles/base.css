@@ -7230,10 +7230,40 @@ select.config-strategy-input {
 
 /* Operational alerts banner — guardian paused / Telegram stalled. */
 .alerts-banner {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
   margin: 12px 0 0;
+}
+
+.alerts-banner-summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px 14px;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-3);
+  cursor: pointer;
+  list-style: none;
+}
+
+.alerts-banner-summary::-webkit-details-marker {
+  display: none;
+}
+
+.alerts-banner-summary strong {
+  font-size: 12px;
+}
+
+.alerts-banner-summary > span:last-child {
+  margin-left: auto;
+  color: var(--ink-3);
+  font-size: 11px;
+}
+
+.alerts-banner-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .alerts-banner-item {

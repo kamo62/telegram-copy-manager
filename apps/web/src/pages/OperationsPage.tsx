@@ -14,14 +14,13 @@ function orderSide(type: number) {
   return type === 0 ? "buy" : "sell";
 }
 
-function stageState(status: string, reviewRequired: boolean) {
+function stageState(status: string) {
   if (status === "EXECUTED") return 5;
   if (status === "APPROVED") return 3;
-  if (reviewRequired || status === "HELD") return 1;
   return 2;
 }
 
-function requiresReview(signal: DashboardSnapshot["parserResults"][number]) {
+export function signalRequiresReview(signal: DashboardSnapshot["parserResults"][number]) {
   return (
     signal.status === "HELD" ||
     ((!signal.status || signal.status === "PARSED") && signal.reviewRequired)
@@ -35,6 +34,8 @@ export function OperationsPage({
   onReviewSignals,
   onOpenPositions,
   onOpenProviders,
+  signalReviewCount,
+  alertCount,
 }: {
   snapshot: DashboardSnapshot;
   focusedAccountId: string | null;
@@ -42,15 +43,22 @@ export function OperationsPage({
   onReviewSignals: () => void;
   onOpenPositions: () => void;
   onOpenProviders: () => void;
+  signalReviewCount: number;
+  alertCount: number;
 }) {
   const { locale } = useLocale();
   const accounts = focusedAccountId
     ? snapshot.mt5Accounts.filter((account) => account.id === focusedAccountId)
     : snapshot.mt5Accounts;
   const signalRows = snapshot.parserResults
-    .filter((signal) => signal.status !== "IGNORED" && signal.status !== "DISMISSED")
+    .filter(
+      (signal) =>
+        signal.status !== "IGNORED" &&
+        signal.status !== "DISMISSED" &&
+        !signalRequiresReview(signal),
+    )
     .slice(0, 5);
-  const blockedSignal = signalRows.find(requiresReview);
+  const attentionCount = signalReviewCount + alertCount;
   const workingOrders = accounts.flatMap((account) =>
     [
       ...((account.appOrders ?? []).map((order) => ({ order, account, owned: true })) as Array<{
@@ -72,19 +80,28 @@ export function OperationsPage({
 
   return (
     <div className="operations-page">
-      {blockedSignal ? (
-        <section className="operations-blocker" role="alert">
+      {attentionCount > 0 ? (
+        <section
+          aria-label="Attention summary"
+          className="operations-blocker operations-attention-summary"
+          role="status"
+        >
           <ShieldAlert aria-hidden="true" className="operations-blocker-icon" size={18} />
           <div>
-            <span>Signal stopped before execution</span>
+            <span>Attention required</span>
             <strong>
-              {blockedSignal.providerTitle || "Unknown provider"} · {blockedSignal.rawText}
+              {attentionCount} {attentionCount === 1 ? "item needs" : "items need"} attention
             </strong>
-            <small>{blockedSignal.heldReason || "Operator review is required."}</small>
+            <small>
+              {signalReviewCount} {signalReviewCount === 1 ? "signal" : "signals"} · {alertCount}{" "}
+              {alertCount === 1 ? "alert" : "alerts"}
+            </small>
           </div>
-          <button className="btn btn-primary btn-small" onClick={onReviewSignals} type="button">
-            Review and fix
-          </button>
+          {signalReviewCount > 0 ? (
+            <button className="btn btn-primary btn-small" onClick={onReviewSignals} type="button">
+              Open review queue
+            </button>
+          ) : null}
         </section>
       ) : null}
 
@@ -174,10 +191,9 @@ export function OperationsPage({
           ) : (
             <div className="operations-ledger-list">
               {signalRows.map((signal) => {
-                const reached = stageState(signal.status ?? "", signal.reviewRequired);
-                const blocked = requiresReview(signal);
+                const reached = stageState(signal.status ?? "");
                 return (
-                  <article className={blocked ? "needs-review" : ""} key={signal.id}>
+                  <article key={signal.id}>
                     <div className="operations-ledger-copy">
                       <span>{signal.providerTitle || "Unknown provider"}</span>
                       <strong>
@@ -201,15 +217,6 @@ export function OperationsPage({
                         />
                       ))}
                     </div>
-                    {blocked ? (
-                      <button
-                        className="btn btn-ghost btn-small"
-                        onClick={onReviewSignals}
-                        type="button"
-                      >
-                        Review
-                      </button>
-                    ) : null}
                   </article>
                 );
               })}

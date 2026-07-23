@@ -28,6 +28,11 @@ function readDismissedAlerts(): Set<string> {
   }
 }
 
+export function visibleOperationalAlerts(alerts: OperationalAlert[]): OperationalAlert[] {
+  const dismissed = readDismissedAlerts();
+  return alerts.filter((alert) => !dismissed.has(alertKey(alert)));
+}
+
 function writeDismissedAlerts(dismissed: Set<string>) {
   try {
     window.localStorage.setItem(DISMISSED_ALERTS_STORAGE_KEY, JSON.stringify([...dismissed]));
@@ -72,42 +77,57 @@ export function AlertsBanner({
 
   const visible = alerts.filter((alert) => !dismissed.has(alertKey(alert)));
   if (visible.length === 0) return null;
+  const errors = visible.filter((alert) => alert.severity === "error").length;
+  const warnings = visible.length - errors;
 
   return (
-    <section aria-label="Operational alerts" className="alerts-banner" role="alert">
-      {visible.map((alert, index) => {
-        const key = alertKey(alert);
-        return (
-          <div
-            className={`alerts-banner-item alerts-banner-${alert.severity}`}
-            key={`${alert.kind}-${alert.accountId ?? index}`}
-          >
-            <span className="alerts-banner-icon" aria-hidden="true">
-              <ShieldAlert size={15} />
-            </span>
-            <span className="alerts-banner-message">{alert.message}</span>
-            {onViewHeld && /guardian|held/i.test(alert.kind) ? (
-              <button className="alerts-banner-link" onClick={onViewHeld} type="button">
-                View held
-              </button>
-            ) : null}
-            <button
-              aria-label="Dismiss alert"
-              className="alerts-banner-close"
-              onClick={() =>
-                setDismissed((current) => {
-                  const next = new Set(current).add(key);
-                  writeDismissedAlerts(next);
-                  return next;
-                })
-              }
-              type="button"
+    <details aria-label="Operational alerts" className="alerts-banner">
+      <summary className="alerts-banner-summary">
+        <span className="alerts-banner-icon" aria-hidden="true">
+          <ShieldAlert size={15} />
+        </span>
+        <strong>
+          {visible.length} operational {visible.length === 1 ? "alert" : "alerts"}
+        </strong>
+        <span>
+          {errors} critical · {warnings} {warnings === 1 ? "warning" : "warnings"}
+        </span>
+      </summary>
+      <div className="alerts-banner-list" role="alert">
+        {visible.map((alert, index) => {
+          const key = alertKey(alert);
+          return (
+            <div
+              className={`alerts-banner-item alerts-banner-${alert.severity}`}
+              key={`${alert.kind}-${alert.accountId ?? index}`}
             >
-              <X size={14} aria-hidden="true" />
-            </button>
-          </div>
-        );
-      })}
-    </section>
+              <span className="alerts-banner-icon" aria-hidden="true">
+                <ShieldAlert size={15} />
+              </span>
+              <span className="alerts-banner-message">{alert.message}</span>
+              {onViewHeld && /guardian|held/i.test(alert.kind) ? (
+                <button className="alerts-banner-link" onClick={onViewHeld} type="button">
+                  View held
+                </button>
+              ) : null}
+              <button
+                aria-label="Dismiss alert"
+                className="alerts-banner-close"
+                onClick={() =>
+                  setDismissed((current) => {
+                    const next = new Set(current).add(key);
+                    writeDismissedAlerts(next);
+                    return next;
+                  })
+                }
+                type="button"
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </details>
   );
 }

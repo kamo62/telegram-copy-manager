@@ -2,7 +2,7 @@ import { Server } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
-import { AlertsBanner } from "./components/AlertsBanner";
+import { AlertsBanner, visibleOperationalAlerts } from "./components/AlertsBanner";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { useConfirm } from "./components/ConfirmDialog";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
@@ -51,7 +51,7 @@ import { EquityGuardianPage } from "./pages/EquityGuardianPage";
 import { HistoryPage } from "./pages/HistoryPage";
 import { LinkedAccountsPage } from "./pages/LinkedAccountsPage";
 import { LogsPage } from "./pages/LogsPage";
-import { OperationsPage } from "./pages/OperationsPage";
+import { OperationsPage, signalRequiresReview } from "./pages/OperationsPage";
 import { PerformancePage } from "./pages/PerformancePage";
 import { ProvidersPage } from "./pages/ProvidersPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -1226,6 +1226,17 @@ export function App({
     [heldItems],
   );
 
+  const signalReviewCount = useMemo(() => {
+    const parsedReviewCount = snapshot.parserResults.filter(
+      (signal) => signal.status !== "HELD" && signalRequiresReview(signal),
+    ).length;
+    const recentHeldCount = snapshot.parserResults.filter(
+      (signal) => signal.status === "HELD",
+    ).length;
+    return parsedReviewCount + Math.max(heldItems.length, recentHeldCount);
+  }, [heldItems.length, snapshot.parserResults]);
+  const operationalAlertCount = visibleOperationalAlerts(snapshot.alerts ?? []).length;
+
   const paletteCommands = useMemo<PaletteCommand[]>(
     () => [
       {
@@ -2184,7 +2195,7 @@ export function App({
         pendingSlots={sidebarPendingSlots}
         selectedAccountId={selectedAccountId}
         selectedSlotId={selectedSlotId}
-        heldCount={heldItems.length}
+        reviewCount={signalReviewCount}
       />
 
       <ErrorBoundary fallbackLabel="This view hit an unexpected error">
@@ -2286,6 +2297,8 @@ export function App({
                   setActiveTab("logs");
                 }}
                 onSelectAccount={(id) => navigate(`/accounts/${id}/summary`)}
+                alertCount={operationalAlertCount}
+                signalReviewCount={signalReviewCount}
                 snapshot={snapshot}
               />
             ) : null}
