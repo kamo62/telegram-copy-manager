@@ -1329,6 +1329,49 @@ describe("App dashboard", () => {
     });
   });
 
+  test("scopes Equity Guardian controls to the selected account", async () => {
+    const view = rtlRender(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          equityGuardians: [
+            {
+              accountId: "mt5-demo-1",
+              accountNumber: "100200300",
+              threshold: 10,
+              currentDrawdown: 2,
+              paused: false,
+              enabled: true,
+              breaches: [],
+            },
+            {
+              accountId: "mt5-live-2",
+              accountNumber: "200300400",
+              threshold: 12,
+              currentDrawdown: 3,
+              paused: false,
+              enabled: true,
+              breaches: [],
+            },
+          ],
+        }}
+      />,
+      {
+        wrapper: ({ children }) => (
+          <MemoryRouter initialEntries={["/accounts/mt5-demo-1/equity-guardian"]}>
+            {children}
+          </MemoryRouter>
+        ),
+      },
+    );
+    const headings = view.getAllByRole("heading", { name: "Equity Guardian" });
+    const guardianPanel = headings.at(-1)?.closest("section");
+    if (!guardianPanel) throw new Error("Equity Guardian panel not found");
+
+    expect(within(guardianPanel).getByText("100200300")).toBeTruthy();
+    expect(within(guardianPanel).queryByText("200300400")).toBeNull();
+  });
+
   test("lets the operator update provider parser mode and channel lot size from the modal", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {

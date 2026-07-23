@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.54.2 - 2026-07-23 (Patch)
+
+Release impact: Patch because this fixes account-scoped Guardian presentation without changing Guardian persistence, API, database, or MT5 execution contracts.
+
+- Show only the selected account's Equity Guardian controls inside account detail while retaining the all-account Guardian overview.
+- Added regression coverage preventing another account's Guardian settings from leaking into the focused account page.
+- Aligned application and EA source version metadata at 1.54.2; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.54.1 - 2026-07-23 (Patch)
 
 Release impact: Patch because this corrects route-level scroll restoration without changing account navigation, API, database, or MT5 execution contracts.

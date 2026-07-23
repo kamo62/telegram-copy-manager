@@ -2334,7 +2334,9 @@ export function App({
             {showEquityGuardian ? (
               <EquityGuardianPage
                 guardianHeldCounts={guardianHeldCounts}
-                guardians={snapshot.equityGuardians ?? []}
+                guardians={(snapshot.equityGuardians ?? []).filter(
+                  (guardian) => !selectedAccountId || guardian.accountId === selectedAccountId,
+                )}
                 onSave={(accountId, formElement) => void saveGuardian(accountId, formElement)}
                 onUnpause={(accountId, requeueHeld) => void unpauseGuardian(accountId, requeueHeld)}
               />
