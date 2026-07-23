@@ -198,7 +198,7 @@ export function PerformancePage({
         </button>
       </div>
       {view === "overview" ? (
-        <>
+        <div className="performance-overview">
           <AttributionPanel
             attribution={attribution}
             currency={currency ?? (account as { currency?: string } | undefined)?.currency}
@@ -206,13 +206,14 @@ export function PerformancePage({
             loading={attributionLoading}
             range={range}
             setRange={setRange}
-          />
-          <GrowthChart
-            data={data}
-            loading={loading}
-            currency={currency ?? (account as { currency?: string } | undefined)?.currency}
-          />
-        </>
+          >
+            <GrowthChart
+              data={data}
+              loading={loading}
+              currency={currency ?? (account as { currency?: string } | undefined)?.currency}
+            />
+          </AttributionPanel>
+        </div>
       ) : (
         <StatisticsView
           error={statsError}
@@ -233,6 +234,7 @@ export function PerformancePage({
 
 function AttributionPanel({
   attribution,
+  children,
   currency,
   error,
   loading,
@@ -240,6 +242,7 @@ function AttributionPanel({
   setRange,
 }: {
   attribution: AccountAttributionData | null;
+  children?: ReactNode;
   currency?: string;
   error: string;
   loading: boolean;
@@ -302,6 +305,7 @@ function AttributionPanel({
           </div>
         ))}
       </div>
+      {children}
       {attribution ? (
         <>
           <div className="attribution-breakdown-grid">

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.53.1 - 2026-07-23 (Patch)
+
+Release impact: Patch because this corrects frontend fidelity and mixed-currency presentation without changing the API or MT5 execution protocol.
+
+- Replaced the invented green-grid console skin with the supplied artifact structure: a compact MT5 operations rail, exception-first account posture, signal ledger, working orders, and provider strip.
+- Added the requested Codex-LB-inspired light mode while keeping the dark theme faithful to the supplied Telegram TC dashboard artifact.
+- Reordered the Performance overview around attribution metrics and account growth without removing the existing statistics, provider, account, guardian, history, settings, or recovery workflows.
+- Keep mixed USD and ZAR Performance summaries in separate native-currency cards instead of presenting a combined FX headline.
+- Added regression coverage for native-currency Performance summaries and aligned application and EA source version metadata at 1.53.1; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.53.0 - 2026-07-22 (Minor)
 
 Release impact: Minor because this introduces a new Operations-first frontend, persistent theme behaviour, and corrected reporting-currency provider metrics without breaking the API or MT5 execution protocol.

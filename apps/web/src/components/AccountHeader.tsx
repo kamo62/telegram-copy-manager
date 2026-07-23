@@ -45,6 +45,14 @@ export interface AccountHeaderData {
     thisWeek?: number[];
     thisMonth?: number[];
   };
+  nativeCurrencyGroups?: Array<{
+    currency: string;
+    accountCount: number;
+    balance: number | null;
+    equity: number | null;
+    totalProfit: number | null;
+    today: number | null;
+  }>;
   currency: string;
 }
 
@@ -73,7 +81,7 @@ export function AccountHeader({
   loading?: boolean;
   className?: string;
 }) {
-  const { connectedPlatform, kpis, series, currency } = data;
+  const { connectedPlatform, kpis, nativeCurrencyGroups, series, currency } = data;
   const { locale } = useLocale();
   const { colorAccents } = useColorAccents();
   // Today / This Week / This Month are the same metric over three windows, so
@@ -151,6 +159,11 @@ export function AccountHeader({
     >
       <div className="account-header-section">
         <h2 className="account-header-title">Live</h2>
+        {nativeCurrencyGroups?.length ? (
+          <p className="account-header-currency-note">
+            Native currencies remain separate; no FX total is shown.
+          </p>
+        ) : null}
         <div className="account-platform-card">
           <div className="account-platform-card-icon" aria-hidden="true">
             <Server size={16} />
@@ -178,14 +191,59 @@ export function AccountHeader({
       </div>
 
       <div className="account-kpis anim-stagger">
-        {loading && kpis.balance === null
+        {nativeCurrencyGroups?.map((group) => (
+          <article
+            aria-label={`${group.currency} account totals`}
+            className="native-currency-card"
+            key={group.currency}
+          >
+            <header>
+              <strong>{group.currency}</strong>
+              <span>
+                {group.accountCount} account{group.accountCount === 1 ? "" : "s"} · native
+              </span>
+            </header>
+            <dl>
+              <div>
+                <dt>Balance</dt>
+                <dd>
+                  <Money value={group.balance} currency={group.currency} locale={locale} />
+                </dd>
+              </div>
+              <div>
+                <dt>Equity</dt>
+                <dd>
+                  <Money value={group.equity} currency={group.currency} locale={locale} />
+                </dd>
+              </div>
+              <div>
+                <dt>Trading P/L</dt>
+                <dd>
+                  <Money
+                    value={group.totalProfit}
+                    currency={group.currency}
+                    locale={locale}
+                    signTone
+                  />
+                </dd>
+              </div>
+              <div>
+                <dt>Today</dt>
+                <dd>
+                  <Money value={group.today} currency={group.currency} locale={locale} signTone />
+                </dd>
+              </div>
+            </dl>
+          </article>
+        ))}
+        {!nativeCurrencyGroups?.length && loading && kpis.balance === null
           ? Array.from({ length: 4 }, (_, index) => (
               <div className="kpi" key={`kpi-skeleton-${index}`}>
                 <SkeletonStat />
               </div>
             ))
           : null}
-        {!(loading && kpis.balance === null) ? (
+        {!nativeCurrencyGroups?.length && !(loading && kpis.balance === null) ? (
           <>
             {kpiList.map((kpi) => {
               const delta = formatDelta(kpi.delta, locale);

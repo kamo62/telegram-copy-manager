@@ -6,7 +6,6 @@ import {
   KeyRound,
   Link2,
   Plus,
-  RadioTower,
   Settings2,
   Split,
   UsersRound,
@@ -65,12 +64,9 @@ export function Sidebar({
   return (
     <aside className="sidebar" aria-label="Primary">
       <div className="brand-lockup">
-        <div className="brand-mark">
-          <RadioTower size={16} aria-hidden="true" />
-        </div>
         <div>
-          <span className="brand-kicker">Execution console</span>
-          <strong>Telegram / TC</strong>
+          <strong>Telegram TC</strong>
+          <span className="brand-kicker">MT5 copy desk</span>
         </div>
       </div>
       <span className="sidebar-nav-label">Desk</span>

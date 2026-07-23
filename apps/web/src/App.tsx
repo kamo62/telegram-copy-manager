@@ -1061,6 +1061,38 @@ export function App({
         ? perf.heartbeatStatus === "online"
         : !performanceAccount || performanceAccount.heartbeatStatus === "online";
     const headerCurrency = focusedAccount?.currency ?? perf?.currency ?? "$";
+    const normalizeAccountCurrency = (currency?: string) => {
+      const normalized = currency?.trim().toUpperCase();
+      if (normalized === "$") return "USD";
+      if (normalized === "R") return "ZAR";
+      return normalized || "USD";
+    };
+    const nativeCurrencies = new Set(
+      accounts.map((account) => normalizeAccountCurrency(account.currency)),
+    );
+    const useNativeCurrencyGroups = !focusedAccount && nativeCurrencies.size > 1;
+    const sumComplete = (values: Array<number | null | undefined>) =>
+      values.length > 0 && values.every((value): value is number => typeof value === "number")
+        ? values.reduce((total, value) => total + value, 0)
+        : null;
+    const nativeCurrencyGroups = useNativeCurrencyGroups
+      ? [...nativeCurrencies].sort().map((currency) => {
+          const currencyAccounts = accounts.filter(
+            (account) => normalizeAccountCurrency(account.currency) === currency,
+          );
+          const currencyPerformance = currencyAccounts.map(
+            (account) => snapshot.accountPerformanceByAccount?.[account.id],
+          );
+          return {
+            currency,
+            accountCount: currencyAccounts.length,
+            balance: sumComplete(currencyAccounts.map((account) => account.balance)),
+            equity: sumComplete(currencyAccounts.map((account) => account.equity)),
+            totalProfit: sumComplete(currencyPerformance.map((entry) => entry?.totalProfit)),
+            today: sumComplete(currencyPerformance.map((entry) => entry?.today)),
+          };
+        })
+      : undefined;
 
     let platform = "—";
     let broker = "—";
@@ -1155,6 +1187,7 @@ export function App({
         },
       },
       series,
+      nativeCurrencyGroups,
       currency: headerCurrency,
     };
   }, [
@@ -2135,6 +2168,7 @@ export function App({
         onRefresh={refreshDashboard}
         queuePending={queuePending}
         telegramAdapter={snapshot.health.telegramAdapter}
+        title={workspaceHeading.title}
       />
 
       <Sidebar
@@ -2154,9 +2188,18 @@ export function App({
       />
 
       <ErrorBoundary fallbackLabel="This view hit an unexpected error">
-        <section className="workspace" id="main-content" tabIndex={-1}>
+        <section
+          className={`workspace ${showSummary ? "workspace-operations" : ""}`}
+          id="main-content"
+          tabIndex={-1}
+        >
           <WorkspaceHeading {...workspaceHeading} />
-          <AlertsBanner alerts={snapshot.alerts ?? []} onViewHeld={() => navigate("/logs#held")} />
+          {!showSummary ? (
+            <AlertsBanner
+              alerts={snapshot.alerts ?? []}
+              onViewHeld={() => navigate("/logs#held")}
+            />
+          ) : null}
           {showDashboard && focusedSlot ? (
             <PendingSlotView slot={focusedSlot} />
           ) : showDashboard ? (

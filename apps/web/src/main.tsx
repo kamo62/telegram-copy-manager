@@ -13,8 +13,6 @@ import { applyTheme, readTheme, ThemeProvider } from "./contexts/ThemeContext";
 import { ToastProvider } from "./contexts/ToastContext";
 // Self-hosted variable fonts — Vite emits hashed WOFF2 assets at build time
 // so there are no render-blocking Google Fonts requests on cold start.
-import "@fontsource/barlow-condensed/500.css";
-import "@fontsource/barlow-condensed/600.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
 import "@fontsource-variable/ibm-plex-sans";

@@ -12,6 +12,7 @@ interface StatusBarProps {
   queuePending: number;
   refreshing: boolean;
   telegramAdapter: string;
+  title?: string;
 }
 
 /**
@@ -33,6 +34,7 @@ export function StatusBar({
   queuePending,
   refreshing,
   telegramAdapter,
+  title = "Operations",
 }: StatusBarProps) {
   const { theme, toggleTheme } = useTheme();
   const liveDotClass = lastPollError
@@ -63,7 +65,8 @@ export function StatusBar({
   return (
     <header className="status-bar">
       <h1 className="brand" title={`Version ${appVersion}`}>
-        TG-TC · Operations
+        <span className="visually-hidden">TG-TC · </span>
+        {title}
       </h1>
       <div className="status-cluster">
         <span
@@ -94,6 +97,7 @@ export function StatusBar({
           <span className="sync-label">Queue</span>
           <span className="sync-value">{queuePending}</span>
         </span>
+        <span className="status-chip status-version">v{appVersion}</span>
         {lastPollError ? (
           <span aria-live="polite" className="status-chip status-chip-error" role="status">
             <span className="chip-dot error" />

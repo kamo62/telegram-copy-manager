@@ -5,36 +5,40 @@
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --bg: hsl(42 22% 95%);
-  --bg-elevated: hsl(42 30% 98%);
-  --panel: hsl(42 32% 99%);
-  --panel-2: hsl(40 20% 94%);
-  --panel-hover: hsl(42 24% 91%);
-  --sidebar: hsl(155 17% 13%);
-  --sidebar-2: hsl(155 14% 17%);
-  --topbar: hsl(155 18% 10% / 0.96);
-  --overlay: hsl(155 24% 8% / 0.62);
+  --bg: hsl(220 27% 98%);
+  --bg-elevated: hsl(0 0% 100%);
+  --panel: hsl(0 0% 100%);
+  --panel-2: hsl(220 25% 97%);
+  --panel-hover: hsl(220 22% 94%);
+  --sidebar: hsl(0 0% 100%);
+  --sidebar-2: hsl(220 27% 98%);
+  --topbar: hsl(0 0% 100% / 0.96);
+  --overlay: hsl(220 24% 10% / 0.48);
 
-  --line: hsl(42 13% 84%);
-  --line-strong: hsl(42 11% 72%);
-  --line-subtle: hsl(42 18% 90%);
-  --grid-line: hsl(155 12% 24% / 0.055);
+  --line: hsl(220 17% 89%);
+  --line-strong: hsl(220 15% 80%);
+  --line-subtle: hsl(220 22% 94%);
+  --grid-line: transparent;
 
-  --ink: hsl(155 18% 11%);
-  --ink-2: hsl(155 10% 26%);
-  --ink-dim: hsl(155 8% 37%);
-  --ink-3: hsl(155 7% 46%);
-  --ink-faint: hsl(155 6% 53%);
-  --inverse-ink: hsl(42 30% 95%);
-  --inverse-dim: hsl(42 12% 68%);
+  --ink: hsl(222 32% 9%);
+  --ink-2: hsl(220 14% 27%);
+  --ink-dim: hsl(220 10% 42%);
+  --ink-3: hsl(220 9% 52%);
+  --ink-faint: hsl(220 8% 61%);
+  --inverse-ink: hsl(222 32% 9%);
+  --inverse-dim: hsl(220 10% 42%);
+  --sidebar-ink: hsl(222 32% 9%);
+  --sidebar-dim: hsl(220 10% 42%);
+  --sidebar-border: hsl(220 17% 89%);
+  --sidebar-active: hsl(220 60% 96%);
 
-  --accent: hsl(155 65% 28%);
-  --accent-9: hsl(155 65% 28%);
-  --accent-10: hsl(155 68% 23%);
-  --accent-dim: hsl(155 55% 23%);
-  --accent-soft: hsl(155 42% 88%);
-  --accent-ring: hsl(155 67% 31% / 0.52);
-  --accent-contrast: hsl(42 35% 97%);
+  --accent: hsl(220 70% 52%);
+  --accent-9: hsl(220 70% 52%);
+  --accent-10: hsl(220 72% 44%);
+  --accent-dim: hsl(220 66% 42%);
+  --accent-soft: hsl(220 75% 94%);
+  --accent-ring: hsl(220 75% 56% / 0.38);
+  --accent-contrast: hsl(0 0% 100%);
 
   --tg-blue: hsl(203 78% 40%);
   --tg-blue-deep: hsl(203 83% 31%);
@@ -54,8 +58,10 @@
   --warn-soft: hsl(36 85% 90%);
   --info: hsl(208 66% 42%);
   --info-soft: hsl(208 65% 91%);
+  --unknown: hsl(265 54% 50%);
+  --unknown-soft: hsl(265 58% 94%);
 
-  --font-display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --font-display: "IBM Plex Sans Variable", "IBM Plex Sans", sans-serif;
   --font-ui: "IBM Plex Sans Variable", "IBM Plex Sans", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
 
@@ -81,9 +87,9 @@
   --space-7: 48px;
   --space-8: 64px;
 
-  --radius-1: 2px;
-  --radius-2: 5px;
-  --radius-3: 9px;
+  --radius-1: 6px;
+  --radius-2: 9px;
+  --radius-3: 12px;
   --radius-pill: 999px;
   --radius: var(--radius-2);
   --radius-sm: var(--radius-1);
@@ -94,10 +100,10 @@
   --duration-2: 180ms;
   --duration-3: 280ms;
 
-  --shadow-1: 0 1px 0 hsl(155 20% 10% / 0.04);
-  --shadow-2: 0 12px 30px hsl(155 20% 8% / 0.08);
-  --shadow-3: 0 24px 60px hsl(155 24% 7% / 0.16);
-  --shadow-glass: 0 1px 0 hsl(0 0% 100% / 0.06);
+  --shadow-1: 0 1px 2px hsl(220 24% 10% / 0.035);
+  --shadow-2: 0 10px 28px hsl(220 24% 10% / 0.07);
+  --shadow-3: 0 24px 60px hsl(220 24% 10% / 0.16);
+  --shadow-glass: 0 1px 0 hsl(220 17% 89% / 0.7);
   --shadow-sm: var(--shadow-1);
   --shadow-md: var(--shadow-2);
 }
@@ -105,36 +111,40 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg: hsl(154 12% 7%);
-  --bg-elevated: hsl(154 12% 9%);
-  --panel: hsl(154 11% 11%);
-  --panel-2: hsl(154 10% 14%);
-  --panel-hover: hsl(154 10% 17%);
-  --sidebar: hsl(154 15% 6%);
-  --sidebar-2: hsl(154 12% 9%);
-  --topbar: hsl(154 17% 5% / 0.96);
-  --overlay: hsl(154 25% 3% / 0.78);
+  --bg: hsl(222 28% 7%);
+  --bg-elevated: hsl(222 27% 9%);
+  --panel: hsl(222 25% 11%);
+  --panel-2: hsl(222 23% 14%);
+  --panel-hover: hsl(222 21% 17%);
+  --sidebar: hsl(222 31% 6%);
+  --sidebar-2: hsl(222 29% 8%);
+  --topbar: hsl(222 30% 8% / 0.96);
+  --overlay: hsl(222 38% 3% / 0.76);
 
-  --line: hsl(154 8% 20%);
-  --line-strong: hsl(154 8% 29%);
-  --line-subtle: hsl(154 9% 15%);
-  --grid-line: hsl(154 22% 64% / 0.045);
+  --line: hsl(220 17% 21%);
+  --line-strong: hsl(220 15% 31%);
+  --line-subtle: hsl(220 18% 16%);
+  --grid-line: transparent;
 
-  --ink: hsl(42 24% 92%);
-  --ink-2: hsl(42 10% 76%);
-  --ink-dim: hsl(42 7% 62%);
-  --ink-3: hsl(42 6% 51%);
-  --ink-faint: hsl(42 5% 44%);
-  --inverse-ink: hsl(42 24% 92%);
-  --inverse-dim: hsl(42 7% 62%);
+  --ink: hsl(220 24% 94%);
+  --ink-2: hsl(220 12% 76%);
+  --ink-dim: hsl(220 9% 61%);
+  --ink-3: hsl(220 8% 50%);
+  --ink-faint: hsl(220 7% 42%);
+  --inverse-ink: hsl(220 24% 94%);
+  --inverse-dim: hsl(220 9% 61%);
+  --sidebar-ink: hsl(220 24% 94%);
+  --sidebar-dim: hsl(220 9% 61%);
+  --sidebar-border: hsl(220 17% 18%);
+  --sidebar-active: hsl(220 19% 16%);
 
-  --accent: hsl(154 62% 52%);
-  --accent-9: hsl(154 62% 52%);
-  --accent-10: hsl(154 70% 60%);
-  --accent-dim: hsl(154 54% 41%);
-  --accent-soft: hsl(154 49% 16%);
-  --accent-ring: hsl(154 62% 52% / 0.46);
-  --accent-contrast: hsl(154 20% 7%);
+  --accent: hsl(218 88% 72%);
+  --accent-9: hsl(218 88% 72%);
+  --accent-10: hsl(218 92% 78%);
+  --accent-dim: hsl(218 69% 61%);
+  --accent-soft: hsl(218 45% 17%);
+  --accent-ring: hsl(218 88% 72% / 0.42);
+  --accent-contrast: hsl(222 31% 8%);
 
   --tg-blue: hsl(199 72% 58%);
   --tg-blue-deep: hsl(199 78% 68%);
@@ -154,10 +164,12 @@
   --warn-soft: hsl(37 52% 16%);
   --info: hsl(204 72% 64%);
   --info-soft: hsl(204 44% 17%);
+  --unknown: hsl(269 72% 73%);
+  --unknown-soft: hsl(269 38% 17%);
 
   --shadow-1: 0 1px 0 hsl(0 0% 100% / 0.025);
-  --shadow-2: 0 14px 34px hsl(154 30% 2% / 0.3);
-  --shadow-3: 0 28px 70px hsl(154 30% 2% / 0.48);
+  --shadow-2: 0 14px 34px hsl(222 40% 2% / 0.32);
+  --shadow-3: 0 28px 70px hsl(222 40% 2% / 0.5);
   --shadow-glass: 0 1px 0 hsl(0 0% 100% / 0.035);
 }
 

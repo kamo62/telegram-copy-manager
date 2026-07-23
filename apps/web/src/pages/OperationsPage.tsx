@@ -68,7 +68,7 @@ export function OperationsPage({
     <div className="operations-page">
       {blockedSignal ? (
         <section className="operations-blocker" role="alert">
-          <ShieldAlert aria-hidden="true" size={18} />
+          <ShieldAlert aria-hidden="true" className="operations-blocker-icon" size={18} />
           <div>
             <span>Signal stopped before execution</span>
             <strong>

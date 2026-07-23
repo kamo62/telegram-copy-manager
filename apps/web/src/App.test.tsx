@@ -637,7 +637,7 @@ describe("App dashboard", () => {
     expect(chart.queryByText(/R\s*12\.34/)).toBeNull();
   });
 
-  test("account header uses aggregate performance liveness for mixed-currency reporting", () => {
+  test("account header keeps mixed-currency totals in their native currencies", () => {
     const view = render(
       <App
         initialSnapshot={{
@@ -665,6 +665,8 @@ describe("App dashboard", () => {
               accountNumber: "54870107",
               currency: "ZAR",
               heartbeatStatus: "offline",
+              balance: 1600,
+              equity: 1760,
             },
             {
               ...snapshot.mt5Accounts[0]!,
@@ -673,16 +675,45 @@ describe("App dashboard", () => {
               server: "OctaFX-Real",
               currency: "USD",
               heartbeatStatus: "online",
+              balance: 100,
+              equity: 110,
             },
           ],
+          accountPerformanceByAccount: {
+            "mt5-zar-old": {
+              accountId: "mt5-zar-old",
+              currency: "ZAR",
+              initialBalance: 1440,
+              totalProfit: 160,
+              today: 16,
+              thisWeek: 160,
+              thisMonth: 160,
+            },
+            "mt5-usd-octa": {
+              accountId: "mt5-usd-octa",
+              currency: "USD",
+              initialBalance: 90,
+              totalProfit: 10,
+              today: 1,
+              thisWeek: 10,
+              thisMonth: 10,
+            },
+          },
         }}
       />,
     );
 
     clickTab(view, "Performance");
 
-    expect(view.getByText(/200\.00/)).toBeTruthy();
-    expect(view.getByText(/220\.00/)).toBeTruthy();
+    const usd = within(view.getByRole("article", { name: "USD account totals" }));
+    const zar = within(view.getByRole("article", { name: "ZAR account totals" }));
+
+    expect(usd.getByText(/\$100\.00/)).toBeTruthy();
+    expect(usd.getByText(/\$110\.00/)).toBeTruthy();
+    expect(zar.getByText(/R\s*1,600\.00/)).toBeTruthy();
+    expect(zar.getByText(/R\s*1,760\.00/)).toBeTruthy();
+    expect(view.queryByText(/200\.00/)).toBeNull();
+    expect(view.getByText("Native currencies remain separate; no FX total is shown.")).toBeTruthy();
     expect(view.getByText("EA WORKING")).toBeTruthy();
   });
 
