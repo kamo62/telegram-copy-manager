@@ -44,7 +44,7 @@ export function GrowthChart({
   const [view, setView] = useState<"growth" | "drawdown">("growth");
   const { colorAccents } = useColorAccents();
   const { locale } = useLocale();
-  const hasEquityHistory = data.growth[1].length > 0;
+  const hasEquityHistory = data.growth[1].length > 1;
   const { isGrowth, isTimeSeries, rows } = useMemo(() => {
     const [xs, ys] = view === "growth" ? data.growth : data.drawdown;
     const indices = downsampleIndices(ys, 240);
@@ -104,7 +104,9 @@ export function GrowthChart({
       {loading ? (
         <SkeletonChart />
       ) : !hasEquityHistory ? (
-        <div className="chart-canvas-wrap">No equity history yet</div>
+        <div className="chart-canvas-wrap">
+          {data.growth[1].length === 1 ? "Not enough equity history yet" : "No equity history yet"}
+        </div>
       ) : (
         <div className="chart-canvas-wrap" data-color-accents={colorAccents ? "on" : "off"}>
           <AreaChart
@@ -119,6 +121,15 @@ export function GrowthChart({
             }}
             data={rows}
             margins={{ bottom: 30, left: 52 }}
+            yDomain={(() => {
+              const values = rows.map((row) => row.value);
+              const minimum = Math.min(...values);
+              const maximum = Math.max(...values);
+              const spread = maximum - minimum;
+              if (spread > Math.max(1, Math.abs(maximum) * 0.05)) return undefined;
+              const padding = Math.max(1, Math.abs(maximum) * 0.02, spread);
+              return [minimum - padding, maximum + padding] as [number, number];
+            })()}
           >
             <Grid />
             <XAxis

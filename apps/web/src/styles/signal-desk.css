@@ -318,7 +318,7 @@ h3,
 }
 
 .sidebar-child-dot.off {
-  background: var(--unknown);
+  background: var(--ink-3);
   border: 0;
 }
 
@@ -846,7 +846,10 @@ textarea {
 }
 
 .operations-account.offline {
-  border-color: var(--unknown);
+  border-color: var(--line);
+  box-shadow:
+    inset 3px 0 0 var(--warn),
+    var(--shadow-1);
 }
 
 .operations-account > header {
@@ -884,8 +887,8 @@ textarea {
   align-items: center;
   gap: 5px;
   padding: 2px 7px;
-  color: var(--unknown);
-  background: var(--unknown-soft);
+  color: var(--ink-2);
+  background: var(--panel-2);
   border-radius: var(--radius-pill);
   font-family: var(--font-mono);
   font-size: 8px;
@@ -964,8 +967,8 @@ textarea {
   padding: 9px 12px;
   margin: 0 12px 12px;
   color: var(--ink);
-  background: var(--unknown-soft);
-  border-left: 2px solid var(--unknown);
+  background: var(--warn-soft);
+  border-left: 2px solid var(--warn);
   font-size: 10px;
 }
 
@@ -977,6 +980,82 @@ textarea {
 .operations-account-issue span {
   color: var(--ink-dim);
   font-size: 9px;
+}
+
+.provider-monitoring {
+  margin: 16px 0;
+  overflow: hidden;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-2);
+}
+
+.provider-monitoring-head,
+.provider-monitoring-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.provider-monitoring-head {
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--line);
+}
+
+.provider-monitoring-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.provider-monitoring-head span,
+.provider-monitoring-head > span {
+  color: var(--ink-3);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.provider-monitoring-head h3 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.provider-monitoring-list {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.provider-monitoring-row {
+  padding: 10px 13px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.provider-monitoring-row:last-child {
+  border-bottom: 0;
+}
+
+.provider-monitoring-row > div:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.provider-monitoring-row strong {
+  overflow: hidden;
+  color: var(--ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-monitoring-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
 }
 
 .operations-primary-grid {

@@ -7,6 +7,7 @@ interface AccountsOverviewProps {
   accounts: Array<{
     id: string;
     accountNumber: string;
+    nickname?: string | null;
     server: string;
     marginMode: string;
     heartbeatStatus: string;
@@ -31,7 +32,7 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
     .filter((account) => (account.equity ?? 0) > 0)
     .map((account, index) => ({
       id: account.id,
-      label: account.accountNumber || account.id,
+      label: account.nickname || account.accountNumber || account.id,
       value: account.equity ?? 0,
       pattern: SLICE_PATTERNS[index % SLICE_PATTERNS.length] ?? 0,
     }));
@@ -123,7 +124,7 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
           return (
             <li key={account.id}>
               <button
-                aria-label={`Open ${account.accountNumber || account.id}`}
+                aria-label={`Open ${account.nickname || account.accountNumber || account.id}`}
                 className="accounts-overview-row"
                 onClick={() => onSelectAccount(account.id)}
                 type="button"
@@ -133,7 +134,7 @@ export function AccountsOverview({ accounts, onSelectAccount }: AccountsOverview
                   className={`accounts-overview-dot ${online ? "ok" : "off"}`}
                 />
                 <div className="accounts-overview-row-body">
-                  <strong>{account.accountNumber || account.id}</strong>
+                  <strong>{account.nickname || account.accountNumber || account.id}</strong>
                   <span className="accounts-overview-row-meta">
                     {account.server} · {account.marginMode} · EA{" "}
                     {account.eaVersion ?? "legacy/unknown"}

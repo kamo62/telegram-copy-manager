@@ -7,7 +7,8 @@ This checklist is the release gate for future frontend changes.
 
 - `/`: all-account operations overview, account selection, exposure, activity and onboarding.
 - `/telegram`: Telegram authentication, OTP/2FA continuation, dialog refresh, provider selection,
-  provider monitoring, resync, enable/disable, configure and remove.
+  and provider addition. Provider monitoring, resync, enable/disable, configuration, and removal
+  live on the Providers page.
 - `/linked-accounts`: link-slot creation/deletion, link code, connected-account health, provider
   assignment summary, account removal and external broker activity.
 - `/settings`: appearance, execution defaults, order types, polling/dedup, stale-signal expiry,

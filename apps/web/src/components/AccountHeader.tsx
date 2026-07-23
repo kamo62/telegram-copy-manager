@@ -2,6 +2,7 @@ import {
   CalendarDays,
   CalendarRange,
   CheckCircle2,
+  ChevronDown,
   type LucideIcon,
   PiggyBank,
   Server,
@@ -9,7 +10,7 @@ import {
   TrendingUp,
   Wallet,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useColorAccents } from "../contexts/ColorAccentsContext";
 import { useLocale } from "../contexts/LocaleContext";
 import { CHART_PALETTE } from "../lib/chartPalette";
@@ -19,6 +20,11 @@ import { SkeletonStat } from "./Skeleton";
 import { Sparkline } from "./Sparkline";
 
 export interface AccountHeaderData {
+  accountId?: string;
+  accountLabel?: string;
+  accountNickname?: string | null;
+  heartbeatStatus?: string;
+  lastHeartbeatAt?: string | null;
   connectedPlatform: {
     platform: string;
     broker: string;
@@ -76,14 +82,46 @@ export function AccountHeader({
   data,
   loading = false,
   className,
+  onRename,
+  onRemoveAccount,
+  onManageLink,
 }: {
   data: AccountHeaderData;
   loading?: boolean;
   className?: string;
+  onRename?: (nickname: string) => Promise<void> | void;
+  onRemoveAccount?: () => void;
+  onManageLink?: () => void;
 }) {
-  const { connectedPlatform, kpis, nativeCurrencyGroups, series, currency } = data;
+  const {
+    accountId,
+    accountLabel,
+    accountNickname,
+    connectedPlatform,
+    heartbeatStatus,
+    kpis,
+    lastHeartbeatAt,
+    nativeCurrencyGroups,
+    series,
+    currency,
+  } = data;
   const { locale } = useLocale();
   const { colorAccents } = useColorAccents();
+  const [renaming, setRenaming] = useState(false);
+  const [nickname, setNickname] = useState(accountNickname ?? "");
+  const initialized = useRef(false);
+  useEffect(() => {
+    if (!initialized.current) {
+      initialized.current = true;
+      return;
+    }
+    setNickname(accountNickname ?? "");
+    setRenaming(false);
+  }, [accountId, accountNickname]);
+  const isOnline = heartbeatStatus === "online";
+  const heartbeatLabel = lastHeartbeatAt
+    ? new Date(lastHeartbeatAt).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
+    : "unknown time";
   // Today / This Week / This Month are the same metric over three windows, so
   // they collapse into one card with a toggle instead of three separate cards.
   const [pnlWindow, setPnlWindow] = useState<"today" | "thisWeek" | "thisMonth">("today");
@@ -158,7 +196,63 @@ export function AccountHeader({
       aria-label="Account performance"
     >
       <div className="account-header-section">
-        <h2 className="account-header-title">Live</h2>
+        <div className="account-header-title-row">
+          <div>
+            <h2 className="account-header-title">{isOnline ? "Live" : "Last known"}</h2>
+            {accountLabel ? (
+              <span className="account-header-account-label">{accountLabel}</span>
+            ) : null}
+          </div>
+          {accountId ? (
+            <details className="resolve-menu account-header-menu">
+              <summary aria-label="Account actions" className="icon-btn">
+                <ChevronDown aria-hidden="true" size={15} />
+              </summary>
+              <div className="resolve-menu-popover">
+                {renaming ? (
+                  <form
+                    className="account-rename-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      if (!onRename) return;
+                      const value = new FormData(event.currentTarget).get("nickname");
+                      void Promise.resolve(onRename(typeof value === "string" ? value.trim() : ""))
+                        .then(() => setRenaming(false))
+                        .catch(() => undefined);
+                    }}
+                  >
+                    <label htmlFor="account-nickname">Account name</label>
+                    <input
+                      aria-label="Account name"
+                      className="settings-input"
+                      id="account-nickname"
+                      maxLength={80}
+                      name="nickname"
+                      onChange={(event) => setNickname(event.target.value)}
+                      value={nickname}
+                    />
+                    <button className="btn btn-primary btn-small" type="submit">
+                      Save name
+                    </button>
+                  </form>
+                ) : (
+                  <button onClick={() => setRenaming(true)} type="button">
+                    Rename
+                  </button>
+                )}
+                <button onClick={onRemoveAccount} type="button">
+                  Remove account
+                </button>
+                <button onClick={onManageLink} type="button">
+                  Manage link
+                </button>
+              </div>
+            </details>
+          ) : null}
+        </div>
+        {!isOnline && lastHeartbeatAt ? (
+          <p className="account-header-stale-note">Balance as at {heartbeatLabel} - not current</p>
+        ) : null}
         {nativeCurrencyGroups?.length ? (
           <p className="account-header-currency-note">
             Native currencies remain separate; no FX total is shown.

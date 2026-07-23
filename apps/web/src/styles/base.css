@@ -2259,6 +2259,52 @@ h3 {
   letter-spacing: -0.015em;
 }
 
+.account-header-title-row {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.account-header-account-label {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.account-header-stale-note {
+  margin: -4px 0 0;
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.account-header-menu {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.account-header-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-2);
+  background: var(--panel-2);
+}
+
+.account-rename-form {
+  display: grid;
+  gap: 6px;
+  padding: 4px;
+}
+
+.account-rename-form label {
+  color: var(--ink-3);
+  font-size: 10px;
+}
+
 .account-platform-card {
   background: linear-gradient(180deg, var(--bg-elevated), var(--bg));
   border-radius: var(--radius-2);
@@ -4424,6 +4470,36 @@ span.data-table-subtle {
   color: var(--panel);
   font-weight: 600;
   box-shadow: none;
+}
+
+.settings-theme-picker {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  margin: 0;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+}
+
+.settings-theme-picker button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 12px;
+  color: var(--ink-3);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.settings-theme-picker button.active {
+  color: var(--panel);
+  background: var(--ink);
+  font-weight: 600;
 }
 
 .segmented-control button:hover:not(.active) {
@@ -8069,6 +8145,23 @@ select.config-strategy-input {
 .resolve-menu-popover button:disabled {
   color: var(--ink-faint);
   cursor: not-allowed;
+}
+
+.account-header-menu .resolve-menu-popover {
+  left: 0;
+  right: auto;
+}
+
+.external-dismiss-button {
+  white-space: nowrap;
+}
+
+.dismissed-external-show {
+  margin-top: 10px;
+}
+
+.external-position-row .external-dismiss-button {
+  justify-self: start;
 }
 
 /* Responsive operations shell -------------------------------------------- */

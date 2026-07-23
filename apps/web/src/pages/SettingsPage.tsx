@@ -19,6 +19,7 @@ import { useTheme } from "../contexts/ThemeContext";
 interface AccountThresholdsRow {
   id: string;
   accountNumber: string;
+  nickname?: string | null;
   currency: string;
   drawdownWarnPctOverride: number | null;
   drawdownDangerPctOverride: number | null;
@@ -164,10 +165,11 @@ export function SettingsPage({
                 className="settings-input mono"
                 defaultValue={settings.defaultLotSize}
                 id="defaultLotSize"
+                inputMode="decimal"
                 min="0.01"
                 name="defaultLotSize"
-                step="0.01"
-                type="number"
+                pattern="[0-9]+([.,][0-9]+)?"
+                type="text"
               />
             </Field>
             <Field
@@ -570,7 +572,10 @@ function AccountThresholdRow({
   return (
     <tr>
       <th className="data-table-row-head" scope="row">
-        <strong>{account.accountNumber}</strong>
+        <strong>{account.nickname || account.accountNumber}</strong>
+        {account.nickname ? (
+          <span className="data-table-subtle">{account.accountNumber}</span>
+        ) : null}
         <span className="data-table-subtle">{account.currency}</span>
       </th>
       <td className="num-cell">

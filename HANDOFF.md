@@ -1,6 +1,20 @@
 # Handoff
 
-Updated: 2026-07-17 (session 2)
+Updated: 2026-07-23 (UI fidelity and information architecture session)
+
+## Session progress (2026-07-23) - implementation complete locally
+
+Implemented locally on branch `feat/ui-fidelity-and-ia-2026-07-23`; changes remain uncommitted and
+nothing was pushed, opened as a PR, or deployed.
+
+- Operations no longer renders the Signal ledger. Telegram Setup is limited to authentication, dialog selection, and provider addition.
+- Providers is the global provider hub for aggregate performance, health, and enable, pause, remove monitoring. Account-scoped provider copy settings remain in the account workspace.
+- Account headers have Rename, Remove account, and Manage link actions. Nicknames are nullable, persisted through `PATCH /api/mt5/accounts/:accountId`, and used as the display fallback before the MT5 account number.
+- External and untracked trades support local browser dismissal only. No broker mutation is performed.
+- Offline and stale states use neutral and amber tokens, stale headers show last-known balances, the equity chart handles flat and single-point history, settings accept comma decimals, `/review` redirects to `/logs`, and the app has a favicon.
+- Version bumped to 1.55.1 in the root package and EA metadata. Changelog entry added.
+- Final gate: `bun run typecheck` passed, `bun run lint` passed, `bun test` passed with 515 tests and 0 failures, and `bun run build` passed for both API and web bundles.
+- Git commits were requested but blocked by the environment because `.git/index.lock` cannot be created. No push, pull request, or deployment was performed.
 
 ## Session progress (2026-07-17) — all on branch, NOTHING deployed
 

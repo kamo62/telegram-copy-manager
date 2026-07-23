@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS queue_items (
 CREATE TABLE IF NOT EXISTS mt5_accounts (
   id TEXT PRIMARY KEY,
   account_number TEXT NOT NULL,
+  nickname TEXT,
   server TEXT NOT NULL,
   company TEXT NOT NULL,
   currency TEXT NOT NULL,

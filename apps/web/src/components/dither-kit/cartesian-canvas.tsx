@@ -7,6 +7,7 @@ import {
   bloomLayerStyle,
   easeInOutCubic,
   paintColumn,
+  paintTopLine,
   prefersReducedMotion,
   resample,
 } from "./dither-paint";
@@ -93,6 +94,7 @@ function startCartesianLoop({
           sparse,
         });
       }
+      paintTopLine(octx, cur.top, seed, dim);
     });
   };
 
@@ -302,9 +304,11 @@ export function CartesianCanvas() {
       const band = ctx.bands[key];
       if (!band) continue;
       const line = (ctx.seriesSpecs[key]?.kind ?? defaultKind) === "line";
-      const top = band.map((b) => (ctx.y(b[1]) / h) * (rows - 1));
+      const toRow = (value: number) =>
+        Math.max(0, Math.min(rows - 1, (ctx.y(value) / h) * (rows - 1)));
+      const top = band.map((b) => toRow(b[1]));
       const floor = band.map((b, i) =>
-        line ? Math.min(rows - 1, (top[i] ?? 0) + glow) : (ctx.y(b[0]) / h) * (rows - 1),
+        line ? Math.min(rows - 1, (top[i] ?? 0) + glow) : toRow(b[0]),
       );
       out[key] = { top: resample(top, cols), floor: resample(floor, cols) };
     }

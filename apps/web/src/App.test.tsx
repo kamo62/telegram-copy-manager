@@ -489,7 +489,7 @@ describe("App dashboard", () => {
     expect(view.getByRole("button", { name: "Operations" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Review queue" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Telegram" })).toBeTruthy();
-    expect(view.getByRole("heading", { name: "Signal ledger" })).toBeTruthy();
+    expect(view.queryByRole("heading", { name: "Signal ledger" })).toBeNull();
     expect(view.queryByText("Get started today")).toBeNull();
     expect(view.getByRole("tab", { name: "Signals" })).toBeTruthy();
     expect(view.getByRole("tab", { name: "Signals" }).getAttribute("aria-selected")).toBe("true");
@@ -519,7 +519,7 @@ describe("App dashboard", () => {
     );
 
     expect(view.queryByText(ignoredText)).toBeNull();
-    expect(view.getByText("No recent signals")).toBeTruthy();
+    expect(view.queryByRole("heading", { name: "Signal ledger" })).toBeNull();
   });
 
   test("summarises attention counts without repeating review signals in the ledger", () => {
@@ -588,7 +588,7 @@ describe("App dashboard", () => {
 
     fireEvent.click(view.getByRole("button", { name: "Operations" }));
     await waitFor(() => expect(window.location.pathname).toBe("/"));
-    expect(await view.findByRole("heading", { name: "Signal ledger" })).toBeTruthy();
+    expect(view.queryByRole("heading", { name: "Signal ledger" })).toBeNull();
 
     clickSidebar(view, "100200300");
     await waitFor(() => expect(window.location.pathname).toBe("/accounts/mt5-demo-1/performance"));
@@ -1044,7 +1044,7 @@ describe("App dashboard", () => {
     expect(chart.getByText(/\$45\.50/)).toBeTruthy();
   });
 
-  test("account header does not present stale MT5 telemetry as live PnL", () => {
+  test("account header shows last-known stale MT5 telemetry", () => {
     const view = render(
       <App
         initialSnapshot={{
@@ -1074,7 +1074,7 @@ describe("App dashboard", () => {
     clickTab(view, "Performance");
 
     expect(view.getByText("EA OFFLINE")).toBeTruthy();
-    expect(view.queryByText(/12,345\.67/)).toBeNull();
+    expect(view.getByText(/12,345\.67/)).toBeTruthy();
     expect(view.queryByText("Balance")).toBeTruthy();
     expect(view.queryByText("Equity")).toBeTruthy();
     expect(view.queryByText("Trading P/L")).toBeTruthy();
@@ -1103,7 +1103,7 @@ describe("App dashboard", () => {
     );
 
     await clickTabAsync(view, "Providers");
-    expect(await view.findByText("Provider paused")).toBeTruthy();
+    expect((await view.findAllByText("Provider paused")).length).toBeGreaterThan(0);
 
     await clickTabAsync(view, "Logs");
     const parserLab = await view.findByTestId("parser-lab-panel");
@@ -1151,6 +1151,7 @@ describe("App dashboard", () => {
     expect(await view.findByText("Available dialogs")).toBeTruthy();
     expect(view.getByText("Real FX Channel")).toBeTruthy();
     expect(view.getByRole("button", { name: "Add Real FX Channel as a provider" })).toBeTruthy();
+    expect(view.queryByRole("heading", { name: "Provider monitoring" })).toBeNull();
   });
 
   test("lets the operator resync providers after a new Telegram session connects", async () => {
@@ -1193,14 +1194,37 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickSidebar(view, "Telegram Setup");
+    clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Enable auto-copy for Alpha FX Signals" }));
 
-    await view.findByText("Provider paused");
+    expect((await view.findAllByText("Provider paused")).length).toBeGreaterThan(0);
     const toggleCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
     expect(toggleCall?.init?.method).toBe("PATCH");
     expect(JSON.parse(String(toggleCall?.init?.body))).toEqual({ enabled: true });
     expect(calls.some((call) => call.url === "/api/dashboard")).toBe(true);
+  });
+
+  test("removes a provider from the Providers page after confirmation", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+    clickTab(view, "Providers");
+    fireEvent.click(view.getByRole("button", { name: "Remove provider Alpha FX Signals" }));
+
+    const dialog = await view.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /^Remove provider$/ }));
+
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) => call.url === "/api/providers/provider-alpha" && call.init?.method === "DELETE",
+        ),
+      ).toBe(true),
+    );
   });
 
   test("lets the operator export provider performance from the Providers panel", async () => {
@@ -1229,7 +1253,7 @@ describe("App dashboard", () => {
     );
   });
 
-  test("keeps the overview Providers tab read-only (no per-account toggle or configure)", () => {
+  test("keeps aggregate copy links read-only while exposing global provider monitoring", () => {
     const linkedSnapshot: DashboardSnapshot = {
       ...snapshot,
       providers: [{ ...snapshot.providers[0]!, enabled: true }],
@@ -1240,9 +1264,11 @@ describe("App dashboard", () => {
     const view = render(<App initialSnapshot={linkedSnapshot} />);
     clickTab(view, "Providers");
 
-    // Overview shows which accounts copy (read-only chip) but no per-account controls.
-    expect(view.getByText(/Aggregated performance across all copying accounts/)).toBeTruthy();
-    expect(view.queryByRole("button", { name: /Configure Alpha FX Signals/ })).toBeNull();
+    expect(
+      view.getByText(/Aggregated performance, health, and global provider monitoring/),
+    ).toBeTruthy();
+    expect(view.getByRole("heading", { name: "Provider monitoring" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "Configure Alpha FX Signals" })).toBeTruthy();
     expect(
       view.queryByRole("button", {
         name: /Copy Alpha FX Signals|Stop copying Alpha FX Signals/,
@@ -1380,7 +1406,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickSidebar(view, "Telegram Setup");
+    clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
       target: { value: "aggressive" },
@@ -1424,7 +1450,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickSidebar(view, "Telegram Setup");
+    clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
 
     const dialog = view.getByRole("dialog");
@@ -1482,7 +1508,7 @@ describe("App dashboard", () => {
         }}
       />,
     );
-    clickSidebar(view, "Telegram Setup");
+    clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.click(
       view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
@@ -1507,7 +1533,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickSidebar(view, "Telegram Setup");
+    clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
 
     for (const leg of [4, 3, 2, 1]) {
@@ -1552,7 +1578,7 @@ describe("App dashboard", () => {
       />,
     );
 
-    clickSidebar(view, "Telegram Setup");
+    clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
 
     const modalText = view.getByRole("dialog").textContent ?? "";
@@ -1572,7 +1598,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickSidebar(view, "Telegram Setup");
+    clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
 
     fireEvent.input(view.getByLabelText("TP1 percentage"), { target: { value: "0" } });
@@ -1619,7 +1645,7 @@ describe("App dashboard", () => {
     }) as typeof fetch;
 
     const view = render(<App initialSnapshot={snapshot} />);
-    clickSidebar(view, "Telegram Setup");
+    clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
     fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
       target: { value: "aggressive" },

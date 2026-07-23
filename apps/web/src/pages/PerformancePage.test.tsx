@@ -140,4 +140,19 @@ describe("PerformancePage", () => {
 
     expect(view.getByText("No equity history yet")).toBeTruthy();
   });
+
+  test("does not draw a misleading curve for a single equity snapshot", () => {
+    const view = render(
+      <GrowthChart
+        data={{
+          ...growthData,
+          growth: [[1_779_292_800], [100]],
+          drawdown: [[1_779_292_800], [0]],
+          numberOfTrades: 0,
+        }}
+      />,
+    );
+
+    expect(view.getByText("Not enough equity history yet")).toBeTruthy();
+  });
 });

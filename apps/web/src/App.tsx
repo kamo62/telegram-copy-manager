@@ -172,6 +172,7 @@ export interface DashboardSnapshot {
   mt5Accounts: Array<{
     id: string;
     accountNumber: string;
+    nickname?: string | null;
     server: string;
     heartbeatStatus: string;
     marginMode: string;
@@ -1009,6 +1010,10 @@ export function App({
     }
   }, [location.pathname, navigate]);
 
+  useEffect(() => {
+    if (location.pathname === "/review") navigate("/logs", { replace: true });
+  }, [location.pathname, navigate]);
+
   const focusedAccount = useMemo(() => {
     if (selectedAccountId) {
       return snapshot.mt5Accounts.find((account) => account.id === selectedAccountId) ?? null;
@@ -1155,6 +1160,13 @@ export function App({
     };
 
     return {
+      accountId: focusedAccount?.id,
+      accountLabel: focusedAccount
+        ? focusedAccount.nickname || focusedAccount.accountNumber || focusedAccount.id
+        : undefined,
+      accountNickname: focusedAccount?.nickname ?? null,
+      heartbeatStatus: focusedAccount?.heartbeatStatus ?? perf?.heartbeatStatus,
+      lastHeartbeatAt: focusedAccount?.lastHeartbeatAt ?? perf?.lastHeartbeatAt,
       connectedPlatform: {
         platform,
         broker,
@@ -1163,20 +1175,8 @@ export function App({
         eaActive,
       },
       kpis: {
-        balance: focusedAccount
-          ? performanceIsLive
-            ? (focusedAccount.balance ?? null)
-            : null
-          : performanceIsLive
-            ? (perf?.currentBalance ?? null)
-            : null,
-        equity: focusedAccount
-          ? performanceIsLive
-            ? (focusedAccount.equity ?? null)
-            : null
-          : performanceIsLive
-            ? (perf?.currentEquity ?? null)
-            : null,
+        balance: focusedAccount ? (focusedAccount.balance ?? null) : (perf?.currentBalance ?? null),
+        equity: focusedAccount ? (focusedAccount.equity ?? null) : (perf?.currentEquity ?? null),
         totalProfit: {
           amount: focusedAccount
             ? usePerformanceSeries
@@ -1212,7 +1212,7 @@ export function App({
     () =>
       snapshot.mt5Accounts.map((account) => ({
         id: account.id,
-        label: account.accountNumber || account.id,
+        label: account.nickname || account.accountNumber || account.id,
         status: account.heartbeatStatus,
         online: account.heartbeatStatus === "online",
       })),
@@ -1613,6 +1613,17 @@ export function App({
     await refreshDashboard();
   }
 
+  async function renameAccount(accountId: string, nickname: string) {
+    try {
+      await apiPatch(`/api/mt5/accounts/${accountId}`, { nickname });
+      toast.success(nickname ? "Account name saved" : "Account name cleared");
+      await refreshDashboard();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save account name");
+      throw error;
+    }
+  }
+
   async function saveProviderSettings(
     provider: ProviderRowData,
     payload: ProviderConfigSubmission,
@@ -1713,8 +1724,13 @@ export function App({
   async function saveExecutionSettingsForm(formElement: HTMLFormElement) {
     const formData = new FormData(formElement);
     const alertBotToken = String(formData.get("alertBotToken") ?? "").trim();
+    const defaultLotSize = Number(String(formData.get("defaultLotSize") ?? "").replace(",", "."));
+    if (!Number.isFinite(defaultLotSize) || defaultLotSize <= 0) {
+      toast.error("Default lot size must be a positive decimal");
+      return;
+    }
     await apiPatch("/api/settings", {
-      defaultLotSize: Number(formData.get("defaultLotSize")),
+      defaultLotSize,
       defaultRiskPercent: Number(formData.get("defaultRiskPercent")),
       defaultStopLossPips: Number(formData.get("defaultStopLossPips")),
       defaultTakeProfitPips: Number(formData.get("defaultTakeProfitPips")),
@@ -2139,7 +2155,7 @@ export function App({
     const copy = TAB_COPY[activeTab];
     return {
       eyebrow: focusedAccount
-        ? `Account ${focusedAccount.accountNumber || focusedAccount.id}`
+        ? `Account ${focusedAccount.nickname || focusedAccount.accountNumber || focusedAccount.id}`
         : "All accounts",
       ...copy,
     };
@@ -2230,7 +2246,17 @@ export function App({
                 <AccountHeader
                   className="account-context-secondary"
                   data={accountHeaderData}
+                  key={focusedAccount?.id ?? "aggregate"}
                   loading={initialLoading}
+                  onManageLink={() => navigate("/linked-accounts")}
+                  onRemoveAccount={
+                    focusedAccount ? () => void deleteAccount(focusedAccount) : undefined
+                  }
+                  onRename={
+                    focusedAccount
+                      ? (nickname) => renameAccount(focusedAccount.id, nickname)
+                      : undefined
+                  }
                 />
               ) : null}
               {snapshot.providers.length === 0 &&
@@ -2363,23 +2389,6 @@ export function App({
                   }}
                   onSelectDialog={selectDialog}
                   selectedDialogIds={snapshot.providers.map((provider) => provider.dialogId)}
-                  providers={snapshot.providers.map((provider) => ({
-                    id: provider.id,
-                    title: provider.title,
-                    enabled: provider.enabled,
-                  }))}
-                  onToggleProvider={(provider) => {
-                    const full = snapshot.providers.find((p) => p.id === provider.id);
-                    if (full) void toggleProvider(full);
-                  }}
-                  onRemoveProvider={(provider) => {
-                    const full = snapshot.providers.find((p) => p.id === provider.id);
-                    if (full) void deleteProvider(full);
-                  }}
-                  onConfigureProvider={(provider) => {
-                    const full = snapshot.providers.find((p) => p.id === provider.id);
-                    if (full) setConfigProvider(full);
-                  }}
                 />
               ) : null}
 
@@ -2387,11 +2396,13 @@ export function App({
                 <ProvidersPage
                   accountId={selectedAccountId}
                   accountLabel={
-                    focusedAccount ? focusedAccount.accountNumber || focusedAccount.id : undefined
+                    focusedAccount
+                      ? focusedAccount.nickname || focusedAccount.accountNumber || focusedAccount.id
+                      : undefined
                   }
                   accounts={snapshot.mt5Accounts.map((account) => ({
                     id: account.id,
-                    label: account.accountNumber || account.id,
+                    label: account.nickname || account.accountNumber || account.id,
                   }))}
                   currency={
                     (focusedAccount as { currency?: string } | undefined)?.currency ??
@@ -2400,6 +2411,8 @@ export function App({
                   loading={initialLoading}
                   onConfigure={(provider) => setConfigProvider(provider)}
                   onExport={() => void exportProviderPerformance()}
+                  onRemoveProvider={(provider) => void deleteProvider(provider)}
+                  onToggleProvider={(provider) => void toggleProvider(provider)}
                   onToggleAccountLink={(accountId, providerId, enabled) =>
                     void toggleAccountProviderLink(accountId, providerId, enabled)
                   }
@@ -2497,6 +2510,7 @@ export function App({
                   accounts={snapshot.mt5Accounts.map((account) => ({
                     id: account.id,
                     accountNumber: account.accountNumber,
+                    nickname: account.nickname,
                     currency: account.currency ?? "USD",
                     drawdownWarnPctOverride: account.drawdownWarnPctOverride ?? null,
                     drawdownDangerPctOverride: account.drawdownDangerPctOverride ?? null,
@@ -2519,7 +2533,7 @@ export function App({
       <ProviderConfigModal
         accountLabel={
           selectedAccountId && focusedAccount
-            ? focusedAccount.accountNumber || focusedAccount.id
+            ? focusedAccount.nickname || focusedAccount.accountNumber || focusedAccount.id
             : undefined
         }
         onClose={() => setConfigProvider(null)}

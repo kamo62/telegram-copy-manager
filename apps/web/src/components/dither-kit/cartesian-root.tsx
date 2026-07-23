@@ -44,6 +44,7 @@ export type CartesianChartProps<TData extends Row> = {
   bloom?: BloomInput;
   /** Only bloom while the chart is hovered. */
   bloomOnHover?: boolean;
+  yDomain?: [number, number];
   /** Fires with the scrubbed index as the pointer moves (null on leave). */
   onHoverChange?: (index: number | null) => void;
   defaultSelectedDataKey?: string | null;
@@ -83,6 +84,7 @@ export function CartesianRoot<TData extends Row>({
   hovered = false,
   bloom = "off",
   bloomOnHover = false,
+  yDomain,
   onHoverChange,
   defaultSelectedDataKey = null,
   onSelectionChange,
@@ -107,6 +109,7 @@ export function CartesianRoot<TData extends Row>({
     hovered,
     bloom,
     bloomOnHover,
+    yDomain,
     defaultSelectedDataKey,
     onSelectionChange,
   });

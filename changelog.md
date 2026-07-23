@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.55.1 - 2026-07-23 (Patch)
+
+Release impact: Patch because this hardens nickname updates, preserves dashboard identity, and corrects chart and provider workflow regressions without changing the MT5 execution protocol.
+
+- Preserved account nicknames in dashboard responses and made account rename PATCH validation explicit.
+- Reset rename state across account switches, corrected flat-chart band painting, and anchored account actions away from KPI cards.
+- Kept provider monitoring and removal on the Providers page with parity and end-to-end coverage.
+
+## 1.55.0 - 2026-07-23 (Minor)
+
+Release impact: Minor because this adds account nicknames, a new provider hub workflow, and client-only trade visibility controls while preserving the MT5 execution protocol.
+
+- Removed the Signal ledger from Operations and kept Telegram Setup focused on authentication, dialogs, and provider addition.
+- Added global provider performance, health, lifecycle controls, and account-scoped execution configuration under Providers.
+- Added account rename, remove, and link-management actions with nullable account nicknames surfaced across the UI.
+- Added client-only dismissal for external trades, honest stale account presentation, neutral and amber offline styling, chart and locale fixes, a `/review` redirect, and a favicon.
+- Aligned application and EA source version metadata at 1.55.0; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.54.2 - 2026-07-23 (Patch)
 
 Release impact: Patch because this fixes account-scoped Guardian presentation without changing Guardian persistence, API, database, or MT5 execution contracts.

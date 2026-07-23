@@ -142,6 +142,38 @@ describe("MT5 account hard delete", () => {
     });
     expect(response.status).toBe(404);
   });
+
+  test("renames an account and exposes the nickname in the account DTO", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const accountId = await registerAccount(app, "700800900");
+
+    const renamed = await app.request(`/api/mt5/accounts/${accountId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ nickname: "Primary gold" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(renamed.status).toBe(200);
+    expect(await json<{ account: { nickname: string } }>(renamed)).toMatchObject({
+      account: { nickname: "Primary gold" },
+    });
+
+    const listed = await json<{ accounts: Array<{ id: string; nickname: string }> }>(
+      await app.request("/api/mt5/accounts"),
+    );
+    expect(listed.accounts.find((account) => account.id === accountId)?.nickname).toBe(
+      "Primary gold",
+    );
+
+    const cleared = await app.request(`/api/mt5/accounts/${accountId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ nickname: "   " }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(cleared.status).toBe(200);
+    expect(await json<{ account: { nickname: string | null } }>(cleared)).toMatchObject({
+      account: { nickname: null },
+    });
+  });
 });
 
 async function registerAccount(app: ReturnType<typeof createApi>, accountNumber = "63442826") {

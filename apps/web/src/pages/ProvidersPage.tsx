@@ -6,10 +6,13 @@ import {
   type ProviderRowData,
   ProvidersTable,
 } from "../components/ProvidersTable";
+import { Tag } from "../components/Tag";
 
 export function ProvidersPage({
   providers,
   onConfigure,
+  onToggleProvider,
+  onRemoveProvider,
   onExport,
   loading = false,
   accounts = [],
@@ -21,6 +24,8 @@ export function ProvidersPage({
 }: {
   providers: ProviderRowData[];
   onConfigure: (provider: ProviderRowData) => void;
+  onToggleProvider?: (provider: ProviderRowData) => void;
+  onRemoveProvider?: (provider: ProviderRowData) => void;
   onExport?: () => void;
   loading?: boolean;
   accounts?: ProviderAccountLinkOption[];
@@ -49,15 +54,63 @@ export function ProvidersPage({
           Stats, copy status, and configuration shown for{" "}
           <strong>{accountLabel ?? "this account"}</strong>. Use <strong>Copy</strong> to start or
           stop copying a provider here, and <strong>Configure</strong> to set this account's lot
-          size, risk, and take-profit. Enable or remove a provider from{" "}
-          <strong>Telegram Setup</strong>.
+          size, risk, and take-profit. Enable or remove a provider from this hub.
         </p>
       ) : (
         <p className="panel-intro">
-          Aggregated performance across all copying accounts. Select an account in the sidebar to
-          see its own stats and to start copying or configuring a provider.
+          Aggregated performance, health, and global provider monitoring. Select an account in the
+          sidebar for its copy settings.
         </p>
       )}
+      {!isAccountMode ? (
+        <section className="provider-monitoring" aria-label="Provider monitoring">
+          <header className="provider-monitoring-head">
+            <div>
+              <span>Global lifecycle</span>
+              <h3>Provider monitoring</h3>
+            </div>
+            <span>{providers.length} configured</span>
+          </header>
+          <ul className="provider-monitoring-list">
+            {providers.map((provider) => (
+              <li className="provider-monitoring-row" key={provider.id}>
+                <div>
+                  <strong>{provider.title}</strong>
+                  <Tag tone={provider.enabled ? "good" : "muted"}>
+                    {provider.enabled ? "Auto-copy enabled" : "Provider paused"}
+                  </Tag>
+                </div>
+                <div className="provider-monitoring-actions">
+                  <button
+                    aria-label={`Configure ${provider.title}`}
+                    className="btn btn-ghost btn-small"
+                    onClick={() => onConfigure(provider)}
+                    type="button"
+                  >
+                    Configure
+                  </button>
+                  <button
+                    aria-label={`${provider.enabled ? "Pause" : "Enable"} auto-copy for ${provider.title}`}
+                    className="btn btn-ghost btn-small"
+                    onClick={() => onToggleProvider?.(provider)}
+                    type="button"
+                  >
+                    {provider.enabled ? "Pause" : "Enable"}
+                  </button>
+                  <button
+                    aria-label={`Remove provider ${provider.title}`}
+                    className="btn btn-ghost btn-small btn-destructive-subtle"
+                    onClick={() => onRemoveProvider?.(provider)}
+                    type="button"
+                  >
+                    Remove
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
       <ProvidersTable
         accountId={accountId}
         accounts={accounts}

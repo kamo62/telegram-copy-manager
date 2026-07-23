@@ -1,6 +1,6 @@
 import "../test-setup";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, render, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { AccountHeader, type AccountHeaderData } from "./AccountHeader";
 
 afterEach(() => cleanup());
@@ -49,5 +49,71 @@ describe("AccountHeader", () => {
     // Switching the window updates the displayed value.
     fireEvent.click(toggle.getByRole("tab", { name: "Week" }));
     expect(view.getByText(/222\.00/)).toBeTruthy();
+  });
+
+  test("shows honest stale state and exposes account actions", async () => {
+    const onRename = async () => undefined;
+    const view = render(
+      <AccountHeader
+        data={{
+          ...data,
+          accountId: "mt5-demo-1",
+          accountLabel: "Primary gold",
+          heartbeatStatus: "stale",
+          lastHeartbeatAt: "2026-07-23T08:30:00.000Z",
+        }}
+        onRename={onRename}
+        onManageLink={() => undefined}
+        onRemoveAccount={() => undefined}
+      />,
+    );
+
+    expect(view.getByText("Last known")).toBeTruthy();
+    expect(view.getByText("Primary gold")).toBeTruthy();
+    expect(view.getByText(/Balance as at/)).toBeTruthy();
+    const accountActions = view.container.querySelector('summary[aria-label="Account actions"]');
+    expect(accountActions).toBeTruthy();
+    fireEvent.click(accountActions!);
+    fireEvent.click(view.getByRole("button", { name: "Rename" }));
+    fireEvent.change(view.getByLabelText("Account name"), { target: { value: "Gold live" } });
+    fireEvent.click(view.getByRole("button", { name: "Save name" }));
+    await waitFor(() => expect(view.queryByLabelText("Account name")).toBeNull());
+  });
+
+  test("resets rename state when switching accounts and keeps an empty nickname clearable", async () => {
+    const renamed: string[] = [];
+    const view = render(
+      <AccountHeader
+        key="account-a"
+        data={{ ...data, accountId: "account-a", accountLabel: "100", accountNickname: "Alpha" }}
+        onRename={(nickname) => {
+          renamed.push(nickname);
+        }}
+      />,
+    );
+
+    fireEvent.click(view.container.querySelector('summary[aria-label="Account actions"]')!);
+    fireEvent.click(view.getByRole("button", { name: "Rename" }));
+    expect((view.getByLabelText("Account name") as HTMLInputElement).value).toBe("Alpha");
+
+    view.rerender(
+      <AccountHeader
+        key="account-b"
+        data={{ ...data, accountId: "account-b", accountLabel: "200", accountNickname: null }}
+        onRename={(nickname) => {
+          renamed.push(nickname);
+        }}
+      />,
+    );
+
+    await waitFor(() => expect(view.queryByLabelText("Account name")).toBeNull());
+    fireEvent.click(view.getByRole("button", { name: "Rename" }));
+    expect((view.getByLabelText("Account name") as HTMLInputElement).value).toBe("");
+    fireEvent.input(view.getByLabelText("Account name"), { target: { value: "Bravo" } });
+    await waitFor(() =>
+      expect((view.getByLabelText("Account name") as HTMLInputElement).value).toBe("Bravo"),
+    );
+    fireEvent.click(view.getByRole("button", { name: "Save name" }));
+    await waitFor(() => expect(renamed).toEqual(["Bravo"]));
   });
 });

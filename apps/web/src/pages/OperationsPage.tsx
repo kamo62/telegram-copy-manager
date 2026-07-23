@@ -1,4 +1,4 @@
-import { ArrowRight, Radio, ShieldAlert } from "lucide-react";
+import { ArrowRight, ShieldAlert } from "lucide-react";
 import type { DashboardSnapshot, ExternalBrokerPosition } from "../App";
 import { EmptyState } from "../components/EmptyState";
 import { useLocale } from "../contexts/LocaleContext";
@@ -12,12 +12,6 @@ function orderSide(type: number) {
   if (type === 6) return "buy stop limit";
   if (type === 7) return "sell stop limit";
   return type === 0 ? "buy" : "sell";
-}
-
-function stageState(status: string) {
-  if (status === "EXECUTED") return 5;
-  if (status === "APPROVED") return 3;
-  return 2;
 }
 
 export function signalRequiresReview(signal: DashboardSnapshot["parserResults"][number]) {
@@ -50,14 +44,6 @@ export function OperationsPage({
   const accounts = focusedAccountId
     ? snapshot.mt5Accounts.filter((account) => account.id === focusedAccountId)
     : snapshot.mt5Accounts;
-  const signalRows = snapshot.parserResults
-    .filter(
-      (signal) =>
-        signal.status !== "IGNORED" &&
-        signal.status !== "DISMISSED" &&
-        !signalRequiresReview(signal),
-    )
-    .slice(0, 5);
   const attentionCount = signalReviewCount + alertCount;
   const workingOrders = accounts.flatMap((account) =>
     [
@@ -118,7 +104,7 @@ export function OperationsPage({
             >
               <header>
                 <button onClick={() => onSelectAccount(account.id)} type="button">
-                  {account.accountNumber || account.id}
+                  {account.nickname || account.accountNumber || account.id}
                   <ArrowRight aria-hidden="true" size={14} />
                 </button>
                 <span className={`operations-state ${online ? "online" : "offline"}`}>
@@ -168,67 +154,6 @@ export function OperationsPage({
       </section>
 
       <div className="operations-primary-grid">
-        <section className="operations-ledger">
-          <header className="operations-section-head">
-            <div>
-              <span>Signal flow</span>
-              <h3>Signal ledger</h3>
-            </div>
-            <div className="operations-stage-labels" aria-hidden="true">
-              <span>Parse</span>
-              <span>Route</span>
-              <span>Queue</span>
-              <span>Send</span>
-              <span>Fill</span>
-            </div>
-          </header>
-          {signalRows.length === 0 ? (
-            <EmptyState
-              body="New Telegram messages will appear here as they move toward a broker."
-              glyph={<Radio aria-hidden="true" size={26} />}
-              title="No recent signals"
-            />
-          ) : (
-            <div className="operations-ledger-list">
-              {signalRows.map((signal) => {
-                const reached = stageState(signal.status ?? "");
-                return (
-                  <article key={signal.id}>
-                    <div className="operations-ledger-copy">
-                      <span>{signal.providerTitle || "Unknown provider"}</span>
-                      <strong>
-                        {signal.rawText || `${signal.commandType} ${signal.canonicalSymbol}`}
-                      </strong>
-                      <small>
-                        {signal.commandType} ·{" "}
-                        {signal.brokerSymbol || signal.canonicalSymbol || "unmapped"}
-                        {signal.heldReason ? ` · ${signal.heldReason}` : ""}
-                      </small>
-                    </div>
-                    <div
-                      className="operations-stage-track"
-                      aria-label={`Reached stage ${reached} of 5`}
-                      role="img"
-                    >
-                      {[1, 2, 3, 4, 5].map((stage) => (
-                        <span
-                          className={stage < reached ? "done" : stage === reached ? "current" : ""}
-                          key={stage}
-                        />
-                      ))}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-          <footer>
-            <button className="btn btn-ghost btn-small" onClick={onReviewSignals} type="button">
-              Open signal review
-            </button>
-          </footer>
-        </section>
-
         <section className="operations-orders">
           <header className="operations-section-head">
             <div>

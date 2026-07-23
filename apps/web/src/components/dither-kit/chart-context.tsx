@@ -66,6 +66,7 @@ export type ChartContextValue = {
   y: ScaleLinear<number, number>; // value → px within the plot
   bands: Record<string, [number, number][]>; // per-series [y0, y1] per row
   max: number;
+  min: number;
 
   // Interaction state, shared by every part.
   selectedDataKey: string | null;
@@ -180,6 +181,7 @@ export function useChartController({
   hovered = false,
   bloom = "off",
   bloomOnHover = false,
+  yDomain,
   defaultSelectedDataKey = null,
   onSelectionChange,
 }: {
@@ -196,6 +198,7 @@ export function useChartController({
   hovered?: boolean;
   bloom?: BloomInput;
   bloomOnHover?: boolean;
+  yDomain?: [number, number];
   defaultSelectedDataKey?: string | null;
   onSelectionChange?: (key: string | null) => void;
 }): ChartContextValue {
@@ -251,7 +254,7 @@ export function useChartController({
   const entranceDone = entrance.revision === revision ? entrance.done : !animate;
   const markEntranceDone = () => setEntrance({ revision, done: true });
 
-  const { bands, max } = computeBands(data, configKeys, stackType);
+  const { max } = computeBands(data, configKeys, stackType);
 
   const isBar = chartType === "bar";
   const xPoint = buildXScale(data.length, plotWidth);
@@ -274,7 +277,9 @@ export function useChartController({
       width: slot * 0.84,
     };
   };
-  const y = buildYScale(max, plotHeight);
+  const [domainMin, domainMax] = yDomain ?? [0, max];
+  const y = buildYScale(domainMin, domainMax, plotHeight);
+  const bands = computeBands(data, configKeys, stackType, y.domain()[0] ?? domainMin).bands;
 
   const seedOf = (key: string) => seedOfColor(config[key]?.color ?? "grey");
 
@@ -336,6 +341,7 @@ export function useChartController({
     y,
     bands,
     max,
+    min: domainMin,
     selectedDataKey,
     selectDataKey,
     focusDataKey,

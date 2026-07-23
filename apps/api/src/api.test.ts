@@ -301,6 +301,85 @@ async function sendGoldSnapshot(
 }
 
 describe("Telegram TC API", () => {
+  test("preserves renamed dashboard nicknames and validates account nickname PATCH bodies", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const registered = await json<{ accountId: string }>(
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "300400500",
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes Ltd",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const path = `/api/mt5/accounts/${registered.accountId}`;
+    const headers = { "content-type": "application/json" };
+
+    expect((await app.request(path, { method: "PATCH", body: "{", headers })).status).toBe(400);
+    expect(
+      (await app.request(path, { method: "PATCH", body: JSON.stringify({}), headers })).status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request(path, {
+          method: "PATCH",
+          body: JSON.stringify({ nickname: 123 }),
+          headers,
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request(path, {
+          method: "PATCH",
+          body: JSON.stringify({ nickname: "x".repeat(81) }),
+          headers,
+        })
+      ).status,
+    ).toBe(400);
+
+    const renamed = await app.request(path, {
+      method: "PATCH",
+      body: JSON.stringify({ nickname: "Primary" }),
+      headers,
+    });
+    expect(renamed.status).toBe(200);
+    const dashboard = await json<{
+      mt5Accounts: Array<{ id: string; nickname: string | null }>;
+    }>(await app.request("/api/dashboard"));
+    expect(dashboard.mt5Accounts).toContainEqual(
+      expect.objectContaining({ id: registered.accountId, nickname: "Primary" }),
+    );
+
+    const omitted = await app.request(path, {
+      method: "PATCH",
+      body: JSON.stringify({}),
+      headers,
+    });
+    expect(omitted.status).toBe(400);
+    const unchanged = await json<{ accounts: Array<{ nickname: string | null }> }>(
+      await app.request("/api/mt5/accounts"),
+    );
+    expect(unchanged.accounts[0]?.nickname).toBe("Primary");
+
+    const cleared = await app.request(path, {
+      method: "PATCH",
+      body: JSON.stringify({ nickname: null }),
+      headers,
+    });
+    expect(cleared.status).toBe(200);
+    const afterClear = await json<{ accounts: Array<{ nickname: string | null }> }>(
+      await app.request("/api/mt5/accounts"),
+    );
+    expect(afterClear.accounts[0]?.nickname).toBeNull();
+  });
   test("serves backend health from both API and root health routes", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
 

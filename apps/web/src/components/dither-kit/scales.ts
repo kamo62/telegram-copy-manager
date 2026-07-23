@@ -9,14 +9,15 @@ const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0
 
 /**
  * Per-series [y0, y1] bands for every row. For `default` every series sits on
- * the floor (y0 = 0); for `stacked`/`percent` they pile on top of each other
- * via d3's stack layout. The shape `bands[key][i] = [y0, y1]` is what both the
- * SVG area paths and the canvas overlay read from.
+ * the effective plot baseline; for `stacked`/`percent` they pile on top of
+ * each other via d3's stack layout. The shape `bands[key][i] = [y0, y1]` is
+ * what both the SVG area paths and the canvas overlay read from.
  */
 export function computeBands(
   data: Row[],
   keys: string[],
   stackType: StackType,
+  baseline = 0,
 ): { bands: Record<string, [number, number][]>; max: number } {
   if (stackType === "default") {
     const bands: Record<string, [number, number][]> = {};
@@ -25,7 +26,7 @@ export function computeBands(
       bands[key] = data.map((row) => {
         const v = num(row[key]);
         if (v > max) max = v;
-        return [0, v];
+        return [baseline, v];
       });
     }
     return { bands: bands, max: max || 1 };
@@ -71,8 +72,8 @@ export function indexAtBand(px: number, length: number, plotWidth: number) {
 }
 
 /** value → vertical pixel, with the floor at the bottom of the plot. */
-export function buildYScale(max: number, plotHeight: number) {
-  return scaleLinear().domain([0, max]).nice().range([plotHeight, 0]);
+export function buildYScale(min: number, max: number, plotHeight: number) {
+  return scaleLinear().domain([min, max]).nice().range([plotHeight, 0]);
 }
 
 /** Index of the row nearest a horizontal pixel offset within the plot. */

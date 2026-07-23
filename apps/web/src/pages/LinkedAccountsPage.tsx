@@ -1,10 +1,16 @@
 import { ArrowRight, Hand, Plug, Plus, Server, Trash2 } from "lucide-react";
+import { useState } from "react";
 import type { ExternalBrokerPosition } from "../App";
 import { AccountRow } from "../components/AccountRow";
 import { EmptyState } from "../components/EmptyState";
 import { Money } from "../components/Money";
 import { Panel } from "../components/Panel";
 import { useLocale } from "../contexts/LocaleContext";
+import {
+  externalTradeKey,
+  readDismissedExternalTrades,
+  writeDismissedExternalTrades,
+} from "../lib/dismissedExternalTrades";
 import { formatLot, formatNumber } from "../lib/format";
 
 type LinkedAccount = Parameters<typeof AccountRow>[0]["account"] & {
@@ -207,9 +213,24 @@ export function LinkedAccountsPage({
  * affecting equity / contributing to drawdown beyond app-driven trades.
  */
 function ExternalPositionsBlock({ account, locale }: { account: LinkedAccount; locale: string }) {
-  const positions = account.externalPositions ?? [];
-  const orders = account.externalOrders ?? [];
-  if (positions.length === 0 && orders.length === 0) return null;
+  const [dismissed, setDismissed] = useState(readDismissedExternalTrades);
+  const allPositions = account.externalPositions ?? [];
+  const allOrders = account.externalOrders ?? [];
+  const positions = allPositions.filter(
+    (position) => !dismissed.has(externalTradeKey(account.id, position.ticket)),
+  );
+  const orders = allOrders.filter(
+    (order) => !dismissed.has(externalTradeKey(account.id, order.ticket)),
+  );
+  const dismissedCount = [...dismissed].filter((key) => key.startsWith(`${account.id}:`)).length;
+  if (positions.length === 0 && orders.length === 0 && dismissedCount === 0) return null;
+  const dismiss = (ticket: string) => {
+    setDismissed((current) => {
+      const next = new Set(current).add(externalTradeKey(account.id, ticket));
+      writeDismissedExternalTrades(next);
+      return next;
+    });
+  };
   const totalProfit = positions.reduce((acc, p) => acc + (p.profit ?? 0), 0);
   return (
     <div className="external-positions-block">
@@ -259,6 +280,14 @@ function ExternalPositionsBlock({ account, locale }: { account: LinkedAccount; l
                   className="external-position-profit"
                 />
               ) : null}
+              <button
+                aria-label={`Dismiss external trade ${position.ticket} from app view`}
+                className="btn btn-ghost btn-small external-dismiss-button"
+                onClick={() => dismiss(position.ticket)}
+                type="button"
+              >
+                Dismiss from app view
+              </button>
               <small className="external-position-source">
                 #{position.ticket} · magic {position.magic}
                 {position.comment ? ` · ${position.comment}` : ""}
@@ -266,6 +295,49 @@ function ExternalPositionsBlock({ account, locale }: { account: LinkedAccount; l
             </li>
           ))}
         </ul>
+      ) : null}
+      {orders.length > 0 ? (
+        <ul className="external-positions-list">
+          {orders.map((order) => (
+            <li className="external-position-row" key={order.ticket}>
+              <span className={`external-position-side ${order.type % 2 === 0 ? "buy" : "sell"}`}>
+                {order.type % 2 === 0 ? "BUY" : "SELL"}
+              </span>
+              <strong className="external-position-symbol">{order.symbol}</strong>
+              <span className="external-position-vol">{formatLot(order.volume)}</span>
+              <span className="external-position-price">
+                @ {formatNumber(order.openPrice, { locale, maximumFractionDigits: 5 })}
+              </span>
+              <small className="external-position-source">#{order.ticket} pending</small>
+              <button
+                aria-label={`Dismiss external trade ${order.ticket} from app view`}
+                className="btn btn-ghost btn-small external-dismiss-button"
+                onClick={() => dismiss(order.ticket)}
+                type="button"
+              >
+                Dismiss from app view
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {dismissedCount > 0 ? (
+        <button
+          className="btn btn-ghost btn-small dismissed-external-show"
+          onClick={() => {
+            setDismissed((current) => {
+              const next = new Set(current);
+              for (const key of next) {
+                if (key.startsWith(`${account.id}:`)) next.delete(key);
+              }
+              writeDismissedExternalTrades(next);
+              return next;
+            });
+          }}
+          type="button"
+        >
+          Show {dismissedCount} dismissed trade{dismissedCount === 1 ? "" : "s"}
+        </button>
       ) : null}
     </div>
   );

@@ -732,6 +732,32 @@ export function createApi(options: ApiOptions = {}) {
   });
 
   app.get("/api/mt5/accounts", (c) => c.json({ accounts: store.mt5Accounts() }));
+  app.patch("/api/mt5/accounts/:accountId", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (
+      !body ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      !Object.hasOwn(body, "nickname") ||
+      !(
+        typeof (body as Record<string, unknown>).nickname === "string" ||
+        (body as Record<string, unknown>).nickname === null
+      )
+    ) {
+      return c.json({ error: "nickname must be text or null" }, 400);
+    }
+    const result = store.updateAccountNickname(
+      c.req.param("accountId"),
+      (body as { nickname: string | null }).nickname,
+    );
+    if ("error" in result) return c.json(result, result.statusCode);
+    return c.json(result);
+  });
   app.delete("/api/mt5/accounts/:accountId", (c) => {
     const result = store.deleteMt5Account(c.req.param("accountId"));
     if ("error" in result) return c.json(result, 404);
@@ -5913,7 +5939,7 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, account_number, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, ea_version, ea_capabilities_json, last_heartbeat_at, drawdown_warn_pct, drawdown_danger_pct FROM mt5_accounts ORDER BY account_number",
+          "SELECT id, account_number, nickname, server, company, currency, balance, equity, profit, initial_balance, margin_mode, heartbeat_status, available_symbols_json, ea_version, ea_capabilities_json, last_heartbeat_at, drawdown_warn_pct, drawdown_danger_pct FROM mt5_accounts ORDER BY account_number",
         )
         .all() as Row[]
     ).map((row) => {
@@ -5938,6 +5964,7 @@ class AppStore {
       return {
         id: accountId,
         accountNumber: String(row.account_number),
+        nickname: row.nickname ? String(row.nickname) : null,
         server: String(row.server),
         company: String(row.company),
         currency: String(row.currency),
@@ -5972,6 +5999,24 @@ class AppStore {
         drawdownDangerPctOverride: nullableNumber(row.drawdown_danger_pct) ?? null,
       };
     });
+  }
+
+  updateAccountNickname(accountId: string, value: string | null) {
+    if (!this.mt5Accounts().some((account) => account.id === accountId)) {
+      return { statusCode: 404 as const, error: "MT5 account not found" };
+    }
+    const nickname = typeof value === "string" ? value.trim() : "";
+    if (nickname.length > 80) {
+      return { statusCode: 400 as const, error: "Nickname must be 80 characters or fewer" };
+    }
+    this.db
+      .query("UPDATE mt5_accounts SET nickname = ? WHERE id = ?")
+      .run(nickname || null, accountId);
+    this.audit("mt5.account.rename", "info", "MT5 account nickname updated", {
+      accountId,
+      nickname: nickname || null,
+    });
+    return { account: this.mt5Accounts().find((account) => account.id === accountId) };
   }
 
   accountSlots() {
@@ -8522,6 +8567,7 @@ class AppStore {
       mt5Accounts: accounts.map((account) => ({
         id: account.id,
         accountNumber: account.accountNumber,
+        nickname: account.nickname,
         server: account.server,
         currency: account.currency,
         balance: account.balance,
@@ -8888,6 +8934,7 @@ class AppStore {
     this.ensureColumn("mt5_accounts", "ea_capabilities_json", "TEXT NOT NULL DEFAULT '[]'");
     this.ensureColumn("mt5_accounts", "drawdown_warn_pct", "REAL");
     this.ensureColumn("mt5_accounts", "drawdown_danger_pct", "REAL");
+    this.ensureColumn("mt5_accounts", "nickname", "TEXT");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS account_slots (
         id TEXT PRIMARY KEY,

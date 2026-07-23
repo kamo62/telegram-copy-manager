@@ -7,6 +7,7 @@ export function AccountRow({
   account: {
     id: string;
     accountNumber: string;
+    nickname?: string | null;
     server: string;
     marginMode: string;
     heartbeatStatus: string;
@@ -22,8 +23,14 @@ export function AccountRow({
         {online ? <CheckCircle2 size={14} /> : <CircleSlash size={14} />}
       </div>
       <div className="account-row-body">
-        <strong>{account.accountNumber || account.id}</strong>
+        <strong>{account.nickname || account.accountNumber || account.id}</strong>
         <span className="account-row-meta">
+          {account.nickname ? <span>{account.accountNumber || account.id}</span> : null}
+          {account.nickname ? (
+            <span className="dot-sep" aria-hidden="true">
+              ·
+            </span>
+          ) : null}
           <span>{account.server}</span>
           <span className="dot-sep" aria-hidden="true">
             ·

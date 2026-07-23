@@ -1,6 +1,12 @@
 import { Activity, Bot, Hand } from "lucide-react";
+import { useState } from "react";
 import type { ExternalBrokerPosition } from "../App";
 import { useLocale } from "../contexts/LocaleContext";
+import {
+  externalTradeKey,
+  readDismissedExternalTrades,
+  writeDismissedExternalTrades,
+} from "../lib/dismissedExternalTrades";
 import { formatLot, formatNumber } from "../lib/format";
 import { EmptyState } from "./EmptyState";
 import { Money } from "./Money";
@@ -28,6 +34,7 @@ type Side = "buy" | "sell";
 
 interface PositionRow extends ExternalBrokerPosition {
   origin: Origin;
+  accountId: string;
   accountNumber: string;
   currency: string;
   currentPrice: number | undefined;
@@ -75,6 +82,7 @@ export function OpenPositionsTable({
   currency,
 }: OpenPositionsTableProps) {
   const { locale } = useLocale();
+  const [dismissed, setDismissed] = useState(readDismissedExternalTrades);
   const aggregate = focusedAccountId === null;
   const scoped = aggregate ? accounts : accounts.filter((a) => a.id === focusedAccountId);
 
@@ -83,17 +91,21 @@ export function OpenPositionsTable({
     const ea = (account.appPositions ?? []).map<PositionRow>((p) => ({
       ...p,
       origin: "ea",
+      accountId: account.id,
       accountNumber: account.accountNumber,
       currency: account.currency ?? currency ?? "USD",
       currentPrice: currentPriceFor(p, symbols),
     }));
-    const ext = (account.externalPositions ?? []).map<PositionRow>((p) => ({
-      ...p,
-      origin: "external",
-      accountNumber: account.accountNumber,
-      currency: account.currency ?? currency ?? "USD",
-      currentPrice: currentPriceFor(p, symbols),
-    }));
+    const ext = (account.externalPositions ?? [])
+      .filter((p) => !dismissed.has(externalTradeKey(account.id, p.ticket)))
+      .map<PositionRow>((p) => ({
+        ...p,
+        origin: "external",
+        accountId: account.id,
+        accountNumber: account.accountNumber,
+        currency: account.currency ?? currency ?? "USD",
+        currentPrice: currentPriceFor(p, symbols),
+      }));
     return [...ea, ...ext];
   });
 
@@ -102,17 +114,21 @@ export function OpenPositionsTable({
     const ea = (account.appOrders ?? []).map<PositionRow>((o) => ({
       ...o,
       origin: "ea",
+      accountId: account.id,
       accountNumber: account.accountNumber,
       currency: account.currency ?? currency ?? "USD",
       currentPrice: currentPriceFor(o, symbols),
     }));
-    const ext = (account.externalOrders ?? []).map<PositionRow>((o) => ({
-      ...o,
-      origin: "external",
-      accountNumber: account.accountNumber,
-      currency: account.currency ?? currency ?? "USD",
-      currentPrice: currentPriceFor(o, symbols),
-    }));
+    const ext = (account.externalOrders ?? [])
+      .filter((o) => !dismissed.has(externalTradeKey(account.id, o.ticket)))
+      .map<PositionRow>((o) => ({
+        ...o,
+        origin: "external",
+        accountId: account.id,
+        accountNumber: account.accountNumber,
+        currency: account.currency ?? currency ?? "USD",
+        currentPrice: currentPriceFor(o, symbols),
+      }));
     return [...ea, ...ext];
   });
 
@@ -121,13 +137,45 @@ export function OpenPositionsTable({
     (a, b) => a.symbol.localeCompare(b.symbol) || a.ticket.localeCompare(b.ticket),
   );
 
+  const dismiss = (row: PositionRow) => {
+    const key = externalTradeKey(row.accountId, row.ticket);
+    setDismissed((current) => {
+      const next = new Set(current).add(key);
+      writeDismissedExternalTrades(next);
+      return next;
+    });
+  };
+  const dismissedCount = [...dismissed].filter((key) =>
+    scoped.some((account) => key.startsWith(`${account.id}:`)),
+  ).length;
+
   if (positions.length === 0 && pendingOrders.length === 0) {
     return (
-      <EmptyState
-        body="Approved signals will appear here while they're running. Manual MT5 trades on this account will show up alongside them, marked external."
-        glyph={<Activity aria-hidden="true" size={28} />}
-        title="No positions open right now"
-      />
+      <div>
+        <EmptyState
+          body="Approved signals will appear here while they're running. Manual MT5 trades on this account will show up alongside them, marked external."
+          glyph={<Activity aria-hidden="true" size={28} />}
+          title="No positions open right now"
+        />
+        {dismissedCount > 0 ? (
+          <button
+            className="btn btn-ghost btn-small dismissed-external-show"
+            onClick={() => {
+              setDismissed((current) => {
+                const next = new Set(current);
+                for (const key of next) {
+                  if (scoped.some((account) => key.startsWith(`${account.id}:`))) next.delete(key);
+                }
+                writeDismissedExternalTrades(next);
+                return next;
+              });
+            }}
+            type="button"
+          >
+            Show {dismissedCount} dismissed trade{dismissedCount === 1 ? "" : "s"}
+          </button>
+        ) : null}
+      </div>
     );
   }
 
@@ -210,6 +258,7 @@ export function OpenPositionsTable({
             {positions.map((p) => (
               <PositionRowComponent
                 key={`${p.accountNumber}-${p.ticket}`}
+                onDismiss={p.origin === "external" ? dismiss : undefined}
                 position={p}
                 aggregate={aggregate}
                 locale={locale}
@@ -250,6 +299,7 @@ export function OpenPositionsTable({
                 {pendingOrders.map((o) => (
                   <PendingOrderRow
                     key={`${o.accountNumber}-${o.ticket}`}
+                    onDismiss={o.origin === "external" ? dismiss : undefined}
                     order={o}
                     aggregate={aggregate}
                     locale={locale}
@@ -260,6 +310,24 @@ export function OpenPositionsTable({
           </div>
         </section>
       ) : null}
+      {dismissedCount > 0 ? (
+        <button
+          className="btn btn-ghost btn-small dismissed-external-show"
+          onClick={() => {
+            setDismissed((current) => {
+              const next = new Set(current);
+              for (const key of next) {
+                if (scoped.some((account) => key.startsWith(`${account.id}:`))) next.delete(key);
+              }
+              writeDismissedExternalTrades(next);
+              return next;
+            });
+          }}
+          type="button"
+        >
+          Show {dismissedCount} dismissed trade{dismissedCount === 1 ? "" : "s"}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -269,11 +337,13 @@ function PositionRowComponent({
   aggregate,
   locale,
   currency,
+  onDismiss,
 }: {
   position: PositionRow;
   aggregate: boolean;
   locale: string;
   currency?: string;
+  onDismiss?: (position: PositionRow) => void;
 }) {
   const pnl = position.profit;
   const side = positionSide(position.type);
@@ -327,6 +397,16 @@ function PositionRowComponent({
       </td>
       <td>
         <code className="open-positions-ticket">#{position.ticket}</code>
+        {onDismiss ? (
+          <button
+            aria-label={`Dismiss external trade ${position.ticket} from app view`}
+            className="btn btn-ghost btn-small external-dismiss-button"
+            onClick={() => onDismiss(position)}
+            type="button"
+          >
+            Dismiss from app view
+          </button>
+        ) : null}
       </td>
     </tr>
   );
@@ -336,10 +416,12 @@ function PendingOrderRow({
   order,
   aggregate,
   locale,
+  onDismiss,
 }: {
   order: PositionRow;
   aggregate: boolean;
   locale: string;
+  onDismiss?: (order: PositionRow) => void;
 }) {
   const side = pendingOrderSide(order.type);
   return (
@@ -380,6 +462,16 @@ function PendingOrderRow({
       </td>
       <td>
         <code className="open-positions-ticket">#{order.ticket}</code>
+        {onDismiss ? (
+          <button
+            aria-label={`Dismiss external trade ${order.ticket} from app view`}
+            className="btn btn-ghost btn-small external-dismiss-button"
+            onClick={() => onDismiss(order)}
+            type="button"
+          >
+            Dismiss from app view
+          </button>
+        ) : null}
       </td>
     </tr>
   );

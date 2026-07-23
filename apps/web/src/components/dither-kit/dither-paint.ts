@@ -19,7 +19,7 @@ export const BORDER_ALPHA = 0.72;
 // Opacity of a dither "off" cell relative to an "on" cell. The scatter modulates
 // between these two tiers of the *same* colour instead of leaving holes, so the
 // background never shows through as stark white on a light theme.
-export const OFF_TIER = 0.4;
+export const OFF_TIER = 0.12;
 
 export type PaintOpts = {
   variant: AreaVariant;
@@ -41,8 +41,8 @@ export type PaintOpts = {
 
 /**
  * Fill one backing-canvas column `x` from row `top` down to `floor` with the
- * ordered-dither scatter — solid at the floor, dissolving upward so it *fades
- * out toward the value line* — then cap the top with a soft border outline in
+ * ordered-dither scatter — solid at the value line, dissolving downward so it
+ * fades out toward the baseline — then cap the top with a soft border outline in
  * the series colour. Density drives opacity (see the note above), so the fade
  * reads correctly against both light and dark backgrounds. The single source of
  * the dither look across area / line / bar.
@@ -65,9 +65,9 @@ export function paintColumn(
   }
   const bias = (variant === "dotted" ? 0.12 : 0) + (stacked ? 0.2 : 0) - sparse;
   for (let y = t; y < f; y++) {
-    // Inverted falloff: 0 at the top line, 1 at the floor — dense at the
-    // bottom, thinning as it rises toward the outline.
-    let density = (y - t) / depth;
+    // 1 at the top line, 0 at the floor — dense at the value, thinning toward
+    // the baseline.
+    let density = (f - y) / depth;
     if (stacked) density = 0.5 + 0.5 * density;
     if (variant === "hatched" && ((x + y) & 3) >= 2) continue;
     const lit =
@@ -77,7 +77,7 @@ export function paintColumn(
     // faint tint) so nothing shows the background through as white.
     if (variant === "dotted" && !lit) continue;
     // Density → alpha (see the colour-vs-opacity note above).
-    const k = (0.3 + density * 0.7) * (1 + 0.22 * intensity);
+    const k = (0.08 + density ** 1.35 * 0.92) * (1 + 0.22 * intensity);
     const alpha = clamp01((lit ? k : k * OFF_TIER) * dim);
     octx.fillStyle = rgb(seed.fill, 1, alpha);
     octx.fillRect(x, y, 1, 1);
@@ -91,6 +91,26 @@ export function paintColumn(
     octx.fillStyle = rgb(seed.fill, 1, BORDER_ALPHA * 0.5 * dim);
     octx.fillRect(x, t + 1, 1, 1);
   }
+}
+
+export function paintTopLine(
+  octx: CanvasRenderingContext2D,
+  top: number[],
+  seed: Seed,
+  dim: number,
+) {
+  if (top.length === 0) return;
+  octx.beginPath();
+  octx.moveTo(0, Math.round(top[0] ?? 0) + 0.5);
+  for (let x = 1; x < top.length; x += 1) {
+    const previous = Math.round(top[x - 1] ?? 0) + 0.5;
+    const current = Math.round(top[x] ?? 0) + 0.5;
+    octx.lineTo(x, previous);
+    octx.lineTo(x, current);
+  }
+  octx.strokeStyle = rgb(seed.line, 1, BORDER_ALPHA * dim);
+  octx.lineWidth = 1;
+  octx.stroke();
 }
 
 /** Linear-resample a per-index fraction array to `cols` columns. */
