@@ -8,7 +8,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { BrowserRouter, MemoryRouter } from "react-router-dom";
+import { createBrowserRouter, MemoryRouter, RouterProvider } from "react-router-dom";
 import packageJson from "../../../package.json";
 import { App, type DashboardSnapshot, dashboardSnapshotsEqual } from "./App";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -561,18 +561,17 @@ describe("App dashboard", () => {
     expect(view.getByTitle("2 signals need review").textContent).toBe("2");
   });
 
-  test("BrowserRouter mounts the clicked workspace immediately without a refresh", async () => {
+  test("the data router mounts clicked workspaces immediately without a refresh", async () => {
     (
       window as typeof window & {
         happyDOM?: { setURL: (url: string) => void };
       }
     ).happyDOM?.setURL("http://localhost/");
     window.history.replaceState({}, "", "http://localhost/");
-    const view = rtlRender(
-      <BrowserRouter>
-        <App initialSnapshot={snapshot} />
-      </BrowserRouter>,
-    );
+    const router = createBrowserRouter([
+      { path: "*", element: <App initialSnapshot={snapshot} /> },
+    ]);
+    const view = rtlRender(<RouterProvider router={router} />);
 
     fireEvent.click(view.getByRole("tab", { name: "Providers" }));
 
@@ -583,6 +582,40 @@ describe("App dashboard", () => {
     fireEvent.click(view.getByRole("button", { name: "Operations" }));
     await waitFor(() => expect(window.location.pathname).toBe("/"));
     expect(await view.findByRole("heading", { name: "Signal ledger" })).toBeTruthy();
+
+    clickSidebar(view, "100200300");
+    await waitFor(() => expect(window.location.pathname).toBe("/accounts/mt5-demo-1/performance"));
+    expect(view.getByRole("tab", { name: "Performance" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(view.queryByRole("tab", { name: "Signals" })).toBeNull();
+
+    fireEvent.click(view.getByRole("tab", { name: "Positions" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/accounts/mt5-demo-1/history"));
+    expect(await view.findByRole("heading", { name: "Trade history" })).toBeTruthy();
+    expect(view.queryByRole("heading", { name: "Performance" })).toBeNull();
+    router.dispose();
+  });
+
+  test("redirects legacy account Signals routes to Performance without exposing the tab", async () => {
+    const view = rtlRender(<App initialSnapshot={snapshot} />, {
+      wrapper: ({ children }) => (
+        <MemoryRouter initialEntries={["/accounts/mt5-demo-1/summary"]}>{children}</MemoryRouter>
+      ),
+    });
+
+    expect(view.queryByRole("tab", { name: "Signals" })).toBeNull();
+    expect(view.getByRole("tab", { name: "Performance" }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    expect(view.getByRole("heading", { name: "Performance" })).toBeTruthy();
+  });
+
+  test("keeps subtle table cells in native table flow", async () => {
+    const css = await Bun.file(new URL("./styles/base.css", import.meta.url)).text();
+
+    expect(css).not.toMatch(/(?:^|\n)\.data-table-subtle\s*\{\s*display:\s*block/);
+    expect(css).toMatch(/span\.data-table-subtle\s*\{\s*display:\s*block/);
   });
 
   test("does not show Telegram login while a saved session is confirmed before the dashboard loads", async () => {

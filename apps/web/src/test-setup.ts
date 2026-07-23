@@ -1,6 +1,8 @@
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 const bunFetchAndStreams = {
+  AbortController,
+  AbortSignal,
   Headers,
   ReadableStream,
   Request,

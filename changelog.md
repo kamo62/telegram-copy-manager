@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.54.0 - 2026-07-23 (Minor)
+
+Release impact: Minor because this changes the account-detail navigation workflow while preserving API, database, and MT5 execution contracts.
+
+- Removed the redundant Signals tab from account-detail pages while retaining Signals on the all-account Operations desk.
+- Made Performance the canonical account landing page, including redirects from legacy account Signals URLs.
+- Moved production navigation to the data router and committed user-triggered route changes synchronously, so live dashboard updates cannot leave the old page rendered after the URL changes.
+- Restored native table-cell layout for Performance attribution dates, keeping Opened and Closed values in their correct columns.
+- Added regression coverage for immediate account tab navigation, legacy account route redirects, the account tab set, and subtle table-cell layout.
+- Aligned application and EA source version metadata at 1.54.0; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.53.3 - 2026-07-23 (Patch)
 
 Release impact: Patch because this reduces dashboard notification noise without changing review actions, API contracts, or the MT5 execution protocol.

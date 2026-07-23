@@ -4147,11 +4147,14 @@ h3 {
 }
 
 .data-table-subtle {
-  display: block;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 11px;
   color: var(--ink-faint);
+}
+
+span.data-table-subtle {
+  display: block;
 }
 
 .data-table .num-cell {

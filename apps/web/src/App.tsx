@@ -1,6 +1,6 @@
 import { Server } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { type NavigateOptions, type To, useLocation, useNavigate } from "react-router-dom";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AlertsBanner, visibleOperationalAlerts } from "./components/AlertsBanner";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
@@ -497,7 +497,9 @@ function parseRoute(pathname: string): RouteState {
   if (seg[0] === "linked-accounts") return { view: "mt5", accountId: null, tab: "performance" };
   if (seg[0] === "settings") return { view: "settings", accountId: null, tab: "performance" };
   if (seg[0] === "accounts" && seg[1]) {
-    const tab = seg[2] && (TAB_IDS as string[]).includes(seg[2]) ? (seg[2] as TabId) : "summary";
+    const requestedTab =
+      seg[2] && (TAB_IDS as string[]).includes(seg[2]) ? (seg[2] as TabId) : "performance";
+    const tab = requestedTab === "summary" ? "performance" : requestedTab;
     return { view: "dashboard", accountId: seg[1], tab };
   }
   if (seg[0] && (TAB_IDS as string[]).includes(seg[0])) {
@@ -514,12 +516,12 @@ function pathForView(viewId: string, accountId: string | null, tab: TabId): stri
   if (viewId === "parser") return "/logs";
   if (viewId === "trades") return "/history";
   if (viewId === "mapping") return "/symbols";
-  if (accountId) return `/accounts/${accountId}/${tab}`;
+  if (accountId) return `/accounts/${accountId}/${tab === "summary" ? "performance" : tab}`;
   return tab === "summary" ? "/" : `/${tab}`;
 }
 
 function pathForTab(accountId: string | null, tab: TabId): string {
-  if (accountId) return `/accounts/${accountId}/${tab}`;
+  if (accountId) return `/accounts/${accountId}/${tab === "summary" ? "performance" : tab}`;
   return tab === "summary" ? "/" : `/${tab}`;
 }
 
@@ -683,7 +685,13 @@ export function App({
     if (initialSnapshot) setSyncStatus({ lastSyncAt: new Date().toISOString() });
   }, [initialSnapshot]);
   const location = useLocation();
-  const navigate = useNavigate();
+  const routerNavigate = useNavigate();
+  const navigate = useCallback(
+    (to: To, options?: NavigateOptions) => {
+      void routerNavigate(to, { ...options, flushSync: true });
+    },
+    [routerNavigate],
+  );
   const route = useMemo(() => parseRoute(location.pathname), [location.pathname]);
   const activeView = route.view;
   const activeTab = route.tab;
@@ -990,10 +998,10 @@ export function App({
     }
   }, [selectedAccountId, initialLoading, snapshot.mt5Accounts, navigate]);
 
-  // Canonicalize a bare /accounts/:id to its default tab.
+  // Account detail starts at Performance; Signals belongs to the all-account desk.
   useEffect(() => {
     const seg = location.pathname.split("/").filter(Boolean);
-    if (seg[0] === "accounts" && seg[1] && !seg[2]) {
+    if (seg[0] === "accounts" && seg[1] && (!seg[2] || seg[2] === "summary")) {
       navigate(`/accounts/${seg[1]}/performance`, { replace: true });
     }
   }, [location.pathname, navigate]);
@@ -2137,7 +2145,7 @@ export function App({
   function navigateSidebar(viewId: string) {
     if (viewId === "dashboard") {
       setSelectedSlotId(null);
-      navigate(selectedAccountId ? `/accounts/${selectedAccountId}/summary` : "/");
+      navigate("/");
       return;
     }
     setActiveView(viewId);
@@ -2189,7 +2197,7 @@ export function App({
         onNavigate={navigateSidebar}
         onSelectAccount={(id) => {
           setSelectedSlotId(null);
-          navigate(id ? `/accounts/${id}/summary` : "/");
+          navigate(id ? `/accounts/${id}/performance` : "/");
         }}
         onSelectSlot={(id) => selectSlot(id)}
         pendingSlots={sidebarPendingSlots}
@@ -2279,7 +2287,11 @@ export function App({
                   </button>
                 </section>
               ) : null}
-              <WorkspaceTabs onChange={setActiveTab} value={activeTab} />
+              <WorkspaceTabs
+                accountScoped={Boolean(focusedAccount)}
+                onChange={setActiveTab}
+                value={activeTab}
+              />
             </>
           ) : null}
 
@@ -2296,7 +2308,7 @@ export function App({
                   setParserTab("Recent Parses");
                   setActiveTab("logs");
                 }}
-                onSelectAccount={(id) => navigate(`/accounts/${id}/summary`)}
+                onSelectAccount={(id) => navigate(`/accounts/${id}/performance`)}
                 alertCount={operationalAlertCount}
                 signalReviewCount={signalReviewCount}
                 snapshot={snapshot}

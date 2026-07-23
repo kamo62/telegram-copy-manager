@@ -19,13 +19,16 @@ export const tabOptions: Array<{ id: TabId; label: string }> = [
 ];
 
 export function WorkspaceTabs({
+  accountScoped = false,
   value,
   onChange,
 }: {
+  accountScoped?: boolean;
   value: TabId;
   onChange: (id: TabId) => void;
 }) {
   const tabsRef = useRef<HTMLDivElement>(null);
+  const visibleTabs = accountScoped ? tabOptions.filter((tab) => tab.id !== "summary") : tabOptions;
 
   useEffect(() => {
     const active = tabsRef.current?.querySelector<HTMLElement>(".workspace-tab.active");
@@ -37,9 +40,9 @@ export function WorkspaceTabs({
       className="workspace-tabs"
       ref={tabsRef}
       role="tablist"
-      aria-label="Live workspace sections"
+      aria-label={accountScoped ? "Account sections" : "Live workspace sections"}
     >
-      {tabOptions.map((tab) => (
+      {visibleTabs.map((tab) => (
         <button
           aria-controls={`tabpanel-${tab.id}`}
           aria-selected={value === tab.id}
