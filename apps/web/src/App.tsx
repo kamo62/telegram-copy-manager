@@ -1,5 +1,5 @@
 import { Server } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { type NavigateOptions, type To, useLocation, useNavigate } from "react-router-dom";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import { AlertsBanner, visibleOperationalAlerts } from "./components/AlertsBanner";
@@ -696,6 +696,9 @@ export function App({
   const activeView = route.view;
   const activeTab = route.tab;
   const selectedAccountId = route.accountId;
+  useLayoutEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [location.pathname]);
   const dashboardUrl = selectedAccountId
     ? `/api/dashboard?accountId=${encodeURIComponent(selectedAccountId)}`
     : "/api/dashboard";

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.54.1 - 2026-07-23 (Patch)
+
+Release impact: Patch because this corrects route-level scroll restoration without changing account navigation, API, database, or MT5 execution contracts.
+
+- Reset the document scroll position before painting a newly selected workspace route, so switching account pages cannot land midway through the destination.
+- Extended the live-navigation regression to cover top-of-page restoration.
+- Aligned application and EA source version metadata at 1.54.1; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.54.0 - 2026-07-23 (Minor)
 
 Release impact: Minor because this changes the account-detail navigation workflow while preserving API, database, and MT5 execution contracts.

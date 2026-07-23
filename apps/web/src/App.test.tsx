@@ -571,11 +571,18 @@ describe("App dashboard", () => {
     const router = createBrowserRouter([
       { path: "*", element: <App initialSnapshot={snapshot} /> },
     ]);
+    const originalScrollTo = window.scrollTo;
+    const scrollPositions: ScrollToOptions[] = [];
+    window.scrollTo = ((options: ScrollToOptions) => {
+      scrollPositions.push(options);
+    }) as typeof window.scrollTo;
     const view = rtlRender(<RouterProvider router={router} />);
 
+    scrollPositions.length = 0;
     fireEvent.click(view.getByRole("tab", { name: "Providers" }));
 
     await waitFor(() => expect(window.location.pathname).toBe("/providers"));
+    expect(scrollPositions.at(-1)).toEqual({ top: 0, left: 0, behavior: "auto" });
     expect((await view.findAllByRole("heading", { name: "Providers" })).length).toBeGreaterThan(0);
     expect(view.queryByRole("heading", { name: "Signal ledger" })).toBeNull();
 
@@ -595,6 +602,7 @@ describe("App dashboard", () => {
     expect(await view.findByRole("heading", { name: "Trade history" })).toBeTruthy();
     expect(view.queryByRole("heading", { name: "Performance" })).toBeNull();
     router.dispose();
+    window.scrollTo = originalScrollTo;
   });
 
   test("redirects legacy account Signals routes to Performance without exposing the tab", async () => {
