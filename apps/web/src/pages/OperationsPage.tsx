@@ -15,11 +15,17 @@ function orderSide(type: number) {
 }
 
 function stageState(status: string, reviewRequired: boolean) {
-  if (reviewRequired || status === "HELD") return 1;
-  if (status === "IGNORED") return 1;
-  if (status === "APPROVED") return 3;
   if (status === "EXECUTED") return 5;
+  if (status === "APPROVED") return 3;
+  if (reviewRequired || status === "HELD") return 1;
   return 2;
+}
+
+function requiresReview(signal: DashboardSnapshot["parserResults"][number]) {
+  return (
+    signal.status === "HELD" ||
+    ((!signal.status || signal.status === "PARSED") && signal.reviewRequired)
+  );
 }
 
 export function OperationsPage({
@@ -41,10 +47,10 @@ export function OperationsPage({
   const accounts = focusedAccountId
     ? snapshot.mt5Accounts.filter((account) => account.id === focusedAccountId)
     : snapshot.mt5Accounts;
-  const signalRows = snapshot.parserResults.slice(0, 5);
-  const blockedSignal = signalRows.find(
-    (signal) => signal.reviewRequired || signal.status === "HELD",
-  );
+  const signalRows = snapshot.parserResults
+    .filter((signal) => signal.status !== "IGNORED" && signal.status !== "DISMISSED")
+    .slice(0, 5);
+  const blockedSignal = signalRows.find(requiresReview);
   const workingOrders = accounts.flatMap((account) =>
     [
       ...((account.appOrders ?? []).map((order) => ({ order, account, owned: true })) as Array<{
@@ -169,7 +175,7 @@ export function OperationsPage({
             <div className="operations-ledger-list">
               {signalRows.map((signal) => {
                 const reached = stageState(signal.status ?? "", signal.reviewRequired);
-                const blocked = signal.reviewRequired || signal.status === "HELD";
+                const blocked = requiresReview(signal);
                 return (
                   <article className={blocked ? "needs-review" : ""} key={signal.id}>
                     <div className="operations-ledger-copy">

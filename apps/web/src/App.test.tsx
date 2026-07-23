@@ -500,6 +500,28 @@ describe("App dashboard", () => {
     expect(view.getByRole("tab", { name: "Logs" })).toBeTruthy();
   });
 
+  test("operations does not resurface an ignored signal after refresh", () => {
+    const ignoredText = "BUY EURUSD @ 1.0850";
+    const view = render(
+      <App
+        initialSnapshot={{
+          ...snapshot,
+          parserResults: [
+            {
+              ...snapshot.parserResults[0]!,
+              rawText: ignoredText,
+              reviewRequired: true,
+              status: "IGNORED",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(view.queryByText(ignoredText)).toBeNull();
+    expect(view.getByText("No recent signals")).toBeTruthy();
+  });
+
   test("BrowserRouter mounts the clicked workspace immediately without a refresh", async () => {
     (
       window as typeof window & {

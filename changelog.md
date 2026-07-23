@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.53.2 - 2026-07-23 (Patch)
+
+Release impact: Patch because this preserves operator dismissals and correctly honors existing terminal signal states without changing the API or MT5 execution protocol.
+
+- Stop resurfacing persisted `IGNORED` and `DISMISSED` signals in the Operations ledger or blocking banner.
+- Treat only active parsed or held signals as requiring review, so approved signals no longer inherit stale review warnings.
+- Persist dismissed operational notifications in browser storage until their underlying condition clears.
+- Added regression coverage for ignored-signal refreshes and notification dismissal across remounts.
+- Aligned application and EA source version metadata at 1.53.2; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.53.1 - 2026-07-23 (Patch)
 
 Release impact: Patch because this corrects frontend fidelity and mixed-currency presentation without changing the API or MT5 execution protocol.

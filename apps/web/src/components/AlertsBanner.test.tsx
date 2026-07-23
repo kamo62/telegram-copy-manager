@@ -3,7 +3,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { AlertsBanner, type OperationalAlert } from "./AlertsBanner";
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  window.localStorage.clear();
+});
 
 const sample: OperationalAlert[] = [
   { kind: "unmapped-symbols", severity: "warn", message: "2 provider symbols could not be mapped" },
@@ -32,5 +35,15 @@ describe("AlertsBanner", () => {
     expect(queryByText("2 provider symbols could not be mapped")).toBeNull();
     // The other alert stays visible.
     expect(getByText("Telegram session is not receiving updates")).toBeDefined();
+  });
+
+  test("keeps dismissed alerts hidden after remount", () => {
+    const first = render(<AlertsBanner alerts={sample} />);
+    fireEvent.click(first.getAllByRole("button", { name: "Dismiss alert" })[0] as HTMLElement);
+    first.unmount();
+
+    const second = render(<AlertsBanner alerts={sample} />);
+    expect(second.queryByText("2 provider symbols could not be mapped")).toBeNull();
+    expect(second.getByText("Telegram session is not receiving updates")).toBeDefined();
   });
 });

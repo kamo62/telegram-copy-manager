@@ -1,6 +1,8 @@
 import { ShieldAlert, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
+const DISMISSED_ALERTS_STORAGE_KEY = "ttc:dismissedOperationalAlerts";
+
 export interface OperationalAlert {
   kind: string;
   severity: "warn" | "error";
@@ -9,10 +11,29 @@ export interface OperationalAlert {
   detail?: Record<string, unknown>;
 }
 
-/** Stable identity for an alert across dashboard refreshes (the message text
- * can change as counts move, so dismissal keys off kind + account, not text). */
+/** Stable identity for an alert across dashboard refreshes. */
 function alertKey(alert: OperationalAlert): string {
-  return `${alert.kind}:${alert.accountId ?? ""}`;
+  const detailId = alert.detail?.providerId ?? alert.detail?.sessionId ?? "";
+  return `${alert.kind}:${alert.accountId ?? detailId}`;
+}
+
+function readDismissedAlerts(): Set<string> {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(DISMISSED_ALERTS_STORAGE_KEY) ?? "[]");
+    return new Set(
+      Array.isArray(stored) ? stored.filter((key): key is string => typeof key === "string") : [],
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function writeDismissedAlerts(dismissed: Set<string>) {
+  try {
+    window.localStorage.setItem(DISMISSED_ALERTS_STORAGE_KEY, JSON.stringify([...dismissed]));
+  } catch {
+    // The in-memory dismissal still works when browser storage is unavailable.
+  }
 }
 
 /**
@@ -22,12 +43,8 @@ function alertKey(alert: OperationalAlert): string {
  * (HTTP stayed healthy while signals were dropped), so they get a prominent
  * banner here until the condition clears.
  *
- * Each alert is dismissible. Dismissal is session-scoped (component state, not
- * persisted) on purpose: closing tidies the view now, but a page reload re-shows
- * any still-active condition so a safety-critical alert (guardian latched,
- * Telegram stalled) can never be permanently hidden.
- * ponytail: dismissal lives in state, so it resets on reload — that is the
- * intended ceiling; persisting it would risk hiding live trade-blocking alerts.
+ * Each alert is dismissible. Dismissals survive reloads, then clear when the
+ * underlying condition clears so a later recurrence is visible again.
  */
 export function AlertsBanner({
   alerts,
@@ -36,10 +53,9 @@ export function AlertsBanner({
   alerts: OperationalAlert[];
   onViewHeld?: () => void;
 }) {
-  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const [dismissed, setDismissed] = useState(readDismissedAlerts);
 
-  // Drop dismissals whose condition has cleared so the alert shows again if it
-  // re-triggers later in the same session.
+  // Drop dismissals whose condition has cleared so a later recurrence is visible.
   useEffect(() => {
     setDismissed((current) => {
       if (current.size === 0) return current;
@@ -48,7 +64,9 @@ export function AlertsBanner({
       for (const key of current) {
         if (live.has(key)) next.add(key);
       }
-      return next.size === current.size ? current : next;
+      if (next.size === current.size) return current;
+      writeDismissedAlerts(next);
+      return next;
     });
   }, [alerts]);
 
@@ -76,7 +94,13 @@ export function AlertsBanner({
             <button
               aria-label="Dismiss alert"
               className="alerts-banner-close"
-              onClick={() => setDismissed((current) => new Set(current).add(key))}
+              onClick={() =>
+                setDismissed((current) => {
+                  const next = new Set(current).add(key);
+                  writeDismissedAlerts(next);
+                  return next;
+                })
+              }
               type="button"
             >
               <X size={14} aria-hidden="true" />
