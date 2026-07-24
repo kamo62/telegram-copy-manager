@@ -1348,6 +1348,7 @@ type LifecycleResolution = {
   method: "provider-order-id" | "reply-link" | "none";
   status: "MATCHED" | "AMBIGUOUS" | "UNMATCHED";
   tradeId?: string;
+  tradeIds?: string[];
   reason?: string;
 };
 type LifecycleActionState = {
@@ -2316,6 +2317,14 @@ class AppStore {
         method: "provider-order-id",
         status: "MATCHED",
         tradeId: providerOrderCandidates[0]!.id,
+      };
+    }
+    if (providerOrderCandidates.length > 1) {
+      return {
+        method: "provider-order-id",
+        status: "AMBIGUOUS",
+        tradeIds: providerOrderCandidates.map((trade) => trade.id),
+        reason: "Multiple active logical trades share this provider order id",
       };
     }
     const lifecycle = this.db
@@ -3409,6 +3418,7 @@ class AppStore {
           queueItemId?: string;
           logicalTradeId?: string;
           queueItems?: string[];
+          heldQueueItems?: string[];
           logicalTradeIds?: string[];
           queuedCount?: number;
           status: string;
@@ -3543,6 +3553,7 @@ class AppStore {
       const routableTargets = onlineTargetSignals.filter(
         (target) => target.signal.mappingStatus === "mapped",
       );
+      const nakedPendingTargets: typeof routableTargets = [];
       for (const target of routableTargets) {
         const targetTradedSymbolHoldReason = this.tradedSymbolHoldReason(
           providerId,
@@ -3557,6 +3568,15 @@ class AppStore {
         // to MARKET and execute immediately — the exact 4028-intended/4023.8-filled
         // failure this inference exists to prevent.
         const inferred = this.inferPendingOrderType(target.signal, target.accountId);
+        const safetyHoldReason = this.executionPayloadHoldReason(
+          target.accountId,
+          buildExecutionCommand(inferred, { id: "safety-check", accountId: target.accountId })
+            .payload,
+        );
+        if (safetyHoldReason === "NAKED_PENDING_ENTRY") {
+          nakedPendingTargets.push(target);
+          continue;
+        }
         if (
           inferred.commandType !== "OPEN_TRADE" ||
           shouldRequireManualReview(inferred, target.config.parserMode === "aggressive")
@@ -3581,20 +3601,16 @@ class AppStore {
           };
         }
       }
-      const parameterDuplicate = routableTargets.find((target) =>
+      const duplicateOrderIdTargets = routableTargets.filter((target) =>
+        this.hasDuplicateProviderOrderId(providerId, target.accountId, target.signal),
+      );
+      const queueableTargets = routableTargets.filter(
+        (target) =>
+          !duplicateOrderIdTargets.includes(target) && !nakedPendingTargets.includes(target),
+      );
+      const parameterDuplicate = queueableTargets.find((target) =>
         this.hasDuplicateOpenSignal(providerId, target.accountId, target.signal),
       );
-      if (parameterDuplicate) {
-        this.insertNonLeasedQueueItem(parsedSignalId, parameterDuplicate.signal, "DUPLICATE", {
-          accountId: parameterDuplicate.accountId,
-          executionMode,
-          settings,
-        });
-        this.db
-          .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
-          .run("DUPLICATE", parsedSignalId);
-        return { statusCode: 409, error: "Matching open signal has already been queued" };
-      }
       const heldQueueItems = mappingHolds.map((target) => {
         const heldReason = `SYMBOL_MAPPING_${target.signal.mappingStatus.toUpperCase()}`;
         const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, target.signal, "HELD", {
@@ -3621,6 +3637,46 @@ class AppStore {
         this.alertHeldQueueItem(queueItemId, `${heldReason}:${target.accountId}`);
         return queueItemId;
       });
+      for (const target of duplicateOrderIdTargets) {
+        const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, target.signal, "HELD", {
+          accountId: target.accountId,
+          executionMode,
+          settings,
+          heldReason: "DUPLICATE_ORDER_ID",
+        });
+        heldQueueItems.push(queueItemId);
+        this.audit(
+          "signal.duplicate-order-id",
+          "warn",
+          "Duplicate provider order id held for review",
+          {
+            parsedSignalId,
+            providerId,
+            accountId: target.accountId,
+            providerOrderId: target.signal.providerOrderId,
+            queueItemId,
+            heldReason: "DUPLICATE_ORDER_ID",
+          },
+        );
+        this.alertHeldQueueItem(queueItemId, `DUPLICATE_ORDER_ID:${target.accountId}`);
+      }
+      for (const target of nakedPendingTargets) {
+        const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, target.signal, "HELD", {
+          accountId: target.accountId,
+          executionMode,
+          settings,
+          heldReason: "NAKED_PENDING_ENTRY",
+        });
+        heldQueueItems.push(queueItemId);
+        this.audit("signal.naked-order", "warn", "Pending order held without a valid entry price", {
+          parsedSignalId,
+          providerId,
+          accountId: target.accountId,
+          queueItemId,
+          heldReason: "NAKED_PENDING_ENTRY",
+        });
+        this.alertHeldQueueItem(queueItemId, `NAKED_PENDING_ENTRY:${target.accountId}`);
+      }
       for (const target of offlineTargetSignals) {
         const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, target.signal, "HELD", {
           accountId: target.accountId,
@@ -3638,7 +3694,18 @@ class AppStore {
         });
         this.alertHeldQueueItem(queueItemId, `EA_OFFLINE:${target.accountId}`);
       }
-      if (routableTargets.length === 0) {
+      if (parameterDuplicate) {
+        this.insertNonLeasedQueueItem(parsedSignalId, parameterDuplicate.signal, "DUPLICATE", {
+          accountId: parameterDuplicate.accountId,
+          executionMode,
+          settings,
+        });
+        this.db
+          .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+          .run("DUPLICATE", parsedSignalId);
+        return { statusCode: 409, error: "Matching open signal has already been queued" };
+      }
+      if (queueableTargets.length === 0) {
         this.db
           .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
           .run("HELD", parsedSignalId);
@@ -3646,6 +3713,7 @@ class AppStore {
           body: {
             queueItemId: heldQueueItems[0],
             queueItems: heldQueueItems,
+            heldQueueItems,
             queuedCount: 0,
             status: "HELD",
           },
@@ -3653,7 +3721,7 @@ class AppStore {
       }
       const queueItems: string[] = [];
       const logicalTradeIds: string[] = [];
-      for (const target of routableTargets) {
+      for (const target of queueableTargets) {
         const targetLogicalTradeId = `trade_${nanoid(10)}`;
         const targetQueueId = `queue_${nanoid(10)}`;
         const item = buildExecutionCommand(
@@ -3696,6 +3764,7 @@ class AppStore {
         {
           parsedSignalId,
           queueItems,
+          heldQueueItems,
           logicalTradeIds,
         },
         "operator",
@@ -3705,6 +3774,7 @@ class AppStore {
           queueItemId: queueItems[0],
           logicalTradeId: logicalTradeIds[0],
           queueItems,
+          heldQueueItems,
           logicalTradeIds,
           status: "PENDING",
         },
@@ -3732,25 +3802,38 @@ class AppStore {
           source?.rawMessageId ?? "",
           targetSignal,
         );
+        const closeAllMatches =
+          targetSignal.commandType === "CLOSE_TRADE" &&
+          resolved.status === "AMBIGUOUS" &&
+          (resolved.tradeIds?.length ?? 0) > 0;
         const match =
           resolved.status === "MATCHED" && resolved.tradeId
             ? {
                 status: "MATCHED" as const,
                 tradeId: resolved.tradeId,
+                tradeIds: resolved.tradeIds,
                 confidence: resolved.method === "provider-order-id" ? 0.99 : 0.97,
                 requiresManualReview: false,
               }
-            : resolved.status === "AMBIGUOUS"
+            : closeAllMatches
               ? {
-                  status: "AMBIGUOUS" as const,
-                  confidence: 0.45,
-                  requiresManualReview: true,
-                  reason: "Multiple open logical trades match this provider command",
+                  status: "MATCHED" as const,
+                  tradeId: resolved.tradeIds![0]!,
+                  tradeIds: resolved.tradeIds,
+                  confidence: 0.99,
+                  requiresManualReview: false,
                 }
-              : matchLifecycleCommandToTrade(
-                  targetSignal,
-                  this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
-                );
+              : resolved.status === "AMBIGUOUS"
+                ? {
+                    status: "AMBIGUOUS" as const,
+                    confidence: 0.45,
+                    requiresManualReview: true,
+                    reason: "Multiple open logical trades match this provider command",
+                  }
+                : matchLifecycleCommandToTrade(
+                    targetSignal,
+                    this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
+                  );
         return { accountId: targetAccountId, config: targetConfig, signal: targetSignal, match };
       });
 
@@ -3801,56 +3884,66 @@ class AppStore {
       const queueItems: string[] = [];
       const logicalTradeIds: string[] = [];
       for (const target of lifecycleTargets) {
-        const trade = this.logicalTrade(target.match.tradeId!);
-        if (!trade) {
-          return { statusCode: 422, error: "Matched logical trade could not be loaded" };
+        const tradeIds = target.match.tradeIds ?? [target.match.tradeId!];
+        for (const tradeId of tradeIds) {
+          const trade = this.logicalTrade(tradeId);
+          if (!trade) {
+            return { statusCode: 422, error: "Matched logical trade could not be loaded" };
+          }
+          const targetQueueId = `queue_${nanoid(10)}`;
+          const actionState = evaluateLifecycleActionState(target.signal.commandType, trade.status);
+          if (actionState.verdict === "noop" || actionState.verdict === "hold") {
+            return {
+              statusCode: 422,
+              error: `Lifecycle command cannot run while trade is ${trade.status}`,
+            };
+          }
+          const routedSignal =
+            actionState.verdict === "cancel"
+              ? {
+                  ...target.signal,
+                  commandType: "CANCEL_PENDING" as const,
+                  partialClose: undefined,
+                }
+              : target.signal;
+          const enrichedSignal = enrichLifecycleSignalFromTrade(routedSignal, trade);
+          const absoluteSignal = this.withAbsolutePartialCloseTarget(
+            enrichedSignal,
+            trade,
+            target.accountId,
+          );
+          if (!absoluteSignal) {
+            return {
+              statusCode: 422,
+              error: "Percentage close requires a current broker position snapshot",
+            };
+          }
+          this.appendTradeCommand(trade.id, target.signal);
+          const queueItem = buildExecutionCommand(enrichedSignal, {
+            id: targetQueueId,
+            accountId: target.accountId,
+            logicalTradeId: trade.id,
+            executionMode,
+            volume:
+              target.config.riskMode === "fixed"
+                ? target.config.riskAmount
+                : (provider?.lotSize ?? settings.defaultLotSize),
+            riskPercent:
+              target.config.riskMode === "percent"
+                ? target.config.riskAmount
+                : settings.defaultRiskPercent,
+          });
+          if (absoluteSignal.partialClose?.kind === "PERCENT") {
+            queueItem.payload.partialClose = absoluteSignal.partialClose;
+          }
+          Object.assign(
+            queueItem.payload,
+            this.brokerTargetForCommand(trade.id, queueItem.payload),
+          );
+          this.insertQueueItem(queueItem, parsedSignalId);
+          queueItems.push(targetQueueId);
+          logicalTradeIds.push(trade.id);
         }
-        const targetQueueId = `queue_${nanoid(10)}`;
-        const actionState = evaluateLifecycleActionState(target.signal.commandType, trade.status);
-        if (actionState.verdict === "noop" || actionState.verdict === "hold") {
-          return {
-            statusCode: 422,
-            error: `Lifecycle command cannot run while trade is ${trade.status}`,
-          };
-        }
-        const routedSignal =
-          actionState.verdict === "cancel"
-            ? { ...target.signal, commandType: "CANCEL_PENDING" as const, partialClose: undefined }
-            : target.signal;
-        const enrichedSignal = enrichLifecycleSignalFromTrade(routedSignal, trade);
-        const absoluteSignal = this.withAbsolutePartialCloseTarget(
-          enrichedSignal,
-          trade,
-          target.accountId,
-        );
-        if (!absoluteSignal) {
-          return {
-            statusCode: 422,
-            error: "Percentage close requires a current broker position snapshot",
-          };
-        }
-        this.appendTradeCommand(trade.id, target.signal);
-        const queueItem = buildExecutionCommand(enrichedSignal, {
-          id: targetQueueId,
-          accountId: target.accountId,
-          logicalTradeId: trade.id,
-          executionMode,
-          volume:
-            target.config.riskMode === "fixed"
-              ? target.config.riskAmount
-              : (provider?.lotSize ?? settings.defaultLotSize),
-          riskPercent:
-            target.config.riskMode === "percent"
-              ? target.config.riskAmount
-              : settings.defaultRiskPercent,
-        });
-        if (absoluteSignal.partialClose?.kind === "PERCENT") {
-          queueItem.payload.partialClose = absoluteSignal.partialClose;
-        }
-        Object.assign(queueItem.payload, this.brokerTargetForCommand(trade.id, queueItem.payload));
-        this.insertQueueItem(queueItem, parsedSignalId);
-        queueItems.push(targetQueueId);
-        logicalTradeIds.push(trade.id);
       }
       this.db
         .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
@@ -4621,6 +4714,22 @@ class AppStore {
         return false;
       }
       if (item.payload.commandType !== "OPEN_TRADE") return true;
+      const safetyHoldReason = this.executionPayloadHoldReason(item.accountId, item.payload);
+      if (safetyHoldReason) {
+        const now = new Date().toISOString();
+        this.db
+          .query(
+            "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
+          )
+          .run("HELD", safetyHoldReason, now, item.id);
+        this.audit("queue.safety-hold", "warn", "OPEN_TRADE held before reaching the EA", {
+          queueItemId: item.id,
+          accountId: item.accountId,
+          heldReason: safetyHoldReason,
+        });
+        this.alertHeldQueueItem(item.id, safetyHoldReason);
+        return false;
+      }
       if (!this.isEquityGuardianPaused(item.accountId)) return true;
       const now = new Date().toISOString();
       this.db
@@ -10155,6 +10264,7 @@ class AppStore {
     );
     if (
       signal.commandType !== "OPEN_TRADE" ||
+      signal.providerOrderId ||
       !symbol ||
       !signal.direction ||
       !signal.orderType ||
@@ -10201,6 +10311,46 @@ class AppStore {
         (payload.stopLoss ?? null) === (signal.stopLoss ?? null)
       );
     });
+  }
+
+  private hasDuplicateProviderOrderId(providerId: string, accountId: string, signal: ParsedSignal) {
+    if (signal.commandType !== "OPEN_TRADE" || !signal.providerOrderId) return false;
+    return this.logicalTrades().some(
+      (trade) =>
+        trade.providerId === providerId &&
+        trade.accountId === accountId &&
+        trade.providerOrderId === signal.providerOrderId &&
+        ["OPEN", "PENDING", "PLANNED", "OUT_OF_SYNC"].includes(trade.status),
+    );
+  }
+
+  private executionPayloadHoldReason(
+    accountId: string | undefined,
+    payload: ExecutionQueueItem["payload"],
+  ) {
+    if (payload.commandType !== "OPEN_TRADE") return undefined;
+    const orderType = payload.orderType ?? "MARKET";
+    if (
+      (orderType === "STOP" || orderType === "LIMIT") &&
+      (!payload.entry || !Number.isFinite(payload.entry.from) || payload.entry.from <= 0)
+    ) {
+      return "NAKED_PENDING_ENTRY";
+    }
+    if (orderType !== "MARKET") return undefined;
+    const quote = accountId ? this.latestQuote(accountId, payload.brokerSymbol) : undefined;
+    // ponytail: no backend snapshot leaves fresh terminal-quote validation to the EA; hold once
+    // the account snapshot proves it is watching symbols without a valid quote for this one.
+    if (!quote?.hasQuoteData) return undefined;
+    if (
+      !quote?.quote ||
+      !Number.isFinite(quote.quote.bid) ||
+      !Number.isFinite(quote.quote.ask) ||
+      quote.quote.bid <= 0 ||
+      quote.quote.ask <= 0
+    ) {
+      return "NAKED_MARKET_NO_QUOTE";
+    }
+    return undefined;
   }
 
   private mt5SnapshotsByAccount() {
@@ -10740,10 +10890,10 @@ class AppStore {
   private brokerTargetForCommand(logicalTradeId: string, payload: ExecutionQueueItem["payload"]) {
     const action = brokerAction(payload.commandType);
     const rows = this.brokerOrders(logicalTradeId).slice().reverse();
-    // Pending cancellations deliberately omit a target ticket: the EA matches
-    // every still-live order bearing this logical trade comment and confirms
-    // the command only after all removals succeed.
-    if (action === "CANCEL_PENDING") return {};
+    // Pending cancellations and full closes deliberately omit a target ticket:
+    // the EA matches every still-live order/position bearing this logical trade
+    // comment and confirms the command only after the full set is handled.
+    if (action === "CANCEL_PENDING" || action === "FULL_CLOSE") return {};
     const position = rows.find(
       (row) =>
         truthyBrokerTicket(row.positionTicket) &&

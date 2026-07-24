@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.57.0 - 2026-07-24 (Minor)
+
+Release impact: Minor because this adds broker-agnostic duplicate-open, naked-order, and provider-order lifecycle safety behavior without changing the MT5 payload contract.
+
+- Classified provider activation/status replies as lifecycle context, including the live Sell Stop trailing-price format.
+- Held duplicate provider order IDs and malformed pending or market orders before EA delivery.
+- Persisted provider order IDs on logical trades and fanned provider closes across every active logical trade for that order ID.
+- Added live VIP Gold 545/546/547 regression coverage and aligned application and EA metadata at 1.57.0.
+
 ## 1.56.2 - 2026-07-24 (Patch)
 
 Release impact: Patch because this corrects account attribution and canonical mapping validation without changing execution or held-for-review behavior.

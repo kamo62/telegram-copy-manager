@@ -1157,6 +1157,19 @@ describe("VIP Gold order lifecycle formats", () => {
     expect(result.matchedPatternIds).toContain("lifecycle.activation");
   });
 
+  test("treats the live Sell Stop activation with a trailing quote as lifecycle context", () => {
+    const result = parseSignalText(
+      "Quoted signal: NEW ORDER - XAUUSD Sell Stop 📉 # 306947863 ...{ NEW }... Entry: 4051.30 SL: 4057.30 TP: 4039.30 --- Comment: 🚀 Sell Stop activated 🚀 # 306947863 XAUUSD @ 4051.30",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "NO_SIGNAL",
+      providerOrderId: "306947863",
+      entry: undefined,
+    });
+    expect(result.matchedPatternIds).toContain("lifecycle.activation");
+  });
+
   test("does not turn provider activation and fill notices into entries", () => {
     for (const text of [
       "Buy Stop activated",

@@ -54,9 +54,12 @@ describe("MT5 Expert Advisor source", () => {
   test("refreshes the guardian heartbeat before polling and refuses opens without a fresh quote", () => {
     const onTimer = source.match(/void OnTimer\(\)[\s\S]*?\n}/)?.[0] ?? "";
     const ensureSymbol = source.match(/bool EnsureSymbol\(string symbol\)[\s\S]*?\n}/)?.[0] ?? "";
+    const open =
+      source.match(/bool ExecuteOpenTrade\(SignalCommand &command\)[\s\S]*?\n}/)?.[0] ?? "";
     expect(onTimer.indexOf("SendHeartbeat()")).toBeLessThan(onTimer.indexOf("PollAndExecute()"));
     expect(ensureSymbol).toContain("no fresh tick after 2s — aborting execution");
     expect(ensureSymbol).toMatch(/no fresh tick after 2s[\s\S]*return false/);
+    expect(open).toContain("ReportUnknown(command.queueItemId");
   });
 
   test("reports external manual history deals so account PnL can realize after close", () => {
@@ -166,6 +169,16 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("OrderGetString(ORDER_COMMENT)");
     expect(source).toContain("PositionGetString(POSITION_COMMENT)");
     expect(source).toContain("MatchesLogicalTradeComment");
+  });
+
+  test("holds lifecycle closes for reconciliation when no live position matches", () => {
+    const close =
+      source.match(
+        /void ExecuteClose\(SignalCommand &command\)[\s\S]*?\n}\n\nvoid ClosePositionTicket/,
+      )?.[0] ?? "";
+    expect(close).toContain("CollectPositionTickets(command, tickets)");
+    expect(close).toContain("ReportUnknown(command.queueItemId");
+    expect(close).toContain("reconcile broker snapshot/history");
   });
 
   test("reports current MT5 position and pending-order snapshots to the backend", () => {

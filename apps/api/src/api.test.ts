@@ -2521,6 +2521,279 @@ describe("Telegram TC API", () => {
     }
   });
 
+  test("covers the live VIP Gold 545/546/547 safety fixture across accounts", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-vipgold-live-safety-"));
+    const databasePath = join(tempDir, "app.db");
+    const order =
+      "NEW ORDER - XAUUSD Sell Stop 📉  # 306947863  ----------{ NEW }---------- Entry: 4051.30 [Lots: 0.01] SL: 4057.30 TP: 4039.30";
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter([
+          { telegramMessageId: "545", messageDate: "2026-07-24T13:00:00.000Z", rawText: order },
+          {
+            telegramMessageId: "546",
+            replyToMessageId: "545",
+            messageDate: "2026-07-24T13:01:00.000Z",
+            rawText:
+              "Quoted signal: NEW ORDER - XAUUSD Sell Stop 📉 # 306947863 ...{ NEW }... Entry: 4051.30 SL: 4057.30 TP: 4039.30 --- Comment: 🚀 Sell Stop activated 🚀 # 306947863 XAUUSD @ 4051.30",
+          },
+          {
+            telegramMessageId: "547",
+            replyToMessageId: "545",
+            messageDate: "2026-07-24T13:02:00.000Z",
+            rawText:
+              "... Comment: 🟢 CLOSED - XAUUSD Sell 🟢 # 306947863 ...{ CLOSED }... Profit: 2.21$",
+          },
+        ]),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "54945785",
+          server: "HFMarkets-Demo",
+          company: "HF Markets",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+          eaVersion: "1.56.2",
+          eaCapabilities: ["lane-2-close-contract"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-54945785/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion.queued).toBe(4);
+
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const trades = db
+          .query("SELECT id, account_id, data_json FROM logical_trades")
+          .all() as Array<{
+          id: string;
+          account_id: string;
+          data_json: string;
+        }>;
+        const queues = db
+          .query(
+            "SELECT account_id, logical_trade_id, status, held_reason, payload_json FROM queue_items",
+          )
+          .all() as Array<{
+          account_id: string;
+          logical_trade_id: string;
+          status: string;
+          held_reason: string | null;
+          payload_json: string;
+        }>;
+        expect(trades).toHaveLength(2);
+        expect(trades.map((trade) => JSON.parse(trade.data_json).providerOrderId)).toEqual([
+          "306947863",
+          "306947863",
+        ]);
+        expect(db.query("SELECT logical_trade_id FROM trade_origins").all()).toHaveLength(2);
+        expect(
+          queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "OPEN_TRADE"),
+        ).toHaveLength(2);
+        expect(
+          queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE"),
+        ).toHaveLength(2);
+        expect(
+          queues
+            .filter((queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE")
+            .every((queue) => JSON.parse(queue.payload_json).targetPositionTicket === undefined),
+        ).toBe(true);
+        expect(queues.filter((queue) => queue.status === "HELD")).toHaveLength(0);
+      } finally {
+        db.close();
+      }
+
+      const duplicate = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: `${order} Reminder`,
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const duplicateApproval = await json<{
+        status: string;
+        heldQueueItems: string[];
+      }>(await app.request(`/api/signals/${duplicate.parsedSignalId}/approve`, { method: "POST" }));
+      expect(duplicateApproval.status).toBe("HELD");
+      expect(duplicateApproval.heldQueueItems).toHaveLength(2);
+      const held = await json<{ queue: Array<{ status: string; heldReason: string }> }>(
+        await app.request("/api/signals"),
+      );
+      expect(held.queue.filter((item) => item.heldReason === "DUPLICATE_ORDER_ID")).toHaveLength(2);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("holds a naked STOP before it can be sent to the EA", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "XAUUSD Sell Stop\nSL: 4057.30\nTP: 4039.30",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ status: string; queueItemId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    expect(approval.status).toBe("HELD");
+    const queue = await json<{ queue: Array<{ id: string; status: string; heldReason: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        id: approval.queueItemId,
+        status: "HELD",
+        heldReason: "NAKED_PENDING_ENTRY",
+      }),
+    );
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+    ).not.toContain("commandType=OPEN_TRADE");
+  });
+
+  test("holds a MARKET order when the account reports no quote for its symbol", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [],
+        orders: [],
+        symbols: [{ symbol: "EURUSD", bid: 1.08, ask: 1.0802, point: 0.00001 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const pushed = await app.request("/api/signals/manual", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        direction: "BUY",
+        orderType: "MARKET",
+        brokerSymbol: "XAUUSD",
+        stopLoss: 4050,
+        takeProfits: [{ price: 4070 }],
+        volume: 0.01,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(pushed.status).toBe(200);
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+    ).not.toContain("commandType=OPEN_TRADE");
+    const queue = await json<{ queue: Array<{ status: string; heldReason?: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({ status: "HELD", heldReason: "NAKED_MARKET_NO_QUOTE" }),
+    );
+  });
+
+  test("fans a provider CLOSE out to every active logical trade for its order id", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-close-order-id-fanout-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      const opened = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText:
+              "NEW ORDER - XAUUSD Sell Stop # 306947863 Entry: 4051.30 SL: 4057.30 TP: 4039.30",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const approval = await json<{ logicalTradeId: string }>(
+        await app.request(`/api/signals/${opened.parsedSignalId}/approve`, { method: "POST" }),
+      );
+
+      const db = new Database(databasePath);
+      const original = db
+        .query(
+          "SELECT provider_id, account_id, status, data_json, created_at FROM logical_trades WHERE id = ?",
+        )
+        .get(approval.logicalTradeId) as {
+        provider_id: string;
+        account_id: string;
+        status: string;
+        data_json: string;
+        created_at: string;
+      };
+      const duplicate = { ...JSON.parse(original.data_json), id: "trade_duplicate-order-id" };
+      db.query(
+        "INSERT INTO logical_trades (id, provider_id, account_id, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(
+        duplicate.id,
+        original.provider_id,
+        original.account_id,
+        original.status,
+        JSON.stringify(duplicate),
+        original.created_at,
+      );
+      db.close();
+
+      const closed = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "CLOSED - XAUUSD Sell # 306947863",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const closeApproval = await json<{ logicalTradeIds: string[]; queueItems: string[] }>(
+        await app.request(`/api/signals/${closed.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(closeApproval.logicalTradeIds).toEqual(
+        expect.arrayContaining([approval.logicalTradeId, duplicate.id]),
+      );
+      expect(closeApproval.queueItems).toHaveLength(2);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("uses a reply link to disambiguate duplicate provider order ids", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-reply-lifecycle-"));
     const databasePath = join(tempDir, "app.db");
@@ -5930,6 +6203,58 @@ describe("Telegram TC API", () => {
     );
     expect(dashboard.signalQueue.filter((item) => item.status === "PENDING")).toHaveLength(1);
     expect(dashboard.signalQueue.some((item) => item.status === "DUPLICATE")).toBe(true);
+  });
+
+  test("sends a new provider order after an identical terminal order", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-order-id-terminal-dedup-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      const parseOpen = async (providerOrderId: string) =>
+        json<{ parsedSignalId: string }>(
+          await app.request("/api/parser/parse", {
+            method: "POST",
+            body: JSON.stringify({
+              providerId,
+              accountId: "mt5-63442826",
+              rawText: `NEW ORDER - XAUUSD Buy Stop # ${providerOrderId} Entry: 4141.10 SL: 4135.10 TP: 4150.10`,
+            }),
+            headers: { "content-type": "application/json" },
+          }),
+        );
+
+      const first = await parseOpen("306307354");
+      const firstApproval = await app.request(`/api/signals/${first.parsedSignalId}/approve`, {
+        method: "POST",
+      });
+      expect(firstApproval.status).toBe(200);
+
+      const db = new Database(databasePath);
+      const row = db
+        .query("SELECT id, data_json FROM logical_trades WHERE provider_id = ? LIMIT 1")
+        .get(providerId) as { id: string; data_json: string };
+      const terminalTrade = { ...JSON.parse(row.data_json), status: "CANCELLED" };
+      db.query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?").run(
+        "CANCELLED",
+        JSON.stringify(terminalTrade),
+        row.id,
+      );
+      db.close();
+
+      const second = await parseOpen("307138907");
+      const secondApproval = await app.request(`/api/signals/${second.parsedSignalId}/approve`, {
+        method: "POST",
+      });
+      expect(secondApproval.status).toBe(200);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("records ignored parsed signals as non-leaseable queue items", async () => {

@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.56.2"
+#property version   "1.57.0"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -290,7 +290,7 @@ bool ExecuteOpenTrade(SignalCommand &command)
 {
    if(!EnsureSymbol(command.brokerSymbol))
    {
-      ReportFailure(command.queueItemId, "Symbol is unavailable or has no fresh tick", command.brokerSymbol);
+      ReportUnknown(command.queueItemId, "Symbol is unavailable or has no fresh tick; reconcile quote before retry", command.brokerSymbol);
       return false;
    }
 
@@ -756,7 +756,7 @@ void ExecuteClose(SignalCommand &command)
    int found = CollectPositionTickets(command, tickets);
    if(found <= 0)
    {
-      ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
+      ReportUnknown(command.queueItemId, "No matching position found; reconcile broker snapshot/history", command.brokerSymbol);
       return;
    }
 
@@ -776,7 +776,7 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
 {
    if(!PositionSelectByTicket(ticket))
    {
-      ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
+      ReportUnknown(command.queueItemId, "Position disappeared before close; reconcile broker snapshot/history", command.brokerSymbol);
       return;
    }
 

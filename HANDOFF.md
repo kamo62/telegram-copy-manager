@@ -1,5 +1,16 @@
 # Handoff
 
+Updated: 2026-07-24 (v1.57.0 duplicate-open prevention)
+
+Implemented the scoped trade-safety batch on `fix/vipgold-duplicate-open-prevention`; nothing was pushed or deployed.
+
+- Activation/status replies, including VIP Gold msg 546, stay lifecycle context and never create an open.
+- Provider order IDs are persisted on logical trades; duplicate `(provider, account, order id)` opens are HELD as `DUPLICATE_ORDER_ID`.
+- Naked STOP/LIMIT entries and known-unquoted MARKET orders are HELD before EA delivery.
+- Provider CLOSE commands fan out to every active logical trade sharing the provider order id.
+- Added exact live 545/546/547, duplicate-id, naked-order, quote, and close-fanout regression coverage.
+- Full gate passed after the final metadata/test pass: `bun run typecheck`, `bun run lint`, `bun test` (541 passed, 0 failed), and `bun run build`.
+
 Updated: 2026-07-24 (v1.56.2 follow-up review fixes)
 
 ## Session progress (2026-07-24) - required Medium fixes applied locally

@@ -192,6 +192,7 @@ export interface RunnerConfig {
 export interface LifecycleMatch {
   status: "MATCHED" | "UNMATCHED" | "AMBIGUOUS";
   tradeId?: string;
+  tradeIds?: string[];
   confidence: number;
   requiresManualReview: boolean;
   reason?: string;
@@ -747,7 +748,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     warnings: [...new Set(warnings)],
     providerId: context.providerId,
     accountId: context.accountId,
-    providerOrderId: text.match(/#\s*(\d{6,})/)?.[1],
+    providerOrderId: (text.match(/#\s*(\d+)/) ?? original.match(/#\s*(\d+)/))?.[1],
     fingerprint: createMessageFingerprint(original),
   };
 }
@@ -873,17 +874,12 @@ export function createLogicalTradeFromSignal(
   };
 }
 
-export function matchLifecycleCommandToTrade(
+export function matchLifecycleCommandToTrades(
   command: ParsedSignal,
   trades: LogicalTrade[],
-): LifecycleMatch {
+): LogicalTrade[] {
   if (command.commandType === "OPEN_TRADE" || command.commandType === "NO_SIGNAL") {
-    return {
-      status: "UNMATCHED",
-      confidence: 0,
-      requiresManualReview: true,
-      reason: "Open commands create trades instead of matching existing trades",
-    };
+    return [];
   }
 
   const candidates = trades.filter((trade) => {
@@ -902,11 +898,27 @@ export function matchLifecycleCommandToTrade(
 
   // An explicit provider id is authoritative when the trade has one too. A
   // different id must never fall back to a same-symbol close/cancel.
-  const idCompatibleCandidates = command.providerOrderId
+  return command.providerOrderId
     ? candidates.filter(
         (trade) => !trade.providerOrderId || trade.providerOrderId === command.providerOrderId,
       )
     : candidates;
+}
+
+export function matchLifecycleCommandToTrade(
+  command: ParsedSignal,
+  trades: LogicalTrade[],
+): LifecycleMatch {
+  if (command.commandType === "OPEN_TRADE" || command.commandType === "NO_SIGNAL") {
+    return {
+      status: "UNMATCHED",
+      confidence: 0,
+      requiresManualReview: true,
+      reason: "Open commands create trades instead of matching existing trades",
+    };
+  }
+
+  const idCompatibleCandidates = matchLifecycleCommandToTrades(command, trades);
   const providerOrderCandidates = command.providerOrderId
     ? idCompatibleCandidates.filter((trade) => trade.providerOrderId === command.providerOrderId)
     : [];
@@ -916,6 +928,15 @@ export function matchLifecycleCommandToTrade(
       tradeId: providerOrderCandidates[0]!.id,
       confidence: 0.99,
       requiresManualReview: false,
+    };
+  }
+  if (providerOrderCandidates.length > 1) {
+    return {
+      status: "AMBIGUOUS",
+      tradeIds: providerOrderCandidates.map((trade) => trade.id),
+      confidence: 0.45,
+      requiresManualReview: true,
+      reason: "Multiple active logical trades share this provider order id",
     };
   }
   if (idCompatibleCandidates.length === 1) {
@@ -1090,7 +1111,7 @@ function normalizeFrenchVocabulary(text: string): string {
 
 function extractSignalCandidate(text: string) {
   text = normalizeFrenchVocabulary(text);
-  const quoted = text.match(/Quoted signal:\n([\s\S]*?)(?:\n\nComment:\n([\s\S]*))?$/i);
+  const quoted = text.match(/Quoted signal:\s*([\s\S]*?)(?:\s+---\s+|\n\n)Comment:\s*([\s\S]*)$/i);
   // A quoted block is context, never an instruction. The ONLY comment that re-opens it
   // is an explicit put-back. Anything else — ordinary reply prose, an empty comment, or
   // no comment at all — must fall through to the comment (or to nothing), because
@@ -1169,9 +1190,7 @@ function detectCommandType(
     .replace(/\s+/g, " ")
     .trim();
   if (
-    /^(?:BUY|SELL)\s+(?:LIMIT|STOP)\s+(?:ACTIVATED|TRIGGERED|FILLED)(?:\s*#\s*\d+)?$/.test(
-      activationNotice,
-    ) ||
+    /\b(?:BUY|SELL)\s+(?:LIMIT|STOP)\s+(?:ACTIVATED|TRIGGERED|FILLED)\b/.test(activationNotice) ||
     /^(?:ACTIVATED|TRIGGERED|FILLED|ORDER\s+FILLED)$/.test(activationNotice)
   ) {
     matchedPatternIds.push("lifecycle.activation");
