@@ -346,6 +346,7 @@ export function SymbolMappingModal({
         setSaveError("Select a broker symbol from the list");
         return;
       }
+      const hasDirtyAccountRules = Object.values(advancedDirty.current).some(Boolean);
       if (source === "provider") {
         await onSaveAccountMapping({
           accountId: defaultAccountId,
@@ -353,6 +354,10 @@ export function SymbolMappingModal({
           brokerSymbol: accountBrokerSymbol,
           direct: true,
         });
+        return;
+      }
+      if (!accountBrokerSymbol && !hasDirtyAccountRules) {
+        setSaveError("Select a broker symbol or edit an account rule");
         return;
       }
 

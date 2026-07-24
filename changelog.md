@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.56.2 - 2026-07-24 (Patch)
+
+Release impact: Patch because this corrects account attribution and canonical mapping validation without changing execution or held-for-review behavior.
+
+- Correlated held symbol-mapping alert counts to the queue item's account after provider relinking.
+- Rejected blank canonical broker input unless an account rule is intentionally dirty for a rules-only save.
+- Added regression coverage for relinked multi-account attribution and both canonical save outcomes.
+- Aligned application and EA source version metadata at 1.56.2.
+
 ## 1.56.1 - 2026-07-24 (Patch)
 
 Release impact: Patch because this closes symbol-mapping and alert correctness gaps without changing the MT5 execution protocol or held-for-review behavior.

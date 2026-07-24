@@ -1,5 +1,17 @@
 # Handoff
 
+Updated: 2026-07-24 (v1.56.2 follow-up review fixes)
+
+## Session progress (2026-07-24) - required Medium fixes applied locally
+
+Applied only the two required pre-deploy review fixes on `feat/symbol-picker-and-actionable-alerts`; nothing was pushed, opened as a PR, or deployed.
+
+- Correlated held symbol-mapping alert counts to the queue item's account after provider relinking.
+- Rejected blank canonical broker input unless an account rule is intentionally dirty for a rules-only save.
+- Added regression coverage for the relinked multi-account attribution and both canonical save outcomes.
+- Execution and held-for-review behavior remain unchanged.
+- Version aligned to 1.56.2 in `package.json` and the MT5 EA metadata; changelog updated.
+
 Updated: 2026-07-24 (symbol picker and actionable alerts review fixes)
 
 ## Session progress (2026-07-24) - review fixes applied locally

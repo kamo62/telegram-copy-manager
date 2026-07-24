@@ -3004,6 +3004,16 @@ class AppStore {
       .all() as Row[];
     const accounts = new Map(this.mt5Accounts().map((account) => [account.id, account]));
     const providers = new Map(this.providers().map((provider) => [provider.id, provider]));
+    const currentMappingHoldAccounts = new Set(
+      (
+        this.db
+          .query(
+            `SELECT parsed_signal_id, account_id FROM queue_items
+             WHERE status = 'HELD' AND held_reason LIKE 'SYMBOL_MAPPING_%'`,
+          )
+          .all() as Row[]
+      ).map((row) => `${String(row.parsed_signal_id)}:${String(row.account_id)}`),
+    );
     const suppressed = new Set(
       (
         this.db
@@ -3070,6 +3080,8 @@ class AppStore {
         signal.accountId ?? this.defaultParserAccountId(providerId),
       );
       for (const accountId of targets) {
+        if (!actionable && !currentMappingHoldAccounts.has(`${String(row.id)}:${accountId}`))
+          continue;
         const context = contextFor(providerId, accountId);
         const resolved = resolveSymbol(signal.rawSymbol, context);
         if (resolved.mappingStatus === "mapped") continue;

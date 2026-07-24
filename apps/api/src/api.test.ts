@@ -821,6 +821,62 @@ describe("Telegram TC API", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  test("attributes a held mapping block to its queue account after provider relinking", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "SELL RELINKPAIR\nSL 100\nTP 90",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approval.status).toBe(200);
+
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "200300400",
+        server: "MetaQuotes-Demo",
+        company: "MetaQuotes Ltd",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols: ["XAUUSD"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    for (const accountId of ["mt5-63442826", "mt5-200300400"]) {
+      await app.request(`/api/account-provider-links/${accountId}/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    const dashboard = await json<{
+      alerts: Array<{ kind: string; accountId?: string; detail?: Record<string, unknown> }>;
+    }>(await app.request("/api/dashboard"));
+    const alerts = dashboard.alerts.filter((alert) => alert.kind === "unmapped-symbols");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      accountId: "mt5-63442826",
+      detail: {
+        accountId: "mt5-63442826",
+        blockedSignalCount: 1,
+      },
+    });
+    expect(alerts.some((alert) => alert.accountId === "mt5-200300400")).toBe(false);
+  });
+
   test("preloads dashboard alert state for repeated unmapped signals", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });

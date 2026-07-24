@@ -148,4 +148,50 @@ describe("SymbolMappingModal", () => {
     expect(saves).toBe(0);
     expect(view.getByText("Select a broker symbol from the list")).toBeDefined();
   });
+
+  test("rejects a blank canonical broker symbol without account rules", () => {
+    let saves = 0;
+    const view = render(
+      <SymbolMappingModal
+        availableBrokerSymbols={["XAUUSD.raw"]}
+        defaultAccountId="mt5-1"
+        onClose={() => undefined}
+        onSaveAccountMapping={() => {
+          saves += 1;
+        }}
+        onSaveGlobalAlias={() => undefined}
+        open
+      />,
+    );
+    fireEvent.click(view.getByRole("tab", { name: "Account" }));
+    fireEvent.input(view.getByLabelText("Account source symbol"), {
+      target: { value: "XAUUSD" },
+    });
+    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+    expect(saves).toBe(0);
+    expect(view.getByText("Select a broker symbol or edit an account rule")).toBeDefined();
+  });
+
+  test("allows a blank canonical broker symbol when an account rule is dirty", () => {
+    let saved: unknown;
+    const view = render(
+      <SymbolMappingModal
+        availableBrokerSymbols={["XAUUSD.raw"]}
+        defaultAccountId="mt5-1"
+        onClose={() => undefined}
+        onSaveAccountMapping={(payload) => {
+          saved = payload;
+        }}
+        onSaveGlobalAlias={() => undefined}
+        open
+      />,
+    );
+    fireEvent.click(view.getByRole("tab", { name: "Account" }));
+    fireEvent.input(view.getByLabelText("Account source symbol"), {
+      target: { value: "XAUUSD" },
+    });
+    fireEvent.input(view.getByLabelText("Mapping suffix"), { target: { value: ".raw" } });
+    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+    expect(saved).toEqual({ accountId: "mt5-1", canonicalSymbol: "XAUUSD", suffix: ".raw" });
+  });
 });
