@@ -513,12 +513,13 @@ describe("symbol metadata + unmapped alerts (Task 6)", () => {
     expect(symbol).toBeTruthy();
     expect(parsed.result?.mappingStatus).not.toBe("mapped");
 
-    const before = await json<{ alerts: Array<{ kind: string; detail?: { symbols?: string[] } }> }>(
-      await app.request("/api/dashboard"),
-    );
+    const before = await json<{
+      alerts: Array<{ kind: string; detail?: { token?: string; accountId?: string } }>;
+    }>(await app.request("/api/dashboard"));
     const alert = before.alerts.find((a) => a.kind === "unmapped-symbols");
     expect(alert).toBeDefined();
-    expect(alert?.detail?.symbols).toContain(symbol);
+    expect(alert?.detail?.token).toBe(symbol);
+    expect(alert?.detail?.accountId).toBe("mt5-63442826");
 
     // Once the broker symbol becomes available (operator maps/adds it), the
     // symbol resolves and the alert clears.

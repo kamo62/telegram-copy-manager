@@ -1825,7 +1825,7 @@ describe("App dashboard", () => {
     });
   });
 
-  test("saves canonical free text and omits untouched account rules", async () => {
+  test("saves canonical inventory selection and omits untouched account rules", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init });
@@ -1840,11 +1840,11 @@ describe("App dashboard", () => {
     fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
     fireEvent.click(view.getByRole("tab", { name: "Account" }));
     expect(view.getByLabelText("Mapping account ID").hasAttribute("readonly")).toBe(true);
-    fireEvent.change(view.getByLabelText("Account source symbol"), {
+    fireEvent.input(view.getByLabelText("Account source symbol"), {
       target: { value: "XAGUSD" },
     });
-    fireEvent.change(view.getByLabelText("Broker symbol for this account"), {
-      target: { value: "XAGUSD.offline" },
+    fireEvent.input(view.getByLabelText("Broker symbol for this account"), {
+      target: { value: "XAUUSD.pro" },
     });
     fireEvent.input(view.getByLabelText("Mapping prefix"), { target: { value: "m." } });
     fireEvent.blur(view.getByLabelText("Mapping prefix"));
@@ -1860,7 +1860,7 @@ describe("App dashboard", () => {
     );
     expect(JSON.parse(String(mappingCall?.init?.body))).toEqual({
       accountId: "mt5-demo-1",
-      canonicalOverrides: { XAGUSD: "XAGUSD.offline" },
+      canonicalOverrides: { XAGUSD: "XAUUSD.pro" },
       prefix: "m.",
     });
   });
@@ -1917,11 +1917,10 @@ describe("App dashboard", () => {
     fireEvent.click(await view.findByRole("button", { name: "Add mapping" }));
     fireEvent.click(view.getByRole("tab", { name: "Account" }));
     fireEvent.click(view.getByLabelText("Map from provider symbol"));
-    expect(view.getByRole("option", { name: "XAUUSD.raw" })).toBeTruthy();
-    fireEvent.change(view.getByLabelText("Account source symbol"), { target: { value: "GOLD" } });
-    fireEvent.change(view.getByLabelText("Broker symbol for this account"), {
-      target: { value: "XAUUSD.pro" },
-    });
+    const brokerInput = view.getByLabelText("Broker symbol for this account");
+    fireEvent.input(brokerInput, { target: { value: "XAUUSD.pro" } });
+    fireEvent.keyDown(brokerInput, { key: "Enter" });
+    fireEvent.input(view.getByLabelText("Account source symbol"), { target: { value: "GOLD" } });
     fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
 
     await waitFor(() =>
@@ -1964,12 +1963,70 @@ describe("App dashboard", () => {
     fireEvent.click(accountView.getByRole("tab", { name: "Account" }));
     fireEvent.click(accountView.getByLabelText("Map from provider symbol"));
     expect(accountView.getByLabelText("Account source symbol").hasAttribute("required")).toBe(true);
-    fireEvent.change(accountView.getByLabelText("Broker symbol for this account"), {
+    fireEvent.input(accountView.getByLabelText("Broker symbol for this account"), {
       target: { value: "XAUUSD.pro" },
     });
     fireEvent.click(accountView.getByRole("button", { name: "Save account mapping" }));
 
     expect(calls.some((call) => call.url.startsWith("/api/symbol-mappings/"))).toBe(false);
+  });
+
+  test("maps an unmapped alert through a canonical account override", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return fixtureResponse(url);
+    }) as typeof fetch;
+    const view = rtlRender(
+      <MemoryRouter initialEntries={["/accounts/mt5-live-2/performance"]}>
+        <App
+          initialSnapshot={{
+            ...snapshot,
+            alerts: [
+              {
+                kind: "unmapped-symbols",
+                severity: "warn",
+                message: "GOLD is unmapped",
+                accountId: "mt5-live-2",
+                detail: {
+                  token: "GOLD",
+                  canonicalSymbol: "XAUUSD",
+                  providerId: "provider-alpha",
+                  providerTitle: "Alpha FX Signals",
+                  accountId: "mt5-live-2",
+                  accountLabel: "200300400",
+                  blockedSignalCount: 1,
+                  suggestedBrokerSymbol: "XAUUSD.raw",
+                },
+              },
+            ],
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await view.findByText("1 operational alert"));
+    fireEvent.click(view.getByRole("button", { name: "Map to XAUUSD.raw" }));
+
+    await waitFor(() => expect(view.getByRole("dialog")).toBeTruthy());
+    expect((view.getByLabelText("Account source symbol") as HTMLInputElement).value).toBe("XAUUSD");
+    expect((view.getByLabelText("Broker symbol for this account") as HTMLInputElement).value).toBe(
+      "XAUUSD.raw",
+    );
+    fireEvent.click(view.getByRole("button", { name: "Save account mapping" }));
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/symbol-mappings/account/mt5-live-2")).toBe(
+        true,
+      ),
+    );
+    const mappingCall = calls.find(
+      (call) => call.url === "/api/symbol-mappings/account/mt5-live-2",
+    );
+    expect(JSON.parse(String(mappingCall?.init?.body))).toEqual({
+      accountId: "mt5-live-2",
+      canonicalOverrides: { XAUUSD: "XAUUSD.raw" },
+    });
+    await waitFor(() => expect(view.queryByRole("dialog")).toBeNull());
   });
 
   test("deletes direct mappings through the account mapping endpoint", async () => {

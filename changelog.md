@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.56.1 - 2026-07-24 (Patch)
+
+Release impact: Patch because this closes symbol-mapping and alert correctness gaps without changing the MT5 execution protocol or held-for-review behavior.
+
+- Fixed quoted-symbol ranking, provider-scoped alert suppression, actionable blocked-signal counts, malformed suppression requests, and dashboard alert query fan-out.
+- Mapped actionable alerts through canonical account overrides and require broker-picker inventory selections in both mapping modes; affix suggestions now require backend-equivalent confidence.
+- Preserved unmapped-token approval as HELD for review with `SYMBOL_MAPPING_*` reasons.
+- Kept application and EA source version metadata aligned at 1.56.1.
+
+## 1.56.0 - 2026-07-24 (Minor)
+
+Release impact: Minor because this adds broker-symbol discovery and actionable symbol-mapping workflows while preserving the MT5 execution and held-for-review contracts.
+
+- Added a searchable, quote-aware broker-symbol picker with ranked matches, affix guesses, keyboard access, and refresh-safe selection state.
+- Structured unmapped-symbol alerts by provider and account, including blocked signal counts and suggested quoted broker symbols.
+- Added persisted per-provider "not an instrument" suppression with audit logging; suppression only quiets mapping alerts and never changes execution handling.
+- Aligned application and EA source version metadata at 1.56.0; no EA recompile is required because the MT5 payload contract is unchanged.
+
 ## 1.55.1 - 2026-07-23 (Patch)
 
 Release impact: Patch because this hardens nickname updates, preserves dashboard identity, and corrects chart and provider workflow regressions without changing the MT5 execution protocol.

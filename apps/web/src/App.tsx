@@ -2,7 +2,11 @@ import { Server } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { type NavigateOptions, type To, useLocation, useNavigate } from "react-router-dom";
 import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
-import { AlertsBanner, visibleOperationalAlerts } from "./components/AlertsBanner";
+import {
+  AlertsBanner,
+  type OperationalAlert,
+  visibleOperationalAlerts,
+} from "./components/AlertsBanner";
 import { CommandPalette, type PaletteCommand } from "./components/CommandPalette";
 import { useConfirm } from "./components/ConfirmDialog";
 import type { TelegramDialogSummary } from "./components/DialogPicker";
@@ -28,6 +32,7 @@ import type { SetupFormState, SetupStep } from "./components/SetupFlow";
 import { navItems, Sidebar } from "./components/Sidebar";
 import { SignIn } from "./components/SignIn";
 import { LiveStatusBar } from "./components/StatusBar";
+import type { SymbolMappingSeed } from "./components/SymbolMappingModal";
 import { WorkspaceHeading } from "./components/WorkspaceHeading";
 import { type TabId, WorkspaceTabs } from "./components/WorkspaceTabs";
 import { useToast } from "./contexts/ToastContext";
@@ -682,6 +687,8 @@ export function App({
   const [availableDialogs, setAvailableDialogs] = useState<TelegramDialogSummary[]>(initialDialogs);
   const [initialLoading, setInitialLoading] = useState(!initialSnapshot);
   const [lastPollError, setLastPollError] = useState(false);
+  const [mappingSeed, setMappingSeed] = useState<SymbolMappingSeed | null>(null);
+  const clearMappingSeed = useCallback(() => setMappingSeed(null), []);
   useEffect(() => {
     if (initialSnapshot) setSyncStatus({ lastSyncAt: new Date().toISOString() });
   }, [initialSnapshot]);
@@ -1378,6 +1385,50 @@ export function App({
       setSyncStatus({ refreshing: false });
     }
   }
+
+  const openMappingFromAlert = useCallback(
+    (alert: OperationalAlert) => {
+      const detail = alert.detail;
+      if (
+        alert.kind !== "unmapped-symbols" ||
+        typeof detail?.accountId !== "string" ||
+        typeof detail?.token !== "string"
+      ) {
+        return;
+      }
+      setMappingSeed({
+        source: "canonical",
+        sourceSymbol:
+          typeof detail.canonicalSymbol === "string" && detail.canonicalSymbol.trim()
+            ? detail.canonicalSymbol
+            : detail.token,
+        brokerSymbol:
+          typeof detail.suggestedBrokerSymbol === "string"
+            ? detail.suggestedBrokerSymbol
+            : undefined,
+      });
+      navigate(pathForTab(detail.accountId, "symbols"));
+    },
+    [navigate],
+  );
+
+  const suppressMappingAlert = useCallback(
+    async (alert: OperationalAlert) => {
+      const detail = alert.detail;
+      if (
+        alert.kind !== "unmapped-symbols" ||
+        typeof detail?.providerId !== "string" ||
+        typeof detail?.token !== "string"
+      ) {
+        return;
+      }
+      await apiPost(`/api/providers/${detail.providerId}/not-an-instrument`, {
+        token: detail.token,
+      });
+      await refreshDashboard();
+    },
+    [refreshDashboard],
+  );
 
   async function exportProviderPerformance() {
     const accountId = focusedAccount?.id;
@@ -2235,7 +2286,9 @@ export function App({
           {!showSummary ? (
             <AlertsBanner
               alerts={snapshot.alerts ?? []}
+              onMapUnmapped={openMappingFromAlert}
               onViewHeld={() => navigate("/logs#held")}
+              onSuppressUnmapped={suppressMappingAlert}
             />
           ) : null}
           {showDashboard && focusedSlot ? (
@@ -2499,7 +2552,9 @@ export function App({
                   defaultProviderId={snapshot.providers[0]?.id}
                   loading={initialLoading}
                   mappings={snapshot.symbolMappings}
+                  mappingSeed={mappingSeed}
                   onDelete={deleteSymbolMapping}
+                  onMappingSeedConsumed={clearMappingSeed}
                   onSaveAccountMapping={saveAccountMapping}
                   onSaveGlobalAlias={saveSymbolAlias}
                 />

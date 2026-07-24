@@ -11,10 +11,31 @@ export interface OperationalAlert {
   detail?: Record<string, unknown>;
 }
 
+export interface UnmappedSymbolAlertDetail {
+  token: string;
+  canonicalSymbol: string;
+  providerId: string;
+  providerTitle: string;
+  accountId: string;
+  accountLabel: string;
+  blockedSignalCount: number;
+  suggestedBrokerSymbol?: string;
+}
+
 /** Stable identity for an alert across dashboard refreshes. */
 function alertKey(alert: OperationalAlert): string {
-  const detailId = alert.detail?.providerId ?? alert.detail?.sessionId ?? "";
-  return `${alert.kind}:${alert.accountId ?? detailId}`;
+  const detail = alert.detail ?? {};
+  if (alert.kind === "unmapped-symbols") {
+    return `${alert.kind}:${detail.providerId ?? ""}:${alert.accountId ?? detail.accountId ?? ""}:${detail.token ?? ""}`;
+  }
+  const detailId = detail.providerId ?? detail.sessionId ?? "";
+  const token = detail.token ?? "";
+  return `${alert.kind}:${alert.accountId ?? detail.accountId ?? detailId}:${token}`;
+}
+
+function unmappedDetail(alert: OperationalAlert): UnmappedSymbolAlertDetail | null {
+  if (alert.kind !== "unmapped-symbols" || !alert.detail?.token) return null;
+  return alert.detail as unknown as UnmappedSymbolAlertDetail;
 }
 
 function readDismissedAlerts(): Set<string> {
@@ -54,11 +75,16 @@ function writeDismissedAlerts(dismissed: Set<string>) {
 export function AlertsBanner({
   alerts,
   onViewHeld,
+  onMapUnmapped,
+  onSuppressUnmapped,
 }: {
   alerts: OperationalAlert[];
   onViewHeld?: () => void;
+  onMapUnmapped?: (alert: OperationalAlert) => void;
+  onSuppressUnmapped?: (alert: OperationalAlert) => Promise<void> | void;
 }) {
   const [dismissed, setDismissed] = useState(readDismissedAlerts);
+  const [suppressed, setSuppressed] = useState<Set<string>>(() => new Set());
 
   // Drop dismissals whose condition has cleared so a later recurrence is visible.
   useEffect(() => {
@@ -75,7 +101,9 @@ export function AlertsBanner({
     });
   }, [alerts]);
 
-  const visible = alerts.filter((alert) => !dismissed.has(alertKey(alert)));
+  const visible = alerts.filter(
+    (alert) => !dismissed.has(alertKey(alert)) && !suppressed.has(alertKey(alert)),
+  );
   if (visible.length === 0) return null;
   const errors = visible.filter((alert) => alert.severity === "error").length;
   const warnings = visible.length - errors;
@@ -96,34 +124,78 @@ export function AlertsBanner({
       <div className="alerts-banner-list" role="alert">
         {visible.map((alert, index) => {
           const key = alertKey(alert);
+          const detail = unmappedDetail(alert);
           return (
             <div
               className={`alerts-banner-item alerts-banner-${alert.severity}`}
-              key={`${alert.kind}-${alert.accountId ?? index}`}
+              key={`${key}-${index}`}
             >
               <span className="alerts-banner-icon" aria-hidden="true">
                 <ShieldAlert size={15} />
               </span>
-              <span className="alerts-banner-message">{alert.message}</span>
+              <span className="alerts-banner-message">
+                {detail ? (
+                  <>
+                    <strong>{detail.token}</strong>
+                    <span>
+                      {detail.providerTitle} · {detail.accountLabel} · {detail.blockedSignalCount}{" "}
+                      {detail.blockedSignalCount === 1 ? "signal blocked" : "signals blocked"}
+                    </span>
+                  </>
+                ) : (
+                  alert.message
+                )}
+              </span>
+              {detail && onMapUnmapped ? (
+                <button
+                  className="alerts-banner-link"
+                  onClick={() => onMapUnmapped(alert)}
+                  type="button"
+                >
+                  {detail.suggestedBrokerSymbol
+                    ? `Map to ${detail.suggestedBrokerSymbol}`
+                    : "Map symbol"}
+                </button>
+              ) : null}
+              {detail && onSuppressUnmapped ? (
+                <button
+                  className="alerts-banner-link alerts-banner-secondary"
+                  onClick={() => {
+                    setSuppressed((current) => new Set(current).add(key));
+                    void Promise.resolve(onSuppressUnmapped(alert)).catch(() => {
+                      setSuppressed((current) => {
+                        const next = new Set(current);
+                        next.delete(key);
+                        return next;
+                      });
+                    });
+                  }}
+                  type="button"
+                >
+                  Not an instrument
+                </button>
+              ) : null}
               {onViewHeld && /guardian|held/i.test(alert.kind) ? (
                 <button className="alerts-banner-link" onClick={onViewHeld} type="button">
                   View held
                 </button>
               ) : null}
-              <button
-                aria-label="Dismiss alert"
-                className="alerts-banner-close"
-                onClick={() =>
-                  setDismissed((current) => {
-                    const next = new Set(current).add(key);
-                    writeDismissedAlerts(next);
-                    return next;
-                  })
-                }
-                type="button"
-              >
-                <X size={14} aria-hidden="true" />
-              </button>
+              {!detail ? (
+                <button
+                  aria-label="Dismiss alert"
+                  className="alerts-banner-close"
+                  onClick={() =>
+                    setDismissed((current) => {
+                      const next = new Set(current).add(key);
+                      writeDismissedAlerts(next);
+                      return next;
+                    })
+                  }
+                  type="button"
+                >
+                  <X size={14} aria-hidden="true" />
+                </button>
+              ) : null}
             </div>
           );
         })}

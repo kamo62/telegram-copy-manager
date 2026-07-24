@@ -1,5 +1,33 @@
 # Handoff
 
+Updated: 2026-07-24 (symbol picker and actionable alerts review fixes)
+
+## Session progress (2026-07-24) - review fixes applied locally
+
+Applied all eight review fixes on `feat/symbol-picker-and-actionable-alerts`; changes remain local and
+nothing was pushed, opened as a PR, or deployed.
+
+- Fixed unrelated quoted-symbol suggestions, canonical alert mapping saves, provider-scoped alert suppression, affix confidence, actionable blocked counts, suppression request validation, dashboard alert query fan-out, and broker inventory validation.
+- Added regression coverage for each finding, including malformed JSON/non-string suppression bodies and canonical-versus-raw mapping payloads.
+- Suppressed tokens still follow the normal approval path and remain `HELD` with `SYMBOL_MAPPING_*`; execution and held-for-review behavior is unchanged.
+- Version aligned to 1.56.1 in `package.json` and the MT5 EA metadata.
+- Full gate passed: `bun run typecheck`, `bun run lint`, `bun test` (531 passed, 0 failed), and `bun run build`.
+
+Updated: 2026-07-24 (symbol picker and actionable alerts)
+
+## Session progress (2026-07-24) - implementation complete locally
+
+Implemented locally on branch `feat/symbol-picker-and-actionable-alerts`; changes remain local and
+nothing was pushed, opened as a PR, or deployed.
+
+- Added a searchable, quote-aware, keyboard-accessible broker-symbol combobox with refresh-safe selection and confirm-only affix suggestions.
+- Structured unmapped-symbol alerts by provider and account, showing blocked signal counts and suggested quoted broker symbols.
+- Added persisted per-provider "not an instrument" suppression with audit logging. Suppression is excluded from the alert and needs-mapping surfaces only; execution still holds unmapped signals for review.
+- Added end-to-end coverage for alert mapping, suppression, quote metadata, and held-for-review behavior after suppression. `FRONTEND_PARITY.md` was preserved unchanged.
+- Version aligned to 1.56.0 in the root package and EA metadata. Changelog entry added.
+- Final gate: `bun run typecheck` passed, `bun run lint` passed, `bun test` passed with 525 tests and 0 failures, and `bun run build` passed for both API and web bundles.
+- No push, pull request, or deployment was performed.
+
 Updated: 2026-07-23 (UI fidelity and information architecture session)
 
 ## Session progress (2026-07-23) - implementation complete locally

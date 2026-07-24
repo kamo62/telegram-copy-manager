@@ -4412,6 +4412,54 @@ span.data-table-subtle {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.symbol-combobox {
+  position: relative;
+}
+
+.symbol-combobox-options {
+  position: absolute;
+  z-index: 4;
+  width: 100%;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 4px 0 0;
+  padding: 4px;
+  list-style: none;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-2);
+}
+
+.symbol-combobox-options [role="option"] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 32px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.symbol-combobox-options [role="option"].active,
+.symbol-combobox-options [role="option"]:hover {
+  background: var(--panel-2);
+}
+
+.symbol-combobox-options small {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+.symbol-combobox-empty {
+  color: var(--ink-faint);
+  cursor: default;
+}
+
 .config-test-message {
   min-height: 92px;
   padding-top: 9px;
@@ -7370,8 +7418,21 @@ select.config-strategy-input {
 }
 
 .alerts-banner-message {
+  display: grid;
+  gap: 2px;
   font-size: 13px;
   font-weight: 500;
+}
+
+.alerts-banner-message > span {
+  color: var(--ink-2);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.alerts-banner-secondary {
+  color: var(--ink-2);
+  border-style: dashed;
 }
 
 .alerts-banner-close {

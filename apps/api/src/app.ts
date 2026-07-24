@@ -482,6 +482,22 @@ export function createApi(options: ApiOptions = {}) {
     return c.json(store.updateProvider(c.req.param("id"), body));
   });
 
+  app.post("/api/providers/:id/not-an-instrument", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Malformed JSON" }, 400);
+    }
+    const token =
+      body && typeof body === "object" && !Array.isArray(body) && "token" in body
+        ? (body as { token?: unknown }).token
+        : undefined;
+    const result = store.suppressProviderSymbol(c.req.param("id"), token);
+    if ("error" in result) return c.json({ error: result.error }, result.statusCode);
+    return c.json(result);
+  });
+
   app.delete("/api/providers/:id", (c) => c.json(store.deleteProvider(c.req.param("id"))));
 
   app.get("/api/providers/:id/messages", async (c) => {
@@ -2903,18 +2919,13 @@ class AppStore {
         detail: { ...health },
       });
     }
-    const needsMapping = this.providerSymbolsNeedingMapping();
-    if (needsMapping.length > 0) {
-      const shown = needsMapping.slice(0, 8);
+    for (const item of this.unmappedProviderSymbolAlerts()) {
       alerts.push({
         kind: "unmapped-symbols",
         severity: "warn",
-        message: `${needsMapping.length} provider symbol${
-          needsMapping.length === 1 ? "" : "s"
-        } could not be mapped: ${shown.join(", ")}${
-          needsMapping.length > shown.length ? "…" : ""
-        } — add a symbol mapping.`,
-        detail: { symbols: needsMapping },
+        message: `${item.rawSymbol} is unmapped for ${item.accountLabel} and is blocking ${item.blockedSignalCount} ${item.blockedSignalCount === 1 ? "signal" : "signals"}.`,
+        accountId: item.accountId,
+        detail: item,
       });
     }
     // Provider health: surface providers whose rolling win rate has turned red.
@@ -2944,38 +2955,158 @@ class AppStore {
    * O(distinct provider symbols); upgrade path is caching resolution per symbol.
    */
   providerSymbolsNeedingMapping(): string[] {
-    const rows = this.db
-      .query(
-        "SELECT provider_id, result_json FROM parsed_signals ORDER BY created_at DESC LIMIT 300",
-      )
-      .all() as Row[];
-    const contexts = new Map<string, ParserContext>();
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const row of rows) {
-      if (out.length >= 12) break;
-      const signal = parseJson<ParsedSignal>(String(row.result_json));
-      if (!signal || signal.commandType === "NO_SIGNAL") continue;
-      const raw = signal.rawSymbol;
-      if (!raw) continue;
-      const key = raw.replace(/[^a-z0-9]/gi, "").toUpperCase();
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      const providerId = String(row.provider_id);
-      let context = contexts.get(providerId);
-      if (!context) {
-        context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
-        contexts.set(providerId, context);
-      }
-      // Only flag symbols that still do not resolve to a broker symbol.
-      if (resolveSymbol(raw, context).mappingStatus !== "mapped") out.push(raw);
-    }
-    return out;
+    return [...new Set(this.unmappedProviderSymbolAlerts().map((item) => item.rawSymbol))].slice(
+      0,
+      12,
+    );
   }
 
-  /** Persisted broker symbol metadata (point/digits/pip) for an account. */
+  suppressProviderSymbol(providerId: string, token: unknown) {
+    const provider = this.providerDetails(providerId);
+    const rawToken = typeof token === "string" ? token.trim() : "";
+    const tokenKey = rawToken.replace(/[^a-z0-9]/gi, "").toUpperCase();
+    if (!provider) return { statusCode: 404 as const, error: "Provider not found" };
+    if (!tokenKey) return { statusCode: 400 as const, error: "token is required" };
+    const normalizedToken = rawToken.toUpperCase();
+    this.db
+      .query(
+        `INSERT OR IGNORE INTO suppressed_provider_symbols (provider_id, token, token_key, created_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(providerId, normalizedToken, tokenKey, new Date().toISOString());
+    this.audit(
+      "provider-symbol.suppress",
+      "info",
+      "Provider symbol marked as not an instrument",
+      {
+        providerId,
+        token: normalizedToken,
+      },
+      "operator",
+    );
+    return { providerId, token: normalizedToken, status: "SUPPRESSED" as const };
+  }
+
+  private unmappedProviderSymbolAlerts() {
+    const rows = this.db
+      .query(
+        `SELECT parsed_signals.id, parsed_signals.provider_id, parsed_signals.result_json, parsed_signals.status,
+                EXISTS (
+                  SELECT 1 FROM queue_items
+                  WHERE queue_items.parsed_signal_id = parsed_signals.id
+                    AND queue_items.status = 'HELD'
+                    AND queue_items.held_reason LIKE 'SYMBOL_MAPPING_%'
+                ) AS has_current_mapping_hold
+         FROM parsed_signals
+         ORDER BY parsed_signals.created_at DESC
+         LIMIT 300`,
+      )
+      .all() as Row[];
+    const accounts = new Map(this.mt5Accounts().map((account) => [account.id, account]));
+    const providers = new Map(this.providers().map((provider) => [provider.id, provider]));
+    const suppressed = new Set(
+      (
+        this.db
+          .query("SELECT provider_id, token_key FROM suppressed_provider_symbols")
+          .all() as Row[]
+      ).map((row) => `${row.provider_id}:${row.token_key}`),
+    );
+    const contexts = new Map<string, ParserContext>();
+    const quotedByAccount = new Map<string, Set<string>>();
+    const contextFor = (providerId: string, accountId: string) => {
+      const key = `${providerId}:${accountId}`;
+      let context = contexts.get(key);
+      if (!context) {
+        context = this.parserContext(providerId, accountId);
+        contexts.set(key, context);
+      }
+      return context;
+    };
+    const quotedFor = (accountId: string) => {
+      let quoted = quotedByAccount.get(accountId);
+      if (!quoted) {
+        quoted = new Set(
+          this.symbolMetadata(accountId)
+            .filter(
+              (item) => item.bid !== null && item.ask !== null && item.bid > 0 && item.ask > 0,
+            )
+            .map((item) => item.symbol.toUpperCase()),
+        );
+        quotedByAccount.set(accountId, quoted);
+      }
+      return quoted;
+    };
+    const grouped = new Map<
+      string,
+      {
+        kind: "unmapped-symbols";
+        token: string;
+        rawSymbol: string;
+        canonicalSymbol: string;
+        providerId: string;
+        providerTitle: string;
+        accountId: string;
+        accountLabel: string;
+        blockedSignalCount: number;
+        suggestedBrokerSymbol?: string;
+      }
+    >();
+    for (const row of rows) {
+      const signal = parseJson<ParsedSignal>(String(row.result_json));
+      const actionable = String(row.status) === "PARSED";
+      const hasCurrentMappingHold = Boolean(row.has_current_mapping_hold);
+      if (
+        !signal ||
+        signal.commandType !== "OPEN_TRADE" ||
+        !signal.rawSymbol ||
+        (!actionable && !hasCurrentMappingHold)
+      )
+        continue;
+      const providerId = String(row.provider_id);
+      const tokenKey = signal.rawSymbol.replace(/[^a-z0-9]/gi, "").toUpperCase();
+      if (suppressed.has(`${providerId}:${tokenKey}`)) continue;
+      const targets = this.targetAccountIdsForProvider(
+        providerId,
+        signal.accountId ?? this.defaultParserAccountId(providerId),
+      );
+      for (const accountId of targets) {
+        const context = contextFor(providerId, accountId);
+        const resolved = resolveSymbol(signal.rawSymbol, context);
+        if (resolved.mappingStatus === "mapped") continue;
+        const account = accounts.get(accountId);
+        const provider = providers.get(providerId);
+        const key = `${providerId}:${signal.rawSymbol.replace(/[^a-z0-9]/gi, "").toUpperCase()}:${accountId}`;
+        const current = grouped.get(key);
+        if (current) {
+          current.blockedSignalCount += 1;
+          continue;
+        }
+        grouped.set(key, {
+          kind: "unmapped-symbols",
+          token: signal.rawSymbol,
+          rawSymbol: signal.rawSymbol,
+          canonicalSymbol: resolved.canonicalSymbol ?? signal.canonicalSymbol ?? signal.rawSymbol,
+          providerId,
+          providerTitle: provider?.title ?? providerId,
+          accountId,
+          accountLabel: account?.accountNumber || accountId,
+          blockedSignalCount: 1,
+          suggestedBrokerSymbol: account
+            ? rankBrokerSymbols(
+                account.availableSymbols ?? [],
+                resolved.canonicalSymbol ?? signal.rawSymbol,
+                quotedFor(accountId),
+              )[0]
+            : undefined,
+        });
+      }
+    }
+    return [...grouped.values()].slice(0, 12);
+  }
+
+  /** Broker symbol metadata with current quote status when the EA has reported it. */
   symbolMetadata(accountId: string) {
-    return (
+    const rows = (
       this.db
         .query(
           "SELECT symbol, point, digits, pip_size, updated_at FROM symbol_metadata WHERE account_id = ? ORDER BY symbol",
@@ -2988,6 +3119,29 @@ class AppStore {
       pipSize: nullableNumber(row.pip_size) ?? null,
       updatedAt: String(row.updated_at),
     }));
+    const live = this.liveMt5Snapshots.get(accountId)?.symbols ?? [];
+    const liveBySymbol = new Map(
+      live
+        .filter((item): item is Record<string, unknown> =>
+          Boolean(item && typeof item === "object"),
+        )
+        .map((item) => [String(item.symbol ?? "").toUpperCase(), item]),
+    );
+    return [...new Set([...rows.map((row) => row.symbol), ...liveBySymbol.keys()])]
+      .sort()
+      .map((symbol) => {
+        const row = rows.find((item) => item.symbol === symbol);
+        const quote = liveBySymbol.get(symbol.toUpperCase());
+        return {
+          symbol,
+          point: row?.point ?? nullableNumber(quote?.point) ?? null,
+          digits: row?.digits ?? nullableNumber(quote?.digits) ?? null,
+          pipSize: row?.pipSize ?? null,
+          bid: nullableNumber(quote?.bid) ?? null,
+          ask: nullableNumber(quote?.ask) ?? null,
+          updatedAt: row?.updatedAt ?? this.liveMt5Snapshots.get(accountId)?.updatedAt ?? "",
+        };
+      });
   }
 
   private persistSymbolMetadata(accountId: string, symbols: unknown[]) {
@@ -8819,6 +8973,15 @@ class AppStore {
       );
     `);
     this.db.run(`
+      CREATE TABLE IF NOT EXISTS suppressed_provider_symbols (
+        provider_id TEXT NOT NULL,
+        token TEXT NOT NULL,
+        token_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (provider_id, token_key)
+      );
+    `);
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS raw_messages (
         id TEXT PRIMARY KEY,
         provider_id TEXT NOT NULL,
@@ -12764,6 +12927,30 @@ function isLegacyDemoAccountMapping(mapping: AccountSymbolMapping) {
 function brokerReportsPlainCoreSymbols(symbols: string[]) {
   const available = new Set(symbols.map((symbol) => symbol.toUpperCase()));
   return available.has("BTCUSD") || available.has("XAUUSD") || available.has("EURUSD");
+}
+
+function rankBrokerSymbols(symbols: string[], canonical: string, quoted: Set<string>) {
+  const target = canonical.replace(/[^a-z0-9]/gi, "").toUpperCase();
+  if (!target) return [];
+  return symbols
+    .map((symbol) => {
+      const upper = symbol.toUpperCase();
+      const normalized = symbol.replace(/[^a-z0-9]/gi, "").toUpperCase();
+      const likeness =
+        normalized === target
+          ? 1000
+          : normalized.startsWith(target)
+            ? 800
+            : normalized.includes(target)
+              ? 600
+              : target.includes(normalized)
+                ? 500
+                : 0;
+      return { symbol, score: likeness > 0 ? likeness + (quoted.has(upper) ? 10_000 : 0) : 0 };
+    })
+    .filter((item) => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.symbol.localeCompare(right.symbol))
+    .map((item) => item.symbol);
 }
 
 function inferBrokerAffixes(symbols: string[]) {

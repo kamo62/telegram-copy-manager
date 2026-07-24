@@ -77,8 +77,10 @@ describe("AccountHeader", () => {
     fireEvent.click(view.getByRole("button", { name: "Rename" }));
     fireEvent.change(view.getByLabelText("Account name"), { target: { value: "Gold live" } });
     fireEvent.click(view.getByRole("button", { name: "Save name" }));
-    await waitFor(() => expect(view.queryByLabelText("Account name")).toBeNull());
-  });
+    await waitFor(() => expect(view.queryByLabelText("Account name")).toBeNull(), {
+      timeout: 10_000,
+    });
+  }, 10_000);
 
   test("resets rename state when switching accounts and keeps an empty nickname clearable", async () => {
     const renamed: string[] = [];

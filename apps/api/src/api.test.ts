@@ -679,6 +679,220 @@ describe("Telegram TC API", () => {
     });
   });
 
+  test("does not suggest unrelated quoted symbols, suppresses alerts, and still holds for review", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["XAUUSD", "EURUSD.raw"],
+    });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [],
+        orders: [],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.1, ask: 1.1001, point: 0.00001, digits: 5 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "SELL UNKNOWNPAIR\nSL 100\nTP 90",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const before = await json<{
+      alerts: Array<{
+        kind: string;
+        accountId?: string;
+        detail?: Record<string, unknown>;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    const unmapped = before.alerts.find((alert) => alert.kind === "unmapped-symbols");
+    expect(unmapped).toMatchObject({
+      accountId: "mt5-63442826",
+      detail: {
+        token: "UNKNOWNPAIR",
+        providerId,
+        accountId: "mt5-63442826",
+        blockedSignalCount: 1,
+        accountLabel: "63442826",
+      },
+    });
+    expect(unmapped?.detail?.suggestedBrokerSymbol).toBeUndefined();
+
+    const suppressed = await app.request(`/api/providers/${providerId}/not-an-instrument`, {
+      method: "POST",
+      body: JSON.stringify({ token: "UNKNOWNPAIR" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(suppressed.status).toBe(200);
+    const after = await json<{ alerts: Array<{ kind: string; detail?: Record<string, unknown> }> }>(
+      await app.request("/api/dashboard"),
+    );
+    expect(after.alerts.some((alert) => alert.kind === "unmapped-symbols")).toBe(false);
+    const audit = await json<{ logs: Array<{ eventType: string; data: Record<string, unknown> }> }>(
+      await app.request("/api/audit-logs?event=provider-symbol.suppress"),
+    );
+    expect(audit.logs[0]).toMatchObject({
+      eventType: "provider-symbol.suppress",
+      data: { providerId, token: "UNKNOWNPAIR", actor: "operator" },
+    });
+
+    const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approval.status).toBe(200);
+    const approved = await json<{ status: string; queueItemId: string }>(approval);
+    expect(approved.status).toBe("HELD");
+    const held = await json<{ items: Array<{ id: string; heldReason: string }> }>(
+      await app.request("/api/queue-items/held"),
+    );
+    expect(held.items).toContainEqual(
+      expect.objectContaining({ id: approved.queueItemId, heldReason: "SYMBOL_MAPPING_UNMAPPED" }),
+    );
+  });
+
+  test("rejects malformed suppression JSON and non-string tokens", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    const malformed = await app.request(`/api/providers/${providerId}/not-an-instrument`, {
+      method: "POST",
+      body: "{",
+      headers: { "content-type": "application/json" },
+    });
+    expect(malformed.status).toBe(400);
+
+    const nonString = await app.request(`/api/providers/${providerId}/not-an-instrument`, {
+      method: "POST",
+      body: JSON.stringify({ token: 1 }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(nonString.status).toBe(400);
+  });
+
+  test("counts only actionable open signals and current mapping holds", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "telegram-tc-alerts-"));
+    const databasePath = join(directory, "alerts.db");
+    const app = createApi({
+      databasePath,
+      seedDemoData: false,
+      telegramAdapter: "mock",
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    const parse = async (rawText: string) =>
+      json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({ providerId, accountId: "mt5-63442826", rawText }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+    const historical = await parse("SELL HISTORICALPAIR\nSL 100\nTP 90");
+    const ignored = await parse("SELL IGNOREDPAIR\nSL 100\nTP 90");
+    await app.request(`/api/signals/${ignored.parsedSignalId}/ignore`, { method: "POST" });
+    await parse("CLOSE HISTORICALPAIR");
+    const held = await parse("SELL HELDPAIR\nSL 100\nTP 90");
+    const approval = await app.request(`/api/signals/${held.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approval.status).toBe(200);
+
+    const db = new Database(databasePath);
+    db.query("UPDATE parsed_signals SET status = ?, created_at = ? WHERE id = ?").run(
+      "APPROVED",
+      "2020-01-01T00:00:00.000Z",
+      historical.parsedSignalId,
+    );
+    db.close();
+
+    const dashboard = await json<{
+      alerts: Array<{ kind: string; detail?: { token?: string; blockedSignalCount?: number } }>;
+    }>(await app.request("/api/dashboard"));
+    const alerts = dashboard.alerts.filter((alert) => alert.kind === "unmapped-symbols");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.detail).toMatchObject({ token: "HELDPAIR", blockedSignalCount: 1 });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  test("preloads dashboard alert state for repeated unmapped signals", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    for (const token of ["FIRSTPAIR", "SECONDPAIR"]) {
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: `SELL ${token}\nSL 100\nTP 90`,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    const originalQuery = Database.prototype.query;
+    let suppressionQueries = 0;
+    let metadataQueries = 0;
+    Database.prototype.query = function (this: Database, sql: string) {
+      if (sql.includes("FROM suppressed_provider_symbols")) suppressionQueries += 1;
+      if (sql.includes("FROM symbol_metadata WHERE account_id")) metadataQueries += 1;
+      return originalQuery.call(this, sql);
+    } as typeof originalQuery;
+    try {
+      const dashboard = await json<{ alerts: Array<{ kind: string }> }>(
+        await app.request("/api/dashboard"),
+      );
+      expect(dashboard.alerts.filter((alert) => alert.kind === "unmapped-symbols")).toHaveLength(2);
+    } finally {
+      Database.prototype.query = originalQuery;
+    }
+    expect(suppressionQueries).toBe(1);
+    expect(metadataQueries).toBe(1);
+  });
+
+  test("symbol metadata includes the latest quote used by the picker", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "63442826",
+        server: "OctaFX-Real",
+        company: "OctaFX",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols: ["XAUUSD.raw", "XAUUSD.pro"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [],
+        orders: [],
+        symbols: [
+          { symbol: "XAUUSD.raw", bid: 2450, ask: 2450.2, point: 0.01, digits: 2 },
+          { symbol: "XAUUSD.pro", bid: 0, ask: 0, point: 0.01, digits: 2 },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const metadata = await json<{
+      symbols: Array<{ symbol: string; bid: number | null; ask: number | null }>;
+    }>(await app.request("/api/accounts/mt5-63442826/symbol-metadata"));
+    expect(metadata.symbols).toContainEqual(
+      expect.objectContaining({ symbol: "XAUUSD.raw", bid: 2450, ask: 2450.2 }),
+    );
+  });
+
   test("repairs stale demo account mappings when the broker reports plain OctaFX symbols", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
 

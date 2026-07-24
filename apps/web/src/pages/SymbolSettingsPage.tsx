@@ -1,12 +1,15 @@
 import { Search } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Panel } from "../components/Panel";
 import {
   type AccountMappingPayload,
+  type BrokerSymbolMetadata,
   type GlobalAliasPayload,
   SymbolMappingModal,
+  type SymbolMappingSeed,
 } from "../components/SymbolMappingModal";
 import { type SymbolMappingRowData, SymbolMappingsTable } from "../components/SymbolMappingsTable";
+import { apiGet } from "../lib/api";
 
 export function SymbolSettingsPage({
   mappings,
@@ -17,6 +20,8 @@ export function SymbolSettingsPage({
   onSaveAccountMapping,
   onDelete,
   loading = false,
+  mappingSeed,
+  onMappingSeedConsumed,
 }: {
   mappings: SymbolMappingRowData[];
   defaultAccountId: string;
@@ -26,9 +31,34 @@ export function SymbolSettingsPage({
   onSaveAccountMapping: (payload: AccountMappingPayload) => Promise<void> | void;
   onDelete: (mapping: SymbolMappingRowData) => void;
   loading?: boolean;
+  mappingSeed?: SymbolMappingSeed | null;
+  onMappingSeedConsumed?: () => void;
 }) {
   const [filter, setFilter] = useState("");
   const [mappingModalOpen, setMappingModalOpen] = useState(false);
+  const [activeMappingSeed, setActiveMappingSeed] = useState<SymbolMappingSeed | null>(null);
+  const [symbolMetadata, setSymbolMetadata] = useState<BrokerSymbolMetadata[]>([]);
+  useEffect(() => {
+    if (!mappingSeed) return;
+    setActiveMappingSeed(mappingSeed);
+    setMappingModalOpen(true);
+  }, [mappingSeed]);
+  useEffect(() => {
+    if (!mappingModalOpen || !defaultAccountId) return;
+    let active = true;
+    void apiGet<{ symbols?: BrokerSymbolMetadata[] }>(
+      `/api/accounts/${defaultAccountId}/symbol-metadata`,
+    )
+      .then((data) => {
+        if (active) setSymbolMetadata(Array.isArray(data.symbols) ? data.symbols : []);
+      })
+      .catch(() => {
+        if (active) setSymbolMetadata([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [defaultAccountId, mappingModalOpen]);
   const filtered = useMemo(() => {
     const needle = filter.trim().toLowerCase();
     if (!needle) return mappings;
@@ -38,6 +68,12 @@ export function SymbolSettingsPage({
         .some((field) => field?.toLowerCase().includes(needle)),
     );
   }, [mappings, filter]);
+
+  function closeMappingModal() {
+    setMappingModalOpen(false);
+    setActiveMappingSeed(null);
+    onMappingSeedConsumed?.();
+  }
 
   return (
     <>
@@ -68,17 +104,19 @@ export function SymbolSettingsPage({
       </Panel>
       <SymbolMappingModal
         availableBrokerSymbols={availableBrokerSymbols}
+        brokerSymbolMetadata={symbolMetadata}
         defaultAccountId={defaultAccountId}
         defaultProviderId={defaultProviderId}
+        initialMapping={activeMappingSeed ?? undefined}
         key={mappingModalOpen ? "open" : "closed"}
-        onClose={() => setMappingModalOpen(false)}
+        onClose={closeMappingModal}
         onSaveAccountMapping={async (payload) => {
           await onSaveAccountMapping(payload);
-          setMappingModalOpen(false);
+          closeMappingModal();
         }}
         onSaveGlobalAlias={async (payload) => {
           await onSaveGlobalAlias(payload);
-          setMappingModalOpen(false);
+          closeMappingModal();
         }}
         open={mappingModalOpen}
       />
