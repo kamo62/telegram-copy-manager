@@ -1157,6 +1157,41 @@ describe("VIP Gold order lifecycle formats", () => {
     expect(result.matchedPatternIds).toContain("lifecycle.activation");
   });
 
+  test("classifies every quoted NEW-order status before open detection", () => {
+    const statuses = [
+      ["activated", "NO_SIGNAL"],
+      ["triggered", "NO_SIGNAL"],
+      ["filled", "NO_SIGNAL"],
+      ["deleted", "CANCEL_PENDING"],
+      ["closed", "CLOSE_TRADE"],
+      ["modified", "NO_SIGNAL"],
+    ] as const;
+    for (const direction of ["Buy", "Sell"] as const) {
+      for (const [status, commandType] of statuses) {
+        for (const emoji of ["", "🚀 "]) {
+          for (const trailing of [false, true]) {
+            const result = parseSignalText(
+              `Quoted signal: NEW ORDER - XAUUSD ${direction} Stop # 306947863 Entry: 4051.30 SL: 4057.30 TP: 4039.30 --- Comment: ${emoji}${direction} Stop ${status} # 306947863${trailing ? " XAUUSD @ 4051.30" : ""}`,
+              context,
+            );
+            expect(result.commandType).toBe(commandType);
+            expect(result.entry).toBeUndefined();
+            expect(result.providerOrderId).toBe("306947863");
+          }
+        }
+      }
+    }
+  });
+
+  test("keeps a fully valid quoted modification lifecycle command executable", () => {
+    const result = parseSignalText(
+      "Quoted signal: NEW ORDER - XAUUSD Buy Stop # 306947863 Entry: 4051.30 SL: 4057.30 TP: 4039.30 --- Comment: XAUUSD modified SL 4048",
+      context,
+    );
+    expect(result).toMatchObject({ commandType: "MODIFY_SL", newStopLoss: 4048 });
+    expect(result.entry).toBeUndefined();
+  });
+
   test("treats the live Sell Stop activation with a trailing quote as lifecycle context", () => {
     const result = parseSignalText(
       "Quoted signal: NEW ORDER - XAUUSD Sell Stop 📉 # 306947863 ...{ NEW }... Entry: 4051.30 SL: 4057.30 TP: 4039.30 --- Comment: 🚀 Sell Stop activated 🚀 # 306947863 XAUUSD @ 4051.30",
@@ -1222,6 +1257,18 @@ describe("VIP Gold order lifecycle formats", () => {
       stopLoss: 3995.9,
       providerOrderId: "299490138",
     });
+  });
+
+  test("does not promote hashtags or TP numbering into provider order ids", () => {
+    expect(
+      parseSignalText(
+        "NEW ORDER - XAUUSD Buy Stop #1 Entry: 4051.30 SL: 4045.30 TP1: 4060.30",
+        context,
+      ).providerOrderId,
+    ).toBeUndefined();
+    expect(
+      parseSignalText("BUY XAUUSD 4051.30 SL 4045.30 TP1 4060.30", context).providerOrderId,
+    ).toBeUndefined();
   });
 
   test("classifies a provider CLOSED report as a close keyed to its order id", () => {

@@ -529,11 +529,14 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const matchedPatternIds: string[] = [...candidate.matchedPatternIds];
   const warnings: string[] = [];
   const missingFields: string[] = [];
-  let commandType = detectCommandType(
-    upper,
-    matchedPatternIds,
-    Boolean(candidate.quotedText && /\b(?:LIMIT|STOP|ENTRY)\b/i.test(candidate.quotedText)),
-  );
+  const quotedStatusCommandType = classifyQuotedNewOrderStatus(candidate, matchedPatternIds);
+  let commandType =
+    quotedStatusCommandType ??
+    detectCommandType(
+      upper,
+      matchedPatternIds,
+      Boolean(candidate.quotedText && /\b(?:LIMIT|STOP|ENTRY)\b/i.test(candidate.quotedText)),
+    );
   let direction = detectDirection(upper);
   let orderType: OrderType | undefined = detectOrderType(upper);
   let entry = commandType === "OPEN_TRADE" ? extractEntry(text, direction, orderType) : undefined;
@@ -748,7 +751,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     warnings: [...new Set(warnings)],
     providerId: context.providerId,
     accountId: context.accountId,
-    providerOrderId: (text.match(/#\s*(\d+)/) ?? original.match(/#\s*(\d+)/))?.[1],
+    providerOrderId: extractProviderOrderId(text) ?? extractProviderOrderId(original),
     fingerprint: createMessageFingerprint(original),
   };
 }
@@ -1258,6 +1261,62 @@ function detectCommandType(
   if (hasOpenTradeIntent(upper)) return "OPEN_TRADE";
   matchedPatternIds.push("noise.no-signal");
   return "NO_SIGNAL";
+}
+
+function classifyQuotedNewOrderStatus(
+  candidate: ReturnType<typeof extractSignalCandidate>,
+  matchedPatternIds: string[],
+): CommandType | undefined {
+  if (
+    !candidate.quotedText ||
+    !candidate.commentText ||
+    !/\bNEW\s+ORDER\b/i.test(candidate.quotedText)
+  ) {
+    return undefined;
+  }
+  const comment = candidate.commentText;
+  const upper = comment.toUpperCase();
+  const mark = (pattern: string) => {
+    matchedPatternIds.push(`lifecycle.quoted-status.${pattern}`);
+  };
+  if (/\b(?:DELETED|CANCELLED|CANCELED)\b/.test(upper)) {
+    mark("deleted");
+    matchedPatternIds.push("lifecycle.deleted-cancel");
+    return "CANCEL_PENDING";
+  }
+  if (/\bCLOSED\b/.test(upper)) {
+    mark("closed");
+    matchedPatternIds.push("lifecycle.provider-closed");
+    return "CLOSE_TRADE";
+  }
+  if (/\bMODIFIED\b/.test(upper)) {
+    const modificationPatterns: string[] = [];
+    const normalized = upper.replace(/\bMODIFIED\b/g, "MODIFY");
+    const modification = detectCommandType(normalized, modificationPatterns);
+    if (
+      modification === "MODIFY_SL" ||
+      modification === "MODIFY_TP" ||
+      modification === "MOVE_SL_TO_BE" ||
+      modification === "TRAILING_STOP"
+    ) {
+      mark("modified-command");
+      return modification;
+    }
+    mark("modified");
+    return "NO_SIGNAL";
+  }
+  if (/\b(?:ACTIVATED|TRIGGERED|FILLED)\b/.test(upper)) {
+    mark("activation");
+    matchedPatternIds.push("lifecycle.activation");
+    return "NO_SIGNAL";
+  }
+  return undefined;
+}
+
+function extractProviderOrderId(text: string): string | undefined {
+  // Provider tickets in this integration are six or more digits; short hashtags
+  // are TP numbering or social text, not durable order identities.
+  return text.match(/#\s*(\d{6,})\b/)?.[1];
 }
 
 function isPendingOrderRemoval(upper: string, hasQuotedPendingSignal: boolean): boolean {

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.57.1 - 2026-07-24 (Patch)
+
+Release impact: Patch because this closes trade-safety review gaps without changing the public API shape; the EA close implementation must be recompiled and redeployed before pending-trade flattening is enabled.
+
+- Classified every status word in quoted NEW-order comments before open detection and constrained provider ticket extraction so TP numbering and short hashtags cannot become order identities.
+- Made provider order IDs take precedence over open-signal deduplication, ignored terminal trades for deduplication, and preferred fresh in-memory EA quotes over stale durable snapshots.
+- Held unmatched, ambiguous, incomplete, and incompatible lifecycle commands with explicit reconciliation evidence instead of dropping them.
+- Changed provider CLOSE handling for pending logical trades to a capability-gated flatten command that cancels pending orders and closes positions, reporting UNKNOWN/PARTIAL when exposure is not confirmed gone.
+- Added regression coverage for all six findings and aligned app and EA metadata at 1.57.1.
+- **Operators must recompile and reattach `mt5/TelegramTC_EA.mq5` before using the pending-trade flattening path.** Legacy EAs remain held by the existing capability gate.
+
 ## 1.57.0 - 2026-07-24 (Minor)
 
 Release impact: Minor because this adds broker-agnostic duplicate-open, naked-order, and provider-order lifecycle safety behavior without changing the MT5 payload contract.

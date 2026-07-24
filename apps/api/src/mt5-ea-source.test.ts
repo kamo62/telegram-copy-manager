@@ -174,9 +174,9 @@ describe("MT5 Expert Advisor source", () => {
   test("holds lifecycle closes for reconciliation when no live position matches", () => {
     const close =
       source.match(
-        /void ExecuteClose\(SignalCommand &command\)[\s\S]*?\n}\n\nvoid ClosePositionTicket/,
+        /void ExecuteClose\(SignalCommand &command\)[\s\S]*?\n}\n\nbool ClosePositionTicket/,
       )?.[0] ?? "";
-    expect(close).toContain("CollectPositionTickets(command, tickets)");
+    expect(close).toContain("CollectPositionTickets(command, initialPositions)");
     expect(close).toContain("ReportUnknown(command.queueItemId");
     expect(close).toContain("reconcile broker snapshot/history");
   });
@@ -301,7 +301,7 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket))");
     expect(source).toContain("MarkLifecycleExecuted(command, ticket)");
     expect(source).toMatch(
-      /for\(int index = 0; index < found; index\+\+\)\s*\{\s*if\(LifecycleAlreadyExecuted\(command, tickets\[index\]\)\)\s*continue;\s*pending\+\+;\s*ClosePositionTicket\(command, tickets\[index\]\);/,
+      /for\(int index = 0; index < positionFound; index\+\+\)[\s\S]*?LifecycleAlreadyExecuted\(command, ticket\)[\s\S]*?ClosePositionTicket\(command, ticket, result, requested, filled, remaining\)/,
     );
     expect(source).toContain(
       'command.targetRemainingVolume = StringToDouble(ValueFor(body, "targetRemainingVolume"))',

@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.57.0"
+#property version   "1.57.1"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -149,7 +149,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.40.0",
+      "1.57.1",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -752,32 +752,117 @@ void ModifyPositionTp(SignalCommand &command, ulong ticket, double takeProfit)
 
 void ExecuteClose(SignalCommand &command)
 {
-   ulong tickets[];
-   int found = CollectPositionTickets(command, tickets);
-   if(found <= 0)
+   ulong pendingTickets[];
+   int pendingFound = CollectPendingOrderTickets(command, pendingTickets);
+   ulong initialPositions[];
+   int initialPositionCount = CollectPositionTickets(command, initialPositions);
+   if(pendingFound <= 0 && initialPositionCount <= 0)
    {
-      ReportUnknown(command.queueItemId, "No matching position found; reconcile broker snapshot/history", command.brokerSymbol);
+      ReportUnknown(command.queueItemId, "No matching pending order or position; reconcile broker snapshot/history", command.commandType);
       return;
    }
 
-   int pending = 0;
-   for(int index = 0; index < found; index++)
+   int pendingRemoved = 0;
+   int pendingFailures = 0;
+   MqlTradeResult lastResult = {};
+   ulong lastOrderTicket = 0;
+   ulong lastPositionTicket = 0;
+   ulong lastDealTicket = 0;
+   for(int index = 0; index < pendingFound; index++)
    {
-      if(LifecycleAlreadyExecuted(command, tickets[index]))
-         continue;
-      pending++;
-      ClosePositionTicket(command, tickets[index]);
+      MqlTradeResult result = {};
+      if(RemovePendingOrder(command, pendingTickets[index], result))
+         pendingRemoved++;
+      else
+         pendingFailures++;
+      lastResult = result;
+      lastOrderTicket = pendingTickets[index];
    }
-   if(pending == 0)
-      ReportUnknown(command.queueItemId, "Lifecycle command was already executed; reconcile broker snapshot/history", command.commandType);
+
+   // A pending order may fill while the remove request is in flight. Re-scan
+   // after cancellation so CLOSE_TRADE handles the newly-created position too.
+   ulong positionTickets[];
+   int positionFound = CollectPositionTickets(command, positionTickets);
+   int positionsClosed = 0;
+   int positionFailures = 0;
+   bool partialResult = false;
+   double requestedVolume = 0.0;
+   double filledVolume = 0.0;
+   double remainingVolume = 0.0;
+   for(int index = 0; index < positionFound; index++)
+   {
+      ulong ticket = positionTickets[index];
+      if(LifecycleAlreadyExecuted(command, ticket))
+      {
+         positionFailures++;
+         lastPositionTicket = ticket;
+         continue;
+      }
+      MqlTradeResult result = {};
+      double requested = 0.0;
+      double filled = 0.0;
+      double remaining = 0.0;
+      if(ClosePositionTicket(command, ticket, result, requested, filled, remaining))
+         positionsClosed++;
+      else
+         positionFailures++;
+      if(result.retcode == TRADE_RETCODE_DONE_PARTIAL)
+         partialResult = true;
+      requestedVolume += requested;
+      filledVolume += filled;
+      remainingVolume += remaining;
+      lastResult = result;
+      lastPositionTicket = ticket;
+      lastDealTicket = result.deal;
+   }
+
+   ulong remainingPendingTickets[];
+   ulong remainingPositionTickets[];
+   int remainingPending = CollectPendingOrderTickets(command, remainingPendingTickets);
+   int remainingPositions = CollectPositionTickets(command, remainingPositionTickets);
+   string status = "UNKNOWN";
+   if(remainingPending == 0 && remainingPositions == 0 && pendingFailures == 0 && positionFailures == 0 && !partialResult)
+      status = "EXECUTED";
+   else if(pendingRemoved > 0 || positionsClosed > 0)
+      status = "PARTIAL";
+
+   string evidence = status == "EXECUTED"
+      ? "Pending orders and positions flattened"
+      : "Flatten incomplete; reconcile broker snapshot/history before retrying";
+   ReportWithVolumes(
+      command.queueItemId,
+      status,
+      lastResult.retcode,
+      lastResult.retcode_external,
+      lastResult.comment,
+      lastOrderTicket,
+      lastPositionTicket,
+      lastDealTicket,
+      0.0,
+      lastResult.price,
+      requestedVolume,
+      filledVolume,
+      remainingVolume,
+      evidence
+   );
 }
 
-void ClosePositionTicket(SignalCommand &command, ulong ticket)
+bool ClosePositionTicket(
+   SignalCommand &command,
+   ulong ticket,
+   MqlTradeResult &result,
+   double &requestedVolume,
+   double &filledVolume,
+   double &remainingVolume
+)
 {
+   requestedVolume = 0.0;
+   filledVolume = 0.0;
+   remainingVolume = 0.0;
    if(!PositionSelectByTicket(ticket))
    {
-      ReportUnknown(command.queueItemId, "Position disappeared before close; reconcile broker snapshot/history", command.brokerSymbol);
-      return;
+      result.comment = "Position disappeared before close";
+      return false;
    }
 
    string symbol = PositionGetString(POSITION_SYMBOL);
@@ -798,12 +883,13 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
 
    if(closeVolume <= 0.0)
    {
-      ReportFailure(command.queueItemId, "No valid partial-close volume provided", command.commandType);
-      return;
+      result.comment = command.commandType == "CLOSE_PARTIAL"
+         ? "No valid partial-close volume provided"
+         : "No valid close volume provided";
+      return false;
    }
 
    MqlTradeRequest request = {};
-   MqlTradeResult result = {};
    request.action = TRADE_ACTION_DEAL;
    request.position = ticket;
    request.symbol = symbol;
@@ -831,9 +917,10 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
    bool sent = OrderSend(request, result);
    if(sent && IsTradeSuccess(result.retcode))
       MarkLifecycleExecuted(command, ticket);
-   double filledVolume = result.volume;
-   double remainingVolume = MathMax(0.0, currentVolume - filledVolume);
-   ReportWithVolumes(command.queueItemId, result.retcode == TRADE_RETCODE_DONE_PARTIAL ? "PARTIAL" : (IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED"), result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.price, result.price, request.volume, filledVolume, remainingVolume, sent ? "" : IntegerToString(GetLastError()));
+   requestedVolume = request.volume;
+   filledVolume = result.volume;
+   remainingVolume = MathMax(0.0, currentVolume - filledVolume);
+   return sent && IsTradeSuccess(result.retcode);
 }
 
 ulong FindPositionTicket(SignalCommand &command)
@@ -1555,7 +1642,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.40.0",
+      "1.57.1",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

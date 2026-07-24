@@ -1,5 +1,16 @@
 # Handoff
 
+Updated: 2026-07-24 (v1.57.1 trade-safety review fixes)
+
+Applied all six HIGH/MEDIUM trade-safety review fixes on `fix/vipgold-duplicate-open-prevention`; nothing was pushed or deployed.
+
+- Quoted NEW-order status comments now stay lifecycle context: activated/triggered/filled are `NO_SIGNAL`, deleted is `CANCEL_PENDING`, closed is `CLOSE_TRADE`, and modified is non-open unless a complete supported modification command is present.
+- Provider order IDs take precedence over fingerprint/parameter deduplication, terminal trades no longer block reposts, fresh live EA quotes win over stale durable snapshots, and short hashtags/TP numbering are not ticket identities.
+- Unmatched, ambiguous, incomplete, and incompatible lifecycle commands are persisted as `HELD` with `LIFECYCLE_RECONCILIATION:*` reasons and original-message evidence.
+- Provider CLOSE on a pending logical trade remains `CLOSE_TRADE`; the EA now cancels matching pending orders, re-scans for fills, closes matching positions, and reports `UNKNOWN`/`PARTIAL` when exposure is not fully confirmed gone.
+- **EA recompile and reattach/redeploy are required before this flattening behavior can run.** The server holds close work for EAs without `lane2-close-contract`; legacy EAs are not silently used.
+- Added regressions for all six findings, including the pending-fill-before-close orphan case. Full gate was run after the final patch; no push/deploy was performed.
+
 Updated: 2026-07-24 (v1.57.0 duplicate-open prevention)
 
 Implemented the scoped trade-safety batch on `fix/vipgold-duplicate-open-prevention`; nothing was pushed or deployed.
