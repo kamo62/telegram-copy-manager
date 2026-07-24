@@ -1,6 +1,25 @@
 # Handoff
 
-Updated: 2026-07-24 (v1.57.1 trade-safety review fixes)
+Updated: 2026-07-24 (v1.57.2 trade-safety review fixes)
+
+Applied all four second-pass HIGH/MEDIUM close-flatten and EA-contract fixes on
+fix/vipgold-duplicate-open-prevention; nothing was pushed or deployed.
+
+- Pending-trade CLOSE_TRADE flattening now requires the fresh
+  pending-close-flatten-v1 capability or EA version >=1.57.1. The recompiled
+  EA advertises both lane2-close-contract and pending-close-flatten-v1.
+- Requeue rejects unbound LIFECYCLE_RECONCILIATION:* items, and the EA rejects
+  every lifecycle command with an empty logicalTradeId; empty identity is
+  never a wildcard.
+- PLACED and DONE_PARTIAL closes stay retryable until broker state confirms
+  the ticket is gone. Partial retry uses the current remaining volume and
+  idempotent replay cannot double-close.
+- Added runnable flatten-state coverage for pending-order removal, fill
+  rescan, partial handling, and idempotent replay, plus server/API and EA
+  contract regressions.
+- **EA recompile and reattach are required before this new flattening behavior
+  can run.** Old EAs keep the prior safe behavior and are held from the new
+  pending-close path until a fresh compatible register/heartbeat is confirmed.
 
 Applied all six HIGH/MEDIUM trade-safety review fixes on `fix/vipgold-duplicate-open-prevention`; nothing was pushed or deployed.
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.57.2 - 2026-07-24 (Patch)
+
+Release impact: Patch because this closes four trade-safety defects without changing the public API shape; the EA must be recompiled and reattached before the new pending-close contract can execute.
+
+- Added the unique pending-close-flatten-v1 EA capability and gated pending-trade CLOSE_TRADE flattening on a fresh compatible register/heartbeat or EA version >=1.57.1; older EAs remain held.
+- Rejected requeue of unbound LIFECYCLE_RECONCILIATION:* items and made the EA reject empty lifecycle identities instead of treating them as wildcards.
+- Kept PLACED and DONE_PARTIAL closes retryable until broker state confirms the position is gone, preserving idempotency without over-closing.
+- Added runnable flatten-state regression coverage for pending removal, fill rescan, partial retry, and idempotent replay, plus server and EA-contract regressions.
+- **Operators must recompile and reattach mt5/TelegramTC_EA.mq5 before using pending-trade flattening.** The new capability is pending-close-flatten-v1; no push or deployment was performed.
+
 ## 1.57.1 - 2026-07-24 (Patch)
 
 Release impact: Patch because this closes trade-safety review gaps without changing the public API shape; the EA close implementation must be recompiled and redeployed before pending-trade flattening is enabled.

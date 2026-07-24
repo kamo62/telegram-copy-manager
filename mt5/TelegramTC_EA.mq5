@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.57.1"
+#property version   "1.57.2"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -82,7 +82,7 @@ int trailingStopStateCount = 0;
 int CurrentPollSeconds = 0;
 datetime LastHeartbeatSentAt = 0;
 datetime LastHistoryBackfillAt = 0;
-string EaCapabilitiesJson = "[\"lane2-close-contract\"]";
+string EaCapabilitiesJson = "[\"lane2-close-contract\",\"pending-close-flatten-v1\"]";
 
 int OnInit()
 {
@@ -149,7 +149,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.57.1",
+      "1.57.2",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -215,7 +215,12 @@ void PollAndExecute()
    SignalCommand command = {};
    if(!ParseCommand(response, command))
    {
-      ReportFailure(command.queueItemId, "Could not parse poll payload", "parser");
+      ReportUnknown(command.queueItemId, "Could not parse poll payload", "parser");
+      return;
+   }
+   if(IsLifecycleCommand(command.commandType) && command.logicalTradeId == "")
+   {
+      ReportUnknown(command.queueItemId, "Lifecycle command rejected", "empty logicalTradeId");
       return;
    }
 
@@ -806,7 +811,7 @@ void ExecuteClose(SignalCommand &command)
          positionsClosed++;
       else
          positionFailures++;
-      if(result.retcode == TRADE_RETCODE_DONE_PARTIAL)
+      if(result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED)
          partialResult = true;
       requestedVolume += requested;
       filledVolume += filled;
@@ -915,11 +920,12 @@ bool ClosePositionTicket(
       command.targetPositionTicket);
 
    bool sent = OrderSend(request, result);
-   if(sent && IsTradeSuccess(result.retcode))
+   bool positionGone = !PositionSelectByTicket(ticket);
+   if(sent && result.retcode == TRADE_RETCODE_DONE && positionGone)
       MarkLifecycleExecuted(command, ticket);
    requestedVolume = request.volume;
    filledVolume = result.volume;
-   remainingVolume = MathMax(0.0, currentVolume - filledVolume);
+   remainingVolume = positionGone ? 0.0 : PositionGetDouble(POSITION_VOLUME);
    return sent && IsTradeSuccess(result.retcode);
 }
 
@@ -1008,7 +1014,7 @@ bool OrderMatchesCommand(SignalCommand &command)
 bool MatchesLogicalTradeComment(string brokerComment, string logicalTradeId)
 {
    if(logicalTradeId == "")
-      return true;
+      return false;
    if(StringFind(brokerComment, logicalTradeId) >= 0)
       return true;
    return StringFind(brokerComment, CompactTradeId(logicalTradeId)) >= 0;
@@ -1267,6 +1273,17 @@ bool ParseCommand(string body, SignalCommand &command)
       command.tpVolume[index] = StringToDouble(ValueFor(body, "tp" + leg + "Volume"));
    }
    return command.queueItemId != "" && command.commandType != "";
+}
+
+bool IsLifecycleCommand(string commandType)
+{
+   return commandType == "CANCEL_PENDING" ||
+          commandType == "MOVE_SL_TO_BE" ||
+          commandType == "MODIFY_SL" ||
+          commandType == "MODIFY_TP" ||
+          commandType == "TRAILING_STOP" ||
+          commandType == "CLOSE_TRADE" ||
+          commandType == "CLOSE_PARTIAL";
 }
 
 void ApplyPollConfig(string body)
@@ -1642,7 +1659,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.57.1",
+      "1.57.2",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

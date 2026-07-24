@@ -207,10 +207,37 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).not.toContain('availableSymbols\\":[\\"%s\\"]');
   });
 
-  test("reports its version and lane-2 close capability on registration and heartbeat", () => {
+  test("reports its version and both close capabilities on registration and heartbeat", () => {
+    expect(source).toContain('#property version   "1.57.2"');
+    expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
     expect(source).toContain('\\"lane2-close-contract\\"');
+  });
+
+  test("rejects empty lifecycle identity and never treats it as a broker-comment wildcard", () => {
+    expect(source).toContain(
+      'if(IsLifecycleCommand(command.commandType) && command.logicalTradeId == "")',
+    );
+    expect(source).toContain(
+      'ReportUnknown(command.queueItemId, "Lifecycle command rejected", "empty logicalTradeId")',
+    );
+    expect(source).toMatch(
+      /bool MatchesLogicalTradeComment\(string brokerComment, string logicalTradeId\)[\s\S]*?if\(logicalTradeId == ""\)\s*return false;/,
+    );
+  });
+
+  test("keeps partial and async closes retryable until broker state confirms the ticket is gone", () => {
+    const close =
+      source.match(/bool ClosePositionTicket\([\s\S]*?\n}\n\nulong FindPositionTicket/)?.[0] ?? "";
+    expect(close).toContain("bool positionGone = !PositionSelectByTicket(ticket);");
+    expect(close).toContain("result.retcode == TRADE_RETCODE_DONE && positionGone");
+    expect(close).toContain(
+      "remainingVolume = positionGone ? 0.0 : PositionGetDouble(POSITION_VOLUME);",
+    );
+    expect(source).toContain(
+      "result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED",
+    );
   });
 
   test("logs incoming lifecycle work with ticket and trade context for MT5 Journal tracing", () => {

@@ -103,6 +103,8 @@ const MAX_EXECUTION_LOG_LIMIT = 500;
 // silent EA, not a market price, and must not drive an execution decision.
 const QUOTE_FRESHNESS_MAX_AGE_MS = 5 * 60_000;
 const LANE2_CLOSE_CAPABILITY = "lane2-close-contract";
+const PENDING_CLOSE_FLATTEN_CAPABILITY = "pending-close-flatten-v1";
+const PENDING_CLOSE_FLATTEN_MIN_EA_VERSION = [1, 57, 1] as const;
 
 function capEquityCurve<T extends { equity: number }>(points: T[]): T[] {
   return downsampleSeries(points, EQUITY_CURVE_MAX_POINTS, (point) => point.equity);
@@ -4438,7 +4440,7 @@ class AppStore {
     const row = this.db
       .query(
         `SELECT queue_items.id, queue_items.account_id, queue_items.logical_trade_id,
-                queue_items.status, queue_items.payload_json, queue_items.parsed_signal_id,
+                queue_items.status, queue_items.held_reason, queue_items.payload_json, queue_items.parsed_signal_id,
                 parsed_signals.provider_id
          FROM queue_items
          LEFT JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
@@ -4448,6 +4450,18 @@ class AppStore {
     if (!row) return { statusCode: 404 as const, error: "Held queue item not found" };
     if (String(row.status) !== "HELD") {
       return { statusCode: 409 as const, error: "Only HELD queue items can be requeued" };
+    }
+
+    const heldReason = String(row.held_reason ?? "");
+    const logicalTradeId = String(row.logical_trade_id ?? "");
+    if (
+      heldReason.startsWith("LIFECYCLE_RECONCILIATION:") &&
+      (!logicalTradeId || !this.logicalTrade(logicalTradeId))
+    ) {
+      return {
+        statusCode: 409 as const,
+        error: "Lifecycle reconciliation item must be bound to a logical trade before requeue",
+      };
     }
 
     const originalAccountId = String(row.account_id ?? "");
@@ -4468,7 +4482,7 @@ class AppStore {
     const item: ExecutionQueueItem = {
       id: queueItemId,
       accountId: targetAccountId || undefined,
-      logicalTradeId: String(row.logical_trade_id ?? "") || undefined,
+      logicalTradeId: logicalTradeId || undefined,
       status: "PENDING",
       payload,
     };
@@ -4560,6 +4574,30 @@ class AppStore {
     return parseJson<string[]>(String(row?.ea_capabilities_json ?? "[]")).includes(
       LANE2_CLOSE_CAPABILITY,
     );
+  }
+
+  private supportsPendingCloseFlattenContract(accountId: string) {
+    const row = this.db
+      .query(
+        "SELECT ea_version, ea_capabilities_json, last_heartbeat_at FROM mt5_accounts WHERE id = ?",
+      )
+      .get(accountId) as Row | null;
+    const heartbeatAt = Date.parse(String(row?.last_heartbeat_at ?? ""));
+    const heartbeatFresh =
+      Number.isFinite(heartbeatAt) &&
+      Date.now() - heartbeatAt <= EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS * 1000;
+    if (!heartbeatFresh) return false;
+    return (
+      parseJson<string[]>(String(row?.ea_capabilities_json ?? "[]")).includes(
+        PENDING_CLOSE_FLATTEN_CAPABILITY,
+      ) || versionAtLeast(String(row?.ea_version ?? ""), PENDING_CLOSE_FLATTEN_MIN_EA_VERSION)
+    );
+  }
+
+  private requiresPendingCloseFlattenContract(item: ReturnType<typeof queueRow>) {
+    if (item.payload.commandType !== "CLOSE_TRADE" || !item.logicalTradeId) return false;
+    const trade = this.logicalTrade(item.logicalTradeId);
+    return trade?.status === "PENDING";
   }
 
   registerMt5Account(input: {
@@ -4760,6 +4798,33 @@ class AppStore {
           item,
         );
         this.alertHeldQueueItem(item.id, "EA_CAPABILITY_UNAVAILABLE");
+        return false;
+      }
+      if (
+        this.requiresPendingCloseFlattenContract(item) &&
+        !this.supportsPendingCloseFlattenContract(item.accountId)
+      ) {
+        const now = new Date().toISOString();
+        this.db
+          .query(
+            "UPDATE queue_items SET status = ?, held_reason = ?, leased_at = NULL, updated_at = ? WHERE id = ?",
+          )
+          .run(
+            "HELD",
+            `EA_CAPABILITY_UNAVAILABLE:${PENDING_CLOSE_FLATTEN_CAPABILITY}`,
+            now,
+            item.id,
+          );
+        this.audit(
+          "queue.ea-capability-hold",
+          "warn",
+          "Pending-close flatten held until the new EA contract is confirmed",
+          { ...item, reason: PENDING_CLOSE_FLATTEN_CAPABILITY },
+        );
+        this.alertHeldQueueItem(
+          item.id,
+          `EA_CAPABILITY_UNAVAILABLE:${PENDING_CLOSE_FLATTEN_CAPABILITY}`,
+        );
         return false;
       }
       if (item.payload.commandType !== "OPEN_TRADE") return true;
@@ -9032,8 +9097,8 @@ class AppStore {
       equity: 10000,
       marginMode: "HEDGING",
       availableSymbols: ["EURUSD.raw", "XAUUSD.r", "DJI30.raw"],
-      eaVersion: "1.40.0",
-      eaCapabilities: [LANE2_CLOSE_CAPABILITY],
+      eaVersion: "1.57.2",
+      eaCapabilities: [LANE2_CLOSE_CAPABILITY, PENDING_CLOSE_FLATTEN_CAPABILITY],
     });
     const rawText =
       "BUY EURUSD @ 1.0850\nSL 1.0810\nTP1 1.0900\nTP2 1.0950\nTP3 1.1000\nTP4 1.1050";
@@ -13520,6 +13585,18 @@ function optionalPositiveInteger(value: unknown, max: number) {
   if (!Number.isFinite(number)) return undefined;
   const integer = Math.floor(number);
   return integer > 0 ? Math.min(integer, max) : undefined;
+}
+
+function versionAtLeast(value: string, minimum: readonly [number, number, number]) {
+  const match = value.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
+  if (!match) return false;
+  const actual = [Number(match[1]), Number(match[2]), Number(match[3] ?? 0)];
+  for (let index = 0; index < minimum.length; index += 1) {
+    const actualPart = actual[index] ?? 0;
+    const minimumPart = minimum[index] ?? 0;
+    if (actualPart !== minimumPart) return actualPart > minimumPart;
+  }
+  return true;
 }
 
 function hashHint(value: string) {

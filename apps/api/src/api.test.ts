@@ -64,7 +64,11 @@ function createDialogTelegramAdapter(
 
 async function configureProviderWithAccount(
   app: ReturnType<typeof createApi>,
-  input: { availableSymbols: string[] },
+  input: {
+    availableSymbols: string[];
+    eaVersion?: string;
+    eaCapabilities?: string[];
+  },
 ) {
   const started = await json<{ profileId: string; sessionId: string }>(
     await app.request("/api/telegram/start", {
@@ -105,8 +109,8 @@ async function configureProviderWithAccount(
       equity: 10000,
       marginMode: "HEDGING",
       availableSymbols: input.availableSymbols,
-      eaVersion: "1.40.0",
-      eaCapabilities: ["lane2-close-contract"],
+      eaVersion: input.eaVersion ?? "1.57.2",
+      eaCapabilities: input.eaCapabilities ?? ["lane2-close-contract", "pending-close-flatten-v1"],
     }),
     headers: { "content-type": "application/json" },
   });
@@ -2991,14 +2995,31 @@ describe("Telegram TC API", () => {
     const ingestion = await app.runTelegramIngestionOnce();
     expect(ingestion.errors).toBe(0);
     const queue = await json<{
-      queue: Array<{ status: string; heldReason?: string; payload: { commandType: string } }>;
+      queue: Array<{
+        id: string;
+        status: string;
+        heldReason?: string;
+        payload: { commandType: string };
+      }>;
     }>(await app.request("/api/signals"));
-    expect(queue.queue).toContainEqual(
+    const held = queue.queue.find(
+      (item) => item.status === "HELD" && item.heldReason?.startsWith("LIFECYCLE_RECONCILIATION:"),
+    );
+    expect(held).toMatchObject(
       expect.objectContaining({
         status: "HELD",
         heldReason: expect.stringContaining("LIFECYCLE_RECONCILIATION:"),
         payload: expect.objectContaining({ commandType: "CLOSE_TRADE" }),
       }),
+    );
+    const requeue = await app.request(`/api/queue-items/${held?.id}/requeue`, {
+      method: "POST",
+      body: JSON.stringify({ mode: "original" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(requeue.status).toBe(409);
+    expect((await json<{ error: string }>(requeue)).error).toContain(
+      "must be bound to a logical trade",
     );
     const audit = await json<{ logs: Array<{ eventType: string; level: string }> }>(
       await app.request("/api/audit-logs?event=telegram.ingest.queue-failed"),
@@ -7132,6 +7153,73 @@ describe("Telegram TC API", () => {
     );
   });
 
+  test("holds pending close flattening until the recompiled EA capability is confirmed", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["XAUUSD"],
+      eaVersion: "1.56.2",
+      eaCapabilities: ["lane2-close-contract"],
+    });
+    const opened = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY XAUUSD STOP @ 4500\nSL 4490\nTP 4520",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const opening = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${opened.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    await app.request("/api/mt5/poll-line?accountId=mt5-63442826");
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: opening.queueItemId,
+        status: "EXECUTED",
+        retcode: 10008,
+        retcodeExternal: 0,
+        brokerComment: "pending accepted",
+        orderTicket: "50001",
+        requestedVolume: 0.04,
+        filledVolume: 0,
+        remainingVolume: 0.04,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const closing = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "CLOSED - XAUUSD Buy",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const close = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${closing.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    expect(await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text()).toContain(
+      "status=NO_WORK",
+    );
+    const queue = await json<{
+      queue: Array<{ id: string; status: string; heldReason?: string }>;
+    }>(await app.request("/api/signals"));
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        id: close.queueItemId,
+        status: "HELD",
+        heldReason: "EA_CAPABILITY_UNAVAILABLE:pending-close-flatten-v1",
+      }),
+    );
+  });
+
   test("holds a partial close with actual fill evidence instead of terminalizing the trade", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     const open = await json<{ item: { id: string } | null }>(
@@ -7204,6 +7292,44 @@ describe("Telegram TC API", () => {
         heldReason: "PARTIAL_FILL",
       }),
     );
+
+    const retry = await json<{ queueItemId: string }>(
+      await app.request(`/api/queue-items/${close.queueItemId}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "original" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const retryWork = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
+    ).text();
+    expect(retryWork).toContain(`queueItemId=${retry.queueItemId}`);
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: retry.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "remaining close confirmed",
+        positionTicket: "70001",
+        dealTicket: "70003",
+        requestedVolume: 0.02,
+        filledVolume: 0.02,
+        remainingVolume: 0,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const flattened = await json<{ logicalTrades: Array<{ id: string; status: string }> }>(
+      await app.request("/api/dashboard"),
+    );
+    expect(flattened.logicalTrades.find((trade) => trade.id === "trade-demo-1")?.status).toBe(
+      "CLOSED",
+    );
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text(),
+    ).toContain("status=NO_WORK");
   });
 
   test("holds a lost percentage-close delivery rather than replaying it against the remainder", async () => {
