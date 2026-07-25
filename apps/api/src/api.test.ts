@@ -2562,7 +2562,7 @@ describe("Telegram TC API", () => {
             replyToMessageId: "545",
             messageDate: "2026-07-24T13:02:00.000Z",
             rawText:
-              "... Comment: 🟢 CLOSED - XAUUSD Sell 🟢 # 306947863 ...{ CLOSED }... Profit: 2.21$",
+              "... Comment: 🟢 CLOSED - XAUUSD Sell 🟢 # 306947863 ...{ CLOSED }... Profit: 2.21$ ... Profit: 0.21%",
           },
         ]),
         telegramPollingEnabled: false,
@@ -6310,6 +6310,94 @@ describe("Telegram TC API", () => {
     );
     expect(dashboard.signalQueue.filter((item) => item.status === "PENDING")).toHaveLength(1);
     expect(dashboard.signalQueue.some((item) => item.status === "DUPLICATE")).toBe(true);
+  });
+
+  test("partitions parameter deduplication by linked account", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "200300400",
+        server: "OctaFX-Real",
+        company: "OctaFX",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols: ["XAUUSD"],
+        eaVersion: "1.57.4",
+        eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request(`/api/account-provider-links/mt5-200300400/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: false }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const first = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY XAUUSD LIMIT @ 1.0860\nSL 1.0810\nTP1 1.0910",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(
+      (await app.request(`/api/signals/${first.parsedSignalId}/approve`, { method: "POST" }))
+        .status,
+    ).toBe(200);
+
+    await app.request(`/api/account-provider-links/mt5-200300400/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    const second = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          rawText: "XAUUSD BUY LIMIT ENTRY 1.08604\nSTOP LOSS 1.0810\nTP 1.0920",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{
+      queueItems: string[];
+      heldQueueItems: string[];
+      status: string;
+    }>(await app.request(`/api/signals/${second.parsedSignalId}/approve`, { method: "POST" }));
+    expect(approval.status).toBe("PENDING");
+    expect(approval.queueItems).toHaveLength(1);
+    expect(approval.heldQueueItems).toHaveLength(1);
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-200300400")).text(),
+    ).toContain("status=WORK");
+
+    const queue = await json<{
+      queue: Array<{ accountId: string; status: string; heldReason?: string }>;
+    }>(await app.request("/api/signals"));
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        accountId: "mt5-63442826",
+        status: "DUPLICATE",
+        heldReason: "DUPLICATE_OPEN_SIGNAL",
+      }),
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({ accountId: "mt5-200300400", status: "LEASED" }),
+    );
   });
 
   test("sends a new provider order after an identical terminal order", async () => {

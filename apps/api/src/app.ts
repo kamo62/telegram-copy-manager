@@ -3612,16 +3612,17 @@ class AppStore {
         (target) =>
           !duplicateOrderIdTargets.includes(target) && !nakedPendingTargets.includes(target),
       );
-      const fingerprintDuplicate = queueableTargets.find((target) =>
-        this.hasDuplicateSignalFingerprint(
-          providerId,
-          target.accountId,
-          target.signal,
-          parsedSignalId,
-        ),
+      const duplicateTargets = queueableTargets.filter(
+        (target) =>
+          this.hasDuplicateSignalFingerprint(
+            providerId,
+            target.accountId,
+            target.signal,
+            parsedSignalId,
+          ) || this.hasDuplicateOpenSignal(providerId, target.accountId, target.signal),
       );
-      const parameterDuplicate = queueableTargets.find((target) =>
-        this.hasDuplicateOpenSignal(providerId, target.accountId, target.signal),
+      const queueableCleanTargets = queueableTargets.filter(
+        (target) => !duplicateTargets.includes(target),
       );
       const heldQueueItems = mappingHolds.map((target) => {
         const heldReason = `SYMBOL_MAPPING_${target.signal.mappingStatus.toUpperCase()}`;
@@ -3706,21 +3707,34 @@ class AppStore {
         });
         this.alertHeldQueueItem(queueItemId, `EA_OFFLINE:${target.accountId}`);
       }
-      if (fingerprintDuplicate || parameterDuplicate) {
-        const duplicateTarget = fingerprintDuplicate ?? parameterDuplicate!;
-        this.insertNonLeasedQueueItem(parsedSignalId, duplicateTarget.signal, "DUPLICATE", {
+      for (const duplicateTarget of duplicateTargets) {
+        const duplicateQueueItemId = this.insertNonLeasedQueueItem(
+          parsedSignalId,
+          duplicateTarget.signal,
+          "DUPLICATE",
+          {
+            accountId: duplicateTarget.accountId,
+            executionMode,
+            settings,
+            heldReason: "DUPLICATE_OPEN_SIGNAL",
+          },
+        );
+        heldQueueItems.push(duplicateQueueItemId);
+        this.audit("signal.duplicate-open", "warn", "Duplicate open signal held for this account", {
+          parsedSignalId,
+          providerId,
           accountId: duplicateTarget.accountId,
-          executionMode,
-          settings,
+          queueItemId: duplicateQueueItemId,
+          heldReason: "DUPLICATE_OPEN_SIGNAL",
         });
+      }
+      if (queueableTargets.length > 0 && queueableCleanTargets.length === 0) {
         this.db
           .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
           .run("DUPLICATE", parsedSignalId);
         return {
           statusCode: 409,
-          error: fingerprintDuplicate
-            ? "Signal has already been approved or queued"
-            : "Matching open signal has already been queued",
+          error: "Matching open signal has already been queued",
         };
       }
       if (queueableTargets.length === 0) {
@@ -3739,7 +3753,7 @@ class AppStore {
       }
       const queueItems: string[] = [];
       const logicalTradeIds: string[] = [];
-      for (const target of queueableTargets) {
+      for (const target of queueableCleanTargets) {
         const targetLogicalTradeId = `trade_${nanoid(10)}`;
         const targetQueueId = `queue_${nanoid(10)}`;
         const item = buildExecutionCommand(
@@ -10485,6 +10499,7 @@ class AppStore {
          JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
          LEFT JOIN logical_trades ON logical_trades.id = queue_items.logical_trade_id
          WHERE parsed_signals.provider_id = ?
+           AND queue_items.account_id = ?
            AND json_extract(queue_items.payload_json, '$.commandType') = 'OPEN_TRADE'
            AND queue_items.status IN ('PENDING','LEASED','EXECUTED','HELD')
            AND (
@@ -10493,7 +10508,7 @@ class AppStore {
              OR unixepoch(queue_items.created_at) >= unixepoch('now') - ?
            )`,
       )
-      .all(providerId, OPEN_SIGNAL_DEDUP_SECONDS) as Row[];
+      .all(providerId, accountId, OPEN_SIGNAL_DEDUP_SECONDS) as Row[];
     return rows.some((row) => {
       const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
       const tradeStatus = row.trade_status ? String(row.trade_status) : "";

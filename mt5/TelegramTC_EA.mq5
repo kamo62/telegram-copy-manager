@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.57.4"
+#property version   "1.57.5"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -149,7 +149,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.57.4",
+      "1.57.5",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -1745,7 +1745,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.57.4",
+      "1.57.5",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

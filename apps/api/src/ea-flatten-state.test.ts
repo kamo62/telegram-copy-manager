@@ -37,7 +37,7 @@ class FakeBroker implements FlattenBroker {
     if (position) {
       const remaining = position.volume - result.filledVolume;
       if (remaining <= 0.000001) this.positions.delete(ticket);
-      else this.positions.set(ticket, { ...position, volume: remaining });
+      else this.positions.set(ticket, { ...position, volume: Number(remaining.toFixed(8)) });
     }
     return result;
   }
@@ -79,7 +79,10 @@ describe("EA flatten state machine", () => {
     broker.pending = new Set(["order-1", "order-2"]);
     broker.positions.set("position-1", { ticket: "position-1", volume: 0.04 });
 
-    const result = flattenClose(broker, "partial-1", new Set<string>(), false);
+    const result = flattenClose(broker, "partial-1", new Set<string>(), false, {
+      kind: "LOTS",
+      value: 0.01,
+    });
 
     expect(result.removedPendingTickets).toEqual([]);
     expect([...broker.pending].sort()).toEqual(["order-1", "order-2"]);
@@ -98,25 +101,35 @@ describe("EA flatten state machine", () => {
     ];
     const executedTickets = new Set<string>();
 
-    const first = flattenClose(broker, "partial-2", executedTickets, false);
+    const first = flattenClose(broker, "partial-2", executedTickets, false, {
+      kind: "PERCENT",
+      value: 100,
+      targetRemainingVolume: 0,
+    });
     expect(first.status).toBe("PARTIAL");
     expect(first.closeAttempts).toEqual([
       { ticket: "position-1", requestedVolume: 0.04, filledVolume: 0 },
       { ticket: "position-2", requestedVolume: 0.03, filledVolume: 0.01 },
     ]);
-    expect(executedTickets).toContain("partial-2:position-2");
+    expect(executedTickets).not.toContain("partial-2:position-2");
     expect(executedTickets).not.toContain("partial-2:position-1");
     expect([...broker.pending].sort()).toEqual(["order-1", "order-2"]);
 
-    const retry = flattenClose(broker, "partial-2", executedTickets, false);
+    const retry = flattenClose(broker, "partial-2", executedTickets, false, {
+      kind: "PERCENT",
+      value: 100,
+      targetRemainingVolume: 0,
+    });
     expect(retry.status).toBe("EXECUTED");
     expect(retry.closeAttempts).toEqual([
       { ticket: "position-1", requestedVolume: 0.04, filledVolume: 0.04 },
+      { ticket: "position-2", requestedVolume: 0.02, filledVolume: 0.02 },
     ]);
     expect(broker.closeCalls).toEqual([
       { ticket: "position-1", volume: 0.04 },
       { ticket: "position-2", volume: 0.03 },
       { ticket: "position-1", volume: 0.04 },
+      { ticket: "position-2", volume: 0.02 },
     ]);
   });
 
@@ -125,10 +138,40 @@ describe("EA flatten state machine", () => {
     broker.positions.set("position-1", { ticket: "position-1", volume: 0.04 });
     const executedTickets = new Set(["partial-3:position-1"]);
 
-    const result = flattenClose(broker, "partial-3", executedTickets, false);
+    const result = flattenClose(broker, "partial-3", executedTickets, false, {
+      kind: "LOTS",
+      value: 0.04,
+    });
 
     expect(result.status).toBe("UNKNOWN");
     expect(result.closeAttempts).toEqual([]);
     expect(broker.closeCalls).toEqual([]);
+  });
+
+  test("requests PERCENT, LOTS, and TP_LEG slices instead of full position volume", () => {
+    const cases = [
+      {
+        partialClose: { kind: "PERCENT" as const, value: 50, targetRemainingVolume: 0.02 },
+        volume: 0.03,
+        expected: 0.01,
+      },
+      { partialClose: { kind: "LOTS" as const, value: 0.01 }, volume: 0.03, expected: 0.01 },
+      {
+        partialClose: { kind: "TP_LEG" as const, value: 1, allocationPercent: 25 },
+        volume: 0.04,
+        expected: 0.01,
+      },
+    ];
+
+    for (const { partialClose, volume, expected } of cases) {
+      const broker = new FakeBroker();
+      broker.pending.clear();
+      broker.positions.set("position-1", { ticket: "position-1", volume });
+      const result = flattenClose(broker, "partial-sizing", new Set<string>(), false, partialClose);
+      expect(result.closeAttempts).toEqual([
+        { ticket: "position-1", requestedVolume: expected, filledVolume: expected },
+      ]);
+      expect(broker.closeCalls).toEqual([{ ticket: "position-1", volume: expected }]);
+    }
   });
 });

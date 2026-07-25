@@ -1216,6 +1216,29 @@ describe("VIP Gold order lifecycle formats", () => {
     }
   });
 
+  test("recognizes prefixed activation notices without opening", () => {
+    for (const text of [
+      "XAUUSD Buy Stop activated #306947863 @4051.30",
+      "Order filled: Buy Stop XAUUSD @4051.30",
+      "VIP Gold: Sell Limit triggered #306947863 @4051.30",
+      "Quoted signal: NEW ORDER - XAUUSD Buy Stop Entry: 4051.30 SL: 4045.30 TP: 4060.30 --- Comment: XAUUSD Buy Stop activated #306947863 @4051.30",
+      "XAUUSD Buy Stop activated #306947863 @4051.30\r\n",
+    ]) {
+      const result = parseSignalText(text, context);
+      expect(result.commandType).toBe("NO_SIGNAL");
+      expect(result.entry).toBeUndefined();
+    }
+  });
+
+  test("lets a complete new-order block beat leading activation recap prose", () => {
+    const result = parseSignalText(
+      "BUY STOP FILLED yesterday, next setup below\r\nNEW ORDER - XAUUSD Buy Stop\r\n----------{ NEW }----------\r\nEntry: 4051.30\r\nSL: 4045.30\r\nTP: 4060.30",
+      context,
+    );
+    expect(result.commandType).toBe("OPEN_TRADE");
+    expect(result.entry).toEqual({ from: 4051.3 });
+  });
+
   test("keeps recap prose containing BUY STOP FILLED inside a real new order executable", () => {
     const result = parseSignalText(
       "BUY XAUUSD STOP @ 4500\nSL 4490\nTP 4520\nOur BUY STOP FILLED yesterday was a different trade",
@@ -1299,14 +1322,49 @@ describe("VIP Gold order lifecycle formats", () => {
     expect(quoted("CLOSED\n--------{ CLOSED }--------\nProfit: 0.38%").commandType).toBe(
       "CLOSE_TRADE",
     );
+    expect(quoted("Closed half here").commandType).toBe("CLOSE_PARTIAL");
+    expect(quoted("closed 50%").commandType).toBe("CLOSE_PARTIAL");
+    expect(quoted("Partially closed at TP1").commandType).toBe("CLOSE_PARTIAL");
+    expect(quoted("Market closed, order not filled").commandType).toBe("NO_SIGNAL");
+  });
+
+  test("shares conservative CLOSED classification across quoted and raw status paths", () => {
+    const quoted = (comment: string) =>
+      parseSignalText(
+        `Quoted signal: NEW ORDER - XAUUSD Buy Stop # 306947863 Entry: 4051.30 SL: 4045.30 TP: 4060.30\r\nComment:\r\n${comment}`,
+        context,
+      );
+    expect(parseSignalText("CLOSED TP1", context).commandType).toBe("CLOSE_PARTIAL");
+    expect(parseSignalText("CLOSED 0.01 lots", context)).toMatchObject({
+      commandType: "CLOSE_PARTIAL",
+      partialClose: { kind: "LOTS", value: 0.01 },
+    });
+    expect(parseSignalText("CLOSED a quarter", context)).toMatchObject({
+      commandType: "CLOSE_PARTIAL",
+    });
+    expect(parseSignalText("CLOSED a quarter", context).missingFields).toContain("partialClose");
+    expect(parseSignalText("{ CLOSED } TP1 hit", context).commandType).toBe("CLOSE_PARTIAL");
+    expect(parseSignalText("PARTIALLY CLOSED - XAUUSD", context)).toMatchObject({
+      commandType: "CLOSE_PARTIAL",
+    });
+    expect(parseSignalText("PARTIALLY CLOSED - XAUUSD", context).missingFields).toContain(
+      "partialClose",
+    );
+    expect(parseSignalText("Position fully CLOSED", context).commandType).toBe("CLOSE_TRADE");
     for (const comment of [
-      "Closed half here",
-      "closed 50%",
-      "Partially closed at TP1",
-      "Market closed, order not filled",
+      "CLOSED TP1",
+      "CLOSED 0.01 lots",
+      "CLOSED a quarter",
+      "{ CLOSED } TP1 hit",
     ]) {
-      expect(quoted(comment).commandType).toBe("NO_SIGNAL");
+      expect(quoted(comment).commandType).not.toBe("CLOSE_TRADE");
     }
+    expect(
+      parseSignalText(
+        "... Comment: 🟢 CLOSED - XAUUSD Sell 🟢 # 306947863 ...{ CLOSED }... Profit: 2.21$ ... Profit: 0.21%",
+        context,
+      ).commandType,
+    ).toBe("CLOSE_TRADE");
   });
 
   test("prefers a provider order id and ignores an out-of-sync phantom", () => {

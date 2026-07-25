@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.57.5 - 2026-07-25 (Patch)
+
+Release impact: Patch because this closes parser, account-routing, and partial-close sizing defects without changing the MT5 payload contract.
+
+- Recognized prefixed activation notices while letting complete new-order blocks win over recap prose.
+- Shared conservative CLOSED classification across quoted and raw messages; live VIP Gold msg-547 remains a full close despite its profit percentage.
+- Scoped parameter deduplication per account and queued clean linked accounts while recording duplicate accounts.
+- Mirrored PERCENT, LOTS, TP_LEG, target-remaining-volume, and requested-versus-filled partial sizing in the runnable flatten model.
+- **Recompile and reattach the EA; build from the final 1.57.5 commit.**
+
 ## 1.57.4 - 2026-07-25 (Patch)
 
 Release impact: Patch. Completes the CLOSE_PARTIAL safety hardening and removes the unsafe pending-close version fallback.

@@ -2,6 +2,14 @@ export type FlattenRetcode = "DONE" | "PLACED" | "DONE_PARTIAL" | "FAILED";
 
 export type FlattenPosition = { ticket: string; volume: number };
 
+export type FlattenPartialClose = {
+  kind: "PERCENT" | "LOTS" | "TP_LEG";
+  value: number;
+  volume?: number;
+  allocationPercent?: number;
+  targetRemainingVolume?: number;
+};
+
 export interface FlattenBroker {
   pendingOrderTickets(): string[];
   removePendingOrder(ticket: string): { retcode: "DONE" | "FAILED" };
@@ -34,6 +42,7 @@ export function flattenClose(
   // CLOSE_TRADE cancels working pending orders; CLOSE_PARTIAL must leave them
   // alone because it only reduces an already-open position.
   cancelPending = true,
+  partialClose?: FlattenPartialClose,
 ): FlattenResult {
   const removedPendingTickets: string[] = [];
   const initialPending = cancelPending ? broker.pendingOrderTickets() : [];
@@ -50,7 +59,7 @@ export function flattenClose(
   let partialResult = false;
   let attempted = 0;
   let succeeded = 0;
-  const partialClose = !cancelPending;
+  const partialMode = !cancelPending;
   for (const ticket of broker.positionTickets()) {
     const position = broker.position(ticket);
     if (!position) continue;
@@ -58,14 +67,24 @@ export function flattenClose(
       continue;
     }
     attempted += 1;
-    const result = broker.closePosition(ticket, position.volume);
+    const requestedVolume = partialMode
+      ? partialCloseVolume(position.volume, partialClose)
+      : position.volume;
+    if (requestedVolume <= 0) {
+      partialResult = true;
+      continue;
+    }
+    const result = broker.closePosition(ticket, requestedVolume);
     closeAttempts.push({
       ticket,
-      requestedVolume: position.volume,
+      requestedVolume,
       filledVolume: result.filledVolume,
     });
     const remaining = broker.position(ticket);
-    const complete = result.retcode === "DONE" && (partialClose || !remaining);
+    const complete =
+      result.retcode === "DONE" &&
+      result.filledVolume + 0.000001 >= requestedVolume &&
+      (partialMode || !remaining);
     if (complete) {
       executedTickets.add(`${idempotencyKey}:${ticket}`);
       succeeded += 1;
@@ -74,7 +93,7 @@ export function flattenClose(
     }
   }
 
-  if (partialClose) {
+  if (partialMode) {
     if (attempted === 0) {
       return { status: "UNKNOWN", removedPendingTickets, closeAttempts };
     }
@@ -94,4 +113,20 @@ export function flattenClose(
     return { status: "PARTIAL", removedPendingTickets, closeAttempts };
   }
   return { status: "UNKNOWN", removedPendingTickets, closeAttempts };
+}
+
+function partialCloseVolume(currentVolume: number, partialClose?: FlattenPartialClose) {
+  if (!partialClose) return 0;
+  const requested =
+    partialClose.kind === "PERCENT"
+      ? partialClose.targetRemainingVolume !== undefined
+        ? currentVolume - partialClose.targetRemainingVolume
+        : (currentVolume * partialClose.value) / 100
+      : partialClose.kind === "TP_LEG"
+        ? (partialClose.volume ??
+          (partialClose.allocationPercent
+            ? (currentVolume * partialClose.allocationPercent) / 100
+            : 0))
+        : partialClose.value;
+  return Math.min(currentVolume, Math.max(0, Number(requested.toFixed(8))));
 }

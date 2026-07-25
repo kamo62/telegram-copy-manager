@@ -1,6 +1,14 @@
 # Handoff
 
-Updated: 2026-07-25 (v1.57.4 CLOSE_PARTIAL safety completion)
+Updated: 2026-07-25 (v1.57.5 review fixes)
+
+## v1.57.5 — NO-GO review fixes
+
+- Activation notices accept symbol, order, and label prefixes plus trailing order/price text; complete Entry/SL/TP new-order blocks win over leading recap prose.
+- Quoted and raw CLOSED messages use one conservative classifier: TP legs, quantities, fractions, and ambiguity never become a full close; the live VIP Gold msg-547 profit percentage remains part of `CLOSE_TRADE`.
+- Open-signal parameter deduplication is account-scoped; duplicate linked accounts are recorded while clean accounts continue to queue.
+- The runnable partial-close model requests the EA-equivalent PERCENT, LOTS, or TP_LEG slice and marks a ticket executed only when filled volume covers the request.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.57.5 commit. Nothing was pushed or deployed.**
 
 ## v1.57.4 — final pre-deploy safety completion
 
