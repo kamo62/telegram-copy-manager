@@ -2,6 +2,14 @@ export type FlattenRetcode = "DONE" | "PLACED" | "DONE_PARTIAL" | "FAILED";
 
 export type FlattenPosition = { ticket: string; volume: number };
 
+export type FlattenRunner = { enabled: boolean; lotSize: number };
+
+export type FlattenCloseOptions = {
+  runner?: FlattenRunner;
+  minVolume?: number;
+  volumeStep?: number;
+};
+
 export type FlattenPartialClose = {
   kind: "PERCENT" | "LOTS" | "TP_LEG";
   value: number;
@@ -43,6 +51,7 @@ export function flattenClose(
   // alone because it only reduces an already-open position.
   cancelPending = true,
   partialClose?: FlattenPartialClose,
+  options: FlattenCloseOptions = {},
 ): FlattenResult {
   const removedPendingTickets: string[] = [];
   const initialPending = cancelPending ? broker.pendingOrderTickets() : [];
@@ -59,7 +68,8 @@ export function flattenClose(
   let partialResult = false;
   let attempted = 0;
   let succeeded = 0;
-  const partialMode = !cancelPending;
+  const runnerMode = cancelPending && Boolean(options.runner?.enabled);
+  const partialMode = !cancelPending || runnerMode;
   for (const ticket of broker.positionTickets()) {
     const position = broker.position(ticket);
     if (!position) continue;
@@ -67,24 +77,38 @@ export function flattenClose(
       continue;
     }
     attempted += 1;
-    const requestedVolume = partialMode
+    const requestedVolume = !cancelPending
       ? partialCloseVolume(position.volume, partialClose)
-      : position.volume;
+      : runnerMode
+        ? closeVolumeForRunner(
+            position.volume,
+            options.runner,
+            options.minVolume,
+            options.volumeStep,
+          )
+        : position.volume;
     if (requestedVolume <= 0) {
       partialResult = true;
       continue;
     }
     const result = broker.closePosition(ticket, requestedVolume);
+    const remainingPosition = broker.position(ticket);
+    const observedFilledVolume = Number(
+      (remainingPosition
+        ? Math.max(0, position.volume - remainingPosition.volume)
+        : position.volume
+      ).toFixed(8),
+    );
+    const confirmedFilledVolume = Math.max(result.filledVolume, observedFilledVolume);
     closeAttempts.push({
       ticket,
       requestedVolume,
-      filledVolume: result.filledVolume,
+      filledVolume: confirmedFilledVolume,
     });
-    const remaining = broker.position(ticket);
     const complete =
       result.retcode === "DONE" &&
-      result.filledVolume + 0.000001 >= requestedVolume &&
-      (partialMode || !remaining);
+      confirmedFilledVolume + 0.000001 >= requestedVolume &&
+      (partialMode || !remainingPosition);
     if (complete) {
       executedTickets.add(`${idempotencyKey}:${ticket}`);
       succeeded += 1;
@@ -95,7 +119,11 @@ export function flattenClose(
 
   if (partialMode) {
     if (attempted === 0) {
-      return { status: "UNKNOWN", removedPendingTickets, closeAttempts };
+      return {
+        status: removedPendingTickets.length > 0 ? "EXECUTED" : "UNKNOWN",
+        removedPendingTickets,
+        closeAttempts,
+      };
     }
     return {
       status: succeeded === attempted && !partialResult ? "EXECUTED" : "PARTIAL",
@@ -113,6 +141,21 @@ export function flattenClose(
     return { status: "PARTIAL", removedPendingTickets, closeAttempts };
   }
   return { status: "UNKNOWN", removedPendingTickets, closeAttempts };
+}
+
+export function closeVolumeForRunner(
+  currentVolume: number,
+  runner: FlattenRunner | undefined,
+  minVolume = 0.01,
+  volumeStep = 0.01,
+) {
+  if (!runner?.enabled || runner.lotSize <= 0 || currentVolume <= runner.lotSize) {
+    return currentVolume;
+  }
+  const candidate = currentVolume - runner.lotSize;
+  const step = volumeStep > 0 ? volumeStep : 0.01;
+  const normalized = Number((Math.floor((candidate + step * 0.000001) / step) * step).toFixed(8));
+  return normalized >= minVolume && normalized > 0 ? normalized : currentVolume;
 }
 
 function partialCloseVolume(currentVolume: number, partialClose?: FlattenPartialClose) {

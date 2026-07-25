@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.57.5"
+#property version   "1.58.0"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -58,6 +58,7 @@ struct SignalCommand
    double targetRemainingVolume;
    string idempotencyKey;
    bool runnerEnabled;
+   double runnerVolume;
    ulong targetOrderTicket;
    ulong targetPositionTicket;
    ulong targetDealTicket;
@@ -149,7 +150,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.57.5",
+      "1.58.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -955,7 +956,11 @@ bool ClosePositionTicket(
    long positionType = PositionGetInteger(POSITION_TYPE);
    double currentVolume = PositionGetDouble(POSITION_VOLUME);
    double closeVolume = command.commandType == "CLOSE_PARTIAL" ? 0.0 : currentVolume;
-   if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "PERCENT")
+   if(command.commandType == "CLOSE_TRADE" && command.runnerEnabled)
+      closeVolume = command.runnerVolume >= currentVolume
+         ? currentVolume
+         : NormalizeCloseVolume(symbol, currentVolume - command.runnerVolume, currentVolume);
+   else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "PERCENT")
       closeVolume = NormalizeCloseVolume(symbol, currentVolume - command.targetRemainingVolume, currentVolume);
    else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "TP_LEG")
    {
@@ -1002,16 +1007,16 @@ bool ClosePositionTicket(
 
    bool sent = OrderSend(request, result);
    bool positionGone = !PositionSelectByTicket(ticket);
-   // A full close is only complete once the broker shows the position gone, so a
-   // PLACED or partially filled result stays retryable. A partial close is
-   // complete on a DONE deal because the position is meant to survive; without
-   // this a replay would close a second slice of the same position.
-   bool fullClose = command.commandType == "CLOSE_TRADE";
-   if(sent && result.retcode == TRADE_RETCODE_DONE && (positionGone || !fullClose))
+   remainingVolume = positionGone ? 0.0 : PositionGetDouble(POSITION_VOLUME);
+   double observedFilledVolume = positionGone ? currentVolume : MathMax(0.0, currentVolume - remainingVolume);
+   filledVolume = MathMax(result.volume, observedFilledVolume);
+   bool fullClose = closeVolume >= currentVolume - 0.000001;
+   bool filledConfirmed = filledVolume + 0.000001 >= request.volume;
+   // Full closes require the position gone. Slice closes require a DONE result
+   // plus broker-confirmed volume, either from the deal or the observed delta.
+   if(sent && result.retcode == TRADE_RETCODE_DONE && filledConfirmed && (positionGone || !fullClose))
       MarkLifecycleExecuted(command, ticket);
    requestedVolume = request.volume;
-   filledVolume = result.volume;
-   remainingVolume = positionGone ? 0.0 : PositionGetDouble(POSITION_VOLUME);
    return sent && IsTradeSuccess(result.retcode);
 }
 
@@ -1347,6 +1352,7 @@ bool ParseCommand(string body, SignalCommand &command)
    command.targetRemainingVolume = StringToDouble(ValueFor(body, "targetRemainingVolume"));
    command.idempotencyKey = ValueFor(body, "idempotencyKey");
    command.runnerEnabled = ValueFor(body, "runnerEnabled") == "true";
+   command.runnerVolume = StringToDouble(ValueFor(body, "runnerVolume"));
    command.targetOrderTicket = (ulong)StringToInteger(ValueFor(body, "targetOrderTicket"));
    command.targetPositionTicket = (ulong)StringToInteger(ValueFor(body, "targetPositionTicket"));
    command.targetDealTicket = (ulong)StringToInteger(ValueFor(body, "targetDealTicket"));
@@ -1634,10 +1640,12 @@ double NormalizeCloseVolume(string symbol, double requested, double currentVolum
    double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
    if(step <= 0.0 || requested <= 0.0 || currentVolume <= 0.0)
       return 0.0;
+   if(requested >= currentVolume - step * 0.000001)
+      return currentVolume;
    double volume = MathMin(maxVolume, requested);
    volume = NormalizeDouble(MathFloor((volume + step * 0.000001) / step) * step, VolumeDigits(step));
-   if(volume < minVolume || volume >= currentVolume - step * 0.000001)
-      return 0.0;
+   if(volume < minVolume || volume <= 0.0)
+      return currentVolume;
    return volume;
 }
 
@@ -1745,7 +1753,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.57.5",
+      "1.58.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

@@ -210,7 +210,11 @@ async function approveGoldSellSmallRunnerLimit(app: ReturnType<typeof createApi>
   const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
     await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
   );
-  return { ...approval, shortId: approval.logicalTradeId.replace(/^trade[_-]/, "") };
+  return {
+    ...approval,
+    providerId,
+    shortId: approval.logicalTradeId.replace(/^trade[_-]/, ""),
+  };
 }
 
 async function reportPendingAccepted(
@@ -3487,6 +3491,94 @@ describe("Telegram TC API", () => {
     expect(closeWork).toContain("partialCloseValue=1");
     expect(closeWork).toContain("partialCloseVolume=0.02");
     expect(closeWork).toContain("targetPositionTicket=247596888");
+  });
+
+  test("keeps a configured runner open after a provider CLOSE_TRADE", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldSellSmallRunnerLimit(app);
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "opened",
+        orderTicket: "247694735",
+        positionTicket: "247694735",
+        dealTicket: "247694735",
+        requestedVolume: 0.02,
+        filledVolume: 0.02,
+        remainingVolume: 0.02,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await sendGoldSnapshot(app, {
+      shortId: approved.shortId,
+      bid: 4488.0,
+      positions: [
+        {
+          ticket: "247694735",
+          symbol: "XAUUSD",
+          type: 1,
+          volume: 0.02,
+          openPrice: 4488.46,
+          sl: 4494,
+          tp: 0,
+          profit: 0,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ],
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: approved.providerId,
+          accountId: "mt5-63442826",
+          rawText: "CLOSED - XAUUSD Sell",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const close = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_TRADE");
+    expect(closeWork).toContain("runnerEnabled=true");
+    expect(closeWork).toContain("runnerVolume=0.01");
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: close.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "runner remains",
+        positionTicket: "247694735",
+        dealTicket: "247694736",
+        requestedVolume: 0.01,
+        filledVolume: 0.01,
+        remainingVolume: 0.01,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const dashboard = await json<{
+      logicalTrades: Array<{ id: string; status: string; livePositionExists?: boolean }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.logicalTrades.find((trade) => trade.id === approved.logicalTradeId),
+    ).toMatchObject({
+      status: "OPEN",
+      livePositionExists: true,
+    });
   });
 
   test("uses planned TP volume when small runner allocation would round below broker minimum", async () => {
@@ -6983,11 +7075,11 @@ describe("Telegram TC API", () => {
     expect(approved.status).toBe("PENDING");
 
     const pollLine = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
-    expect(pollLine).toContain("commandType=CLOSE_PARTIAL");
+    expect(pollLine).toContain("commandType=CLOSE_TRADE");
     expect(pollLine).toContain("logicalTradeId=trade-demo-1");
     expect(pollLine).toContain("brokerSymbol=EURUSD.raw");
-    expect(pollLine).toContain("partialCloseKind=PERCENT");
-    expect(pollLine).toContain("partialCloseValue=50");
+    expect(pollLine).toContain("partialCloseKind=");
+    expect(pollLine).toContain("runnerEnabled=false");
 
     const duplicateParse = await json<{ parsedSignalId: string }>(
       await app.request("/api/parser/parse", {
@@ -7424,7 +7516,7 @@ describe("Telegram TC API", () => {
     ).toContain("status=NO_WORK");
   });
 
-  test("holds a lost percentage-close delivery rather than replaying it against the remainder", async () => {
+  test("holds a lost provider-close delivery rather than replaying it against the remainder", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-lifecycle-unknown-"));
     const databasePath = join(tempDir, "app.db");
     try {
@@ -7487,7 +7579,7 @@ describe("Telegram TC API", () => {
       const firstWork = await (
         await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
       ).text();
-      expect(firstWork).toContain("targetRemainingVolume=0.02");
+      expect(firstWork).toContain("commandType=CLOSE_TRADE");
       expect(firstWork).toContain(`idempotencyKey=${close.queueItemId}`);
 
       const db = new Database(databasePath);

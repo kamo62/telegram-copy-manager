@@ -208,7 +208,7 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.57.5"');
+    expect(source).toContain('#property version   "1.58.0"');
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
@@ -234,8 +234,13 @@ describe("MT5 Expert Advisor source", () => {
     // A full close still requires the position to be gone before it is marked
     // executed, so PLACED and DONE_PARTIAL stay retryable. The partial branch is
     // covered separately: it completes on DONE because the position survives.
-    expect(close).toContain("result.retcode == TRADE_RETCODE_DONE && (positionGone || !fullClose)");
-    expect(close).toContain('bool fullClose = command.commandType == "CLOSE_TRADE";');
+    expect(close).toContain(
+      "result.retcode == TRADE_RETCODE_DONE && filledConfirmed && (positionGone || !fullClose)",
+    );
+    expect(close).toContain("bool fullClose = closeVolume >= currentVolume - 0.000001;");
+    expect(close).toContain("command.runnerVolume");
+    expect(close).toContain("command.runnerEnabled");
+    expect(close).toContain("double observedFilledVolume");
     expect(close).toContain(
       "remainingVolume = positionGone ? 0.0 : PositionGetDouble(POSITION_VOLUME);",
     );
@@ -308,12 +313,15 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("No valid partial-close volume provided");
   });
 
-  test("refuses unrepresentable partial closes instead of minimum-clamping them into full closes", () => {
+  test("turns unrepresentable close slices into explicit full closes instead of no-ops", () => {
     expect(source).toContain(
       "double NormalizeCloseVolume(string symbol, double requested, double currentVolume)",
     );
     expect(source).toContain("MathFloor((volume + step * 0.000001) / step) * step");
-    expect(source).toContain("if(volume < minVolume || volume >= currentVolume - step * 0.000001)");
+    expect(source).toContain("if(volume < minVolume || volume <= 0.0)");
+    expect(source).toContain(
+      "if(volume < minVolume || volume <= 0.0)\n      return currentVolume;",
+    );
     expect(source).toContain(
       "closeVolume = NormalizeCloseVolume(symbol, currentVolume - command.targetRemainingVolume, currentVolume)",
     );
@@ -417,11 +425,11 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("marks a partial close idempotently executed so a replay cannot close a second slice", () => {
-    // A full close only completes once the position is gone, but a partial close
-    // is complete on a DONE deal because the position is meant to survive.
-    expect(source).toContain('bool fullClose = command.commandType == "CLOSE_TRADE";');
+    // A full-volume request only completes once the position is gone, while a
+    // confirmed slice can complete with the runner or another position left.
+    expect(source).toContain("bool filledConfirmed = filledVolume + 0.000001 >= request.volume;");
     expect(source).toContain(
-      "if(sent && result.retcode == TRADE_RETCODE_DONE && (positionGone || !fullClose))",
+      "if(sent && result.retcode == TRADE_RETCODE_DONE && filledConfirmed && (positionGone || !fullClose))",
     );
   });
 

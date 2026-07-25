@@ -186,11 +186,10 @@ describe("deterministic signal parser", () => {
     const modifySl = parseSignalText("EURUSD update SL 1.0830", context);
     const modifyTp = parseSignalText("Modify TP2 EURUSD 1.0975", context);
 
-    expect(closeHalf.commandType).toBe("CLOSE_PARTIAL");
-    expect(closeHalf.partialClose).toEqual({ kind: "PERCENT", value: 50 });
-    expect(closeHalfNoSymbol.commandType).toBe("CLOSE_PARTIAL");
-    expect(closeHalfNoSymbol.partialClose).toEqual({ kind: "PERCENT", value: 50 });
-    expect(closeHalfNoSymbol.missingFields).toContain("symbol");
+    expect(closeHalf.commandType).toBe("CLOSE_TRADE");
+    expect(closeHalf.partialClose).toBeUndefined();
+    expect(closeHalfNoSymbol.commandType).toBe("CLOSE_TRADE");
+    expect(closeHalfNoSymbol.partialClose).toBeUndefined();
     expect(closeTp1.partialClose).toEqual({ kind: "TP_LEG", value: 1 });
     expect(moveBe.commandType).toBe("MOVE_SL_TO_BE");
     expect(cancel.commandType).toBe("CANCEL_PENDING");
@@ -324,7 +323,7 @@ describe("deterministic signal parser", () => {
     expect(signal.takeProfits.map((target) => target.price)).toEqual([4738, 4731, 4723, 4700]);
     expect(shouldRequireManualReview(signal)).toBe(false);
     expect(resultUpdate.commandType).toBe("NO_SIGNAL");
-    expect(closedPositionsUpdate.commandType).toBe("NO_SIGNAL");
+    expect(closedPositionsUpdate.commandType).toBe("CLOSE_TRADE");
     expect(tpUpdate.commandType).toBe("MARK_TP_HIT");
   });
 
@@ -510,7 +509,7 @@ describe("deterministic signal parser", () => {
     expect(shouldRequireManualReview(result)).toBe(false);
   });
 
-  test("inherits quoted signal context for close-half replies", () => {
+  test("inherits quoted signal context for provider close replies", () => {
     const kalContext: ParserContext = {
       providerId: "kal-vip",
       accountId: "mt5-demo-1",
@@ -524,8 +523,8 @@ describe("deterministic signal parser", () => {
       kalContext,
     );
 
-    expect(signal.commandType).toBe("CLOSE_PARTIAL");
-    expect(signal.partialClose).toEqual({ kind: "PERCENT", value: 50 });
+    expect(signal.commandType).toBe("CLOSE_TRADE");
+    expect(signal.partialClose).toBeUndefined();
     expect(signal.canonicalSymbol).toBe("XAUUSD");
     expect(signal.brokerSymbol).toBe("XAUUSD.r");
     expect(signal.matchedPatternIds).toContain("quote.reply-context");
@@ -1162,6 +1161,9 @@ describe("VIP Gold order lifecycle formats", () => {
       ["activated", "NO_SIGNAL"],
       ["triggered", "NO_SIGNAL"],
       ["filled", "NO_SIGNAL"],
+      ["executed", "NO_SIGNAL"],
+      ["opened", "NO_SIGNAL"],
+      ["live", "NO_SIGNAL"],
       ["deleted", "CANCEL_PENDING"],
       ["modified", "NO_SIGNAL"],
     ] as const;
@@ -1220,6 +1222,9 @@ describe("VIP Gold order lifecycle formats", () => {
     for (const text of [
       "XAUUSD Buy Stop activated #306947863 @4051.30",
       "Order filled: Buy Stop XAUUSD @4051.30",
+      "XAUUSD Buy Stop executed\n# 1\nEntry: 4051.30\nSL: 4045.30\nTP: 4060.30",
+      "XAUUSD Buy Stop opened #306947863 @4051.30",
+      "XAUUSD Buy Stop live #306947863 @4051.30",
       "VIP Gold: Sell Limit triggered #306947863 @4051.30",
       "Quoted signal: NEW ORDER - XAUUSD Buy Stop Entry: 4051.30 SL: 4045.30 TP: 4060.30 --- Comment: XAUUSD Buy Stop activated #306947863 @4051.30",
       "XAUUSD Buy Stop activated #306947863 @4051.30\r\n",
@@ -1228,6 +1233,15 @@ describe("VIP Gold order lifecycle formats", () => {
       expect(result.commandType).toBe("NO_SIGNAL");
       expect(result.entry).toBeUndefined();
     }
+  });
+
+  test("treats a post-block Comment activation as lifecycle context even without quote retrieval", () => {
+    const result = parseSignalText(
+      "NEW ORDER - XAUUSD Buy Stop\nEntry: 4051.30\nSL: 4045.30\nTP: 4060.30\nComment:\nXAUUSD Buy Stop activated\n# 306947863\nXAUUSD @ 4051.30",
+      context,
+    );
+    expect(result.commandType).toBe("NO_SIGNAL");
+    expect(result.entry).toBeUndefined();
   });
 
   test("lets a complete new-order block beat leading activation recap prose", () => {
@@ -1312,52 +1326,34 @@ describe("VIP Gold order lifecycle formats", () => {
     expect(result.providerOrderId).toBe("298696672");
   });
 
-  test("only maps a complete quoted CLOSED report to a full close", () => {
+  test("maps every provider CLOSED phrasing to a full close and keeps bounded non-trade uses inert", () => {
     const quoted = (comment: string) =>
       parseSignalText(
         `Quoted signal: NEW ORDER - XAUUSD Buy Stop # 306947863 Entry: 4051.30 SL: 4045.30 TP: 4060.30\n\nComment:\n${comment}`,
         context,
       );
 
-    expect(quoted("CLOSED\n--------{ CLOSED }--------\nProfit: 0.38%").commandType).toBe(
-      "CLOSE_TRADE",
-    );
-    expect(quoted("Closed half here").commandType).toBe("CLOSE_PARTIAL");
-    expect(quoted("closed 50%").commandType).toBe("CLOSE_PARTIAL");
-    expect(quoted("Partially closed at TP1").commandType).toBe("CLOSE_PARTIAL");
-    expect(quoted("Market closed, order not filled").commandType).toBe("NO_SIGNAL");
-  });
-
-  test("shares conservative CLOSED classification across quoted and raw status paths", () => {
-    const quoted = (comment: string) =>
-      parseSignalText(
-        `Quoted signal: NEW ORDER - XAUUSD Buy Stop # 306947863 Entry: 4051.30 SL: 4045.30 TP: 4060.30\r\nComment:\r\n${comment}`,
-        context,
-      );
-    expect(parseSignalText("CLOSED TP1", context).commandType).toBe("CLOSE_PARTIAL");
-    expect(parseSignalText("CLOSED 0.01 lots", context)).toMatchObject({
-      commandType: "CLOSE_PARTIAL",
-      partialClose: { kind: "LOTS", value: 0.01 },
-    });
-    expect(parseSignalText("CLOSED a quarter", context)).toMatchObject({
-      commandType: "CLOSE_PARTIAL",
-    });
-    expect(parseSignalText("CLOSED a quarter", context).missingFields).toContain("partialClose");
-    expect(parseSignalText("{ CLOSED } TP1 hit", context).commandType).toBe("CLOSE_PARTIAL");
-    expect(parseSignalText("PARTIALLY CLOSED - XAUUSD", context)).toMatchObject({
-      commandType: "CLOSE_PARTIAL",
-    });
-    expect(parseSignalText("PARTIALLY CLOSED - XAUUSD", context).missingFields).toContain(
-      "partialClose",
-    );
-    expect(parseSignalText("Position fully CLOSED", context).commandType).toBe("CLOSE_TRADE");
-    for (const comment of [
-      "CLOSED TP1",
-      "CLOSED 0.01 lots",
-      "CLOSED a quarter",
-      "{ CLOSED } TP1 hit",
+    for (const text of [
+      "Closed half",
+      "closed 50%",
+      "Closed 25 percent",
+      "Closed 1/2",
+      "Closed most positions",
+      "Partially closed at TP1",
+      "Position fully CLOSED",
+      "CLOSED 100%",
+      "{ CLOSED }",
+      "CLOSED - XAUUSD Sell",
     ]) {
-      expect(quoted(comment).commandType).not.toBe("CLOSE_TRADE");
+      expect(quoted(text).commandType).toBe("CLOSE_TRADE");
+      expect(quoted(text).partialClose).toBeUndefined();
+    }
+    for (const text of [
+      "market closed, order not filled",
+      "session closed",
+      "closed for the day",
+    ]) {
+      expect(quoted(text).commandType).toBe("NO_SIGNAL");
     }
     expect(
       parseSignalText(
@@ -1365,6 +1361,14 @@ describe("VIP Gold order lifecycle formats", () => {
         context,
       ).commandType,
     ).toBe("CLOSE_TRADE");
+    expect(parseSignalText("Close TP1 EURUSD", context)).toMatchObject({
+      commandType: "CLOSE_PARTIAL",
+      partialClose: { kind: "TP_LEG", value: 1 },
+    });
+    expect(parseSignalText("Tp 1 ✅", context).commandType).toBe("MARK_TP_HIT");
+    expect(parseSignalText("Cancelled Buy Stop on XAUUSD", context).commandType).toBe(
+      "CANCEL_PENDING",
+    );
   });
 
   test("prefers a provider order id and ignores an out-of-sync phantom", () => {

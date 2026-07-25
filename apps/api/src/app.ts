@@ -3887,6 +3887,7 @@ class AppStore {
             target.accountId,
             executionMode,
             settings,
+            target.config.runner,
             lifecycleFailure.match.reason ??
               `missing ${lifecycleFailure.signal.missingFields.filter((field) => field !== "symbol" && field !== "brokerSymbol").join(", ")}`,
           ),
@@ -3940,6 +3941,7 @@ class AppStore {
               target.accountId,
               executionMode,
               settings,
+              target.config.runner,
               "matched-logical-trade-could-not-be-loaded",
             );
             return { body: { queueItemId, heldQueueItems: [queueItemId], status: "HELD" } };
@@ -3953,6 +3955,7 @@ class AppStore {
               target.accountId,
               executionMode,
               settings,
+              target.config.runner,
               `${actionState.reason}:trade-${trade.status}`,
             );
             return { body: { queueItemId, heldQueueItems: [queueItemId], status: "HELD" } };
@@ -3978,6 +3981,7 @@ class AppStore {
               target.accountId,
               executionMode,
               settings,
+              target.config.runner,
               "percentage-close-needs-current-broker-position-snapshot",
             );
             return { body: { queueItemId, heldQueueItems: [queueItemId], status: "HELD" } };
@@ -3996,6 +4000,7 @@ class AppStore {
               target.config.riskMode === "percent"
                 ? target.config.riskAmount
                 : settings.defaultRiskPercent,
+            runner: target.config.runner,
           });
           if (absoluteSignal.partialClose?.kind === "PERCENT") {
             queueItem.payload.partialClose = absoluteSignal.partialClose;
@@ -10349,6 +10354,7 @@ class AppStore {
       accountId: string;
       executionMode: ExecutionMode;
       settings: AppSettings;
+      runner?: ProviderExecutionConfig["runner"];
       heldReason?: string;
     },
   ) {
@@ -10358,6 +10364,7 @@ class AppStore {
       executionMode: options.executionMode,
       volume: options.settings.defaultLotSize,
       riskPercent: options.settings.defaultRiskPercent,
+      runner: options.runner,
     });
     item.status = status;
     return this.insertQueueItem(item, parsedSignalId, { heldReason: options.heldReason });
@@ -10369,6 +10376,7 @@ class AppStore {
     accountId: string,
     executionMode: ExecutionMode,
     settings: AppSettings,
+    runner: ProviderExecutionConfig["runner"],
     reason: string,
   ) {
     const heldReason = `LIFECYCLE_RECONCILIATION:${reason}`;
@@ -10376,6 +10384,7 @@ class AppStore {
       accountId,
       executionMode,
       settings,
+      runner,
       heldReason,
     });
     this.db.query("UPDATE parsed_signals SET status = ? WHERE id = ?").run("HELD", parsedSignalId);
@@ -11035,14 +11044,20 @@ class AppStore {
         };
       } else if (input.status === "EXECUTED") {
         const filled = Number(input.filledVolume ?? 0);
+        const remaining = Number(input.remainingVolume ?? 0);
         updated = {
           ...trade,
           status:
             trade.status === "PENDING" && filled <= 0 && !truthyBrokerTicket(input.positionTicket)
               ? "CANCELLED"
-              : "CLOSED",
-          livePositionExists: false,
-          matchedBrokerTickets: [],
+              : payload.runner?.enabled && remaining > CLOSE_VOLUME_EPSILON
+                ? "OPEN"
+                : "CLOSED",
+          livePositionExists: payload.runner?.enabled && remaining > CLOSE_VOLUME_EPSILON,
+          matchedBrokerTickets:
+            payload.runner?.enabled && remaining > CLOSE_VOLUME_EPSILON && input.positionTicket
+              ? [input.positionTicket]
+              : [],
           legs: trade.legs.map((leg) => ({
             ...leg,
             status:

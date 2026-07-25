@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { type FlattenBroker, type FlattenPosition, flattenClose } from "./ea-flatten-state";
+import {
+  closeVolumeForRunner,
+  type FlattenBroker,
+  type FlattenPosition,
+  flattenClose,
+} from "./ea-flatten-state";
 
 class FakeBroker implements FlattenBroker {
   pending = new Set(["order-1"]);
@@ -8,6 +13,7 @@ class FakeBroker implements FlattenBroker {
     retcode: "DONE" | "DONE_PARTIAL" | "PLACED" | "FAILED";
     filledVolume: number;
   }> = [];
+  observedCloseVolumes: number[] = [];
   closeCalls: Array<{ ticket: string; volume: number }> = [];
 
   pendingOrderTickets() {
@@ -35,7 +41,8 @@ class FakeBroker implements FlattenBroker {
     const result = this.closeResults.shift() ?? { retcode: "DONE" as const, filledVolume: volume };
     const position = this.positions.get(ticket);
     if (position) {
-      const remaining = position.volume - result.filledVolume;
+      const appliedVolume = this.observedCloseVolumes.shift() ?? result.filledVolume;
+      const remaining = position.volume - appliedVolume;
       if (remaining <= 0.000001) this.positions.delete(ticket);
       else this.positions.set(ticket, { ...position, volume: Number(remaining.toFixed(8)) });
     }
@@ -173,5 +180,72 @@ describe("EA flatten state machine", () => {
       ]);
       expect(broker.closeCalls).toEqual([{ ticket: "position-1", volume: expected }]);
     }
+  });
+
+  test("closes the whole position when the runner is disabled", () => {
+    const broker = new FakeBroker();
+    broker.pending.clear();
+    broker.positions.set("position-1", { ticket: "position-1", volume: 0.03 });
+
+    const result = flattenClose(broker, "close-full", new Set<string>(), true, undefined, {
+      runner: { enabled: false, lotSize: 0.01 },
+    });
+
+    expect(result.status).toBe("EXECUTED");
+    expect(broker.closeCalls).toEqual([{ ticket: "position-1", volume: 0.03 }]);
+    expect(broker.position("position-1")).toBeUndefined();
+  });
+
+  test("leaves exactly the configured runner lot when the close slice has room", () => {
+    const broker = new FakeBroker();
+    broker.pending.clear();
+    broker.positions.set("position-1", { ticket: "position-1", volume: 0.05 });
+
+    const result = flattenClose(broker, "close-runner", new Set<string>(), true, undefined, {
+      runner: { enabled: true, lotSize: 0.02 },
+      minVolume: 0.01,
+      volumeStep: 0.01,
+    });
+
+    expect(result.status).toBe("EXECUTED");
+    expect(broker.closeCalls).toEqual([{ ticket: "position-1", volume: 0.03 }]);
+    expect(broker.position("position-1")?.volume).toBe(0.02);
+    expect(closeVolumeForRunner(0.05, { enabled: true, lotSize: 0.02 })).toBe(0.03);
+  });
+
+  test("falls back to a full close when a 0.01-lot runner has no closable room", () => {
+    const broker = new FakeBroker();
+    broker.pending.clear();
+    broker.positions.set("position-1", { ticket: "position-1", volume: 0.01 });
+
+    const result = flattenClose(broker, "close-min", new Set<string>(), true, undefined, {
+      runner: { enabled: true, lotSize: 0.01 },
+      minVolume: 0.01,
+      volumeStep: 0.01,
+    });
+
+    expect(result.status).toBe("EXECUTED");
+    expect(broker.closeCalls).toEqual([{ ticket: "position-1", volume: 0.01 }]);
+    expect(broker.position("position-1")).toBeUndefined();
+    expect(closeVolumeForRunner(0.015, { enabled: true, lotSize: 0.01 })).toBe(0.015);
+  });
+
+  test("accepts an observed position delta when the deal reports no filled volume", () => {
+    const broker = new FakeBroker();
+    broker.pending.clear();
+    broker.positions.set("position-1", { ticket: "position-1", volume: 0.03 });
+    broker.closeResults = [{ retcode: "DONE", filledVolume: 0 }];
+    broker.observedCloseVolumes = [0.01];
+
+    const result = flattenClose(broker, "close-observed", new Set<string>(), false, {
+      kind: "LOTS",
+      value: 0.01,
+    });
+
+    expect(result.status).toBe("EXECUTED");
+    expect(result.closeAttempts).toEqual([
+      { ticket: "position-1", requestedVolume: 0.01, filledVolume: 0.01 },
+    ]);
+    expect(broker.position("position-1")?.volume).toBe(0.02);
   });
 });

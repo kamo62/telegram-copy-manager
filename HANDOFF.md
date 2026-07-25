@@ -1,6 +1,14 @@
 # Handoff
 
-Updated: 2026-07-25 (v1.57.5 review fixes)
+Updated: 2026-07-25 (v1.58.0 close-semantics redesign)
+
+## v1.58.0 — simplifying close semantics
+
+- Provider CLOSED prose always produces `CLOSE_TRADE`, including partial-sounding amounts and TP wording; only TP-leg allocation or explicit operator/manual commands produce `CLOSE_PARTIAL`.
+- `CLOSE_TRADE` closes the full position unless the provider runner is enabled and the non-runner slice meets broker minimum/step; otherwise it closes fully, including 0.01-lot positions.
+- EA close idempotency now requires a confirmed fill or observed volume delta, and runner survival is reflected in the app flatten model.
+- Activation, executed, opened, and live pending-order notices never open trades; historical recap lines do not suppress a complete new order.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.58.0 source before enabling live execution. Nothing was pushed or deployed.**
 
 ## v1.57.5 — NO-GO review fixes
 

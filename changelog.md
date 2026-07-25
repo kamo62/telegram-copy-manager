@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.58.0 - 2026-07-25 (Minor)
+
+Release impact: Minor because provider close messages now close the traded position by default, with only an explicitly configured runner left open.
+
+- Simplified CLOSED parsing to one provider-close event; prose amounts no longer create partial closes.
+- Made CLOSE_TRADE runner-aware and fail closed to a full close when the non-runner slice cannot meet broker volume rules.
+- Required filled-volume or observed-volume confirmation before marking a close slice executed.
+- Classified EXECUTED, OPENED, and LIVE pending-order notices as lifecycle events while preserving genuine new orders after historical recaps.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; the EA must be rebuilt from the final 1.58.0 source.**
+
 ## 1.57.5 - 2026-07-25 (Patch)
 
 Release impact: Patch because this closes parser, account-routing, and partial-close sizing defects without changing the MT5 payload contract.

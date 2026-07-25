@@ -1200,17 +1200,14 @@ function detectCommandType(
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter(Boolean);
   if (
-    activationLines.some((line) => isActivationStatusLine(line) && !hasCompleteEntryBlock(upper))
+    activationLines.some((line) => isActivationStatusLine(line) && !isHistoricalStatusLine(line))
   ) {
     matchedPatternIds.push("lifecycle.activation");
     return "NO_SIGNAL";
   }
-  const closedStatus = classifyClosedStatus(upper);
-  if (closedStatus) {
-    matchedPatternIds.push(
-      closedStatus === "CLOSE_TRADE" ? "lifecycle.provider-closed" : "lifecycle.closed-qualified",
-    );
-    return closedStatus;
+  if (isProviderClosedStatus(upper)) {
+    matchedPatternIds.push("lifecycle.provider-closed");
+    return "CLOSE_TRADE";
   }
   if (/\bTP\b.*\b(NOT\s+(?:REACHED|HIT)|WAIT|MONITOR)\b/.test(upper)) {
     matchedPatternIds.push("noise.tp-not-reached");
@@ -1242,7 +1239,7 @@ function detectCommandType(
   }
   if (isCloseCommand(upper)) {
     matchedPatternIds.push("lifecycle.close");
-    if (/\b(HALF|PARTIAL)\b|\b\d{1,3}\s*%(?=\s|$)|\bTP\s*[1-4]\b/.test(upper)) {
+    if (/^\s*CLOSE\s+TP\s*[1-4]\b/.test(upper)) {
       return "CLOSE_PARTIAL";
     }
     return "CLOSE_TRADE";
@@ -1272,42 +1269,26 @@ function detectCommandType(
 
 function isActivationStatusLine(line: string): boolean {
   return (
-    /\b(?:BUY|SELL)\s+(?:LIMIT|STOP)\b.*\b(?:ACTIVATED|TRIGGERED|FILLED)\b/.test(line) ||
-    /\b(?:ACTIVATED|TRIGGERED|FILLED)\b.*\b(?:BUY|SELL)\s+(?:LIMIT|STOP)\b/.test(line) ||
+    /\b(?:BUY|SELL)\s+(?:LIMIT|STOP)\b.*\b(?:ACTIVATED|TRIGGERED|FILLED|EXECUTED|OPENED|LIVE)\b/.test(
+      line,
+    ) ||
+    /\b(?:ACTIVATED|TRIGGERED|FILLED|EXECUTED|OPENED|LIVE)\b.*\b(?:BUY|SELL)\s+(?:LIMIT|STOP)\b/.test(
+      line,
+    ) ||
     /^\s*(?:ORDER\s+)?FILLED\b/.test(line)
   );
 }
 
-function hasCompleteEntryBlock(upper: string): boolean {
-  return (
-    (/\bENTRY\s*[:@]?\s*\d+(?:\.\d+)?/.test(upper) ||
-      /\b(?:BUY|SELL)\b[^\n]*@\s*\d+(?:\.\d+)?/.test(upper)) &&
-    /\b(?:SL|STOP\s*LOSS)\s*[:@]?\s*\d+(?:\.\d+)?/.test(upper) &&
-    /\b(?:TP\s*\d*|TAKE\s+PROFIT)\s*[:@]?\s*\d+(?:\.\d+)?/.test(upper)
-  );
+function isHistoricalStatusLine(line: string): boolean {
+  return /\b(?:YESTERDAY|EARLIER|RECAP|ALREADY|FROM\s+EARLIER)\b/.test(line);
 }
 
-type ClosedStatus = "CLOSE_TRADE" | "CLOSE_PARTIAL" | "NO_SIGNAL";
-
-function classifyClosedStatus(upper: string): ClosedStatus | undefined {
-  if (!/\bCLOSED\b/.test(upper)) return undefined;
-
-  const closeContext = upper.replace(/\bPROFIT\s*:[^\n]*/g, "");
-  const closeQuantity =
-    /\b(?:CLOSE|CLOSED|CLOSING)\b[^\n]{0,32}\b(?:TP\s*[1-4]|\d+(?:\.\d+)?\s*(?:%|LOTS?)|HALF|PARTIAL(?:LY)?|A\s+QUARTER|A\s+THIRD)/.test(
-      closeContext,
-    ) || /\b(?:PARTIAL(?:LY)?|HALF)\s+CLOSED\b/.test(closeContext);
-  if (closeQuantity) return "CLOSE_PARTIAL";
-
-  if (
-    /\{\s*CLOSED\s*\}/.test(upper) ||
-    /\bCLOSED\s*[-–—]\s*[A-Z]{2,}/.test(upper) ||
-    /\bPOSITION\s+FULLY\s+CLOSED\b/.test(upper) ||
-    /(?:^|\n)\s*CLOSED\s*$/.test(upper)
-  ) {
-    return "CLOSE_TRADE";
-  }
-  return "NO_SIGNAL";
+function isProviderClosedStatus(upper: string): boolean {
+  return (
+    /\bCLOSED\b/.test(upper) &&
+    !/\b(?:MARKET|SESSION)\s+(?:IS\s+)?CLOSED\b/.test(upper) &&
+    !/\bCLOSED\s+FOR\s+(?:THE\s+)?DAY\b/.test(upper)
+  );
 }
 
 function classifyQuotedNewOrderStatus(
@@ -1332,14 +1313,13 @@ function classifyQuotedNewOrderStatus(
     return "CANCEL_PENDING";
   }
   if (/\bCLOSED\b/.test(upper)) {
-    const closedStatus = classifyClosedStatus(upper);
-    if (closedStatus === "CLOSE_TRADE") {
+    if (isProviderClosedStatus(upper)) {
       mark("closed");
       matchedPatternIds.push("lifecycle.provider-closed");
-      return closedStatus;
+      return "CLOSE_TRADE";
     }
-    mark("closed-ambiguous");
-    return closedStatus ?? "NO_SIGNAL";
+    mark("closed-non-trade");
+    return "NO_SIGNAL";
   }
   if (/\bMODIFIED\b/.test(upper)) {
     const modificationPatterns: string[] = [];
@@ -1937,11 +1917,6 @@ function extractRiskPercent(text: string): number | undefined {
 function extractPartialClose(upper: string): PartialCloseInstruction | undefined {
   const tpLeg = upper.match(/\bTP\s*([1-4])\b/);
   if (tpLeg?.[1]) return { kind: "TP_LEG", value: Number(tpLeg[1]) };
-  const lots = upper.match(/\b(?:CLOSE|CLOSED|CLOSING)\b[^\n]{0,32}?\b(\d+(?:\.\d+)?)\s*LOTS?\b/);
-  if (lots?.[1]) return { kind: "LOTS", value: Number(lots[1]) };
-  const percent = upper.match(/\b(\d{1,3})\s*%(?=\s|$)/);
-  if (percent?.[1]) return { kind: "PERCENT", value: Number(percent[1]) };
-  if (/\bHALF\b/.test(upper)) return { kind: "PERCENT", value: 50 };
   return undefined;
 }
 
