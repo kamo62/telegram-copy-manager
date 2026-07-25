@@ -182,6 +182,32 @@ describe("EA flatten state machine", () => {
     }
   });
 
+  test("does not escalate sub-minimum partial slices to full closes", () => {
+    for (const partialClose of [
+      { kind: "LOTS" as const, value: 0.09 },
+      { kind: "TP_LEG" as const, value: 2, volume: 0.06 },
+      { kind: "PERCENT" as const, value: 30, targetRemainingVolume: 0.21 },
+    ]) {
+      const broker = new FakeBroker();
+      broker.pending.clear();
+      broker.positions.set("position-1", { ticket: "position-1", volume: 0.3 });
+
+      const result = flattenClose(
+        broker,
+        "partial-sub-minimum",
+        new Set<string>(),
+        false,
+        partialClose,
+        { minVolume: 0.1, volumeStep: 0.1 },
+      );
+
+      expect(result.status).toBe("PARTIAL");
+      expect(result.closeAttempts).toEqual([]);
+      expect(broker.closeCalls).toEqual([]);
+      expect(broker.position("position-1")?.volume).toBe(0.3);
+    }
+  });
+
   test("closes the whole position when the runner is disabled", () => {
     const broker = new FakeBroker();
     broker.pending.clear();

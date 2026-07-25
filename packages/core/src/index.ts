@@ -1268,26 +1268,40 @@ function detectCommandType(
 }
 
 function isActivationStatusLine(line: string): boolean {
+  const symbol = "(?:GOLD|SILVER|[A-Z]{6}|(?:US|NAS|SPX|GER|UK|JP)\\d{2,4})";
+  const sideAndOrder = `(?:BUY|SELL)(?:\\s+${symbol})?\\s+(?:LIMIT|STOP)`;
+  const status = "(?:ACTIVATED|TRIGGERED|FILLED|EXECUTED)";
   return (
-    /\b(?:BUY|SELL)\s+(?:LIMIT|STOP)\b.*\b(?:ACTIVATED|TRIGGERED|FILLED|EXECUTED|OPENED|LIVE)\b/.test(
-      line,
-    ) ||
-    /\b(?:ACTIVATED|TRIGGERED|FILLED|EXECUTED|OPENED|LIVE)\b.*\b(?:BUY|SELL)\s+(?:LIMIT|STOP)\b/.test(
-      line,
-    ) ||
+    new RegExp(`\\b${sideAndOrder}\\b.*\\b${status}\\b`).test(line) ||
+    new RegExp(`\\b${status}\\b.*\\b${sideAndOrder}\\b`).test(line) ||
+    /\bORDER\b.*\b(?:OPENED|LIVE)\b/.test(line) ||
+    /\b(?:IS|NOW)\s+(?:OPENED|LIVE)\b/.test(line) ||
     /^\s*(?:ORDER\s+)?FILLED\b/.test(line)
   );
 }
 
 function isHistoricalStatusLine(line: string): boolean {
-  return /\b(?:YESTERDAY|EARLIER|RECAP|ALREADY|FROM\s+EARLIER)\b/.test(line);
+  return /\b(?:YESTERDAY|EARLIER|RECAP|FROM\s+EARLIER)\b/.test(line);
 }
 
 function isProviderClosedStatus(upper: string): boolean {
+  const tradeText = upper
+    .replace(/\b(?:MARKETS?|SESSION)\s+(?:IS\s+|ARE\s+)?(?:NOW\s+)?CLOSED\b/g, "")
+    .replace(/\bCLOSED\s+FOR\s+(?:THE\s+)?DAY\b/g, "");
+  if (!/\bCLOSED\b/.test(tradeText)) return false;
+
+  const closeSymbol = "(?:GOLD|SILVER|XAU/?USD|XAG/?USD|[A-Z]{6}|(?:US|NAS|SPX|GER|UK|JP)\\d{2,4})";
   return (
-    /\bCLOSED\b/.test(upper) &&
-    !/\b(?:MARKET|SESSION)\s+(?:IS\s+)?CLOSED\b/.test(upper) &&
-    !/\bCLOSED\s+FOR\s+(?:THE\s+)?DAY\b/.test(upper)
+    /\{\s*CLOSED\s*\}/.test(tradeText) ||
+    new RegExp(`\\bCLOSED\\s*[-:]\\s*${closeSymbol}\\b`).test(tradeText) ||
+    tradeText.split("\n").some((line) => /^\s*CLOSED\s*[!.]?\s*$/.test(line)) ||
+    /\b(?:CLOSED|CLOSING)\s+(?:HALF|MOST\s+POSITIONS?|ALL\s+(?:POSITIONS?|TRADES?|ORDERS?)|(?:\d{1,3}\s*(?:%|PERCENT)|1\s*\/\s*2))(?=\s|$)/.test(
+      tradeText,
+    ) ||
+    /\bPARTIALLY\s+CLOSED\b/.test(tradeText) ||
+    /\b(?:POSITION|TRADE|ORDER)\s+(?:IS\s+)?(?:FULLY\s+)?CLOSED\b/.test(tradeText) ||
+    /\bCLOSED\b[^\n]{0,32}\b(?:TP\s*[1-4]|SL|ENTRY)\b/.test(tradeText) ||
+    /\bCLOSED\b[^\n]{0,32}#\s*\d{6,}\b/.test(tradeText)
   );
 }
 

@@ -179,14 +179,19 @@ async function createEaOfflineApproval(
   return { app, approved, databasePath, tempDir };
 }
 
-async function approveGoldSellSmallRunnerLimit(app: ReturnType<typeof createApi>) {
+async function approveGoldSellSmallRunnerLimit(
+  app: ReturnType<typeof createApi>,
+  options: { executionMode?: "VIRTUAL_TP" | "SPLIT_ORDER"; enableRunner?: boolean } = {},
+) {
   const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
   await app.request(`/api/providers/${providerId}`, {
     method: "PATCH",
     body: JSON.stringify({
       riskMode: "fixed",
       riskAmount: 0.02,
-      runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+      ...(options.enableRunner === false
+        ? {}
+        : { runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 } }),
       takeProfitLevels: [
         { leg: 1, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
         { leg: 2, percentage: 25, strategy: { kind: "no-change" } },
@@ -208,7 +213,13 @@ async function approveGoldSellSmallRunnerLimit(app: ReturnType<typeof createApi>
     }),
   );
   const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
-    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+      body: options.executionMode
+        ? JSON.stringify({ executionMode: options.executionMode })
+        : undefined,
+      headers: options.executionMode ? { "content-type": "application/json" } : undefined,
+    }),
   );
   return {
     ...approval,
@@ -3579,6 +3590,77 @@ describe("Telegram TC API", () => {
       status: "OPEN",
       livePositionExists: true,
     });
+  });
+
+  test("does not apply a runner enabled after a SPLIT_ORDER trade opened", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldSellSmallRunnerLimit(app, {
+      executionMode: "SPLIT_ORDER",
+      enableRunner: false,
+    });
+    await app.request(`/api/providers/${approved.providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "opened",
+        orderTicket: "247694736",
+        positionTicket: "247694736",
+        dealTicket: "247694736",
+        requestedVolume: 0.02,
+        filledVolume: 0.02,
+        remainingVolume: 0.02,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await sendGoldSnapshot(app, {
+      shortId: approved.shortId,
+      bid: 4488,
+      positions: [
+        {
+          ticket: "247694736",
+          symbol: "XAUUSD",
+          type: 1,
+          volume: 0.02,
+          openPrice: 4488.46,
+          sl: 4494,
+          tp: 0,
+          profit: 0,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ],
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: approved.providerId,
+          accountId: "mt5-63442826",
+          rawText: "CLOSED - XAUUSD Sell",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" });
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_TRADE");
+    expect(closeWork).toContain("executionMode=VIRTUAL_TP");
+    expect(closeWork).toContain("runnerEnabled=false");
+    expect(closeWork).toContain("runnerVolume=");
+    expect(closeWork).not.toContain("runnerEnabled=true");
   });
 
   test("uses planned TP volume when small runner allocation would round below broker minimum", async () => {

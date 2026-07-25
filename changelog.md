@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.58.1 - 2026-07-26 (Patch)
+
+Release impact: Patch because this restores structural lifecycle detection and corrects close-volume and runner execution without changing the public payload contract.
+
+- Held casual `CLOSED` prose for review while preserving structural provider closes, including the live msg-547 close and full-close semantics for partial-sounding wording.
+- Fixed activation detection for symbol-between-side/order forms, status-first forms, recap lines, and `LIVE` entry wording.
+- Kept sub-minimum partial slices held instead of escalating them to full closes; runner-only fallback still closes fully when there is no room.
+- Reported successful runner closes as `EXECUTED` with the remnant volume and ignored newly enabled runners for legacy `SPLIT_ORDER` trades.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; the EA must be rebuilt from the final 1.58.1 source.**
+
 ## 1.58.0 - 2026-07-25 (Minor)
 
 Release impact: Minor because provider close messages now close the traded position by default, with only an explicitly configured runner left open.

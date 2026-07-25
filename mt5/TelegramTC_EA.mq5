@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.58.0"
+#property version   "1.58.1"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -150,7 +150,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.58.0",
+      "1.58.1",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -835,7 +835,11 @@ void ExecuteClose(SignalCommand &command)
    ulong remainingPendingTickets[];
    ulong remainingPositionTickets[];
    int remainingPending = CollectPendingOrderTickets(command, remainingPendingTickets);
-   int remainingPositions = CollectPositionTickets(command, remainingPositionTickets);
+   int remainingPositionMatches = CollectPositionTickets(command, remainingPositionTickets);
+   int remainingPositions = 0;
+   for(int index = 0; index < remainingPositionMatches; index++)
+      if(!LifecycleAlreadyExecuted(command, remainingPositionTickets[index]))
+         remainingPositions++;
    string status = "UNKNOWN";
    if(remainingPending == 0 && remainingPositions == 0 && pendingFailures == 0 && positionFailures == 0 && !partialResult)
       status = "EXECUTED";
@@ -957,9 +961,13 @@ bool ClosePositionTicket(
    double currentVolume = PositionGetDouble(POSITION_VOLUME);
    double closeVolume = command.commandType == "CLOSE_PARTIAL" ? 0.0 : currentVolume;
    if(command.commandType == "CLOSE_TRADE" && command.runnerEnabled)
+   {
       closeVolume = command.runnerVolume >= currentVolume
          ? currentVolume
          : NormalizeCloseVolume(symbol, currentVolume - command.runnerVolume, currentVolume);
+      if(closeVolume <= 0.0)
+         closeVolume = currentVolume;
+   }
    else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "PERCENT")
       closeVolume = NormalizeCloseVolume(symbol, currentVolume - command.targetRemainingVolume, currentVolume);
    else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "TP_LEG")
@@ -1645,7 +1653,7 @@ double NormalizeCloseVolume(string symbol, double requested, double currentVolum
    double volume = MathMin(maxVolume, requested);
    volume = NormalizeDouble(MathFloor((volume + step * 0.000001) / step) * step, VolumeDigits(step));
    if(volume < minVolume || volume <= 0.0)
-      return currentVolume;
+      return 0.0;
    return volume;
 }
 
@@ -1753,7 +1761,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.58.0",
+      "1.58.1",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

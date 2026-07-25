@@ -78,7 +78,7 @@ export function flattenClose(
     }
     attempted += 1;
     const requestedVolume = !cancelPending
-      ? partialCloseVolume(position.volume, partialClose)
+      ? partialCloseVolume(position.volume, partialClose, options.minVolume, options.volumeStep)
       : runnerMode
         ? closeVolumeForRunner(
             position.volume,
@@ -158,7 +158,12 @@ export function closeVolumeForRunner(
   return normalized >= minVolume && normalized > 0 ? normalized : currentVolume;
 }
 
-function partialCloseVolume(currentVolume: number, partialClose?: FlattenPartialClose) {
+function partialCloseVolume(
+  currentVolume: number,
+  partialClose: FlattenPartialClose | undefined,
+  minVolume = 0.01,
+  volumeStep = 0.01,
+) {
   if (!partialClose) return 0;
   const requested =
     partialClose.kind === "PERCENT"
@@ -171,5 +176,11 @@ function partialCloseVolume(currentVolume: number, partialClose?: FlattenPartial
             ? (currentVolume * partialClose.allocationPercent) / 100
             : 0))
         : partialClose.value;
-  return Math.min(currentVolume, Math.max(0, Number(requested.toFixed(8))));
+  if (requested <= 0) return 0;
+  const step = volumeStep > 0 ? volumeStep : 0.01;
+  if (requested >= currentVolume - step * 0.000001) return currentVolume;
+  const normalized = Number(
+    (Math.floor((Math.min(currentVolume, requested) + step * 0.000001) / step) * step).toFixed(8),
+  );
+  return normalized >= minVolume && normalized > 0 ? normalized : 0;
 }

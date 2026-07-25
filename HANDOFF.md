@@ -1,6 +1,14 @@
 # Handoff
 
-Updated: 2026-07-25 (v1.58.0 close-semantics redesign)
+Updated: 2026-07-26 (v1.58.1 close-safety follow-up)
+
+## v1.58.1 — close-safety follow-up
+
+- Provider close detection is structural: `{ CLOSED }`, `CLOSED - <SYMBOL>`, standalone `CLOSED`, explicit partial-sounding close wording, trade-context close wording, and provider IDs close fully; casual prose is held for review.
+- Activation detection handles symbol-between-side/order and status-first forms, removes `ALREADY` as a historical veto, keeps historical recap lines safe, and does not mistake `GOLD BUY LIMIT ... LIVE` for an activation.
+- EA partial slices below broker minimum/step return zero and remain retryable; only the runner close caller falls back to a full close. Successful runner closes exclude their marked remnant from incomplete-flatten counting and report `EXECUTED` with `remainingVolume`.
+- Close payloads apply the current runner only when the persisted logical trade execution mode is `VIRTUAL_TP`; legacy `SPLIT_ORDER` trades close fully.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.58.1 source before enabling live execution. Nothing was pushed or deployed.**
 
 ## v1.58.0 — simplifying close semantics
 

@@ -4000,7 +4000,7 @@ class AppStore {
               target.config.riskMode === "percent"
                 ? target.config.riskAmount
                 : settings.defaultRiskPercent,
-            runner: target.config.runner,
+            runner: trade.executionMode === "VIRTUAL_TP" ? target.config.runner : undefined,
           });
           if (absoluteSignal.partialClose?.kind === "PERCENT") {
             queueItem.payload.partialClose = absoluteSignal.partialClose;

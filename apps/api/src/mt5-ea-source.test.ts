@@ -8,9 +8,8 @@ describe("MT5 Expert Advisor source", () => {
   test("keeps the EA on the same compatible app release line", () => {
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
-    // API-only patch releases can advance without changing the deployed EA
-    // protocol; major/minor remains the compatibility boundary.
-    expect(eaVersion?.split(".").slice(0, 2)).toEqual(packageJson.version?.split(".").slice(0, 2));
+    expect(eaVersion).toBe("1.58.1");
+    expect(eaVersion).toBe(packageJson.version);
   });
 
   test("uses timer polling, WebRequest, typed MQL5 trade structures, and retcode reporting", () => {
@@ -208,7 +207,7 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.58.0"');
+    expect(source).toContain('#property version   "1.58.1"');
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
@@ -313,21 +312,34 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("No valid partial-close volume provided");
   });
 
-  test("turns unrepresentable close slices into explicit full closes instead of no-ops", () => {
+  test("keeps sub-minimum partial slices as held no-ops and escalates only runner closes", () => {
     expect(source).toContain(
       "double NormalizeCloseVolume(string symbol, double requested, double currentVolume)",
     );
     expect(source).toContain("MathFloor((volume + step * 0.000001) / step) * step");
     expect(source).toContain("if(volume < minVolume || volume <= 0.0)");
-    expect(source).toContain(
-      "if(volume < minVolume || volume <= 0.0)\n      return currentVolume;",
-    );
+    expect(source).toContain("if(volume < minVolume || volume <= 0.0)\n      return 0.0;");
+    expect(source).toContain("if(closeVolume <= 0.0)\n         closeVolume = currentVolume;");
     expect(source).toContain(
       "closeVolume = NormalizeCloseVolume(symbol, currentVolume - command.targetRemainingVolume, currentVolume)",
     );
     expect(source).not.toContain(
       "closeVolume = NormalizeVolume(symbol, currentVolume * command.partialCloseValue / 100.0)",
     );
+  });
+
+  test("reports a runner remnant as executed when this pass closed its ticket", () => {
+    const executeClose = source.slice(
+      source.indexOf("void ExecuteClose("),
+      source.indexOf("void ExecutePartialClose("),
+    );
+    expect(executeClose).toContain(
+      "int remainingPositionMatches = CollectPositionTickets(command, remainingPositionTickets);",
+    );
+    expect(executeClose).toContain(
+      "if(!LifecycleAlreadyExecuted(command, remainingPositionTickets[index]))",
+    );
+    expect(executeClose).toContain("remainingVolume");
   });
 
   test("reports actual open and close volumes, pending zero fills, and ticket-scoped lifecycle markers", () => {
