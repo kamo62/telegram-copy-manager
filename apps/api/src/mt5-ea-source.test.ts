@@ -208,7 +208,7 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.57.3"');
+    expect(source).toContain('#property version   "1.57.4"');
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
@@ -423,6 +423,29 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain(
       "if(sent && result.retcode == TRADE_RETCODE_DONE && (positionGone || !fullClose))",
     );
+  });
+
+  test("aggregates partial-close slices so a failed slice cannot be masked", () => {
+    const partialBody = source.slice(
+      source.indexOf("void ExecutePartialClose("),
+      source.indexOf("bool ClosePositionTicket("),
+    );
+    expect(partialBody.match(/ReportWithVolumes\(/g)).toHaveLength(1);
+    expect(partialBody).toContain("int attempted = 0;");
+    expect(partialBody).toContain("int succeeded = 0;");
+    expect(partialBody).toContain("bool partialResult = false;");
+    expect(partialBody).toContain(
+      "if(ClosePositionTicket(command, ticket, result, requested, filled, remaining))",
+    );
+    expect(partialBody).toContain("succeeded++;");
+    expect(partialBody).toContain(
+      "result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED",
+    );
+    expect(partialBody).toContain(
+      'string status = (succeeded == attempted && !partialResult) ? "EXECUTED" : "PARTIAL";',
+    );
+    expect(partialBody).toContain("if(attempted == 0)");
+    expect(partialBody).toContain("ReportUnknown(command.queueItemId");
   });
 });
 

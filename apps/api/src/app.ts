@@ -104,7 +104,6 @@ const MAX_EXECUTION_LOG_LIMIT = 500;
 const QUOTE_FRESHNESS_MAX_AGE_MS = 5 * 60_000;
 const LANE2_CLOSE_CAPABILITY = "lane2-close-contract";
 const PENDING_CLOSE_FLATTEN_CAPABILITY = "pending-close-flatten-v1";
-const PENDING_CLOSE_FLATTEN_MIN_EA_VERSION = [1, 57, 1] as const;
 
 function capEquityCurve<T extends { equity: number }>(points: T[]): T[] {
   return downsampleSeries(points, EQUITY_CURVE_MAX_POINTS, (point) => point.equity);
@@ -4587,10 +4586,11 @@ class AppStore {
       Number.isFinite(heartbeatAt) &&
       Date.now() - heartbeatAt <= EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS * 1000;
     if (!heartbeatFresh) return false;
-    return (
-      parseJson<string[]>(String(row?.ea_capabilities_json ?? "[]")).includes(
-        PENDING_CLOSE_FLATTEN_CAPABILITY,
-      ) || versionAtLeast(String(row?.ea_version ?? ""), PENDING_CLOSE_FLATTEN_MIN_EA_VERSION)
+    // Capability string only, deliberately no version fallback: an EA reporting
+    // 1.57.1 predates both this capability and the empty-logicalTradeId wildcard
+    // fix, so a version check would admit a build that flattens the wrong trades.
+    return parseJson<string[]>(String(row?.ea_capabilities_json ?? "[]")).includes(
+      PENDING_CLOSE_FLATTEN_CAPABILITY,
     );
   }
 
@@ -13585,18 +13585,6 @@ function optionalPositiveInteger(value: unknown, max: number) {
   if (!Number.isFinite(number)) return undefined;
   const integer = Math.floor(number);
   return integer > 0 ? Math.min(integer, max) : undefined;
-}
-
-function versionAtLeast(value: string, minimum: readonly [number, number, number]) {
-  const match = value.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
-  if (!match) return false;
-  const actual = [Number(match[1]), Number(match[2]), Number(match[3] ?? 0)];
-  for (let index = 0; index < minimum.length; index += 1) {
-    const actualPart = actual[index] ?? 0;
-    const minimumPart = minimum[index] ?? 0;
-    if (actualPart !== minimumPart) return actualPart > minimumPart;
-  }
-  return true;
 }
 
 function hashHint(value: string) {

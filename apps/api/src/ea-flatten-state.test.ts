@@ -4,7 +4,10 @@ import { type FlattenBroker, type FlattenPosition, flattenClose } from "./ea-fla
 class FakeBroker implements FlattenBroker {
   pending = new Set(["order-1"]);
   positions = new Map<string, FlattenPosition>();
-  closeResults: Array<{ retcode: "DONE" | "DONE_PARTIAL" | "PLACED"; filledVolume: number }> = [];
+  closeResults: Array<{
+    retcode: "DONE" | "DONE_PARTIAL" | "PLACED" | "FAILED";
+    filledVolume: number;
+  }> = [];
   closeCalls: Array<{ ticket: string; volume: number }> = [];
 
   pendingOrderTickets() {
@@ -81,5 +84,51 @@ describe("EA flatten state machine", () => {
     expect(result.removedPendingTickets).toEqual([]);
     expect([...broker.pending].sort()).toEqual(["order-1", "order-2"]);
     expect(result.closeAttempts[0]?.ticket).toBe("position-1");
+  });
+
+  test("aggregates partial slices, marks only DONE tickets, and holds a failed slice", () => {
+    const broker = new FakeBroker();
+    broker.pending = new Set(["order-1", "order-2"]);
+    broker.positions.set("position-1", { ticket: "position-1", volume: 0.04 });
+    broker.positions.set("position-2", { ticket: "position-2", volume: 0.03 });
+    broker.closeResults = [
+      { retcode: "FAILED", filledVolume: 0 },
+      { retcode: "DONE", filledVolume: 0.01 },
+      { retcode: "DONE", filledVolume: 0.04 },
+    ];
+    const executedTickets = new Set<string>();
+
+    const first = flattenClose(broker, "partial-2", executedTickets, false);
+    expect(first.status).toBe("PARTIAL");
+    expect(first.closeAttempts).toEqual([
+      { ticket: "position-1", requestedVolume: 0.04, filledVolume: 0 },
+      { ticket: "position-2", requestedVolume: 0.03, filledVolume: 0.01 },
+    ]);
+    expect(executedTickets).toContain("partial-2:position-2");
+    expect(executedTickets).not.toContain("partial-2:position-1");
+    expect([...broker.pending].sort()).toEqual(["order-1", "order-2"]);
+
+    const retry = flattenClose(broker, "partial-2", executedTickets, false);
+    expect(retry.status).toBe("EXECUTED");
+    expect(retry.closeAttempts).toEqual([
+      { ticket: "position-1", requestedVolume: 0.04, filledVolume: 0.04 },
+    ]);
+    expect(broker.closeCalls).toEqual([
+      { ticket: "position-1", volume: 0.04 },
+      { ticket: "position-2", volume: 0.03 },
+      { ticket: "position-1", volume: 0.04 },
+    ]);
+  });
+
+  test("a partial close with no unexecuted slices stays UNKNOWN", () => {
+    const broker = new FakeBroker();
+    broker.positions.set("position-1", { ticket: "position-1", volume: 0.04 });
+    const executedTickets = new Set(["partial-3:position-1"]);
+
+    const result = flattenClose(broker, "partial-3", executedTickets, false);
+
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.closeAttempts).toEqual([]);
+    expect(broker.closeCalls).toEqual([]);
   });
 });

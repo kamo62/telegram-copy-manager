@@ -1163,7 +1163,6 @@ describe("VIP Gold order lifecycle formats", () => {
       ["triggered", "NO_SIGNAL"],
       ["filled", "NO_SIGNAL"],
       ["deleted", "CANCEL_PENDING"],
-      ["closed", "CLOSE_TRADE"],
       ["modified", "NO_SIGNAL"],
     ] as const;
     for (const direction of ["Buy", "Sell"] as const) {
@@ -1215,6 +1214,15 @@ describe("VIP Gold order lifecycle formats", () => {
     ]) {
       expect(parseSignalText(text, context).commandType).toBe("NO_SIGNAL");
     }
+  });
+
+  test("keeps recap prose containing BUY STOP FILLED inside a real new order executable", () => {
+    const result = parseSignalText(
+      "BUY XAUUSD STOP @ 4500\nSL 4490\nTP 4520\nOur BUY STOP FILLED yesterday was a different trade",
+      context,
+    );
+
+    expect(result.commandType).toBe("OPEN_TRADE");
   });
 
   test("keeps complete entries containing lifecycle words executable", () => {
@@ -1279,6 +1287,26 @@ describe("VIP Gold order lifecycle formats", () => {
     expect(result.commandType).toBe("CLOSE_TRADE");
     expect(result.canonicalSymbol).toBe("XAUUSD");
     expect(result.providerOrderId).toBe("298696672");
+  });
+
+  test("only maps a complete quoted CLOSED report to a full close", () => {
+    const quoted = (comment: string) =>
+      parseSignalText(
+        `Quoted signal: NEW ORDER - XAUUSD Buy Stop # 306947863 Entry: 4051.30 SL: 4045.30 TP: 4060.30\n\nComment:\n${comment}`,
+        context,
+      );
+
+    expect(quoted("CLOSED\n--------{ CLOSED }--------\nProfit: 0.38%").commandType).toBe(
+      "CLOSE_TRADE",
+    );
+    for (const comment of [
+      "Closed half here",
+      "closed 50%",
+      "Partially closed at TP1",
+      "Market closed, order not filled",
+    ]) {
+      expect(quoted(comment).commandType).toBe("NO_SIGNAL");
+    }
   });
 
   test("prefers a provider order id and ignores an out-of-sync phantom", () => {

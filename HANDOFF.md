@@ -1,6 +1,13 @@
 # Handoff
 
-Updated: 2026-07-25 (v1.57.3 CLOSE_PARTIAL regression fixes)
+Updated: 2026-07-25 (v1.57.4 CLOSE_PARTIAL safety completion)
+
+## v1.57.4 — final pre-deploy safety completion
+
+- The runnable flatten model now mirrors `ExecutePartialClose`: pending orders remain untouched, one aggregate report covers all attempted positions, only `DONE` slices are marked idempotently executed, and `PLACED`, `DONE_PARTIAL`, or failed slices stay `PARTIAL`/held for retry or reconciliation. An already-executed or zero-attempt partial command reports `UNKNOWN`.
+- Pending-trade flattening is capability-only: `pending-close-flatten-v1` is required on a fresh heartbeat. EA version `1.57.1` alone, or `lane2-close-contract` alone, is held.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.57.4 commit only. Intermediate 1.57.1/1.57.2 binaries carry the CLOSE_PARTIAL regression. CLOSE_PARTIAL is deliberately not capability-gated.**
+- A held `PLACED`/`DONE_PARTIAL` partial close can still be requeued by an operator after its broker order fills. PERCENT payloads recalculate against `targetRemainingVolume`; LOTS and TP_LEG payloads do not know the filled amount. Reconcile the current MT5 snapshot and history for the position ticket, compare filled and remaining volume with the held report, and only then requeue an operator-adjusted residual close. Do not blindly requeue LOTS/TP_LEG work.
 
 ## v1.57.3 — CLOSE_PARTIAL regressions from the 1.57.1 flatten rewrite (FIXED)
 

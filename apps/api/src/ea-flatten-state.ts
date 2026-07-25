@@ -1,4 +1,4 @@
-export type FlattenRetcode = "DONE" | "PLACED" | "DONE_PARTIAL";
+export type FlattenRetcode = "DONE" | "PLACED" | "DONE_PARTIAL" | "FAILED";
 
 export type FlattenPosition = { ticket: string; volume: number };
 
@@ -48,13 +48,16 @@ export function flattenClose(
 
   const closeAttempts: FlattenResult["closeAttempts"] = [];
   let partialResult = false;
+  let attempted = 0;
+  let succeeded = 0;
+  const partialClose = !cancelPending;
   for (const ticket of broker.positionTickets()) {
     const position = broker.position(ticket);
     if (!position) continue;
     if (executedTickets.has(`${idempotencyKey}:${ticket}`)) {
-      partialResult = true;
       continue;
     }
+    attempted += 1;
     const result = broker.closePosition(ticket, position.volume);
     closeAttempts.push({
       ticket,
@@ -62,11 +65,24 @@ export function flattenClose(
       filledVolume: result.filledVolume,
     });
     const remaining = broker.position(ticket);
-    if (result.retcode === "DONE" && !remaining) {
+    const complete = result.retcode === "DONE" && (partialClose || !remaining);
+    if (complete) {
       executedTickets.add(`${idempotencyKey}:${ticket}`);
+      succeeded += 1;
     } else {
       partialResult = true;
     }
+  }
+
+  if (partialClose) {
+    if (attempted === 0) {
+      return { status: "UNKNOWN", removedPendingTickets, closeAttempts };
+    }
+    return {
+      status: succeeded === attempted && !partialResult ? "EXECUTED" : "PARTIAL",
+      removedPendingTickets,
+      closeAttempts,
+    };
   }
 
   const remainingPending = cancelPending ? broker.pendingOrderTickets().length : 0;

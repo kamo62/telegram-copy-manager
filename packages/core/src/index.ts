@@ -1188,13 +1188,20 @@ function detectCommandType(
     matchedPatternIds.push("lifecycle.deleted-cancel");
     return "CANCEL_PENDING";
   }
-  const activationNotice = upper
+  // Line-anchored on purpose. Matching anywhere in the message would let recap
+  // prose ("our BUY STOP FILLED yesterday") inside a genuine new order silently
+  // skip the entry, which is the one place the hold-everything rule cannot help.
+  const activationLines = upper
     .replace(/[^A-Z0-9#\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
   if (
-    /\b(?:BUY|SELL)\s+(?:LIMIT|STOP)\s+(?:ACTIVATED|TRIGGERED|FILLED)\b/.test(activationNotice) ||
-    /^(?:ACTIVATED|TRIGGERED|FILLED|ORDER\s+FILLED)$/.test(activationNotice)
+    activationLines.some(
+      (line) =>
+        /^#?\s*(?:BUY|SELL)\s+(?:LIMIT|STOP)\s+(?:ACTIVATED|TRIGGERED|FILLED)\b/.test(line) ||
+        /^(?:ACTIVATED|TRIGGERED|FILLED|ORDER\s+FILLED)$/.test(line),
+    )
   ) {
     matchedPatternIds.push("lifecycle.activation");
     return "NO_SIGNAL";
@@ -1285,9 +1292,22 @@ function classifyQuotedNewOrderStatus(
     return "CANCEL_PENDING";
   }
   if (/\bCLOSED\b/.test(upper)) {
-    mark("closed");
-    matchedPatternIds.push("lifecycle.provider-closed");
-    return "CLOSE_TRADE";
+    // Only a whole-position close may map to CLOSE_TRADE. "Closed half",
+    // "closed 50%" and prose like "market closed, order not filled" all contain
+    // the word and would otherwise flatten a live trade the provider did not
+    // close. Anything qualified or mid-sentence is treated as status context.
+    const partialQualifier =
+      /\b(?:HALF|PARTIAL|PARTIALLY|BOOK(?:ED|ING)?)\b/.test(upper) ||
+      upper.split("\n").some((line) => /\d+\s*%/.test(line) && !/^\s*PROFIT\s*:/.test(line));
+    const fullCloseForm =
+      /\{\s*CLOSED\s*\}/.test(upper) || /(?:^|\n)\s*[^A-Z0-9\n]*CLOSED\b/.test(upper);
+    if (!partialQualifier && fullCloseForm) {
+      mark("closed");
+      matchedPatternIds.push("lifecycle.provider-closed");
+      return "CLOSE_TRADE";
+    }
+    mark("closed-ambiguous");
+    return "NO_SIGNAL";
   }
   if (/\bMODIFIED\b/.test(upper)) {
     const modificationPatterns: string[] = [];

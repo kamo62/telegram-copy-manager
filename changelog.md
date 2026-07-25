@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.57.4 - 2026-07-25 (Patch)
+
+Release impact: Patch. Completes the CLOSE_PARTIAL safety hardening and removes the unsafe pending-close version fallback.
+
+- Mirrored aggregated partial-close semantics in the runnable flatten model: only DONE slices become idempotently executed; failed, PLACED, and DONE_PARTIAL slices remain held and retryable.
+- Added regressions for quoted CLOSED classification, line-anchored activation detection, capability-only pending flatten gating, and aggregate partial-close reporting.
+- **Recompile and reattach the EA. Build the EA binary from the final 1.57.4 commit only. Intermediate 1.57.1/1.57.2 builds carry the CLOSE_PARTIAL regression; CLOSE_PARTIAL is deliberately not capability-gated.**
+
 ## 1.57.3 - 2026-07-25 (Patch)
 
 Release impact: Patch. Repairs three CLOSE_PARTIAL regressions introduced by the 1.57.1 flatten rewrite. The EA must be recompiled and reattached.

@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.57.3"
+#property version   "1.57.4"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -149,7 +149,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.57.3",
+      "1.57.4",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -872,7 +872,18 @@ void ExecutePartialClose(SignalCommand &command)
       return;
    }
 
+   // One aggregated report per command. Reporting per ticket would let a later
+   // EXECUTED slice overwrite an earlier failed one (last write wins on the
+   // queue item), leaving the command marked done while a slice never retried.
    int attempted = 0;
+   int succeeded = 0;
+   bool partialResult = false;
+   double requestedVolume = 0.0;
+   double filledVolume = 0.0;
+   double remainingVolume = 0.0;
+   MqlTradeResult lastResult = {};
+   ulong lastPositionTicket = 0;
+   ulong lastDealTicket = 0;
    for(int index = 0; index < found; index++)
    {
       ulong ticket = tickets[index];
@@ -883,25 +894,38 @@ void ExecutePartialClose(SignalCommand &command)
       double requested = 0.0;
       double filled = 0.0;
       double remaining = 0.0;
-      bool closed = ClosePositionTicket(command, ticket, result, requested, filled, remaining);
-      string status = (result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED)
-         ? "PARTIAL"
-         : (closed ? "EXECUTED" : "FAILED");
+      if(ClosePositionTicket(command, ticket, result, requested, filled, remaining))
+         succeeded++;
+      if(result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED)
+         partialResult = true;
+      requestedVolume += requested;
+      filledVolume += filled;
+      remainingVolume += remaining;
+      lastResult = result;
+      lastPositionTicket = ticket;
+      lastDealTicket = result.deal;
+   }
+
+   if(attempted > 0)
+   {
+      // Anything short of every attempted slice completing stays PARTIAL, which
+      // the server holds for review rather than treating as terminal.
+      string status = (succeeded == attempted && !partialResult) ? "EXECUTED" : "PARTIAL";
       ReportWithVolumes(
          command.queueItemId,
          status,
-         result.retcode,
-         result.retcode_external,
-         result.comment,
-         result.order,
-         ticket,
-         result.deal,
+         lastResult.retcode,
+         lastResult.retcode_external,
+         lastResult.comment,
+         lastResult.order,
+         lastPositionTicket,
+         lastDealTicket,
          0.0,
-         result.price,
-         requested,
-         filled,
-         remaining,
-         closed ? "" : "Partial close did not complete; reconcile broker snapshot/history"
+         lastResult.price,
+         requestedVolume,
+         filledVolume,
+         remainingVolume,
+         status == "EXECUTED" ? "" : "Partial close did not complete; reconcile broker snapshot/history"
       );
    }
 
@@ -1721,7 +1745,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.57.3",
+      "1.57.4",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

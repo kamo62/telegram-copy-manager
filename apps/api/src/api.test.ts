@@ -7153,71 +7153,75 @@ describe("Telegram TC API", () => {
     );
   });
 
-  test("holds pending close flattening until the recompiled EA capability is confirmed", async () => {
-    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
-    const providerId = await configureProviderWithAccount(app, {
-      availableSymbols: ["XAUUSD"],
-      eaVersion: "1.56.2",
-      eaCapabilities: ["lane2-close-contract"],
-    });
-    const opened = await json<{ parsedSignalId: string }>(
-      await app.request("/api/parser/parse", {
+  test("holds pending close flattening without the capability even at version 1.57.1", async () => {
+    for (const eaCapabilities of [["lane2-close-contract"], []]) {
+      const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD"],
+        eaVersion: "1.57.1",
+        eaCapabilities,
+      });
+      const opened = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "BUY XAUUSD STOP @ 4500\nSL 4490\nTP 4520",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const opening = await json<{ queueItemId: string }>(
+        await app.request(`/api/signals/${opened.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      await app.request("/api/mt5/poll-line?accountId=mt5-63442826");
+      await app.request("/api/mt5/report", {
         method: "POST",
         body: JSON.stringify({
-          providerId,
           accountId: "mt5-63442826",
-          rawText: "BUY XAUUSD STOP @ 4500\nSL 4490\nTP 4520",
+          queueItemId: opening.queueItemId,
+          status: "EXECUTED",
+          retcode: 10008,
+          retcodeExternal: 0,
+          brokerComment: "pending accepted",
+          orderTicket: "50001",
+          requestedVolume: 0.04,
+          filledVolume: 0,
+          remainingVolume: 0.04,
         }),
         headers: { "content-type": "application/json" },
-      }),
-    );
-    const opening = await json<{ queueItemId: string }>(
-      await app.request(`/api/signals/${opened.parsedSignalId}/approve`, { method: "POST" }),
-    );
-    await app.request("/api/mt5/poll-line?accountId=mt5-63442826");
-    await app.request("/api/mt5/report", {
-      method: "POST",
-      body: JSON.stringify({
-        accountId: "mt5-63442826",
-        queueItemId: opening.queueItemId,
-        status: "EXECUTED",
-        retcode: 10008,
-        retcodeExternal: 0,
-        brokerComment: "pending accepted",
-        orderTicket: "50001",
-        requestedVolume: 0.04,
-        filledVolume: 0,
-        remainingVolume: 0.04,
-      }),
-      headers: { "content-type": "application/json" },
-    });
-    const closing = await json<{ parsedSignalId: string }>(
-      await app.request("/api/parser/parse", {
-        method: "POST",
-        body: JSON.stringify({
-          providerId,
-          accountId: "mt5-63442826",
-          rawText: "CLOSED - XAUUSD Buy",
+      });
+      const closing = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "CLOSED - XAUUSD Buy",
+          }),
+          headers: { "content-type": "application/json" },
         }),
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    const close = await json<{ queueItemId: string }>(
-      await app.request(`/api/signals/${closing.parsedSignalId}/approve`, { method: "POST" }),
-    );
-    expect(await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text()).toContain(
-      "status=NO_WORK",
-    );
-    const queue = await json<{
-      queue: Array<{ id: string; status: string; heldReason?: string }>;
-    }>(await app.request("/api/signals"));
-    expect(queue.queue).toContainEqual(
-      expect.objectContaining({
-        id: close.queueItemId,
-        status: "HELD",
-        heldReason: "EA_CAPABILITY_UNAVAILABLE:pending-close-flatten-v1",
-      }),
-    );
+      );
+      const close = await json<{ queueItemId: string }>(
+        await app.request(`/api/signals/${closing.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(
+        await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+      ).toContain("status=NO_WORK");
+      const queue = await json<{
+        queue: Array<{ id: string; status: string; heldReason?: string }>;
+      }>(await app.request("/api/signals"));
+      expect(queue.queue).toContainEqual(
+        expect.objectContaining({
+          id: close.queueItemId,
+          status: "HELD",
+          heldReason: eaCapabilities.includes("lane2-close-contract")
+            ? "EA_CAPABILITY_UNAVAILABLE:pending-close-flatten-v1"
+            : "EA_CAPABILITY_UNAVAILABLE",
+        }),
+      );
+    }
   });
 
   test("holds a partial close with actual fill evidence instead of terminalizing the trade", async () => {
