@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.57.2"
+#property version   "1.57.3"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -149,7 +149,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.57.2",
+      "1.57.3",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -757,6 +757,16 @@ void ModifyPositionTp(SignalCommand &command, ulong ticket, double takeProfit)
 
 void ExecuteClose(SignalCommand &command)
 {
+   // CLOSE_PARTIAL only reduces an open position: it must never cancel working
+   // pending orders, and the position surviving with a smaller volume is the
+   // expected result rather than an incomplete flatten. Only CLOSE_TRADE runs
+   // the flatten path below.
+   if(command.commandType != "CLOSE_TRADE")
+   {
+      ExecutePartialClose(command);
+      return;
+   }
+
    ulong pendingTickets[];
    int pendingFound = CollectPendingOrderTickets(command, pendingTickets);
    ulong initialPositions[];
@@ -852,6 +862,53 @@ void ExecuteClose(SignalCommand &command)
    );
 }
 
+void ExecutePartialClose(SignalCommand &command)
+{
+   ulong tickets[];
+   int found = CollectPositionTickets(command, tickets);
+   if(found <= 0)
+   {
+      ReportUnknown(command.queueItemId, "No matching position; reconcile broker snapshot/history", command.commandType);
+      return;
+   }
+
+   int attempted = 0;
+   for(int index = 0; index < found; index++)
+   {
+      ulong ticket = tickets[index];
+      if(LifecycleAlreadyExecuted(command, ticket))
+         continue;
+      attempted++;
+      MqlTradeResult result = {};
+      double requested = 0.0;
+      double filled = 0.0;
+      double remaining = 0.0;
+      bool closed = ClosePositionTicket(command, ticket, result, requested, filled, remaining);
+      string status = (result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED)
+         ? "PARTIAL"
+         : (closed ? "EXECUTED" : "FAILED");
+      ReportWithVolumes(
+         command.queueItemId,
+         status,
+         result.retcode,
+         result.retcode_external,
+         result.comment,
+         result.order,
+         ticket,
+         result.deal,
+         0.0,
+         result.price,
+         requested,
+         filled,
+         remaining,
+         closed ? "" : "Partial close did not complete; reconcile broker snapshot/history"
+      );
+   }
+
+   if(attempted == 0)
+      ReportUnknown(command.queueItemId, "Lifecycle command was already executed; reconcile broker snapshot/history", command.commandType);
+}
+
 bool ClosePositionTicket(
    SignalCommand &command,
    ulong ticket,
@@ -921,7 +978,12 @@ bool ClosePositionTicket(
 
    bool sent = OrderSend(request, result);
    bool positionGone = !PositionSelectByTicket(ticket);
-   if(sent && result.retcode == TRADE_RETCODE_DONE && positionGone)
+   // A full close is only complete once the broker shows the position gone, so a
+   // PLACED or partially filled result stays retryable. A partial close is
+   // complete on a DONE deal because the position is meant to survive; without
+   // this a replay would close a second slice of the same position.
+   bool fullClose = command.commandType == "CLOSE_TRADE";
+   if(sent && result.retcode == TRADE_RETCODE_DONE && (positionGone || !fullClose))
       MarkLifecycleExecuted(command, ticket);
    requestedVolume = request.volume;
    filledVolume = result.volume;
@@ -1659,7 +1721,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.57.2",
+      "1.57.3",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

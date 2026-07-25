@@ -1,6 +1,33 @@
 # Handoff
 
-Updated: 2026-07-24 (v1.57.2 trade-safety review fixes)
+Updated: 2026-07-25 (v1.57.3 CLOSE_PARTIAL regression fixes)
+
+## v1.57.3 — CLOSE_PARTIAL regressions from the 1.57.1 flatten rewrite (FIXED)
+
+Found in an Opus 5 review of 757bca9a; three prior review passes missed them.
+`ExecuteClose` (`mt5/TelegramTC_EA.mq5`) serves both CLOSE_TRADE and
+CLOSE_PARTIAL (dispatch at `:241`), but the flatten rewrite applied CLOSE_TRADE
+semantics to both, so a partial close:
+
+1. cancelled every working pending order for the logical trade, destroying the
+   remaining entries of a multi-entry/ladder setup;
+2. reported PARTIAL and stayed held even when it fully succeeded, because the
+   surviving position looked like an incomplete flatten;
+3. was never marked idempotently executed (the marker required the position to
+   be gone), so a replay could close a second slice of the same position.
+
+The server capability gate did not shield any of this:
+`requiresPendingCloseFlattenContract` (`apps/api/src/app.ts`) returns false for
+CLOSE_PARTIAL. The old EA did not cancel pendings, so the regression would have
+appeared only after the recompile.
+
+Fix: partial closes run their own `ExecutePartialClose` path that never touches
+pending orders, reports EXECUTED on a DONE deal, and marks the ticket executed
+so a replay cannot double-close. Full closes keep the 1.57.2 hardening
+(complete only once the broker confirms the position is gone; PLACED and
+DONE_PARTIAL stay retryable) via a `fullClose` gate. Covered by EA
+source-contract regressions plus a partial-close case in the runnable flatten
+model; all three fixes were mutation-checked.
 
 Applied all four second-pass HIGH/MEDIUM close-flatten and EA-contract fixes on
 fix/vipgold-duplicate-open-prevention; nothing was pushed or deployed.

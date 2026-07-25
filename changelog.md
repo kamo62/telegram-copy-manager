@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.57.3 - 2026-07-25 (Patch)
+
+Release impact: Patch. Repairs three CLOSE_PARTIAL regressions introduced by the 1.57.1 flatten rewrite. The EA must be recompiled and reattached.
+
+`ExecuteClose` serves both CLOSE_TRADE and CLOSE_PARTIAL, but the flatten rewrite applied CLOSE_TRADE semantics to both. A partial close therefore cancelled every working pending order for the logical trade, which destroys the remaining entries of a multi-entry setup; it also reported PARTIAL and stayed held even when it fully succeeded, because the surviving position looked like an incomplete flatten; and it was never marked idempotently executed, so a replay could close a second slice of the same position.
+
+Partial closes now run their own path: they never touch pending orders, they report EXECUTED on a DONE deal, and they mark the ticket executed so a replay cannot double-close. Full closes keep the 1.57.2 hardening, where a ticket completes only once the broker confirms the position is gone and PLACED or DONE_PARTIAL stays retryable. Covered by EA source-contract regressions and a partial-close case in the runnable flatten model; all three fixes were mutation-checked.
+
 ## 1.57.2 - 2026-07-24 (Patch)
 
 Release impact: Patch because this closes four trade-safety defects without changing the public API shape; the EA must be recompiled and reattached before the new pending-close contract can execute.

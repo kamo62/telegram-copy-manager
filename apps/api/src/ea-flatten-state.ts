@@ -31,9 +31,12 @@ export function flattenClose(
   broker: FlattenBroker,
   idempotencyKey: string,
   executedTickets = new Set<string>(),
+  // CLOSE_TRADE cancels working pending orders; CLOSE_PARTIAL must leave them
+  // alone because it only reduces an already-open position.
+  cancelPending = true,
 ): FlattenResult {
   const removedPendingTickets: string[] = [];
-  const initialPending = broker.pendingOrderTickets();
+  const initialPending = cancelPending ? broker.pendingOrderTickets() : [];
   const initialPositions = broker.positionTickets();
   if (initialPending.length === 0 && initialPositions.length === 0) {
     return { status: "UNKNOWN", removedPendingTickets, closeAttempts: [] };
@@ -66,7 +69,7 @@ export function flattenClose(
     }
   }
 
-  const remainingPending = broker.pendingOrderTickets().length;
+  const remainingPending = cancelPending ? broker.pendingOrderTickets().length : 0;
   const remainingPositions = broker.positionTickets().length;
   if (remainingPending === 0 && remainingPositions === 0 && !partialResult) {
     return { status: "EXECUTED", removedPendingTickets, closeAttempts };

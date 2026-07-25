@@ -70,4 +70,16 @@ describe("EA flatten state machine", () => {
     expect(replay.status).toBe("UNKNOWN");
     expect(broker.closeCalls).toHaveLength(2);
   });
+
+  test("a partial close never cancels working pending orders", () => {
+    const broker = new FakeBroker();
+    broker.pending = new Set(["order-1", "order-2"]);
+    broker.positions.set("position-1", { ticket: "position-1", volume: 0.04 });
+
+    const result = flattenClose(broker, "partial-1", new Set<string>(), false);
+
+    expect(result.removedPendingTickets).toEqual([]);
+    expect([...broker.pending].sort()).toEqual(["order-1", "order-2"]);
+    expect(result.closeAttempts[0]?.ticket).toBe("position-1");
+  });
 });

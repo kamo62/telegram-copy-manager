@@ -208,7 +208,7 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.57.2"');
+    expect(source).toContain('#property version   "1.57.3"');
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
@@ -231,7 +231,11 @@ describe("MT5 Expert Advisor source", () => {
     const close =
       source.match(/bool ClosePositionTicket\([\s\S]*?\n}\n\nulong FindPositionTicket/)?.[0] ?? "";
     expect(close).toContain("bool positionGone = !PositionSelectByTicket(ticket);");
-    expect(close).toContain("result.retcode == TRADE_RETCODE_DONE && positionGone");
+    // A full close still requires the position to be gone before it is marked
+    // executed, so PLACED and DONE_PARTIAL stay retryable. The partial branch is
+    // covered separately: it completes on DONE because the position survives.
+    expect(close).toContain("result.retcode == TRADE_RETCODE_DONE && (positionGone || !fullClose)");
+    expect(close).toContain('bool fullClose = command.commandType == "CLOSE_TRADE";');
     expect(close).toContain(
       "remainingVolume = positionGone ? 0.0 : PositionGetDouble(POSITION_VOLUME);",
     );
@@ -392,6 +396,33 @@ describe("MT5 Expert Advisor source", () => {
       /void\s+PollAndExecute\(\)[\s\S]*HttpGetRetry\(url, response\)[\s\S]*ApplyPollConfig/,
     );
     expect(source).toContain("UNSAFE: /poll-line");
+  });
+
+  test("a partial close routes away from the flatten path and never cancels pending orders", () => {
+    // CLOSE_TRADE and CLOSE_PARTIAL share ExecuteClose. Only the full close may
+    // cancel working pending orders; a partial close that removed them would
+    // destroy the remaining entries of a multi-entry setup.
+    const executeClose = source.slice(source.indexOf("void ExecuteClose("));
+    const partialGuard = executeClose.slice(0, executeClose.indexOf("CollectPendingOrderTickets"));
+    expect(partialGuard).toContain('command.commandType != "CLOSE_TRADE"');
+    expect(partialGuard).toContain("ExecutePartialClose(command);");
+    expect(source).toContain("void ExecutePartialClose(SignalCommand &command)");
+
+    const partialBody = source.slice(
+      source.indexOf("void ExecutePartialClose("),
+      source.indexOf("bool ClosePositionTicket("),
+    );
+    expect(partialBody).not.toContain("CollectPendingOrderTickets");
+    expect(partialBody).not.toContain("RemovePendingOrder");
+  });
+
+  test("marks a partial close idempotently executed so a replay cannot close a second slice", () => {
+    // A full close only completes once the position is gone, but a partial close
+    // is complete on a DONE deal because the position is meant to survive.
+    expect(source).toContain('bool fullClose = command.commandType == "CLOSE_TRADE";');
+    expect(source).toContain(
+      "if(sent && result.retcode == TRADE_RETCODE_DONE && (positionGone || !fullClose))",
+    );
   });
 });
 
