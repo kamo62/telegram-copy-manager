@@ -81,6 +81,28 @@ export type PerAccountProviderConfig = Partial<
   Pick<ProviderRowData, "riskMode" | "riskAmount" | "takeProfitLevels" | "runner" | "workFromTpLeg">
 >;
 
+type HeldReleaseResult = {
+  status?: "PENDING" | "RECORDED";
+  remainingTradeCount?: number;
+};
+
+export function heldReleaseToast(
+  item: Pick<HeldQueueItem, "commandType" | "symbol">,
+  mode: HeldRequeueMode,
+  result: HeldReleaseResult,
+) {
+  const symbol = item.symbol.trim();
+  if (result.status === "RECORDED") {
+    return symbol ? `TP hit recorded for ${symbol}` : "TP hit recorded for selected trade";
+  }
+  if (result.remainingTradeCount && result.remainingTradeCount > 0) {
+    const suffix = result.remainingTradeCount === 1 ? "trade remains" : "trades remain";
+    return `Close queued for selected trade; ${result.remainingTradeCount} ${suffix} held`;
+  }
+  const subject = symbol || item.commandType.replaceAll("_", " ").toLowerCase();
+  return mode === "market" ? `${subject} requeued at market` : `${subject} requeued`;
+}
+
 export interface AccountPerformanceSnapshot {
   accountId?: string;
   currency: string;
@@ -2012,13 +2034,11 @@ export function App({
     logicalTradeId?: string,
   ) {
     try {
-      await apiPost(`/api/queue-items/${item.id}/requeue`, {
+      const result = await apiPost<HeldReleaseResult>(`/api/queue-items/${item.id}/requeue`, {
         mode,
         ...(logicalTradeId ? { logicalTradeId } : {}),
       });
-      toast.success(
-        mode === "market" ? `${item.symbol} requeued at market` : `${item.symbol} requeued`,
-      );
+      toast.success(heldReleaseToast(item, mode, result));
       await Promise.all([refreshHeldItems(), refreshDashboard()]);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to requeue held signal");

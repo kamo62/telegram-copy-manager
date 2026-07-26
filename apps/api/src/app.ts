@@ -164,6 +164,8 @@ type RequeueSuccess =
       status: "PENDING";
       droppedLifecycleCount: number;
       droppedLifecycle: string[];
+      remainingHeldQueueItems?: string[];
+      remainingTradeCount?: number;
     }
   | {
       originQueueItemId: string;
@@ -175,6 +177,10 @@ type RequeueSuccess =
     };
 
 type RequeueError = { statusCode: 404 | 409 | 422; error: string };
+
+export function hasExitVocabularyForDropAudit(text: string) {
+  return /\b(?:CLOS|CANCEL|DELET|REMOV)/i.test(text);
+}
 
 interface AppSettings {
   defaultLotSize: number;
@@ -1605,6 +1611,8 @@ class AppStore {
 
   // Thrown when the HELD source row does not transition exactly once. Escapes the transaction so
   // SQLite rolls the whole release back, then becomes a 409 instead of an unhandled 500.
+  // This boundary must remain top-level: converting ReleaseConflictError to a returned 409 inside
+  // an outer release transaction would let that outer transaction commit after a savepoint rollback.
   private releaseTransaction<T>(operation: () => T): T | { statusCode: 409; error: string } {
     const deferredAlerts: DeferredAlert[] = [];
     const previousDeferredAlerts = this.deferredAlerts;
@@ -3857,16 +3865,24 @@ class AppStore {
     // sits after the gate so it catches the operator bypass too. The corpus contains zero close-all
     // messages, so this costs nothing real and fails closed if one ever arrives.
     if (signal.commandType === "CLOSE_TRADE" && signal.closeAll) {
-      const heldQueueItems = targetAccountIds.map((targetAccountId) =>
-        this.holdForEvidence(
+      const heldQueueItems = targetAccountIds.map((targetAccountId) => {
+        const targetConfig = this.providerConfig(providerId, targetAccountId);
+        const targetSignal = applyProviderExecutionConfig(
+          targetAccountId === signal.accountId
+            ? signal
+            : this.reparseSignalForAccount(signal, providerId, targetAccountId),
+          targetConfig,
+          { defaultTakeProfit },
+        );
+        return this.holdForEvidence(
           parsedSignalId,
-          signal,
+          targetSignal,
           targetAccountId,
           executionMode,
           settings,
           "CLOSE_ALL_REQUIRES_OPERATOR",
-        ),
-      );
+        );
+      });
       return {
         body: {
           queueItemId: heldQueueItems[0],
@@ -4783,6 +4799,7 @@ class AppStore {
           ? this.logicalTrades()
               .filter(
                 (trade) =>
+                  (!row.logical_trade_id || trade.id === String(row.logical_trade_id)) &&
                   trade.providerId === String(row.provider_id ?? "") &&
                   trade.accountId === accountId &&
                   this.isActiveLogicalTrade(trade.id) &&
@@ -4869,7 +4886,8 @@ class AppStore {
     const logicalTradeId = String(row.logical_trade_id ?? "");
     if (
       heldReason.startsWith("LIFECYCLE_RECONCILIATION:") &&
-      (!logicalTradeId || !this.logicalTrade(logicalTradeId))
+      !logicalTradeId &&
+      !selectedLogicalTradeId?.trim()
     ) {
       return {
         statusCode: 409 as const,
@@ -5011,6 +5029,7 @@ class AppStore {
     selectedLogicalTradeId?: string,
   ) {
     const selectedId = selectedLogicalTradeId?.trim() ?? "";
+    const logicalTradeId = String(row.logical_trade_id ?? "");
     if (!selectedId) {
       return {
         statusCode: 409 as const,
@@ -5030,6 +5049,12 @@ class AppStore {
       return {
         statusCode: 409 as const,
         error: "Selected logicalTradeId is missing, inactive, or does not belong to this lifecycle",
+      };
+    }
+    if (logicalTradeId && selectedId !== logicalTradeId) {
+      return {
+        statusCode: 409 as const,
+        error: "Selected logicalTradeId does not match the trade bound to this held lifecycle",
       };
     }
     const signal = row.result_json ? parseJson<ParsedSignal>(String(row.result_json)) : undefined;
@@ -5112,11 +5137,28 @@ class AppStore {
       this.appendTradeCommand(trade.id, signal);
       this.insertQueueItem(queueItem, parsedSignalId, { originQueueItemId: id });
       this.dismissReleasedQueueItem(id, parsedSignalId);
+      const remainingHeldQueueItems = signal.closeAll
+        ? this.holdRemainingCloseAllTrades({
+            parsedSignalId,
+            signal,
+            accountId,
+            providerId,
+            selectedLogicalTradeId: trade.id,
+            executionMode: trade.executionMode ?? "VIRTUAL_TP",
+            settings,
+          })
+        : [];
       this.audit(
         "queue.requeue",
         "info",
         "Evidence-held lifecycle requeued with selected logical trade",
-        { heldQueueItemId: id, queueItemId, accountId, logicalTradeId: trade.id },
+        {
+          heldQueueItemId: id,
+          queueItemId,
+          accountId,
+          logicalTradeId: trade.id,
+          remainingHeldQueueItems,
+        },
         "operator",
       );
       const droppedLifecycle = this.droppedLifecycleForQueueItems([id]).get(id) ?? [];
@@ -5129,7 +5171,69 @@ class AppStore {
         status: "PENDING" as const,
         droppedLifecycleCount: droppedLifecycle.length,
         droppedLifecycle,
+        ...(signal.closeAll
+          ? {
+              remainingHeldQueueItems,
+              remainingTradeCount: remainingHeldQueueItems.length,
+            }
+          : {}),
       };
+    });
+  }
+
+  private holdRemainingCloseAllTrades(input: {
+    parsedSignalId: string;
+    signal: ParsedSignal;
+    accountId: string;
+    providerId: string;
+    selectedLogicalTradeId: string;
+    executionMode: ExecutionMode;
+    settings: AppSettings;
+  }) {
+    const representedRows = this.db
+      .query(
+        `SELECT logical_trade_id FROM queue_items
+         WHERE parsed_signal_id = ?
+           AND account_id = ?
+           AND logical_trade_id != ''
+           AND status IN ('HELD', 'PENDING', 'LEASED', 'EXECUTED')`,
+      )
+      .all(input.parsedSignalId, input.accountId) as Row[];
+    const representedTradeIds = new Set(
+      representedRows.map((row) => String(row.logical_trade_id ?? "")).filter(Boolean),
+    );
+    representedTradeIds.add(input.selectedLogicalTradeId);
+    const signalSymbol = normalizeLockedSymbol(
+      input.signal.brokerSymbol ?? input.signal.canonicalSymbol ?? input.signal.rawSymbol,
+    );
+    const remainingTrades = this.logicalTrades().filter((candidate) => {
+      const candidateSymbol = normalizeLockedSymbol(
+        candidate.symbol.brokerSymbol ??
+          candidate.symbol.canonicalSymbol ??
+          candidate.symbol.rawSymbol,
+      );
+      return (
+        candidate.providerId === input.providerId &&
+        candidate.accountId === input.accountId &&
+        this.isActiveLogicalTrade(candidate.id) &&
+        !representedTradeIds.has(candidate.id) &&
+        (!signalSymbol || candidateSymbol === signalSymbol)
+      );
+    });
+    return remainingTrades.map((remainingTrade) => {
+      const heldQueueItemId = this.holdForEvidence(
+        input.parsedSignalId,
+        input.signal,
+        input.accountId,
+        input.executionMode,
+        input.settings,
+        "CLOSE_ALL_REQUIRES_OPERATOR",
+        `Close-all remains incomplete: release trade ${remainingTrade.id} explicitly`,
+      );
+      this.db
+        .query("UPDATE queue_items SET logical_trade_id = ? WHERE id = ?")
+        .run(remainingTrade.id, heldQueueItemId);
+      return heldQueueItemId;
     });
   }
 
@@ -11201,7 +11305,7 @@ class AppStore {
       accountId,
       queueItemId,
       reason,
-      firstWeekVocabularyAudit: /\b(?:CLOS|CANCEL|DELET|REMOV)/i.test(signal.originalText),
+      firstWeekVocabularyAudit: hasExitVocabularyForDropAudit(signal.originalText),
     });
     return queueItemId;
   }
