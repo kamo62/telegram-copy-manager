@@ -2006,9 +2006,16 @@ export function App({
     }
   }
 
-  async function requeueHeldItem(item: HeldQueueItem, mode: HeldRequeueMode) {
+  async function requeueHeldItem(
+    item: HeldQueueItem,
+    mode: HeldRequeueMode,
+    logicalTradeId?: string,
+  ) {
     try {
-      await apiPost(`/api/queue-items/${item.id}/requeue`, { mode });
+      await apiPost(`/api/queue-items/${item.id}/requeue`, {
+        mode,
+        ...(logicalTradeId ? { logicalTradeId } : {}),
+      });
       toast.success(
         mode === "market" ? `${item.symbol} requeued at market` : `${item.symbol} requeued`,
       );

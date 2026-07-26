@@ -6,6 +6,10 @@ Release impact: Minor because automatic approval now has a fail-closed evidence 
 
 - Wired the default-gated `approveSignal` path with operator bypass, provider-specific structured-id/prose-complete open evidence, forward provenance, provider-wide order-id novelty, and strict lifecycle resolution.
 - Added explicit `EVIDENCE_*` held queue items with alerts and operator suggestions, audited evidence drops, and stopped ingestion from silently skipping actionable review-required lifecycle signals.
+- Routed identity-less held OPEN releases, including EA reconnect auto-release, through scoped approved-open materialization; lifecycle releases now require an explicitly selected active trade and broker binding.
+- Disposed ordinary `NO_SIGNAL`/`TRADE_SETUP` ingestion results as audited `IGNORED` records while holding and alerting risk-off vocabulary; real-corpus tests keep command tallies unchanged.
+- Held every lifecycle `closeAll` signal at `CLOSE_ALL_REQUIRES_OPERATOR`, persisted evidence tiers, forced evidence-hold alerts, and sized held opens from the target account's provider risk config.
+- Demoted conflicting per-account DROP verdicts to audited HOLDs and kept unbound lifecycle requeue fail-closed.
 - Kept step 4 resolution/close-all changes and step 5 parser guard deletions out of this commit.
 
 ## 1.59.0 - 2026-07-26 (Minor)

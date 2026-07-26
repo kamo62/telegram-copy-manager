@@ -1,5 +1,13 @@
 # Handoff
 
+## Independent review follow-up — F1-F5 fixed locally (2026-07-26), version remains 1.59.0
+
+- Lifecycle `closeAll` is now monotone fail-closed at `evaluateLifecycle`: a matched inline quote can no longer execute or reach provider-wide `approveCloseAll`; it returns `CLOSE_ALL_REQUIRES_OPERATOR`.
+- Evidence holds default to alert-enabled, force the evidence alert path even when an older database stored `alertOnHeld=false`, and persist `heldTier` (`action-required` or `fyi`) for later quieting. Production must have the alert bot token and chat id configured before deploy or held signals remain invisible.
+- Held OPEN payloads use the target account's provider risk configuration. Conflicting account verdicts demote DROP to HOLD; unbound lifecycle release remains a 409 refusal and leaves the original held card HELD.
+- Real corpus command-type tallies remain byte-identical: `NO_SIGNAL 1411`, `OPEN_TRADE 348`, `MARK_TP_HIT 138`, `CANCEL_PENDING 29`, `CLOSE_TRADE 15`, `MOVE_SL_TO_BE 4`. Evidence budgets remain `provider_15k9j3v` no-resolution `24/26/18`, simulated `49/1/18`; `provider_1gfxfwd` no-resolution `290/368/1219`, simulated `395/263/1219` (EXECUTE/HOLD/DROP).
+- Verification includes the full Bun gate, targeted real-corpus regressions, `git diff --check`, and mutation checks for all five fixes. No push, deploy, or EA compilation was performed.
+
 ## Step 3 open questions — ANSWERED locally (2026-07-26), independent review still pending
 
 Both reviewers hit usage limits mid-review (reset 2:10pm SAST), so commit 9c665eab is
@@ -25,25 +33,27 @@ EA-offline release, the lifecycle path at :3887), and whether any genuine instru
 be LOST rather than held — the risk direction that inverted with this commit.
 
 
-Updated: 2026-07-26 (v1.59.0 evidence-gated execution step 3)
+Updated: 2026-07-26 (v1.59.0 evidence-gated execution step 3 safety follow-up)
 
 ## Evidence-gated execution step 3 (unreleased; version held at 1.59.0)
 
 - `approveSignal` is gated by default for automatic ingestion and accepts an explicit `operator` bypass for manual approval. The queue requeue path remains operator-controlled.
 - VIP Gold uses structured copier-new plus novel provider order IDs; KAL VIP uses complete prose geometry. Forwarded signals hold, provider order IDs are checked provider-wide across durable origins, and inline quotes require an exact same-provider fingerprint mapped through `trade_origins` to exactly one active trade.
 - Holds create `EVIDENCE_*` queue records, preserve same-symbol lifecycle candidates as suggestions, alert operators, and audit the verdict. Drops create ignored records and a distinct evidence-drop audit, including first-week close/cancel/delete vocabulary marking.
-- Ingestion now sends actionable review-required lifecycle candidates through the gate instead of silently skipping them. Step 4 resolution tightening/close-all deletion and step 5 parser guard deletions were not changed.
-- Corpus replay after wiring remained byte-identical to the step 1-2 budgets: no-resolution floor `provider_15k9j3v` `24/26/18`, `provider_1gfxfwd` `290/298/1289`; simulated resolution `49/1/18` and `395/193/1289` respectively (EXECUTE/HOLD/DROP). The gate delegates these pure verdicts, so no budget rewrite was needed.
+- Ingestion now disposes `NO_SIGNAL` and `TRADE_SETUP` through the evidence layer: ordinary noise is audited `IGNORED` without alerts, while risk-off close/cancel/delete vocabulary is held and alerted. Step 4 resolution tightening/close-all deletion and step 5 parser guard deletions were not changed.
+- Identity-less held OPEN releases now route through scoped operator approval, materializing a logical trade and `trade_origins` row before PENDING delivery. The EA_OFFLINE reconnect auto-release orphan path was pre-existing since v1.51.0 and is now closed. Evidence-held lifecycle releases require an explicitly selected ACTIVE `logicalTradeId`, then enrich from that trade and bind broker targets; missing or inactive selections stay HELD/409.
+- Real corpus API tests now exercise reply-link and inline-quote resolution, release/reconciliation, reconnect release, and NO_SIGNAL disposal. Pure evidence budgets updated for the risk-off hold rule: no-resolution floor `provider_15k9j3v` `24/26/18`, `provider_1gfxfwd` `290/368/1219`; simulated-resolution `49/1/18` and `395/263/1219` respectively (EXECUTE/HOLD/DROP). Command-type tallies remain byte-identical.
 - Command-type tallies remain byte-identical: `NO_SIGNAL 1411`, `OPEN_TRADE 348`, `MARK_TP_HIT 138`, `CANCEL_PENDING 29`, `CLOSE_TRADE 15`, `MOVE_SL_TO_BE 4`. Version release metadata remains deferred to 1.60.0.
 
 ## v1.59.0 evidence corpus budget (2026-07-26)
 
 - Replaced provider-shape test probes with 14 verbatim real provider messages from the committed 1,945-message corpus. The two original compact incident repros and reviewer-only states without real equivalents remain explicitly labelled synthetic in `apps/api/src/execution-evidence.test.ts`.
 - The pure `evaluateExecutionEvidence` corpus budgets are recorded separately:
-  - No-resolution floor: `provider_15k9j3v` EXECUTE 24, HOLD 26, DROP 18; `provider_1gfxfwd` EXECUTE 290, HOLD 298, DROP 1289.
-  - Simulated-resolution expected (reply id -> `reply-link`; `Quoted signal:` -> `inline-quote`, one active trade): `provider_15k9j3v` EXECUTE 49, HOLD 1, DROP 18; `provider_1gfxfwd` EXECUTE 395, HOLD 193, DROP 1289.
+  - No-resolution floor: `provider_15k9j3v` EXECUTE 24, HOLD 26, DROP 18; `provider_1gfxfwd` EXECUTE 290, HOLD 368, DROP 1219.
+  - Simulated-resolution expected (reply id -> `reply-link`; `Quoted signal:` -> `inline-quote`, one active trade): `provider_15k9j3v` EXECUTE 49, HOLD 1, DROP 18; `provider_1gfxfwd` EXECUTE 395, HOLD 263, DROP 1219.
+- Real API corpus tests also drive `resolveLifecycleTarget` for reply-link and inline-quote fingerprints; the pure simulated budget remains a verdict-count control, not resolution proof.
 - `inline-quote` is first-class hard evidence only for an exact single-provider origin fingerprint mapping to exactly one active trade; unmatched or ambiguous resolution holds and never falls back to same-symbol matching.
-- These budgets are evidence-module counts only; the corpus command-type replay remains byte-identical to its pre-change baseline. No runtime logic, version, deployment, or push changed.
+- These budgets are evidence-module counts only; the corpus command-type replay remains byte-identical to its pre-change baseline. No runtime version, deployment, or push changed.
 
 ## Evidence-gated execution steps 1-2 (unreleased; no version bump)
 

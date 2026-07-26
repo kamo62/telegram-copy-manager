@@ -3,7 +3,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { brokerOrderSourceForDealReason, createApi, evaluateLifecycleActionState } from "./app";
+import { parseSignalText } from "@telegram-tc/core";
+import {
+  brokerOrderSourceForDealReason,
+  createApi,
+  evaluateLifecycleActionState,
+  normalizeEvidenceTargets,
+} from "./app";
 import { corpusMessages } from "./fixtures/provider-messages";
 import type { TelegramAdapter, TelegramCapturedMessage, TelegramDialog } from "./telegram";
 
@@ -2556,7 +2562,10 @@ describe("Telegram TC API", () => {
           .all() as Array<{ logical_trade_id: string; payload_json: string }>;
         expect(trades).toHaveLength(1);
         expect(JSON.parse(trades[0]!.data_json).providerOrderId).toBe("300424022");
-        expect(queues).toHaveLength(2);
+        expect(queues).toHaveLength(3);
+        expect(
+          queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "NO_SIGNAL"),
+        ).toHaveLength(1);
         expect(
           queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE"),
         ).toEqual([expect.objectContaining({ logical_trade_id: trades[0]!.id })]);
@@ -3145,23 +3154,7 @@ describe("Telegram TC API", () => {
     const app = createApi({
       databasePath: ":memory:",
       seedDemoData: false,
-      telegram: createQueuedTelegramAdapter([
-        {
-          telegramMessageId: "1",
-          messageDate: "2026-07-20T02:00:00.000Z",
-          rawText: "BUY XAUUSD @ 4025\nSL 4017\nTP 4035",
-        },
-        {
-          telegramMessageId: "2",
-          messageDate: "2026-07-20T02:01:00.000Z",
-          rawText: "BUY XAUUSD @ 4024\nSL 4016\nTP 4036",
-        },
-        {
-          telegramMessageId: "3",
-          messageDate: "2026-07-20T02:02:00.000Z",
-          rawText: "🟢 CLOSED - XAUUSD Buy 🟢",
-        },
-      ]),
+      telegram: createQueuedTelegramAdapter(realFixtureMessages(["15226", "15227", "16669"])),
       telegramPollingEnabled: false,
     });
     await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
@@ -3181,8 +3174,8 @@ describe("Telegram TC API", () => {
     expect(held).toMatchObject(
       expect.objectContaining({
         status: "HELD",
-        heldReason: "EVIDENCE_LIFECYCLE_RESOLUTION_REQUIRED",
-        payload: expect.objectContaining({ commandType: "CLOSE_TRADE" }),
+        heldReason: expect.stringMatching(/^EVIDENCE_/),
+        payload: expect.objectContaining({ commandType: "CANCEL_PENDING" }),
       }),
     );
     const requeue = await app.request(`/api/queue-items/${held?.id}/requeue`, {
@@ -3190,12 +3183,57 @@ describe("Telegram TC API", () => {
       body: JSON.stringify({ mode: "original" }),
       headers: { "content-type": "application/json" },
     });
-    expect(requeue.status).toBe(200);
-    expect(await json<{ status: string }>(requeue)).toMatchObject({ status: "PENDING" });
+    expect(requeue.status).toBe(409);
+    expect(await requeue.json()).toMatchObject({
+      error: expect.stringContaining("selected active logicalTradeId"),
+    });
+    const heldAfter = await json<{ queue: Array<{ id: string; status: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(heldAfter.queue.find((item) => item.id === held?.id)?.status).toBe("HELD");
     const audit = await json<{ logs: Array<{ eventType: string; level: string }> }>(
       await app.request("/api/audit-logs?event=telegram.ingest.queue-failed"),
     );
     expect(audit.logs).toHaveLength(0);
+  });
+
+  test("demotes a real-corpus target DROP when linked-account evidence disagrees", () => {
+    const fixture = corpusMessages.find((message) => message.telegramMessageId === "15226")!;
+    const signal = parseSignalText(fixture.rawText, {
+      providerId: fixture.providerId,
+      accountId: "account-a",
+      accountMappings: {
+        "account-a": {
+          accountId: "account-a",
+          includeSymbols: ["XAUUSD"],
+          availableBrokerSymbols: ["XAUUSD"],
+        },
+      },
+    });
+    const targets = normalizeEvidenceTargets([
+      {
+        accountId: "account-a",
+        signal,
+        verdict: { verdict: "DROP", reason: "NO_EXECUTABLE_SIGNAL" },
+      },
+      {
+        accountId: "account-b",
+        signal,
+        verdict: { verdict: "EXECUTE", reason: "COMPLETE_PROSE_OPEN_EVIDENCE" },
+      },
+    ]);
+
+    expect(targets[0]?.verdict).toMatchObject({
+      verdict: "HOLD",
+      reason: "NO_EXECUTABLE_SIGNAL",
+      tier: "action-required",
+    });
+    expect(targets[1]?.verdict.verdict).toBe("EXECUTE");
+    expect(
+      normalizeEvidenceTargets([targets[0]!, targets[0]!]).every(
+        (target) => target.verdict.verdict === "HOLD",
+      ),
+    ).toBe(true);
   });
 
   test("reconciles MT5 execution reports back into logical trade TP leg state", async () => {
@@ -5693,7 +5731,7 @@ describe("Telegram TC API", () => {
       alertOnGuardianPause: false,
       alertOnEaOffline: false,
       alertOnExecFailed: false,
-      alertOnHeld: false,
+      alertOnHeld: true,
       alertOnDroppedLifecycle: true,
       alertOnTelegramStall: false,
     });
@@ -5994,20 +6032,25 @@ describe("Telegram TC API", () => {
           status: string;
           originQueueItemId?: string;
           accountId: string;
+          logicalTradeId: string;
           payload: { orderType: string };
         }>;
       }>(await app.request("/api/signals"));
       expect(after.queue).toContainEqual(
         expect.objectContaining({ id: approved.queueItemId, status: "DISMISSED" }),
       );
-      expect(after.queue).toContainEqual(
-        expect.objectContaining({
-          accountId: "mt5-63442826",
-          originQueueItemId: approved.queueItemId,
-          status: "PENDING",
-          payload: expect.objectContaining({ orderType: "LIMIT" }),
-        }),
+      const released = after.queue.find(
+        (item) => item.originQueueItemId === approved.queueItemId && item.status === "PENDING",
       );
+      expect(released).toMatchObject({
+        accountId: "mt5-63442826",
+        originQueueItemId: approved.queueItemId,
+        payload: expect.objectContaining({ orderType: "LIMIT" }),
+      });
+      expect(released?.logicalTradeId).toBeTruthy();
+      expect(
+        await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+      ).toContain(`logicalTradeId=${released?.logicalTradeId}`);
     } finally {
       await rm(prepared.tempDir, { recursive: true, force: true });
     }
@@ -12243,19 +12286,14 @@ describe("Telegram TC API", () => {
     expect(item).not.toHaveProperty("provider");
     expect(item).not.toHaveProperty("account");
 
-    const requeued = await json<{
-      droppedLifecycleCount: number;
-      droppedLifecycle: string[];
-    }>(
-      await app.request(`/api/queue-items/${openItem?.id}/requeue`, {
-        method: "POST",
-        body: JSON.stringify({ mode: "market" }),
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    expect(requeued).toMatchObject({
-      droppedLifecycleCount: 0,
-      droppedLifecycle: [],
+    const requeued = await app.request(`/api/queue-items/${openItem?.id}/requeue`, {
+      method: "POST",
+      body: JSON.stringify({ mode: "market" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(requeued.status).toBe(409);
+    expect(await requeued.json()).toMatchObject({
+      error: expect.stringContaining("no unbound command was queued"),
     });
   });
 
@@ -12829,7 +12867,7 @@ describe("Telegram TC API", () => {
         body: JSON.stringify({ mode: "original" }),
         headers: { "content-type": "application/json" },
       }),
-    ).toHaveProperty("status", 200);
+    ).toHaveProperty("status", 409);
 
     const dismissedSignal = await parseHeld("SELL XAUUSD @ 4510\nSL 4520\nTP 4490");
     const heldForDismiss = await json<{ queueItemId: string }>(
@@ -12848,7 +12886,7 @@ describe("Telegram TC API", () => {
     );
     expect(
       dashboard.parserResults.find((signal) => signal.id === requeuedSignal.parsedSignalId)?.status,
-    ).toBe("PENDING");
+    ).toBe("HELD");
     expect(
       dashboard.parserResults.find((signal) => signal.id === dismissedSignal.parsedSignalId)
         ?.status,
@@ -13054,9 +13092,209 @@ describe("step 3 evidence gate wiring", () => {
     ).toHaveLength(2);
     expect(
       signals.signals.filter(
-        (item) => item.status === "PARSED" && item.result.commandType === "NO_SIGNAL",
+        (item) => item.status === "IGNORED" && item.result.commandType === "NO_SIGNAL",
       ),
     ).toHaveLength(2);
+  });
+
+  test("releases a real corpus evidence-held OPEN through trade materialization", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-evidence-open-release-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(realFixtureMessages(["15226"])),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          openEvidence: "structured-id",
+          riskMode: "fixed",
+          riskAmount: 0.37,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.runTelegramIngestionOnce();
+      const held = await json<{ items: Array<{ id: string; heldReason: string }> }>(
+        await app.request("/api/queue-items/held"),
+      );
+      const heldOpen = held.items.find(
+        (item) => item.heldReason === "EVIDENCE_STRUCTURED_OPEN_EVIDENCE_REQUIRED",
+      );
+      expect(heldOpen).toBeDefined();
+      const signals = await json<{
+        queue: Array<{ id: string; payload: { volume?: number; riskPercent?: number } }>;
+      }>(await app.request("/api/signals"));
+      expect(signals.queue.find((item) => item.id === heldOpen?.id)?.payload).toMatchObject({
+        volume: 0.37,
+      });
+
+      const released = await json<{ queueItemId: string; logicalTradeId: string }>(
+        await app.request(`/api/queue-items/${heldOpen?.id}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original" }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(released.logicalTradeId).toBeTruthy();
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          db
+            .query("SELECT logical_trade_id FROM trade_origins WHERE logical_trade_id = ?")
+            .get(released.logicalTradeId),
+        ).toBeTruthy();
+        const queue = db
+          .query("SELECT logical_trade_id, payload_json FROM queue_items WHERE id = ?")
+          .get(released.queueItemId) as { logical_trade_id: string; payload_json: string };
+        expect(queue.logical_trade_id).toBe(released.logicalTradeId);
+      } finally {
+        db.close();
+      }
+      await reportPendingAccepted(app, { queueItemId: released.queueItemId });
+      expect(
+        (
+          await json<{ logicalTrades: Array<{ id: string; status: string }> }>(
+            await app.request("/api/dashboard"),
+          )
+        ).logicalTrades.find((trade) => trade.id === released.logicalTradeId)?.status,
+      ).toBe("PENDING");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("requires and honors an explicit active trade for a real corpus lifecycle release", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-evidence-lifecycle-release-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages = realFixtureMessages(["15226"]);
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.runTelegramIngestionOnce();
+      const open = await json<{
+        queue: Array<{ id: string; status: string; payload: { commandType: string } }>;
+      }>(await app.request("/api/signals"));
+      const openItem = open.queue.find((item) => item.payload.commandType === "OPEN_TRADE");
+      expect(openItem).toBeDefined();
+      await reportPendingAccepted(app, { queueItemId: openItem!.id });
+      const trade = await json<{
+        logicalTrades: Array<{ id: string; status: string }>;
+      }>(await app.request("/api/dashboard"));
+      const activeTrade = trade.logicalTrades.find((item) => item.status === "PENDING");
+      expect(activeTrade).toBeDefined();
+
+      messages.push(realFixtureMessages(["16669"])[0]!);
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion.errors).toBe(0);
+      const held = await json<{
+        items: Array<{
+          id: string;
+          commandType: string;
+          heldReason: string;
+          candidateLogicalTradeIds?: string[];
+        }>;
+      }>(await app.request("/api/queue-items/held"));
+      const heldClose = held.items.find((item) => item.commandType === "CANCEL_PENDING");
+      expect(heldClose).toMatchObject({ heldReason: "EVIDENCE_INLINE_QUOTE_ORIGIN_UNMATCHED" });
+      expect(heldClose?.candidateLogicalTradeIds).toContain(activeTrade?.id);
+
+      const refused = await app.request(`/api/queue-items/${heldClose?.id}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "original" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(refused.status).toBe(409);
+      const released = await json<{ queueItemId: string; logicalTradeId: string }>(
+        await app.request(`/api/queue-items/${heldClose?.id}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original", logicalTradeId: activeTrade!.id }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(released.logicalTradeId).toBe(activeTrade!.id);
+      const signals = await json<{
+        queue: Array<{
+          id: string;
+          logicalTradeId: string;
+          status: string;
+          payload: { commandType: string };
+        }>;
+      }>(await app.request("/api/signals"));
+      expect(signals.queue).toContainEqual(
+        expect.objectContaining({
+          id: released.queueItemId,
+          logicalTradeId: activeTrade!.id,
+          status: "PENDING",
+          payload: expect.objectContaining({ commandType: "CANCEL_PENDING" }),
+        }),
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("disposes real NO_SIGNAL corpus messages: risk-off holds alert, ordinary noise audits only", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter(realFixtureMessages(["17114", "17183"])),
+      telegramPollingEnabled: false,
+    });
+    await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ alertBotToken: "token", alertChatId: "chat", alertOnHeld: true }),
+      headers: { "content-type": "application/json" },
+    });
+    const sentAlerts: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input, init) => {
+      sentAlerts.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await app.runTelegramIngestionOnce();
+      const signals = await json<{
+        signals: Array<{ status: string; result: { commandType: string; originalText: string } }>;
+      }>(await app.request("/api/signals"));
+      expect(signals.signals.filter((item) => item.status === "HELD")).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            result: expect.objectContaining({ commandType: "NO_SIGNAL" }),
+          }),
+        ]),
+      );
+      expect(signals.signals.filter((item) => item.status === "IGNORED")).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            result: expect.objectContaining({ commandType: "NO_SIGNAL" }),
+          }),
+        ]),
+      );
+      const held = await json<{ items: Array<{ heldReason: string }> }>(
+        await app.request("/api/queue-items/held"),
+      );
+      expect(held.items).toContainEqual(
+        expect.objectContaining({ heldReason: "EVIDENCE_RISK_OFF_NO_SIGNAL" }),
+      );
+      const drops = await json<{ logs: Array<{ eventType: string }> }>(
+        await app.request("/api/audit-logs?event=signal.evidence-drop"),
+      );
+      expect(drops.logs).toHaveLength(1);
+      expect(sentAlerts).toHaveLength(1);
+      expect(sentAlerts[0]).toContain("EVIDENCE_RISK_OFF_NO_SIGNAL");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   test("holds an unmatched real inline quote with a suggestion and no symbol fallback", async () => {
@@ -13074,7 +13312,7 @@ describe("step 3 evidence gate wiring", () => {
     });
     await app.request("/api/settings", {
       method: "PATCH",
-      body: JSON.stringify({ alertOnHeld: true, alertBotToken: "token", alertChatId: "chat" }),
+      body: JSON.stringify({ alertOnHeld: false, alertBotToken: "token", alertChatId: "chat" }),
       headers: { "content-type": "application/json" },
     });
     const sentAlerts: string[] = [];
@@ -13086,13 +13324,19 @@ describe("step 3 evidence gate wiring", () => {
     try {
       expect(await app.runTelegramIngestionOnce()).toMatchObject({ queued: 1 });
       const held = await json<{
-        items: Array<{ heldReason: string; suggestion?: string; commandType: string }>;
+        items: Array<{
+          heldReason: string;
+          heldTier?: string;
+          suggestion?: string;
+          commandType: string;
+        }>;
       }>(await app.request("/api/queue-items/held"));
       expect(held.items).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             commandType: "MARK_TP_HIT",
             heldReason: "EVIDENCE_INLINE_QUOTE_ORIGIN_UNMATCHED",
+            heldTier: "action-required",
           }),
         ]),
       );

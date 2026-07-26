@@ -69,7 +69,11 @@ export function LogsPage({
   parserActionPending: Record<string, boolean>;
   fixtureStatus: Record<string, string>;
   heldItems: HeldQueueItem[];
-  onHeldRequeue: (item: HeldQueueItem, mode: HeldRequeueMode) => Promise<void> | void;
+  onHeldRequeue: (
+    item: HeldQueueItem,
+    mode: HeldRequeueMode,
+    logicalTradeId?: string,
+  ) => Promise<void> | void;
   onHeldDismiss: (item: HeldQueueItem) => Promise<void> | void;
 }) {
   return (

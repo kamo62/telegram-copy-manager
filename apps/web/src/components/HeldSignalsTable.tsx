@@ -1,4 +1,5 @@
 import { Clock3, RotateCcw, Trash2 } from "lucide-react";
+import { useState } from "react";
 import { useLocale } from "../contexts/LocaleContext";
 import { useSortableTable } from "../hooks/useSortableTable";
 import type { HeldQueueItem, HeldRequeueMode } from "../lib/api";
@@ -40,14 +41,22 @@ export function HeldSignalsTable({
   items: HeldQueueItem[];
   accountLabel: (accountId: string) => string;
   providerLabel: (providerId: string) => string;
-  onRequeue: (item: HeldQueueItem, mode: HeldRequeueMode) => Promise<void> | void;
+  onRequeue: (
+    item: HeldQueueItem,
+    mode: HeldRequeueMode,
+    logicalTradeId?: string,
+  ) => Promise<void> | void;
   onDismiss: (item: HeldQueueItem) => Promise<void> | void;
 }) {
   const { locale } = useLocale();
   const { confirm, dialog } = useConfirm();
+  const [selectedTradeIds, setSelectedTradeIds] = useState<Record<string, string>>({});
   const { sortedRows, toggle, sortAria } = useSortableTable(items, "createdAt", "asc");
 
   async function requeue(item: HeldQueueItem, mode: HeldRequeueMode) {
+    const requiresTradeSelection = item.commandType !== "OPEN_TRADE";
+    const logicalTradeId = selectedTradeIds[item.id];
+    if (requiresTradeSelection && !logicalTradeId) return;
     const market = mode === "market";
     const confirmed = await confirm({
       title: market ? "Requeue at market?" : "Requeue as original order?",
@@ -58,7 +67,7 @@ export function HeldSignalsTable({
       confirmLabel: market ? "Requeue at market" : "Requeue original",
       destructive: false,
     });
-    if (confirmed) await onRequeue(item, mode);
+    if (confirmed) await onRequeue(item, mode, logicalTradeId);
   }
 
   async function dismiss(item: HeldQueueItem) {
@@ -151,8 +160,28 @@ export function HeldSignalsTable({
                 </td>
                 <td>
                   <div className="held-row-actions">
+                    {item.commandType !== "OPEN_TRADE" ? (
+                      <select
+                        aria-label={`Select active trade for ${item.symbol}`}
+                        onChange={(event) =>
+                          setSelectedTradeIds((current) => ({
+                            ...current,
+                            [item.id]: event.target.value,
+                          }))
+                        }
+                        value={selectedTradeIds[item.id] ?? ""}
+                      >
+                        <option value="">Select active trade</option>
+                        {(item.candidateLogicalTradeIds ?? []).map((tradeId) => (
+                          <option key={tradeId} value={tradeId}>
+                            {tradeId}
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
                     <button
                       className="btn btn-primary btn-small"
+                      disabled={item.commandType !== "OPEN_TRADE" && !selectedTradeIds[item.id]}
                       onClick={() => void requeue(item, "market")}
                       type="button"
                     >
@@ -161,6 +190,7 @@ export function HeldSignalsTable({
                     </button>
                     <button
                       className="btn btn-ghost btn-small"
+                      disabled={item.commandType !== "OPEN_TRADE" && !selectedTradeIds[item.id]}
                       onClick={() => void requeue(item, "original")}
                       type="button"
                     >

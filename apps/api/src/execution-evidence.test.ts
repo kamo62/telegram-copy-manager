@@ -93,6 +93,22 @@ describe("evaluateExecutionEvidence", () => {
     ).toBe("EXECUTE");
   });
 
+  test("holds a synthetic close-all comment on a real KAL quoted signal shape", () => {
+    const realQuote = realMessage("provider_1gfxfwd", "15343");
+    const syntheticCloseAll = `${realQuote.rawText.split(/\n\nComment:\n/)[0]}\n\nComment:\nclose all trades now guys`;
+    const signal = parsed(syntheticCloseAll, realQuote.providerId);
+
+    expect(signal).toMatchObject({ commandType: "CLOSE_TRADE", closeAll: true });
+    expect(
+      evaluateExecutionEvidence(
+        evidence(signal, {
+          providerConfig: proseConfig,
+          lifecycleResolution: lifecycle("inline-quote"),
+        }),
+      ),
+    ).toMatchObject({ verdict: "HOLD", reason: "CLOSE_ALL_REQUIRES_OPERATOR" });
+  });
+
   test("covers the real provider verdicts without trusting stored classifications", () => {
     const cases: Array<{
       label: string;
@@ -151,11 +167,11 @@ describe("evaluateExecutionEvidence", () => {
         message: realMessage("provider_1gfxfwd", "15231"),
         expected: "DROP",
       },
-      // Real educational prose contains sell/close vocabulary but no executable signal.
+      // Real educational prose contains risk-off vocabulary but no executable signal; ingestion must retain it for review.
       {
         label: "KAL VIP educational prose",
         message: realMessage("provider_1gfxfwd", "15311"),
-        expected: "DROP",
+        expected: "HOLD",
       },
       // Real current false positive: incomplete geometry remains held for review.
       {
@@ -332,11 +348,11 @@ describe("evaluateExecutionEvidence", () => {
   test("locks the 1,945-message corpus evidence budget per provider", () => {
     const noResolutionFloor = {
       provider_15k9j3v: { EXECUTE: 24, HOLD: 26, DROP: 18 },
-      provider_1gfxfwd: { EXECUTE: 290, HOLD: 298, DROP: 1289 },
+      provider_1gfxfwd: { EXECUTE: 290, HOLD: 368, DROP: 1219 },
     } as const;
     const simulatedResolutionExpected = {
       provider_15k9j3v: { EXECUTE: 49, HOLD: 1, DROP: 18 },
-      provider_1gfxfwd: { EXECUTE: 395, HOLD: 193, DROP: 1289 },
+      provider_1gfxfwd: { EXECUTE: 395, HOLD: 263, DROP: 1219 },
     } as const;
     const measuredFloor = {
       provider_15k9j3v: { EXECUTE: 0, HOLD: 0, DROP: 0 },

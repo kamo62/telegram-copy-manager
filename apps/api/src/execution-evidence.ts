@@ -36,6 +36,9 @@ export type ExecutionEvidenceVerdict = {
 export function evaluateExecutionEvidence(input: ExecutionEvidenceInput): ExecutionEvidenceVerdict {
   const { parsedSignal: signal } = input;
   const demotionMarkers = signal.evidence?.demotionMarkers ?? [];
+  if (signal.commandType === "NO_SIGNAL" && hasRiskOffVocabulary(signal.originalText)) {
+    return hold("RISK_OFF_NO_SIGNAL", "action-required");
+  }
   const base =
     signal.commandType === "OPEN_TRADE"
       ? evaluateOpen(input)
@@ -78,6 +81,7 @@ function evaluateOpen(input: ExecutionEvidenceInput): ExecutionEvidenceVerdict {
 }
 
 function evaluateLifecycle(input: ExecutionEvidenceInput): ExecutionEvidenceVerdict {
+  if (input.parsedSignal.closeAll) return hold("CLOSE_ALL_REQUIRES_OPERATOR");
   const resolution = input.lifecycleResolution;
   if (resolution?.method === "inline-quote") {
     if (resolution.status === "MATCHED" && resolution.activeTradeCount === 1) {
@@ -114,6 +118,12 @@ function isLifecycleCandidate(signal: ParsedSignal) {
     signal.commandType !== "OPEN_TRADE" &&
     signal.commandType !== "NO_SIGNAL" &&
     signal.commandType !== "TRADE_SETUP"
+  );
+}
+
+function hasRiskOffVocabulary(text: string) {
+  return /\b(?:CLOSE(?:D|S|ING)?|CANCEL(?:LED|ED|S|ING)?|DELETE(?:D|S|ING)?|REMOVE(?:D|S|ING)?)\b/i.test(
+    text,
   );
 }
 
