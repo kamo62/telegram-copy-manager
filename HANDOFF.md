@@ -1,5 +1,66 @@
 # Handoff
 
+## NEXT SESSION STARTS HERE — 7 blocking items from the final pre-deploy review
+
+Branch `fix/vipgold-duplicate-open-prevention` @ `316805ff` (pushed, 598 tests green).
+Both reviewers returned NO-GO on `ef409994`. IMPORTANT: they confirmed the six gate fixes are REAL
+and the gate holds every dangerous path probed, including both deliberately-unfixed parser
+misclassifications ("Trades closed today: 5 winners" and the educational NEW ORDER block both HOLD).
+What is broken is the RELEASE WORKFLOW the gate depends on, plus one regex. All items are small and
+localized. Fix these, re-review, then deploy.
+
+### BLOCKING — release workflow (all probe-confirmed by Fable through the real API)
+1. **Multi-account releases ALWAYS 409 — dead on arrival in production.** `approveSignal` dedup
+   (`app.ts:3591-3596`) excludes only `releasingQueueItemId`, but `holdForEvidence` creates one held
+   row PER LINKED ACCOUNT sharing a `parsedSignalId`. Releasing account A 409s on account B's sibling
+   and vice versa; both stay HELD forever. Prod runs two accounts (FTMO + HF), so one-click recovery
+   never works there. FIX: when `releasingQueueItemId` is set, ignore sibling rows whose status is
+   HELD or DISMISSED (still block PENDING/LEASED/EXECUTED and same-account rows).
+2. **A failed release permanently locks the signal.** `requeueHeldOpen` (`app.ts:4934+`) calls
+   `approveSignal`, which inserts a NEW held row on a HELD outcome (EA_OFFLINE, EXPIRED_LATE,
+   SYMBOL_MAPPING); the catch path reverts the original without deleting the new row, leaving two
+   HELD rows that both 409 forever. The prod box reboots often so release-while-EA-offline is
+   realistic. FIX: delete rows created by the failed approval attempt before reverting.
+3. **Releasing a held MARK_TP_HIT queues an EA-rejected command.** Normal ingest short-circuits
+   MARK_TP_HIT at `app.ts:4177` into `recordProviderTpHit` and queues nothing, but
+   `requeueHeldLifecycle` (`app.ts:5005-5100`) has no such branch, so it queues MARK_TP_HIT which the
+   EA hard-rejects (`mt5/TelegramTC_EA.mq5:245`). The held card is dismissed as if handled and the TP
+   leg is never recorded. MARK_TP_HIT is the most common lifecycle command (138/1945). FIX: branch to
+   `recordProviderTpHit` + dismiss + return RECORDED.
+
+### BLOCKING — safety net regex (Sol; verified directly)
+4. **The risk-off vocabulary regex does not match the words it needs to.**
+   `hasRiskOffVocabulary` (`execution-evidence.ts:124`) uses `CLOSE(?:D|S|ING)?`, which yields
+   "CLOSEING" not "CLOSING". Verified: `closing` -> false, `cancelling` -> false, `deleting` -> false,
+   while the nonsense `CLOSEING` -> true. So a genuine misclassified close ("Consider closing if
+   you're not willing to risk") is still SILENTLY DROPPED — the exact loss this net exists to stop.
+   FIX: `CLOS(?:E[DS]?|ING)`, `CANCEL(?:L?(?:E[DS]?|ING))?`, `DELET(?:E[DS]?|ING)`, `REMOV(?:E[DS]?|ING)`.
+
+### BLOCKING — decide and act
+5. **closeAll via the operator approve endpoint — reviewers disagreed.** `/api/signals/:id/approve`
+   passes `trigger:"operator"` (`app.ts:720`), which skips the gate, and a parsed `closeAll` then
+   reaches `approveCloseAll` (`:3777`) and fans out provider-wide. Sol calls this critical; Fable
+   calls it intended operator action. ORCHESTRATOR VIEW: an innocuous "Approve" button should not
+   silently flatten the whole book. The plan's step 4 DELETES close-all entirely (zero close-all
+   messages exist in the 1945-message corpus) — do that and the disagreement disappears.
+
+### DEPLOY STEPS (not code)
+6. **`alertOnHeld: true` never reaches prod.** `normalizeAppSettings` (`app.ts:14327`) coerces from
+   stored settings and prod's stored `false` survives the deploy; the new default only affects fresh
+   DBs. Evidence holds force-alert regardless, but EA_OFFLINE / NAKED_PENDING_ENTRY /
+   DUPLICATE_ORDER_ID / SYMBOL_MAPPING / GUARDIAN / EA_CAPABILITY_UNAVAILABLE holds stay silent.
+   Flip it via settings PATCH on the live box and set bot token + chat id.
+7. **Old EA_CAPABILITY_UNAVAILABLE holds do not auto-release** when the recompiled EA attaches; each
+   needs a manual requeue. In-flight PENDING items are unaffected (the gate runs at approve time).
+
+### Lower priority (recorded, not blocking)
+- "Requeue at market" is silently ignored for held opens (`requeueHeldOpen` drops `mode`) while the
+  UI promises a market order.
+- `dismissReleasedQueueItem` (`:5102`) overwrites the APPROVED parsed-signal status with PENDING.
+- The risk-off NO_SIGNAL rule holds banter: 85 of 1411 NO_SIGNALs become action-required alerts
+  ("wait for the 15m to close"). Deliberate for the first-week audit; consider an fyi tier after.
+
+
 ## START HERE — session boundary 2026-07-26
 
 Branch `fix/vipgold-duplicate-open-prevention` @ `ef409994`, 13 commits ahead of main, PUSHED.
