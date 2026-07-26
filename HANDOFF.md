@@ -1,5 +1,30 @@
 # Handoff
 
+## Step 3 open questions — ANSWERED locally (2026-07-26), independent review still pending
+
+Both reviewers hit usage limits mid-review (reset 2:10pm SAST), so commit 9c665eab is
+recorded as PENDING INDEPENDENT REVIEW. The two questions flagged in that commit message
+were investigated directly and both came back clean:
+
+1. **Can KAL chatter whose inline quote fingerprint-matches a live trade execute?** NO.
+   Protection is two-factor and independent. The quote identifies WHICH trade; the comment
+   must independently parse to a lifecycle command. Verified against the real corpus:
+   `Comment: This one's abit riskier ...` -> NO_SIGNAL and `Comment: 120 pips if you kept
+   limits` -> NO_SIGNAL, and `isLifecycleCandidate` (execution-evidence.ts) excludes
+   NO_SIGNAL / OPEN_TRADE / TRADE_SETUP, so neither reaches `evaluateLifecycle` no matter how
+   cleanly its quote resolves. The genuine `Comment: Tp 2 150pips` -> MARK_TP_HIT does reach it.
+2. **Does account-scoped resolution silently skip the second account?** NO.
+   `resolveLifecycleTarget` is invoked INSIDE the per-target-account loop (app.ts:3627, and
+   again at :4059), so each linked account resolves its own trade through its own
+   `trade_origins` row. The `trade_origins.account_id = ?` filter is correct by design; a
+   two-account fan-out resolves both accounts independently.
+
+Still outstanding for the reviewers when limits reset: whether the gate is genuinely the only
+path to queue insertion/lease (requeue, auto-release, guardian unpause, manual push, retry,
+EA-offline release, the lifecycle path at :3887), and whether any genuine instruction can now
+be LOST rather than held — the risk direction that inverted with this commit.
+
+
 Updated: 2026-07-26 (v1.59.0 evidence-gated execution step 3)
 
 ## Evidence-gated execution step 3 (unreleased; version held at 1.59.0)
