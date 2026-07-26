@@ -139,6 +139,43 @@ type AlertSetting =
   | "alertOnDroppedLifecycle"
   | "alertOnTelegramStall";
 
+class ReleaseConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReleaseConflictError";
+  }
+}
+
+type DeferredAlert = {
+  event: string;
+  key: string;
+  text: string;
+  setting: AlertSetting;
+  force: boolean;
+};
+
+type RequeueSuccess =
+  | {
+      queueItemId: string;
+      originQueueItemId: string;
+      accountId: string;
+      logicalTradeId?: string;
+      mode: string;
+      status: "PENDING";
+      droppedLifecycleCount: number;
+      droppedLifecycle: string[];
+    }
+  | {
+      originQueueItemId: string;
+      accountId: string;
+      logicalTradeId: string;
+      logicalTradeIds: string[];
+      mode: string;
+      status: "RECORDED";
+    };
+
+type RequeueError = { statusCode: 404 | 409 | 422; error: string };
+
 interface AppSettings {
   defaultLotSize: number;
   defaultRiskPercent: number;
@@ -1529,6 +1566,7 @@ class AppStore {
   // is a shared broker (Redis/Postgres LISTEN) if the API is ever scaled out.
   private readonly eventSubscribers = new Set<(event: AppStoreEvent) => void>();
   private readonly alertSentAt = new Map<string, number>();
+  private deferredAlerts: DeferredAlert[] | undefined;
   private storeRevision = 0;
   private observedDataVersion: number | undefined;
   private dashboardPerformanceCache:
@@ -1563,6 +1601,29 @@ class AppStore {
     this.db = new Database(databasePath);
     this.db.run("PRAGMA journal_mode = WAL");
     this.migrate();
+  }
+
+  // Thrown when the HELD source row does not transition exactly once. Escapes the transaction so
+  // SQLite rolls the whole release back, then becomes a 409 instead of an unhandled 500.
+  private releaseTransaction<T>(operation: () => T): T | { statusCode: 409; error: string } {
+    const deferredAlerts: DeferredAlert[] = [];
+    const previousDeferredAlerts = this.deferredAlerts;
+    this.deferredAlerts = deferredAlerts;
+    let result: T;
+    try {
+      result = this.db.transaction(operation)();
+    } catch (error) {
+      this.deferredAlerts = previousDeferredAlerts;
+      if (error instanceof ReleaseConflictError) {
+        return { statusCode: 409 as const, error: error.message };
+      }
+      throw error;
+    }
+    this.deferredAlerts = previousDeferredAlerts;
+    for (const alert of deferredAlerts) {
+      this.dispatchAlert(alert.event, alert.key, alert.text, alert.setting, alert.force);
+    }
+    return result;
   }
 
   startTelegramSession(input: { apiId: string; apiHash: string; phone: string }) {
@@ -4847,7 +4908,11 @@ class AppStore {
     return dropped;
   }
 
-  requeueQueueItem(id: string, mode?: string, selectedLogicalTradeId?: string) {
+  requeueQueueItem(
+    id: string,
+    mode?: string,
+    selectedLogicalTradeId?: string,
+  ): RequeueSuccess | RequeueError {
     if (mode !== "market" && mode !== "original") {
       return {
         statusCode: 422 as const,
@@ -4906,45 +4971,41 @@ class AppStore {
         ? { ...originalPayload, orderType: "MARKET" as const, entry: undefined }
         : originalPayload;
     if (payload.executionMode !== "VIRTUAL_TP") payload.runner = undefined;
-    const queueItemId = `queue_${nanoid(10)}`;
-    const item: ExecutionQueueItem = {
-      id: queueItemId,
-      accountId: targetAccountId || undefined,
-      logicalTradeId: logicalTradeId || undefined,
-      status: "PENDING",
-      payload,
-    };
-    this.insertQueueItem(item, String(row.parsed_signal_id ?? ""), { originQueueItemId: id });
-    this.db
-      .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
-      .run("DISMISSED", nowIso(), id);
-    if (row.parsed_signal_id) {
-      this.db
-        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
-        .run("PENDING", String(row.parsed_signal_id));
-    }
-    this.audit(
-      "queue.requeue",
-      "info",
-      "Held queue item requeued by operator",
-      {
-        heldQueueItemId: id,
+    return this.releaseTransaction(() => {
+      const queueItemId = `queue_${nanoid(10)}`;
+      const item: ExecutionQueueItem = {
+        id: queueItemId,
+        accountId: targetAccountId || undefined,
+        logicalTradeId: logicalTradeId || undefined,
+        status: "PENDING",
+        payload,
+      };
+      this.insertQueueItem(item, String(row.parsed_signal_id ?? ""), { originQueueItemId: id });
+      this.dismissReleasedQueueItem(id, String(row.parsed_signal_id ?? ""));
+      this.audit(
+        "queue.requeue",
+        "info",
+        "Held queue item requeued by operator",
+        {
+          heldQueueItemId: id,
+          queueItemId,
+          mode,
+          accountId: targetAccountId,
+        },
+        "operator",
+      );
+      const droppedLifecycle = this.droppedLifecycleForQueueItems([id]).get(id) ?? [];
+      return {
         queueItemId,
-        mode,
+        originQueueItemId: id,
         accountId: targetAccountId,
-      },
-      "operator",
-    );
-    const droppedLifecycle = this.droppedLifecycleForQueueItems([id]).get(id) ?? [];
-    return {
-      queueItemId,
-      originQueueItemId: id,
-      accountId: targetAccountId,
-      mode,
-      status: "PENDING" as const,
-      droppedLifecycleCount: droppedLifecycle.length,
-      droppedLifecycle,
-    };
+        logicalTradeId: logicalTradeId || undefined,
+        mode,
+        status: "PENDING" as const,
+        droppedLifecycleCount: droppedLifecycle.length,
+        droppedLifecycle,
+      };
+    });
   }
 
   private requeueHeldOpen(id: string, row: Row, payload: ExecutionQueueItem["payload"]) {
@@ -4956,74 +5017,60 @@ class AppStore {
         error: "Held OPEN has no account or parsed signal binding",
       };
     }
-    this.db
-      .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
-      .run("DISMISSED", nowIso(), id);
-    let approval: ReturnType<AppStore["approveSignal"]>;
     try {
-      approval = this.approveSignal(parsedSignalId, {
-        executionMode: payload.executionMode,
-        trigger: "operator",
-        targetAccountId: accountId,
-        releasingQueueItemId: id,
+      return this.releaseTransaction(() => {
+        this.dismissReleasedQueueItem(id, parsedSignalId, null);
+        const approval = this.approveSignal(parsedSignalId, {
+          executionMode: payload.executionMode,
+          trigger: "operator",
+          targetAccountId: accountId,
+          releasingQueueItemId: id,
+        });
+        if (!("body" in approval) || approval.body.status !== "PENDING") {
+          const reason = "error" in approval ? approval.error : `status=${approval.body.status}`;
+          throw new Error(reason);
+        }
+        const queueItems =
+          approval.body.queueItems ??
+          (approval.body.queueItemId ? [approval.body.queueItemId] : []);
+        if (
+          queueItems.length === 0 ||
+          queueItems.some(
+            (queueItemId) => !this.logicalTrade(this.queueLogicalTradeId(queueItemId)),
+          )
+        ) {
+          throw new Error("Approved OPEN did not produce a bound logical trade");
+        }
+        const placeholders = queueItems.map(() => "?").join(", ");
+        this.db
+          .query(`UPDATE queue_items SET origin_queue_item_id = ? WHERE id IN (${placeholders})`)
+          .run(id, ...queueItems);
+        const queueItemId = queueItems[0]!;
+        this.audit(
+          "queue.requeue",
+          "info",
+          "Held OPEN requeued through approved trade materialization",
+          { heldQueueItemId: id, queueItemId, queueItems, accountId },
+          "operator",
+        );
+        const droppedLifecycle = this.droppedLifecycleForQueueItems([id]).get(id) ?? [];
+        return {
+          queueItemId,
+          originQueueItemId: id,
+          accountId,
+          logicalTradeId: this.queueLogicalTradeId(queueItemId),
+          mode: "approved-open",
+          status: "PENDING" as const,
+          droppedLifecycleCount: droppedLifecycle.length,
+          droppedLifecycle,
+        };
       });
     } catch (error) {
-      this.db
-        .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?")
-        .run("HELD", nowIso(), id);
       return {
         statusCode: 409 as const,
         error: `Held OPEN remains held; no unbound command was queued: ${error instanceof Error ? error.message : "approval failed"}`,
       };
     }
-    if (!("body" in approval) || approval.body.status !== "PENDING") {
-      this.db
-        .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?")
-        .run("HELD", nowIso(), id);
-      const reason = "error" in approval ? approval.error : `status=${approval.body.status}`;
-      return {
-        statusCode: 409 as const,
-        error: `Held OPEN remains held; no unbound command was queued: ${reason}`,
-      };
-    }
-    const queueItems =
-      approval.body.queueItems ?? (approval.body.queueItemId ? [approval.body.queueItemId] : []);
-    if (
-      queueItems.length === 0 ||
-      queueItems.some((queueItemId) => !this.logicalTrade(this.queueLogicalTradeId(queueItemId)))
-    ) {
-      this.db
-        .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?")
-        .run("HELD", nowIso(), id);
-      return {
-        statusCode: 409 as const,
-        error: "Approved OPEN did not produce a bound logical trade",
-      };
-    }
-    const placeholders = queueItems.map(() => "?").join(", ");
-    this.db
-      .query(`UPDATE queue_items SET origin_queue_item_id = ? WHERE id IN (${placeholders})`)
-      .run(id, ...queueItems);
-    this.dismissReleasedQueueItem(id, parsedSignalId);
-    const queueItemId = queueItems[0]!;
-    this.audit(
-      "queue.requeue",
-      "info",
-      "Held OPEN requeued through approved trade materialization",
-      { heldQueueItemId: id, queueItemId, queueItems, accountId },
-      "operator",
-    );
-    const droppedLifecycle = this.droppedLifecycleForQueueItems([id]).get(id) ?? [];
-    return {
-      queueItemId,
-      originQueueItemId: id,
-      accountId,
-      logicalTradeId: this.queueLogicalTradeId(queueItemId),
-      mode: "approved-open",
-      status: "PENDING" as const,
-      droppedLifecycleCount: droppedLifecycle.length,
-      droppedLifecycle,
-    };
   }
 
   private requeueHeldLifecycle(
@@ -5078,6 +5125,25 @@ class AppStore {
     if (actionState.verdict === "noop" || actionState.verdict === "hold") {
       return { statusCode: 409 as const, error: actionState.reason };
     }
+    const parsedSignalId = String(row.parsed_signal_id ?? "");
+    if (signal.commandType === "MARK_TP_HIT") {
+      return this.releaseTransaction(() => {
+        this.recordProviderTpHit(trade.id, signal);
+        this.dismissReleasedQueueItem(id, parsedSignalId, "APPROVED");
+        this.audit("signal.tp-hit", "info", "Provider TP hit recorded for logical trade", {
+          parsedSignalId,
+          logicalTradeIds: [trade.id],
+        });
+        return {
+          originQueueItemId: id,
+          accountId,
+          logicalTradeId: trade.id,
+          logicalTradeIds: [trade.id],
+          mode,
+          status: "RECORDED" as const,
+        };
+      });
+    }
     const routedSignal =
       actionState.verdict === "cancel"
         ? { ...signal, commandType: "CANCEL_PENDING" as const, partialClose: undefined }
@@ -5093,54 +5159,70 @@ class AppStore {
     const settings = this.appSettings();
     const config = this.providerConfig(providerId, accountId);
     const provider = this.providerDetails(providerId);
-    const queueItemId = `queue_${nanoid(10)}`;
-    const queueItem = buildExecutionCommand(enrichedSignal, {
-      id: queueItemId,
-      accountId,
-      logicalTradeId: trade.id,
-      executionMode: trade.executionMode ?? "VIRTUAL_TP",
-      volume:
-        config.riskMode === "fixed"
-          ? config.riskAmount
-          : (provider?.lotSize ?? settings.defaultLotSize),
-      riskPercent: config.riskMode === "percent" ? config.riskAmount : settings.defaultRiskPercent,
-      runner: trade.executionMode === "VIRTUAL_TP" ? config.runner : undefined,
+    return this.releaseTransaction(() => {
+      const queueItemId = `queue_${nanoid(10)}`;
+      const queueItem = buildExecutionCommand(enrichedSignal, {
+        id: queueItemId,
+        accountId,
+        logicalTradeId: trade.id,
+        executionMode: trade.executionMode ?? "VIRTUAL_TP",
+        volume:
+          config.riskMode === "fixed"
+            ? config.riskAmount
+            : (provider?.lotSize ?? settings.defaultLotSize),
+        riskPercent:
+          config.riskMode === "percent" ? config.riskAmount : settings.defaultRiskPercent,
+        runner: trade.executionMode === "VIRTUAL_TP" ? config.runner : undefined,
+      });
+      if (absoluteSignal.partialClose?.kind === "PERCENT") {
+        queueItem.payload.partialClose = absoluteSignal.partialClose;
+      }
+      Object.assign(queueItem.payload, this.brokerTargetForCommand(trade.id, queueItem.payload));
+      this.appendTradeCommand(trade.id, signal);
+      this.insertQueueItem(queueItem, parsedSignalId, { originQueueItemId: id });
+      this.dismissReleasedQueueItem(id, parsedSignalId);
+      this.audit(
+        "queue.requeue",
+        "info",
+        "Evidence-held lifecycle requeued with selected logical trade",
+        { heldQueueItemId: id, queueItemId, accountId, logicalTradeId: trade.id },
+        "operator",
+      );
+      const droppedLifecycle = this.droppedLifecycleForQueueItems([id]).get(id) ?? [];
+      return {
+        queueItemId,
+        originQueueItemId: id,
+        accountId,
+        logicalTradeId: trade.id,
+        mode,
+        status: "PENDING" as const,
+        droppedLifecycleCount: droppedLifecycle.length,
+        droppedLifecycle,
+      };
     });
-    if (absoluteSignal.partialClose?.kind === "PERCENT") {
-      queueItem.payload.partialClose = absoluteSignal.partialClose;
-    }
-    Object.assign(queueItem.payload, this.brokerTargetForCommand(trade.id, queueItem.payload));
-    this.appendTradeCommand(trade.id, signal);
-    this.insertQueueItem(queueItem, String(row.parsed_signal_id ?? ""), { originQueueItemId: id });
-    this.dismissReleasedQueueItem(id, String(row.parsed_signal_id ?? ""));
-    this.audit(
-      "queue.requeue",
-      "info",
-      "Evidence-held lifecycle requeued with selected logical trade",
-      { heldQueueItemId: id, queueItemId, accountId, logicalTradeId: trade.id },
-      "operator",
-    );
-    const droppedLifecycle = this.droppedLifecycleForQueueItems([id]).get(id) ?? [];
-    return {
-      queueItemId,
-      originQueueItemId: id,
-      accountId,
-      logicalTradeId: trade.id,
-      mode,
-      status: "PENDING" as const,
-      droppedLifecycleCount: droppedLifecycle.length,
-      droppedLifecycle,
-    };
   }
 
-  private dismissReleasedQueueItem(id: string, parsedSignalId: string) {
-    this.db
+  private dismissReleasedQueueItem(
+    id: string,
+    parsedSignalId: string,
+    parsedStatus: string | null = "PENDING",
+  ) {
+    // Compare-and-swap: the source must still be HELD and must transition exactly once. If a
+    // concurrent release, a crash retry, or a stale card got there first, abort so we never leave
+    // both an executable row and the original HELD row behind. A leaked PENDING row is immediately
+    // leasable by the EA, so this must fail the whole release rather than warn.
+    const dismissed = this.db
       .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
       .run("DISMISSED", nowIso(), id);
-    if (parsedSignalId) {
+    if (dismissed.changes !== 1) {
+      throw new ReleaseConflictError(
+        "Held queue item was already released or is no longer HELD; nothing was queued",
+      );
+    }
+    if (parsedSignalId && parsedStatus) {
       this.db
         .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
-        .run("PENDING", parsedSignalId);
+        .run(parsedStatus, parsedSignalId);
     }
   }
 
@@ -5809,7 +5891,13 @@ class AppStore {
         "queue.ea-offline-release-skipped",
         "warn",
         "EA_OFFLINE held item could not be requeued",
-        { accountId, queueItemId, sourceDate, reason: "requeue_blocked", error: result.error },
+        {
+          accountId,
+          queueItemId,
+          sourceDate,
+          reason: "requeue_blocked",
+          error: "error" in result ? result.error : "release did not queue executable work",
+        },
       );
       return [];
     });
@@ -9515,6 +9603,10 @@ class AppStore {
     setting: AlertSetting,
     force = false,
   ) {
+    if (this.deferredAlerts) {
+      this.deferredAlerts.push({ event, key, text, setting, force });
+      return;
+    }
     const settings = this.appSettings();
     if ((!settings[setting] && !force) || !settings.alertBotToken || !settings.alertChatId) return;
     const dedupKey = `${event}:${key}`;
