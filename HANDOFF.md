@@ -1,5 +1,56 @@
 # Handoff
 
+## START HERE — session boundary 2026-07-26
+
+Branch `fix/vipgold-duplicate-open-prevention` @ `ef409994`, 13 commits ahead of main, PUSHED.
+Production is untouched on **v1.56.2**. Nothing from this branch is deployed.
+Full plan: `PLAN-evidence-gated-execution.md`. Gate: typecheck, lint, **598 tests**, build all green.
+
+### Two things that are live risks RIGHT NOW on the production box
+1. **Orphan path in prod since v1.51.0.** The EA-reconnect auto-release requeues a held pending
+   order with no logical trade bound; the EA only rejects unbound *lifecycle* commands, so an OPEN
+   goes through and cannot be reconciled. FIXED in this branch but NOT DEPLOYED. If you want it
+   sooner, extract it as a standalone patch rather than waiting for steps 4-5.
+2. **The duplicate-open and false-dedup fixes are not deployed.** Both original incidents are fixed
+   on this branch (stable since v1.57.0) but prod still runs v1.56.2, so a VIP Gold "activated"
+   message can still orphan, and a new order at a cancelled order's price can still be swallowed.
+
+### Deploy prerequisites (owner action, not code)
+- **Alerting is entirely unconfigured in prod**: `alertBotToken` and `alertChatId` are EMPTY and all
+  `alertOn*` flags are unset, so NO alerts of any kind are sent today (guardian pauses, EA offline,
+  execution failures included). Evidence holds now force alert dispatch, but they still cannot send
+  without a token + chat id. Configure in Settings -> Alerting and use "Send test message".
+  Owner has accepted this as a post-deploy item, not a blocker.
+- Deploying this branch requires an **EA recompile + reattach** built from the final commit only.
+
+### Where the plan stands
+- Steps 1-3 COMPLETE: forward provenance capture, the pure evidence model, and the gate wired at
+  `approveSignal` (default-gated, `"operator"` bypass), plus two rounds of review fixes.
+- Steps 4-5 REMAINING: demote the same-symbol fallback to a suggestion everywhere, DELETE close-all
+  (`isCloseAllInstruction`, the `closeAll` flag, `approveCloseAll`) since the corpus contains zero
+  close-all messages, and remove ~250-300 lines of parser guard piles. Then release as v1.60.0.
+
+### Review discipline that actually worked — keep doing this
+- **Test from the real corpus, never invented strings.** 1945 real messages are committed at
+  `apps/api/src/fixtures/provider-messages.ts`; the replay harness is at
+  `scratchpad/replay.ts`. Nine review rounds were spent chasing phrasings the providers never send.
+- **Run Sol AND Fable in parallel, independently.** In the last round each found a critical the
+  other missed (Sol: release-path orphan; Fable: close-all gate escape + silent alerts).
+- **Review BEFORE committing.** The last round caught a book-flattening bug pre-commit.
+- Corpus command-type tallies are the inertness check: NO_SIGNAL 1411, OPEN_TRADE 348,
+  MARK_TP_HIT 138, CANCEL_PENDING 29, CLOSE_TRADE 15, MOVE_SL_TO_BE 4. Any step that is not meant to
+  change classification must leave these byte-identical.
+
+### Measured ground truth (do not re-derive)
+- VIP Gold `provider_15k9j3v`: structured copier blocks, 60/68 carry `#` ids, 25/26 lifecycle
+  messages carry a Telegram reply id, closes arrive as reply comments, and it closes MANUALLY.
+- KAL VIP `provider_1gfxfwd`: prose, ZERO order ids, only 8/160 lifecycle messages carry a reply id;
+  152 embed the original signal verbatim as inline `Quoted signal:` text. Lifecycle is 138 TP-hits
+  and 15 cancels; it never sends close instructions. 40% of its noise is ALSO quoted form, so the
+  quote alone is never evidence — the comment must independently parse to a lifecycle command.
+- Zero close-all phrasings exist in the entire corpus.
+
+
 ## Independent review follow-up — F1-F5 fixed locally (2026-07-26), version remains 1.59.0
 
 - Lifecycle `closeAll` is now monotone fail-closed at `evaluateLifecycle`: a matched inline quote can no longer execute or reach provider-wide `approveCloseAll`; it returns `CLOSE_ALL_REQUIRES_OPERATOR`.
