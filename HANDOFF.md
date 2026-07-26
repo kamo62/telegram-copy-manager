@@ -1,6 +1,14 @@
 # Handoff
 
-Updated: 2026-07-26 (v1.58.1 close-safety follow-up)
+Updated: 2026-07-26 (v1.59.0 structure-first classification)
+
+## v1.59.0 — structure-first classification
+
+- Structural lifecycle evidence wins before prose guards; reply-only Telegram comments hydrate from the stored provider message so `Closed ✅` resolves deterministically.
+- Present-tense close-all instructions and past-tense ALL-quantified close reports (for example, `All positions closed ✅`) fan out one CLOSE_TRADE per active provider trade across enabled linked accounts, with `signal.close-all` audit evidence, fan-out counts, alerts, and reconciliation holds for missing tickets.
+- OPENED/LIVE activation comments stay lifecycle context while complete LIVE-branded entries remain opens; runner-preserving provider closes verify the configured remainder and queue its SL strategy.
+- EA and the runnable flatten model hold PERCENT closes with `targetRemainingVolume <= 0`; non-VIRTUAL_TP lifecycle holds/requeues strip runner payloads.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.59.0 source before enabling live execution. Nothing was pushed or deployed.**
 
 ## v1.58.1 — close-safety follow-up
 

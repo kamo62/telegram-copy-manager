@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.59.0 - 2026-07-26 (Minor)
+
+Release impact: Minor because signal precedence, reply hydration, and provider-wide close-all change live lifecycle behaviour while preserving the existing MT5 command contract.
+
+- Structural close/open evidence now outranks prose, with reply-only close reports hydrated from stored Telegram context.
+- Added bounded provider-wide close-all fan-out for both present-tense instructions and past-tense ALL-quantified close reports, with per-trade reconciliation holds and operator audit/alert evidence.
+- Recognized OPENED/LIVE lifecycle comments without reopening quoted orders, queued the configured runner SL strategy, and rejected invalid zero target-remaining PERCENT closes.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; the EA must be rebuilt from the final 1.59.0 source.**
+
 ## 1.58.1 - 2026-07-26 (Patch)
 
 Release impact: Patch because this restores structural lifecycle detection and corrects close-volume and runner execution without changing the public payload contract.

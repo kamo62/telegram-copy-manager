@@ -8,7 +8,7 @@ describe("MT5 Expert Advisor source", () => {
   test("keeps the EA on the same compatible app release line", () => {
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
-    expect(eaVersion).toBe("1.58.1");
+    expect(eaVersion).toBe("1.59.0");
     expect(eaVersion).toBe(packageJson.version);
   });
 
@@ -207,7 +207,8 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.58.1"');
+    expect(source).toContain('#property version   "1.59.0"');
+    expect(source.match(/"1\.59\.0"/g)).toHaveLength(3);
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
@@ -434,6 +435,8 @@ describe("MT5 Expert Advisor source", () => {
     );
     expect(partialBody).not.toContain("CollectPendingOrderTickets");
     expect(partialBody).not.toContain("RemovePendingOrder");
+    expect(partialBody).toContain("command.targetRemainingVolume <= 0.0");
+    expect(partialBody).toContain("No valid target remaining volume provided");
   });
 
   test("marks a partial close idempotently executed so a replay cannot close a second slice", () => {

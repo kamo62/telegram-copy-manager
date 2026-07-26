@@ -1416,6 +1416,66 @@ describe("VIP Gold order lifecycle formats", () => {
     }
   });
 
+  test("structure decides before prose and keeps close-all scoped", () => {
+    const quoted = (comment: string) =>
+      parseSignalText(
+        `Quoted signal: NEW ORDER - XAUUSD Buy Stop # 306947863 Entry: 4051.30 SL: 4045.30 TP: 4060.30\n\nComment:\n${comment}`,
+        context,
+      );
+    for (const text of [
+      "H4 candle closed above SL, still holding",
+      "Registration closed! Entry fee is $50, DM me",
+      "GOLD closed below our entry",
+      "The week closed above our entry",
+      "Gold closed above TP2 level on the daily",
+      "We closed 5 winning trades this week",
+    ]) {
+      expect(quoted(text).commandType).toBe("NO_SIGNAL");
+      expect(quoted(text).closeAll).toBe(false);
+    }
+    for (const text of [
+      "All positions closed",
+      "All positions closed ✅",
+      "Positions closed",
+      "Both trades closed",
+      "All trades closed",
+      "Everything closed",
+      "All closed",
+      "Closed all positions",
+      "Closed everything",
+    ]) {
+      expect(quoted(text)).toMatchObject({ commandType: "CLOSE_TRADE", closeAll: true });
+    }
+    expect(quoted("Closing all positions now")).toMatchObject({
+      commandType: "CLOSE_TRADE",
+      closeAll: true,
+    });
+    expect(quoted("Closed ✅").commandType).toBe("CLOSE_TRADE");
+    expect(quoted("Closed ✅").closeAll).toBe(false);
+    expect(quoted("Position closed")).toMatchObject({
+      commandType: "CLOSE_TRADE",
+      closeAll: false,
+    });
+    expect(quoted("Closed +40 pips").commandType).toBe("CLOSE_TRADE");
+    expect(quoted("🟢 CLOSED - XAUUSD Sell 🟢\n{ CLOSED }\nDont chase it now").commandType).toBe(
+      "CLOSE_TRADE",
+    );
+  });
+
+  test("recognizes OPENED/LIVE lifecycle comments without suppressing LIVE entries", () => {
+    const quoted = (comment: string) =>
+      parseSignalText(
+        `Quoted signal: NEW ORDER - XAUUSD Buy Stop # 306947863 Entry: 4051.30 SL: 4045.30 TP: 4060.30\n\nComment:\n${comment}`,
+        context,
+      );
+    for (const text of ["Buy Stop opened", "Buy Stop live", "XAUUSD Buy Stop opened"]) {
+      expect(quoted(text).commandType).toBe("NO_SIGNAL");
+    }
+    expect(
+      parseSignalText("GOLD BUY LIMIT @ 3300 - LIVE\nSL: 3290\nTP: 3320", context).commandType,
+    ).toBe("OPEN_TRADE");
+  });
+
   test("does not open a prefixed activation recap containing ALREADY", () => {
     const result = parseSignalText(
       "SELL STOP ACTIVATED - already in profit!\n\nGOLD SELL @ 3305\nSL: 3310\nTP: 3290",

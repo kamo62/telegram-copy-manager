@@ -111,7 +111,6 @@ describe("EA flatten state machine", () => {
     const first = flattenClose(broker, "partial-2", executedTickets, false, {
       kind: "PERCENT",
       value: 100,
-      targetRemainingVolume: 0,
     });
     expect(first.status).toBe("PARTIAL");
     expect(first.closeAttempts).toEqual([
@@ -125,7 +124,6 @@ describe("EA flatten state machine", () => {
     const retry = flattenClose(broker, "partial-2", executedTickets, false, {
       kind: "PERCENT",
       value: 100,
-      targetRemainingVolume: 0,
     });
     expect(retry.status).toBe("EXECUTED");
     expect(retry.closeAttempts).toEqual([
@@ -151,6 +149,22 @@ describe("EA flatten state machine", () => {
     });
 
     expect(result.status).toBe("UNKNOWN");
+    expect(result.closeAttempts).toEqual([]);
+    expect(broker.closeCalls).toEqual([]);
+  });
+
+  test("holds a PERCENT close with zero target remaining volume", () => {
+    const broker = new FakeBroker();
+    broker.pending.clear();
+    broker.positions.set("position-1", { ticket: "position-1", volume: 0.04 });
+
+    const result = flattenClose(broker, "percent-zero", new Set<string>(), false, {
+      kind: "PERCENT",
+      value: 100,
+      targetRemainingVolume: 0,
+    });
+
+    expect(result.status).toBe("PARTIAL");
     expect(result.closeAttempts).toEqual([]);
     expect(broker.closeCalls).toEqual([]);
   });

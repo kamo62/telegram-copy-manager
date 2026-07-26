@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.58.1"
+#property version   "1.59.0"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -150,7 +150,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.58.1",
+      "1.59.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -869,6 +869,11 @@ void ExecuteClose(SignalCommand &command)
 
 void ExecutePartialClose(SignalCommand &command)
 {
+   if(command.partialCloseKind == "PERCENT" && command.targetRemainingVolume <= 0.0)
+   {
+      ReportUnknown(command.queueItemId, "No valid target remaining volume provided", command.commandType);
+      return;
+   }
    ulong tickets[];
    int found = CollectPositionTickets(command, tickets);
    if(found <= 0)
@@ -1761,7 +1766,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.58.1",
+      "1.59.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

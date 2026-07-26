@@ -2247,7 +2247,10 @@ class AppStore {
     const context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
     const counts = new Map<string, number>();
     for (const message of messages) {
-      for (const signal of parseSignalTexts(telegramParserText(message), context)) {
+      for (const signal of parseSignalTexts(
+        this.telegramParserText(providerId, message),
+        context,
+      )) {
         if (signal.commandType !== "OPEN_TRADE" || !signal.canonicalSymbol) continue;
         counts.set(signal.canonicalSymbol, (counts.get(signal.canonicalSymbol) ?? 0) + 1);
       }
@@ -2463,7 +2466,7 @@ class AppStore {
             correlatedMessageIds: [message.telegramMessageId],
           }));
     for (const group of groups) {
-      const parserText = telegramParserText(group);
+      const parserText = this.telegramParserText(providerId, group);
       const context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
       const parsed = parseSignalText(parserText, context);
       const parsedSignals = parseSignalTexts(parserText, context);
@@ -3426,6 +3429,7 @@ class AppStore {
           heldQueueItems?: string[];
           logicalTradeIds?: string[];
           queuedCount?: number;
+          fanoutCount?: number;
           status: string;
         };
       }
@@ -3523,6 +3527,16 @@ class AppStore {
           .run("DUPLICATE", parsedSignalId);
         return { statusCode: 409, error: "Signal has already been approved or queued" };
       }
+    }
+    if (signal.commandType === "CLOSE_TRADE" && signal.closeAll) {
+      return this.approveCloseAll(
+        parsedSignalId,
+        signal,
+        providerId,
+        targetAccountIds,
+        executionMode,
+        settings,
+      );
     }
     if (signal.commandType === "OPEN_TRADE") {
       const targetSignals = targetAccountIds.map((targetAccountId) => {
@@ -3866,7 +3880,19 @@ class AppStore {
                     targetSignal,
                     this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
                   );
-        return { accountId: targetAccountId, config: targetConfig, signal: targetSignal, match };
+        const matchedTradeExecutionMode = match.tradeId
+          ? this.logicalTrade(match.tradeId)?.executionMode
+          : undefined;
+        return {
+          accountId: targetAccountId,
+          config: targetConfig,
+          signal: targetSignal,
+          match,
+          runner:
+            (matchedTradeExecutionMode ?? executionMode) === "VIRTUAL_TP"
+              ? targetConfig.runner
+              : undefined,
+        };
       });
 
       const lifecycleFailure = lifecycleTargets.find((target) => {
@@ -3887,7 +3913,7 @@ class AppStore {
             target.accountId,
             executionMode,
             settings,
-            target.config.runner,
+            target.runner,
             lifecycleFailure.match.reason ??
               `missing ${lifecycleFailure.signal.missingFields.filter((field) => field !== "symbol" && field !== "brokerSymbol").join(", ")}`,
           ),
@@ -3941,7 +3967,7 @@ class AppStore {
               target.accountId,
               executionMode,
               settings,
-              target.config.runner,
+              target.runner,
               "matched-logical-trade-could-not-be-loaded",
             );
             return { body: { queueItemId, heldQueueItems: [queueItemId], status: "HELD" } };
@@ -3955,7 +3981,7 @@ class AppStore {
               target.accountId,
               executionMode,
               settings,
-              target.config.runner,
+              target.runner,
               `${actionState.reason}:trade-${trade.status}`,
             );
             return { body: { queueItemId, heldQueueItems: [queueItemId], status: "HELD" } };
@@ -3981,7 +4007,7 @@ class AppStore {
               target.accountId,
               executionMode,
               settings,
-              target.config.runner,
+              target.runner,
               "percentage-close-needs-current-broker-position-snapshot",
             );
             return { body: { queueItemId, heldQueueItems: [queueItemId], status: "HELD" } };
@@ -4041,6 +4067,96 @@ class AppStore {
         },
       };
     }
+  }
+
+  private approveCloseAll(
+    parsedSignalId: string,
+    signal: ParsedSignal,
+    providerId: string,
+    targetAccountIds: string[],
+    executionMode: ExecutionMode,
+    settings: AppSettings,
+  ) {
+    const activeTrades = this.logicalTrades().filter(
+      (trade) =>
+        trade.providerId === providerId &&
+        targetAccountIds.includes(trade.accountId ?? "") &&
+        (trade.status === "OPEN" || trade.status === "PENDING"),
+    );
+    const queueItems: string[] = [];
+    const heldQueueItems: string[] = [];
+    const logicalTradeIds: string[] = [];
+    for (const trade of activeTrades) {
+      const accountId = trade.accountId!;
+      const config = this.providerConfig(providerId, accountId);
+      const targetSignal = enrichLifecycleSignalFromTrade(
+        { ...signal, accountId, providerId },
+        trade,
+      );
+      const hasBrokerTicket = this.brokerOrders(trade.id).some(
+        (order) =>
+          (order.action === "OPEN" || order.action === "PENDING_OPEN") &&
+          (truthyBrokerTicket(order.positionTicket) || truthyBrokerTicket(order.orderTicket)),
+      );
+      if (!hasBrokerTicket) {
+        heldQueueItems.push(
+          this.holdLifecycleForReconciliation(
+            parsedSignalId,
+            targetSignal,
+            accountId,
+            executionMode,
+            settings,
+            trade.executionMode === "VIRTUAL_TP" ? config.runner : undefined,
+            "close-all-trade-has-no-live-broker-ticket",
+          ),
+        );
+        continue;
+      }
+      const queueItem = buildExecutionCommand(targetSignal, {
+        id: `queue_${nanoid(10)}`,
+        accountId,
+        logicalTradeId: trade.id,
+        executionMode: trade.executionMode ?? "VIRTUAL_TP",
+        volume: config.riskMode === "fixed" ? config.riskAmount : settings.defaultLotSize,
+        riskPercent:
+          config.riskMode === "percent" ? config.riskAmount : settings.defaultRiskPercent,
+        runner: trade.executionMode === "VIRTUAL_TP" ? config.runner : undefined,
+      });
+      Object.assign(queueItem.payload, this.brokerTargetForCommand(trade.id, queueItem.payload));
+      this.appendTradeCommand(trade.id, targetSignal);
+      this.insertQueueItem(queueItem, parsedSignalId);
+      queueItems.push(queueItem.id);
+      logicalTradeIds.push(trade.id);
+    }
+    this.db
+      .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+      .run(queueItems.length > 0 ? "APPROVED" : "HELD", parsedSignalId);
+    this.audit("signal.close-all", "warn", "Provider-wide close-all fanned out", {
+      parsedSignalId,
+      providerId,
+      fanoutCount: queueItems.length,
+      heldCount: heldQueueItems.length,
+      queueItems,
+      heldQueueItems,
+      logicalTradeIds,
+    });
+    this.dispatchAlert(
+      "close-all",
+      parsedSignalId,
+      `Telegram TC CLOSE ALL for provider ${providerId}: ${queueItems.length} trade(s) queued; ${heldQueueItems.length} held for reconciliation.`,
+      "alertOnDroppedLifecycle",
+    );
+    return {
+      body: {
+        queueItemId: queueItems[0],
+        queueItems,
+        heldQueueItems,
+        logicalTradeIds,
+        queuedCount: queueItems.length,
+        fanoutCount: queueItems.length,
+        status: queueItems.length > 0 ? "PENDING" : "HELD",
+      },
+    };
   }
 
   private tradedSymbolHoldReason(
@@ -4496,6 +4612,7 @@ class AppStore {
       mode === "market"
         ? { ...originalPayload, orderType: "MARKET" as const, entry: undefined }
         : originalPayload;
+    if (payload.executionMode !== "VIRTUAL_TP") payload.runner = undefined;
     const queueItemId = `queue_${nanoid(10)}`;
     const item: ExecutionQueueItem = {
       id: queueItemId,
@@ -5237,6 +5354,7 @@ class AppStore {
   }
 
   executionReport(input: ExecutionReportInput) {
+    const verifiedInput = this.verifyRunnerCloseReport(input);
     const id = `report_${nanoid(10)}`;
     const now = new Date().toISOString();
     this.db
@@ -5247,61 +5365,129 @@ class AppStore {
       )
       .run(
         id,
-        input.queueItemId,
-        input.accountId,
-        input.status,
-        input.retcode,
-        input.retcodeExternal,
-        input.brokerComment,
-        input.orderTicket ?? "",
-        input.positionTicket ?? "",
-        input.dealTicket ?? "",
-        input.requestedPrice ?? null,
-        input.filledPrice ?? null,
-        input.filledVolume ?? input.volume ?? null,
-        input.requestedVolume ?? input.volume ?? null,
-        input.filledVolume ?? input.volume ?? null,
-        input.remainingVolume ?? null,
-        input.errorText ?? "",
+        verifiedInput.queueItemId,
+        verifiedInput.accountId,
+        verifiedInput.status,
+        verifiedInput.retcode,
+        verifiedInput.retcodeExternal,
+        verifiedInput.brokerComment,
+        verifiedInput.orderTicket ?? "",
+        verifiedInput.positionTicket ?? "",
+        verifiedInput.dealTicket ?? "",
+        verifiedInput.requestedPrice ?? null,
+        verifiedInput.filledPrice ?? null,
+        verifiedInput.filledVolume ?? verifiedInput.volume ?? null,
+        verifiedInput.requestedVolume ?? verifiedInput.volume ?? null,
+        verifiedInput.filledVolume ?? verifiedInput.volume ?? null,
+        verifiedInput.remainingVolume ?? null,
+        verifiedInput.errorText ?? "",
         now,
       );
     const queueStatus =
-      input.status === "PARTIAL" || input.status === "UNKNOWN" ? "HELD" : input.status;
+      verifiedInput.status === "PARTIAL" || verifiedInput.status === "UNKNOWN"
+        ? "HELD"
+        : verifiedInput.status;
     const heldReason =
-      input.status === "PARTIAL"
+      verifiedInput.status === "PARTIAL"
         ? "PARTIAL_FILL"
-        : input.status === "UNKNOWN"
+        : verifiedInput.status === "UNKNOWN"
           ? "DELIVERY_UNKNOWN"
           : null;
     this.db
       .query("UPDATE queue_items SET status = ?, held_reason = ?, updated_at = ? WHERE id = ?")
       .run(queueStatus, heldReason, now, input.queueItemId);
-    this.recordBrokerOrder(input);
-    this.reconcileExecutionReport(input);
+    this.recordBrokerOrder(verifiedInput);
+    this.reconcileExecutionReport(verifiedInput);
     this.audit(
       "mt5.report",
-      input.status === "EXECUTED" ? "info" : "warn",
+      verifiedInput.status === "EXECUTED" ? "info" : "warn",
       "MT5 execution report received",
-      input,
+      verifiedInput,
     );
-    if (input.status !== "EXECUTED") {
+    if (verifiedInput.status !== "EXECUTED") {
       this.dispatchAlert(
         "execution-failed",
-        input.queueItemId,
-        `MT5 execution ${input.status.toLowerCase()} for queue item ${input.queueItemId}: ${input.brokerComment || input.errorText || "unknown error"}.`,
+        verifiedInput.queueItemId,
+        `MT5 execution ${verifiedInput.status.toLowerCase()} for queue item ${verifiedInput.queueItemId}: ${verifiedInput.brokerComment || verifiedInput.errorText || "unknown error"}.`,
         "alertOnExecFailed",
       );
     }
-    log(input.status === "EXECUTED" ? "info" : "warn", "mt5.report", {
-      accountId: input.accountId,
-      queueItemId: input.queueItemId,
-      status: input.status,
-      retcode: input.retcode,
-      brokerComment: input.brokerComment,
-      orderTicket: input.orderTicket,
-      errorText: input.errorText,
+    log(verifiedInput.status === "EXECUTED" ? "info" : "warn", "mt5.report", {
+      accountId: verifiedInput.accountId,
+      queueItemId: verifiedInput.queueItemId,
+      status: verifiedInput.status,
+      retcode: verifiedInput.retcode,
+      brokerComment: verifiedInput.brokerComment,
+      orderTicket: verifiedInput.orderTicket,
+      errorText: verifiedInput.errorText,
     });
     return { reportId: id, status: queueStatus };
+  }
+
+  private verifyRunnerCloseReport(input: ExecutionReportInput): ExecutionReportInput {
+    if (input.status !== "EXECUTED") return input;
+    const row = this.db
+      .query(
+        "SELECT logical_trade_id, parsed_signal_id, payload_json FROM queue_items WHERE id = ?",
+      )
+      .get(input.queueItemId) as Row | null;
+    if (!row?.logical_trade_id) return input;
+    const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+    const runner = payload.runner;
+    if (payload.commandType !== "CLOSE_TRADE" || !runner?.enabled) return input;
+    const remaining = Number(input.remainingVolume);
+    if (!Number.isFinite(remaining) || remaining <= CLOSE_VOLUME_EPSILON) return input;
+    const trade = this.logicalTrade(String(row.logical_trade_id));
+    const symbol = trade?.symbol.brokerSymbol ?? trade?.symbol.canonicalSymbol ?? "";
+    const step = this.brokerVolumeStep(input.accountId, symbol);
+    const tolerance = step > 0 ? step / 2 : CLOSE_VOLUME_EPSILON;
+    if (Math.abs(remaining - runner.lotSize) <= tolerance) return input;
+    return {
+      ...input,
+      status: "PARTIAL",
+      brokerComment: `${input.brokerComment}; runner remainder ${remaining} does not match configured ${runner.lotSize}`,
+    };
+  }
+
+  private brokerVolumeStep(accountId: string, symbol: string) {
+    const snapshot = this.mt5SnapshotsByAccount()[accountId];
+    const row = snapshot?.symbols?.find(
+      (item) =>
+        item &&
+        typeof item === "object" &&
+        String((item as Record<string, unknown>).symbol ?? "").toUpperCase() ===
+          symbol.toUpperCase(),
+    ) as Record<string, unknown> | undefined;
+    const step = Number(row?.volumeStep ?? 0);
+    return Number.isFinite(step) && step > 0 ? step : 0;
+  }
+
+  private runnerRemainderMatches(
+    accountId: string,
+    trade: LogicalTrade,
+    remaining: number,
+    runnerLotSize: number,
+  ) {
+    const symbol = trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "";
+    const step = this.brokerVolumeStep(accountId, symbol);
+    return Math.abs(remaining - runnerLotSize) <= (step > 0 ? step / 2 : CLOSE_VOLUME_EPSILON);
+  }
+
+  private snapshotOpenPrice(accountId: string | undefined, positionTicket: string) {
+    const position = accountId
+      ? this.mt5SnapshotsByAccount()[accountId]?.positions.find(
+          (item) =>
+            item &&
+            typeof item === "object" &&
+            String((item as Record<string, unknown>).ticket ?? "") === positionTicket,
+        )
+      : undefined;
+    const price = Number(
+      position && typeof position === "object"
+        ? ((position as Record<string, unknown>).openPrice ?? 0)
+        : 0,
+    );
+    return Number.isFinite(price) && price > 0 ? price : undefined;
   }
 
   saveSnapshot(input: {
@@ -6034,6 +6220,16 @@ class AppStore {
     );
     if (!nextLegs.length || nextLegs.some((leg) => leg.status !== "CLOSED")) return;
 
+    this.queueRunnerSlStrategy(trade, positionTicket, runner, open.parsedSignalId, nextLegs);
+  }
+
+  private queueRunnerSlStrategy(
+    trade: LogicalTrade,
+    positionTicket: string,
+    runner: NonNullable<ExecutionQueueItem["payload"]["runner"]>,
+    parsedSignalId: string,
+    legs = trade.legs,
+  ) {
     if (runner.slBehavior === "trail") {
       if (!runner.trailPips || runner.trailPips <= 0) return;
       if (
@@ -6065,7 +6261,7 @@ class AppStore {
           originalText: "App-managed runner trailing stop",
         },
       };
-      this.insertQueueItem(item, open.parsedSignalId);
+      this.insertQueueItem(item, parsedSignalId);
       this.audit("virtual-tp.runner-trail", "info", "App-managed runner queued trailing stop", {
         logicalTradeId: trade.id,
         positionTicket,
@@ -6076,14 +6272,15 @@ class AppStore {
 
     const newStopLoss =
       runner.slBehavior === "last-tp"
-        ? this.lastClosedVirtualTpPrice({ ...trade, legs: nextLegs })
-        : this.openPriceForTrade(trade.id);
+        ? this.lastClosedVirtualTpPrice({ ...trade, legs })
+        : (this.openPriceForTrade(trade.id) ??
+          this.snapshotOpenPrice(trade.accountId, positionTicket));
     if (!newStopLoss) return;
     this.queueModifySlAfterVirtualTp({
       trade,
       positionTicket,
       newStopLoss,
-      parsedSignalId: open.parsedSignalId,
+      parsedSignalId,
       originalText: "App-managed runner SL strategy",
       auditEvent: "virtual-tp.runner-sl",
       auditMessage: "App-managed runner queued SL strategy",
@@ -10254,6 +10451,24 @@ class AppStore {
     });
   }
 
+  private telegramParserText(providerId: string, message: TelegramCapturedMessage) {
+    if (message.quotedText) return telegramParserText(message);
+    if (!message.replyToMessageId) return message.rawText;
+    const quoted = this.db
+      .query(
+        `SELECT raw_messages.raw_text
+         FROM raw_message_aliases
+         JOIN raw_messages ON raw_messages.id = raw_message_aliases.raw_message_id
+         WHERE raw_message_aliases.provider_id = ?
+           AND raw_message_aliases.telegram_message_id = ?
+           AND raw_messages.provider_id = ?`,
+      )
+      .get(providerId, message.replyToMessageId, providerId) as Row | null;
+    return quoted?.raw_text
+      ? telegramParserText({ ...message, quotedText: String(quoted.raw_text) })
+      : message.rawText;
+  }
+
   private rawMessageCount(providerId: string) {
     const row = this.db
       .query("SELECT COUNT(*) AS count FROM raw_messages WHERE provider_id = ?")
@@ -10384,7 +10599,7 @@ class AppStore {
       accountId,
       executionMode,
       settings,
-      runner,
+      runner: executionMode === "VIRTUAL_TP" ? runner : undefined,
       heldReason,
     });
     this.db.query("UPDATE parsed_signals SET status = ? WHERE id = ?").run("HELD", parsedSignalId);
@@ -11045,19 +11260,21 @@ class AppStore {
       } else if (input.status === "EXECUTED") {
         const filled = Number(input.filledVolume ?? 0);
         const remaining = Number(input.remainingVolume ?? 0);
+        const runnerPreserved =
+          payload.runner?.enabled &&
+          remaining > CLOSE_VOLUME_EPSILON &&
+          this.runnerRemainderMatches(input.accountId, trade, remaining, payload.runner.lotSize);
         updated = {
           ...trade,
           status:
             trade.status === "PENDING" && filled <= 0 && !truthyBrokerTicket(input.positionTicket)
               ? "CANCELLED"
-              : payload.runner?.enabled && remaining > CLOSE_VOLUME_EPSILON
+              : runnerPreserved
                 ? "OPEN"
                 : "CLOSED",
-          livePositionExists: payload.runner?.enabled && remaining > CLOSE_VOLUME_EPSILON,
+          livePositionExists: runnerPreserved,
           matchedBrokerTickets:
-            payload.runner?.enabled && remaining > CLOSE_VOLUME_EPSILON && input.positionTicket
-              ? [input.positionTicket]
-              : [],
+            runnerPreserved && input.positionTicket ? [input.positionTicket] : [],
           legs: trade.legs.map((leg) => ({
             ...leg,
             status:
@@ -11067,6 +11284,14 @@ class AppStore {
             brokerEvidence: evidence,
           })),
         };
+        if (runnerPreserved && truthyBrokerTicket(input.positionTicket) && payload.runner) {
+          this.queueRunnerSlStrategy(
+            updated,
+            input.positionTicket,
+            payload.runner,
+            String(row.parsed_signal_id ?? ""),
+          );
+        }
       }
     } else if (payload.commandType === "CANCEL_PENDING") {
       updated = {
@@ -13314,6 +13539,7 @@ function fixtureExpected(signal: ParsedSignal) {
     stopLoss: signal.stopLoss,
     takeProfits: signal.takeProfits,
     partialClose: signal.partialClose,
+    closeAll: signal.closeAll,
     newStopLoss: signal.newStopLoss,
     trailingStop: signal.trailingStop,
     confidence: signal.confidence,

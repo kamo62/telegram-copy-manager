@@ -167,9 +167,11 @@ function partialCloseVolume(
   if (!partialClose) return 0;
   const requested =
     partialClose.kind === "PERCENT"
-      ? partialClose.targetRemainingVolume !== undefined
+      ? partialClose.targetRemainingVolume !== undefined && partialClose.targetRemainingVolume > 0
         ? currentVolume - partialClose.targetRemainingVolume
-        : (currentVolume * partialClose.value) / 100
+        : partialClose.targetRemainingVolume !== undefined
+          ? 0
+          : (currentVolume * partialClose.value) / 100
       : partialClose.kind === "TP_LEG"
         ? (partialClose.volume ??
           (partialClose.allocationPercent

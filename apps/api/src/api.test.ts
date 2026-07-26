@@ -2521,9 +2521,7 @@ describe("Telegram TC API", () => {
             telegramMessageId: "487",
             replyToMessageId: "484",
             messageDate: "2026-07-20T02:48:58.000Z",
-            quotedText: order,
-            rawText:
-              "🟢 CLOSED - XAUUSD Buy 🟢\n# 300424022\n\n--------{ CLOSED }---------\nProfit: 3.98$\nProfit: 0.38%",
+            rawText: "Closed ✅",
           },
         ]),
         telegramPollingEnabled: false,
@@ -2546,6 +2544,15 @@ describe("Telegram TC API", () => {
         expect(
           queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE"),
         ).toEqual([expect.objectContaining({ logical_trade_id: trades[0]!.id })]);
+        const reply = db
+          .query(
+            `SELECT parsed_signals.result_json
+             FROM parsed_signals
+             JOIN raw_messages ON raw_messages.id = parsed_signals.raw_message_id
+             WHERE raw_messages.telegram_message_id = '487'`,
+          )
+          .get() as { result_json: string };
+        expect(JSON.parse(reply.result_json).originalText).toContain("Quoted signal:");
       } finally {
         db.close();
       }
@@ -2569,15 +2576,16 @@ describe("Telegram TC API", () => {
             telegramMessageId: "546",
             replyToMessageId: "545",
             messageDate: "2026-07-24T13:01:00.000Z",
-            rawText:
-              "Quoted signal: NEW ORDER - XAUUSD Sell Stop 📉 # 306947863 ...{ NEW }... Entry: 4051.30 SL: 4057.30 TP: 4039.30 --- Comment: 🚀 Sell Stop activated 🚀 # 306947863 XAUUSD @ 4051.30",
+            rawText: "🚀 Sell Stop activated 🚀 # 306947863 XAUUSD @ 4051.30",
+            quotedText: order,
           },
           {
             telegramMessageId: "547",
             replyToMessageId: "545",
             messageDate: "2026-07-24T13:02:00.000Z",
             rawText:
-              "... Comment: 🟢 CLOSED - XAUUSD Sell 🟢 # 306947863 ...{ CLOSED }... Profit: 2.21$ ... Profit: 0.21%",
+              "🟢 CLOSED - XAUUSD Sell 🟢 # 306947863 ...{ CLOSED }... Profit: 2.21$ ... Profit: 0.21%",
+            quotedText: order,
           },
         ]),
         telegramPollingEnabled: false,
@@ -2677,6 +2685,140 @@ describe("Telegram TC API", () => {
       );
       expect(held.queue.filter((item) => item.heldReason === "DUPLICATE_ORDER_ID")).toHaveLength(2);
     } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("fans a close-all instruction across active provider trades and accounts", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-close-all-"));
+    const databasePath = join(tempDir, "app.db");
+    const previousFetch = globalThis.fetch;
+    const alerts: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      alerts.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+    try {
+      const app = createApi({ databasePath, seedDemoData: false, telegramAdapter: "mock" });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ alertBotToken: "bot-token", alertChatId: "chat-1" }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "54945785",
+          server: "HFMarkets-Demo",
+          company: "HF Markets",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+          eaVersion: "1.59.0",
+          eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-54945785/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/heartbeat", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-54945785",
+          balance: 10000,
+          equity: 10000,
+          availableSymbols: ["XAUUSD"],
+          eaVersion: "1.59.0",
+          eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const opened = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "Gold buy limit\n\n4541-40\n\nSL 4535\n\nTP 4546",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const openApproval = await json<{
+        queueItems: string[];
+        logicalTradeIds: string[];
+      }>(await app.request(`/api/signals/${opened.parsedSignalId}/approve`, { method: "POST" }));
+      expect(openApproval.queueItems).toHaveLength(2);
+      for (const [index, queueItemId] of openApproval.queueItems.entries()) {
+        await app.request("/api/mt5/report", {
+          method: "POST",
+          body: JSON.stringify({
+            accountId: index === 0 ? "mt5-63442826" : "mt5-54945785",
+            queueItemId,
+            status: "EXECUTED",
+            retcode: 10009,
+            retcodeExternal: 0,
+            brokerComment: "opened",
+            orderTicket: `close-all-open-${index}`,
+            positionTicket: `close-all-position-${index}`,
+            dealTicket: `close-all-deal-${index}`,
+            requestedVolume: 0.1,
+            filledVolume: 0.1,
+            remainingVolume: 0.1,
+          }),
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const close = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "All positions closed ✅",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const approval = await json<{
+        queueItems: string[];
+        logicalTradeIds: string[];
+        fanoutCount: number;
+        status: string;
+      }>(await app.request(`/api/signals/${close.parsedSignalId}/approve`, { method: "POST" }));
+      expect(approval).toMatchObject({ fanoutCount: 2, status: "PENDING" });
+      expect(approval.queueItems).toHaveLength(2);
+      expect(new Set(approval.logicalTradeIds)).toEqual(new Set(openApproval.logicalTradeIds));
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const audit = db
+          .query("SELECT data_json FROM audit_logs WHERE event_type = 'signal.close-all'")
+          .get() as { data_json: string };
+        expect(JSON.parse(audit.data_json)).toMatchObject({ fanoutCount: 2 });
+        expect(
+          db
+            .query("SELECT COUNT(*) AS count FROM queue_items WHERE parsed_signal_id = ?")
+            .get(close.parsedSignalId) as { count: number },
+        ).toMatchObject({ count: 2 });
+      } finally {
+        db.close();
+      }
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]?.body).toMatchObject({ chat_id: "chat-1" });
+      expect(String(alerts[0]?.body.text)).toContain("CLOSE ALL");
+    } finally {
+      globalThis.fetch = previousFetch;
       await rm(tempDir, { recursive: true, force: true });
     }
   });
@@ -3590,6 +3732,93 @@ describe("Telegram TC API", () => {
       status: "OPEN",
       livePositionExists: true,
     });
+    const runnerManagement = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+    ).text();
+    expect(runnerManagement).toContain("commandType=MODIFY_SL");
+    expect(runnerManagement).toContain("newStopLoss=4488.46");
+  });
+
+  test("holds an EXECUTED runner close when the broker remainder is not the configured lot", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldSellSmallRunnerLimit(app);
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "opened",
+        orderTicket: "247694737",
+        positionTicket: "247694737",
+        dealTicket: "247694737",
+        requestedVolume: 0.02,
+        filledVolume: 0.02,
+        remainingVolume: 0.02,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await sendGoldSnapshot(app, {
+      shortId: approved.shortId,
+      bid: 4488,
+      positions: [
+        {
+          ticket: "247694737",
+          symbol: "XAUUSD",
+          type: 1,
+          volume: 0.02,
+          openPrice: 4488.46,
+          sl: 4494,
+          tp: 0,
+          profit: 0,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ],
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: approved.providerId,
+          accountId: "mt5-63442826",
+          rawText: "CLOSED - XAUUSD Sell",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const close = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const report = await json<{ status: string }>(
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          queueItemId: close.queueItemId,
+          status: "EXECUTED",
+          retcode: 10009,
+          retcodeExternal: 0,
+          brokerComment: "runner remainder was 0.02",
+          positionTicket: "247694737",
+          dealTicket: "247694738",
+          requestedVolume: 0.01,
+          filledVolume: 0.01,
+          remainingVolume: 0.02,
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(report.status).toBe("HELD");
+    const dashboard = await json<{
+      logicalTrades: Array<{ id: string; status: string; livePositionExists?: boolean }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.logicalTrades.find((trade) => trade.id === approved.logicalTradeId),
+    ).toMatchObject({ status: "OPEN", livePositionExists: true });
   });
 
   test("does not apply a runner enabled after a SPLIT_ORDER trade opened", async () => {
@@ -3661,6 +3890,99 @@ describe("Telegram TC API", () => {
     expect(closeWork).toContain("runnerEnabled=false");
     expect(closeWork).toContain("runnerVolume=");
     expect(closeWork).not.toContain("runnerEnabled=true");
+  });
+
+  test("does not carry a runner into SPLIT_ORDER hold or requeue payloads", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-split-runner-hold-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const approved = await approveGoldSellSmallRunnerLimit(app, {
+        executionMode: "SPLIT_ORDER",
+        enableRunner: false,
+      });
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          queueItemId: approved.queueItemId,
+          status: "EXECUTED",
+          retcode: 10009,
+          retcodeExternal: 0,
+          brokerComment: "opened",
+          orderTicket: "247694739",
+          positionTicket: "247694739",
+          dealTicket: "247694739",
+          requestedVolume: 0.02,
+          filledVolume: 0.02,
+          remainingVolume: 0.02,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/providers/${approved.providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const parsed = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId: approved.providerId,
+            accountId: "mt5-63442826",
+            rawText: "Cancel pending XAUUSD",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const held = await json<{ queueItemId: string; status: string }>(
+        await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(held.status).toBe("HELD");
+
+      const db = new Database(databasePath);
+      const heldRow = db
+        .query("SELECT payload_json FROM queue_items WHERE id = ?")
+        .get(held.queueItemId) as { payload_json: string };
+      const heldPayload = JSON.parse(heldRow.payload_json) as Record<string, unknown>;
+      expect(heldPayload.runner).toBeUndefined();
+      db.query("UPDATE queue_items SET logical_trade_id = ?, payload_json = ? WHERE id = ?").run(
+        approved.logicalTradeId,
+        JSON.stringify({
+          ...heldPayload,
+          executionMode: "SPLIT_ORDER",
+          runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+        }),
+        held.queueItemId,
+      );
+      db.close();
+
+      const requeued = await json<{ queueItemId: string }>(
+        await app.request(`/api/queue-items/${held.queueItemId}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original" }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const requeueDb = new Database(databasePath, { readonly: true });
+      try {
+        const row = requeueDb
+          .query("SELECT payload_json FROM queue_items WHERE id = ?")
+          .get(requeued.queueItemId) as { payload_json: string };
+        expect(JSON.parse(row.payload_json).runner).toBeUndefined();
+      } finally {
+        requeueDb.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("uses planned TP volume when small runner allocation would round below broker minimum", async () => {
