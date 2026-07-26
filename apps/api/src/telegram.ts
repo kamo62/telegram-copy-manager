@@ -15,6 +15,11 @@ export interface TelegramDialog {
   unreadCount: number;
 }
 
+export interface TelegramForwardedFrom {
+  peer?: string;
+  name?: string;
+}
+
 export interface TelegramCapturedMessage {
   telegramMessageId: string;
   replyToMessageId?: string;
@@ -22,6 +27,8 @@ export interface TelegramCapturedMessage {
   rawText: string;
   quotedText?: string;
   senderName?: string;
+  forwardedFrom?: TelegramForwardedFrom;
+  forwardedDate?: string;
 }
 
 export interface TelegramFetchOptions {
@@ -219,6 +226,7 @@ interface GramjsDialog {
 interface GramjsMessage {
   id?: string | number | bigint;
   replyTo?: { replyToMsgId?: string | number | bigint };
+  fwdFrom?: { fromId?: unknown; fromName?: string; date?: number };
   date?: number;
   message?: string;
   getReplyMessage?: () => Promise<GramjsMessage | undefined>;
@@ -401,6 +409,8 @@ class GramjsTelegramAdapter implements TelegramAdapter {
         rawText,
         quotedText: quotedText || undefined,
         senderName: message.sender?.username ?? message.sender?.firstName,
+        forwardedFrom: forwardedFrom(message.fwdFrom),
+        forwardedDate: telegramDateIso(message.fwdFrom?.date),
       });
     }
     this.markContact(sessionId);
@@ -567,6 +577,32 @@ class GramjsTelegramAdapter implements TelegramAdapter {
   private dialogKey(sessionId: string, dialogId: string) {
     return `${sessionId}:${dialogId}`;
   }
+}
+
+function forwardedFrom(header: GramjsMessage["fwdFrom"]): TelegramForwardedFrom | undefined {
+  if (!header) return undefined;
+  const peer = forwardedPeer(header.fromId);
+  return {
+    ...(peer ? { peer } : {}),
+    ...(header.fromName ? { name: header.fromName } : {}),
+  };
+}
+
+function forwardedPeer(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object") return String(value);
+  const peer = value as Record<string, unknown>;
+  for (const key of ["channelId", "chatId", "userId", "id"]) {
+    const id = peer[key];
+    if (id !== undefined && id !== null) return `${key}:${String(id)}`;
+  }
+  return undefined;
+}
+
+function telegramDateIso(seconds: number | undefined): string | undefined {
+  return seconds !== undefined && Number.isFinite(seconds)
+    ? new Date(seconds * 1000).toISOString()
+    : undefined;
 }
 
 export function demoDialogs(): TelegramDialog[] {

@@ -60,6 +60,10 @@ const DEFAULT_TELEGRAM_RPC_TIMEOUT_MS = 20_000;
 const MAX_TELEGRAM_RPC_TIMEOUT_MS = 30_000;
 const TELEGRAM_PROVIDER_STALL_FAILURES = 2;
 
+function rawForwardedFrom(message: TelegramCapturedMessage) {
+  return message.forwardedFrom ? JSON.stringify(message.forwardedFrom) : null;
+}
+
 function telegramRpcTimeoutMs(value?: number) {
   const configured = value ?? Number(process.env.TELEGRAM_RPC_TIMEOUT_MS);
   return Number.isFinite(configured) && configured > 0
@@ -2472,8 +2476,8 @@ class AppStore {
       const parsedSignals = parseSignalTexts(parserText, context);
       this.db
         .query(
-          `INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification, forwarded_from, forward_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO NOTHING`,
         )
         .run(
@@ -2487,6 +2491,8 @@ class AppStore {
           parsedSignals.some((signal) => signal.commandType === "OPEN_TRADE")
             ? "entry"
             : classifyParsedCommand(parsed.commandType),
+          rawForwardedFrom(group),
+          group.forwardedDate ?? null,
         );
       const rawMessageId = `raw_${providerId}_${group.telegramMessageId}`;
       for (const telegramMessageId of group.correlatedMessageIds) {
@@ -3309,7 +3315,7 @@ class AppStore {
     const results = parseSignalTexts(rawText, context);
     this.db
       .query(
-        "INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification, forwarded_from, forward_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         rawMessageId,
@@ -3320,6 +3326,8 @@ class AppStore {
         rawText,
         firstResult.fingerprint,
         "unknown",
+        null,
+        null,
       );
     this.db
       .query(
@@ -4326,7 +4334,7 @@ class AppStore {
       const telegramMessageId = `manual-${Date.now()}`;
       this.db
         .query(
-          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, reply_to_message_id, message_date, raw_text, fingerprint, classification, forwarded_from, forward_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           rawMessageId,
@@ -4337,6 +4345,8 @@ class AppStore {
           originalText,
           fingerprint,
           "entry",
+          null,
+          null,
         );
       this.db
         .query(
@@ -9448,6 +9458,8 @@ class AppStore {
       );
     `);
     this.ensureColumn("raw_messages", "reply_to_message_id", "TEXT");
+    this.ensureColumn("raw_messages", "forwarded_from", "TEXT");
+    this.ensureColumn("raw_messages", "forward_date", "TEXT");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS raw_message_aliases (
         provider_id TEXT NOT NULL,
@@ -10147,7 +10159,7 @@ class AppStore {
       );
       this.db
         .query(
-          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO raw_messages (id, provider_id, telegram_message_id, message_date, raw_text, fingerprint, classification, forwarded_from, forward_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
           `raw_demo_${providerId}_${index}`,
@@ -10157,6 +10169,8 @@ class AppStore {
           message.rawText,
           parsed.fingerprint,
           classifyParsedCommand(parsed.commandType),
+          null,
+          null,
         );
     });
   }

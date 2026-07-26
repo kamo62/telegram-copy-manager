@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased (evidence-gated execution steps 1-2)
+
+Release impact: No version bump; this additive groundwork is inert until the later gate-wiring step.
+
+- Captured Telegram forward provenance in `raw_messages` and added pure, unwired execution-evidence facts, inline-quote lifecycle resolution, and verdict tests.
+
 ## 1.59.0 - 2026-07-26 (Minor)
 
 Release impact: Minor because signal precedence, reply hydration, and provider-wide close-all change live lifecycle behaviour while preserving the existing MT5 command contract.

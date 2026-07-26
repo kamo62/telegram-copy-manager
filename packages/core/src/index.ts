@@ -133,7 +133,14 @@ export interface ParsedSignal {
   closeAll?: boolean;
   /** Provider-side order id (e.g. VIP Gold "# 299490138"), when the message carries one. */
   providerOrderId?: string;
+  /** Extraction facts for the later evidence gate; never a verdict. */
+  evidence?: ParsedSignalEvidence;
   fingerprint: string;
+}
+
+export interface ParsedSignalEvidence {
+  structuralKind: "copier-new" | "copier-closed" | "none";
+  demotionMarkers: string[];
 }
 
 export interface LogicalTrade {
@@ -734,6 +741,8 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     missingFieldCount: missingFields.length,
   });
 
+  const providerOrderId = extractProviderOrderId(text) ?? extractProviderOrderId(original);
+
   return {
     originalText: original,
     commandType,
@@ -762,7 +771,11 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     providerId: context.providerId,
     accountId: context.accountId,
     closeAll,
-    providerOrderId: extractProviderOrderId(text) ?? extractProviderOrderId(original),
+    providerOrderId,
+    evidence: {
+      structuralKind: signalStructuralKind(original, commandType),
+      demotionMarkers: signalDemotionMarkers(original, upper),
+    },
     fingerprint: createMessageFingerprint(original),
   };
 }
@@ -1349,6 +1362,50 @@ function isProviderClosedStatus(upper: string): boolean {
     /\bCLOSED\b[^\n]{0,32}\b(?:TP\s*[1-4]|SL|ENTRY)\b/.test(tradeText) ||
     /\bCLOSED\b[^\n]{0,32}#\s*\d{6,}\b/.test(tradeText)
   );
+}
+
+function signalStructuralKind(
+  original: string,
+  commandType: CommandType,
+): ParsedSignalEvidence["structuralKind"] {
+  if (/\{\s*CLOSED\s*\}/i.test(original) || /\bCLOSED\s*[-:]\s*[A-Z0-9/]+/i.test(original)) {
+    return "copier-closed";
+  }
+  if (
+    commandType === "OPEN_TRADE" &&
+    /\bNEW\s+ORDER\b/i.test(original) &&
+    /\bENTRY\b/i.test(original)
+  ) {
+    return "copier-new";
+  }
+  return "none";
+}
+
+function signalDemotionMarkers(original: string, upper: string): string[] {
+  const markers: string[] = [];
+  if (
+    /\b(?:DO\s+NOT|DON'?T|NOT\s+NOW|NO\s+TRADE|WAIT\s+FOR|ONLY\s+AFTER|AFTER\s+CONFIRMATION|NOT\s+ENTER)\b/.test(
+      upper,
+    )
+  ) {
+    markers.push("negation");
+  }
+  if (
+    /\b(?:EDUCATION\s+ONLY|FOR\s+EXAMPLE|FOR\s+INSTANCE|JUST\s+AN\s+EXAMPLE|HYPOTHETICAL|EXAMPLE\s+ALERT)\b/.test(
+      upper,
+    )
+  ) {
+    markers.push("education/example");
+  }
+  if (
+    /\b(?:RECAP|DAILY\s+TARGET|TARGET\s+SMASHED|TRADES?\s+CLOSED\s+TODAY|CLOSED\s+TODAY|\d+\s+WINNERS?)\b/.test(
+      upper,
+    ) ||
+    /\b(?:CLOSED|CLOSING)\b[\s\S]{0,32}\b(?:YESTERDAY|EARLIER|RECAP|WINNERS?)\b/.test(original)
+  ) {
+    markers.push("recap");
+  }
+  return [...new Set(markers)];
 }
 
 function isCloseAllInstruction(upper: string): boolean {

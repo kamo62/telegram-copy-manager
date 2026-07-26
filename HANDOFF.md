@@ -2,6 +2,21 @@
 
 Updated: 2026-07-26 (v1.59.0 structure-first classification)
 
+## v1.59.0 evidence corpus budget (2026-07-26)
+
+- Replaced provider-shape test probes with 14 verbatim real provider messages from the committed 1,945-message corpus. The two original compact incident repros and reviewer-only states without real equivalents remain explicitly labelled synthetic in `apps/api/src/execution-evidence.test.ts`.
+- The pure `evaluateExecutionEvidence` corpus budgets are recorded separately:
+  - No-resolution floor: `provider_15k9j3v` EXECUTE 24, HOLD 26, DROP 18; `provider_1gfxfwd` EXECUTE 290, HOLD 298, DROP 1289.
+  - Simulated-resolution expected (reply id -> `reply-link`; `Quoted signal:` -> `inline-quote`, one active trade): `provider_15k9j3v` EXECUTE 49, HOLD 1, DROP 18; `provider_1gfxfwd` EXECUTE 395, HOLD 193, DROP 1289.
+- `inline-quote` is first-class hard evidence only for an exact single-provider origin fingerprint mapping to exactly one active trade; unmatched or ambiguous resolution holds and never falls back to same-symbol matching.
+- These budgets are evidence-module counts only; the corpus command-type replay remains byte-identical to its pre-change baseline. No runtime logic, version, deployment, or push changed.
+
+## Evidence-gated execution steps 1-2 (unreleased; no version bump)
+
+- Captured Telegram forward provenance (`forwarded_from` JSON metadata and `forward_date`) through the GramJS adapter and every raw-message INSERT path, with idempotent in-code columns and null ordinary-message values.
+- Added parser evidence facts only (`structuralKind` and `demotionMarkers`) and the unwired pure `evaluateExecutionEvidence` module with adversarial and provider-shape tests. No approval gate, close-all change, parser guard deletion, or MT5 contract change landed.
+- Remaining sequence: step 3 gate wiring, step 4 resolution/close-all tightening, step 5 parser guard deletion and corpus harness, then operator UX and v1.60.0 release metadata.
+
 ## v1.59.0 — structure-first classification
 
 - Structural lifecycle evidence wins before prose guards; reply-only Telegram comments hydrate from the stored provider message so `Closed ✅` resolves deterministically.

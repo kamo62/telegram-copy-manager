@@ -13189,6 +13189,63 @@ describe("provider traded symbols", () => {
 });
 
 describe("signal correlation Phase 1 persistence", () => {
+  test("persists forwarded provenance and nulls ordinary-message provenance", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-forward-provenance-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter([
+          {
+            telegramMessageId: "forwarded",
+            messageDate: "2026-07-17T10:00:00.000Z",
+            rawText: "BUY XAUUSD",
+            forwardedFrom: { peer: "channelId:991", name: "VIP Gold" },
+            forwardedDate: "2026-07-17T00:26:40.000Z",
+          },
+          {
+            telegramMessageId: "ordinary",
+            messageDate: "2026-07-17T10:01:00.000Z",
+            rawText: "SELL XAUUSD",
+          },
+        ]),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.runTelegramIngestionOnce();
+
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const rows = db
+          .query(
+            "SELECT telegram_message_id, forwarded_from, forward_date FROM raw_messages WHERE provider_id = ? ORDER BY telegram_message_id",
+          )
+          .all(providerId) as Array<{
+          telegram_message_id: string;
+          forwarded_from: string | null;
+          forward_date: string | null;
+        }>;
+        expect(rows).toEqual([
+          {
+            telegram_message_id: "forwarded",
+            forwarded_from: JSON.stringify({ peer: "channelId:991", name: "VIP Gold" }),
+            forward_date: "2026-07-17T00:26:40.000Z",
+          },
+          {
+            telegram_message_id: "ordinary",
+            forwarded_from: null,
+            forward_date: null,
+          },
+        ]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("migrates reply correlation storage idempotently on fresh and legacy databases", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-signal-correlation-"));
     const legacyPath = join(tempDir, "legacy.db");
@@ -13217,6 +13274,8 @@ describe("signal correlation Phase 1 persistence", () => {
             name: string;
           }>;
           expect(columns.filter((column) => column.name === "reply_to_message_id")).toHaveLength(1);
+          expect(columns.filter((column) => column.name === "forwarded_from")).toHaveLength(1);
+          expect(columns.filter((column) => column.name === "forward_date")).toHaveLength(1);
           const tables = db
             .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)")
             .all("raw_message_aliases", "trade_origins") as Array<{ name: string }>;
