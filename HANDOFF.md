@@ -1,64 +1,101 @@
 # Handoff
 
-## NEXT SESSION STARTS HERE — 7 blocking items from the final pre-deploy review
+## NEXT SESSION STARTS HERE — all 8 blocking items fixed, awaiting independent review
 
-Branch `fix/vipgold-duplicate-open-prevention` @ `316805ff` (pushed, 598 tests green).
-Both reviewers returned NO-GO on `ef409994`. IMPORTANT: they confirmed the six gate fixes are REAL
-and the gate holds every dangerous path probed, including both deliberately-unfixed parser
-misclassifications ("Trades closed today: 5 winners" and the educational NEW ORDER block both HOLD).
-What is broken is the RELEASE WORKFLOW the gate depends on, plus one regex. All items are small and
-localized. Fix these, re-review, then deploy.
+Branch `fix/vipgold-duplicate-open-prevention` @ `d30c72f7` (NOT pushed). Gate: typecheck, lint,
+**604 tests**, build all green. Production is untouched on **v1.56.2**.
 
-### BLOCKING — release workflow (all probe-confirmed by Fable through the real API)
-1. **Multi-account releases ALWAYS 409 — dead on arrival in production.** `approveSignal` dedup
-   (`app.ts:3591-3596`) excludes only `releasingQueueItemId`, but `holdForEvidence` creates one held
-   row PER LINKED ACCOUNT sharing a `parsedSignalId`. Releasing account A 409s on account B's sibling
-   and vice versa; both stay HELD forever. Prod runs two accounts (FTMO + HF), so one-click recovery
-   never works there. FIX: when `releasingQueueItemId` is set, ignore sibling rows whose status is
-   HELD or DISMISSED (still block PENDING/LEASED/EXECUTED and same-account rows).
-2. **A failed release permanently locks the signal.** `requeueHeldOpen` (`app.ts:4934+`) calls
-   `approveSignal`, which inserts a NEW held row on a HELD outcome (EA_OFFLINE, EXPIRED_LATE,
-   SYMBOL_MAPPING); the catch path reverts the original without deleting the new row, leaving two
-   HELD rows that both 409 forever. The prod box reboots often so release-while-EA-offline is
-   realistic. FIX: delete rows created by the failed approval attempt before reverting.
-3. **Releasing a held MARK_TP_HIT queues an EA-rejected command.** Normal ingest short-circuits
-   MARK_TP_HIT at `app.ts:4177` into `recordProviderTpHit` and queues nothing, but
-   `requeueHeldLifecycle` (`app.ts:5005-5100`) has no such branch, so it queues MARK_TP_HIT which the
-   EA hard-rejects (`mt5/TelegramTC_EA.mq5:245`). The held card is dismissed as if handled and the TP
-   leg is never recorded. MARK_TP_HIT is the most common lifecycle command (138/1945). FIX: branch to
-   `recordProviderTpHit` + dismiss + return RECORDED.
+The previous session recorded 7 blocking items. An independent Codex sol xhigh plan review found
+that **three of its five prescribed fixes were wrong**, and surfaced an 8th defect. All eight are now
+fixed and mutation-checked. What remains before deploy is the dual independent review of the diff,
+then the deploy steps below.
 
-### BLOCKING — safety net regex (Sol; verified directly)
-4. **The risk-off vocabulary regex does not match the words it needs to.**
-   `hasRiskOffVocabulary` (`execution-evidence.ts:124`) uses `CLOSE(?:D|S|ING)?`, which yields
-   "CLOSEING" not "CLOSING". Verified: `closing` -> false, `cancelling` -> false, `deleting` -> false,
-   while the nonsense `CLOSEING` -> true. So a genuine misclassified close ("Consider closing if
-   you're not willing to risk") is still SILENTLY DROPPED — the exact loss this net exists to stop.
-   FIX: `CLOS(?:E[DS]?|ING)`, `CANCEL(?:L?(?:E[DS]?|ING))?`, `DELET(?:E[DS]?|ING)`, `REMOV(?:E[DS]?|ING)`.
+### What was fixed (commits)
 
-### BLOCKING — decide and act
-5. **closeAll via the operator approve endpoint — reviewers disagreed.** `/api/signals/:id/approve`
-   passes `trigger:"operator"` (`app.ts:720`), which skips the gate, and a parsed `closeAll` then
-   reaches `approveCloseAll` (`:3777`) and fans out provider-wide. Sol calls this critical; Fable
-   calls it intended operator action. ORCHESTRATOR VIEW: an innocuous "Approve" button should not
-   silently flatten the whole book. The plan's step 4 DELETES close-all entirely (zero close-all
-   messages exist in the 1945-message corpus) — do that and the disagreement disappears.
+- `1a85e0d8` — items 1 and 4, plus the drop-audit vocabulary hole.
+- `dccc808e` — items 2, 3 and 8 (release atomicity).
+- `d30c72f7` — item 5 (close-all).
 
-### DEPLOY STEPS (not code)
-6. **`alertOnHeld: true` never reaches prod.** `normalizeAppSettings` (`app.ts:14327`) coerces from
-   stored settings and prod's stored `false` survives the deploy; the new default only affects fresh
-   DBs. Evidence holds force-alert regardless, but EA_OFFLINE / NAKED_PENDING_ENTRY /
-   DUPLICATE_ORDER_ID / SYMBOL_MAPPING / GUARDIAN / EA_CAPABILITY_UNAVAILABLE holds stay silent.
-   Flip it via settings PATCH on the live box and set bot token + chat id.
-7. **Old EA_CAPABILITY_UNAVAILABLE holds do not auto-release** when the recompiled EA attaches; each
-   needs a manual requeue. In-flight PENDING items are unaffected (the gate runs at approve time).
+### Corrections to the OLD handoff text (do not follow the deleted list)
+
+The previous top section prescribed fixes that were wrong. Recorded here so nobody re-derives them:
+
+1. **Item 4's proposed regex was buggy.** `CANCEL(?:L?(?:E[DS]?|ING))?` drops `cancels` and admits
+   malformed `CANCELE`. Shipped instead:
+   `CLOS(?:E[SD]?|ING)|CANCEL(?:S|L?(?:ED|ING))?|DELET(?:E[SD]?|ING)|REMOV(?:E[SD]?|ING)`.
+   The corpus contains no `cancels`, so replay alone would never have caught it.
+2. **Item 1's proposed predicate was wrong.** "Still block PENDING/LEASED/EXECUTED" breaks the
+   SECOND release: once account A is released it holds a PENDING row that would then 409 account B.
+   A release is always account-scoped, so the guard ignores ALL different-account rows regardless of
+   status and blocks any non-source row for the releasing account.
+3. **Item 5's "DELETE close-all entirely" was UNSAFE.** The `closeAll` flag carries a fail-closed
+   guard: `evaluateLifecycle` and `evaluateOpen` hold on it BEFORE resolution is consulted. Remove
+   the flag and a close-all resolving via provider order id, reply link, or exact inline quote
+   returns EXECUTE instead of HOLD — a new execute path on the most dangerous command in the system.
+   Correct scope, now shipped: delete `approveCloseAll` and the promotion, KEEP the flag, both
+   holds, and `isCloseAllInstruction` as a classifier, and ADD a refusal on the operator path.
+
+### Item 8 (new, found by the review)
+
+HELD release transitions were not atomic. No requeue variant verified that its source row actually
+transitioned, and nothing prevented a duplicate release. A crash between statements left BOTH an
+executable row and the original HELD row, and a leaked PENDING row is immediately leasable by the
+EA. Guardian-unpause and EA-reconnect automation inherit the same path. All three variants now run
+in a transaction with a compare-and-swap requiring exactly one HELD row to transition.
+
+**Testing note that matters:** a CAS regression written against the held-OPEN path is VACUOUS —
+`approveSignal`'s dedup masks a lost dismissal there, so the test passes with no CAS at all. The
+regression deliberately targets the **bound** requeue path, which never calls `approveSignal`.
+
+### DEPLOY ORDERING CONSTRAINT (blocking)
+
+**Items 1 and 2 must reach production together.** Item 1 alone is more dangerous than the current
+state: it opens the release path while failed releases can still leak leasable rows. Separate local
+commits are fine as long as no intermediate artifact is deployed.
+
+### DEPLOY STEPS (owner actions, verified against source, not code)
+
+1. **`alertOnHeld: true` will not reach prod on its own.** `normalizeAppSettings` coerces with
+   `input.alertOnHeld === true`, so prod's stored `false` survives the deploy; the `true` default
+   only applies to fresh databases. Evidence holds force-alert regardless, but EA_OFFLINE /
+   NAKED_PENDING_ENTRY / DUPLICATE_ORDER_ID / SYMBOL_MAPPING / GUARDIAN /
+   EA_CAPABILITY_UNAVAILABLE holds stay silent. Flip it with a settings PATCH on the live box.
+2. **Alerting is entirely unconfigured in prod.** `alertBotToken` and `alertChatId` are EMPTY, so no
+   alert of any kind is delivered today — guardian pauses, EA offline and execution failures
+   included. Set both, then use "Send test message". Owner accepted this as post-deploy previously,
+   but evidence holds are now the primary safety surface, so it is effectively required.
+3. **Old `EA_CAPABILITY_UNAVAILABLE` holds do not auto-release.** `releaseEaOfflineHeldQueueItems`
+   filters `held_reason = 'EA_OFFLINE'` exactly, so each capability hold needs a manual requeue
+   after the recompiled EA attaches. In-flight PENDING items are unaffected.
+4. **EA recompile + reattach**, built from the final commit only.
+
+### Remaining before deploy
+
+- Dual independent review (Fable + Sol) over `48903580..d30c72f7`. NOT yet done.
+- Version/changelog metadata for 1.60.0 is still deferred; the working tree is deliberately
+  untouched on `package.json`, `changelog.md` and the EA source.
 
 ### Lower priority (recorded, not blocking)
+
 - "Requeue at market" is silently ignored for held opens (`requeueHeldOpen` drops `mode`) while the
   UI promises a market order.
-- `dismissReleasedQueueItem` (`:5102`) overwrites the APPROVED parsed-signal status with PENDING.
-- The risk-off NO_SIGNAL rule holds banter: 85 of 1411 NO_SIGNALs become action-required alerts
-  ("wait for the 15m to close"). Deliberate for the first-week audit; consider an fyi tier after.
+- The risk-off NO_SIGNAL rule holds banter: 93 of 1411 NO_SIGNALs become action-required alerts.
+  Deliberate for the first-week audit; consider an fyi tier after.
+- `dismissReleasedQueueItem` writing parsed status `PENDING` is now a deliberate default with an
+  explicit `"APPROVED"` override for the TP-hit path. Audit other callers if the default ever moves.
+
+### Delegation gotchas (cost ~40 minutes this session)
+
+- `Agent(isolation:"worktree")` branches from **main**, not the current HEAD.
+- `codex:codex-rescue` is a forwarder that exits in ~60s, so the harness deletes the "unchanged"
+  worktree while Codex is still running, and Codex falls back to the real repo.
+- **Codex writes to the directory the rescue agent was invoked from.** A prompt-level `cd` does not
+  move its sandbox root, so parallel Codex lanes in separate worktrees are impossible. Run them
+  sequentially, and guard the tree with a watcher on `git status --porcelain`.
+- A cancelled rescue agent can RESUME its old thread and re-apply a superseded spec. Cancel the
+  Codex job AND `TaskStop` the Claude-side agent, then reset the tree.
+- A Codex lane can finish its work and then hang without committing; check file mtimes against the
+  clock rather than trusting the elapsed counter.
 
 
 ## START HERE — session boundary 2026-07-26
