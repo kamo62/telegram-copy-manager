@@ -2714,7 +2714,7 @@ describe("Telegram TC API", () => {
     }
   });
 
-  test("fans a close-all instruction across active provider trades and accounts", async () => {
+  test("refuses a close-all instruction on the gate-bypassing operator approve path", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-close-all-"));
     const databasePath = join(tempDir, "app.db");
     const previousFetch = globalThis.fetch;
@@ -2816,32 +2816,53 @@ describe("Telegram TC API", () => {
           headers: { "content-type": "application/json" },
         }),
       );
+      // This endpoint passes trigger:"operator", which SKIPS the evidence gate. Before the fan-out
+      // was deleted, one "Approve" click here flattened every active trade on every linked account.
+      // It must now hold on both accounts and queue nothing executable.
       const approval = await json<{
-        queueItems: string[];
-        logicalTradeIds: string[];
-        fanoutCount: number;
+        heldQueueItems: string[];
+        queuedCount: number;
         status: string;
       }>(await app.request(`/api/signals/${close.parsedSignalId}/approve`, { method: "POST" }));
-      expect(approval).toMatchObject({ fanoutCount: 2, status: "PENDING" });
-      expect(approval.queueItems).toHaveLength(2);
-      expect(new Set(approval.logicalTradeIds)).toEqual(new Set(openApproval.logicalTradeIds));
+      expect(approval).toMatchObject({ queuedCount: 0, status: "HELD" });
+      expect(approval.heldQueueItems).toHaveLength(2);
       const db = new Database(databasePath, { readonly: true });
       try {
-        const audit = db
-          .query("SELECT data_json FROM audit_logs WHERE event_type = 'signal.close-all'")
-          .get() as { data_json: string };
-        expect(JSON.parse(audit.data_json)).toMatchObject({ fanoutCount: 2 });
+        // The provider-wide fan-out audit must no longer exist at all.
         expect(
           db
-            .query("SELECT COUNT(*) AS count FROM queue_items WHERE parsed_signal_id = ?")
+            .query("SELECT COUNT(*) AS count FROM audit_logs WHERE event_type = 'signal.close-all'")
+            .get() as { count: number },
+        ).toMatchObject({ count: 0 });
+        // Two HELD rows, one per linked account, and nothing the EA could ever lease.
+        expect(
+          db
+            .query(
+              "SELECT COUNT(*) AS count FROM queue_items WHERE parsed_signal_id = ? AND status = 'HELD'",
+            )
             .get(close.parsedSignalId) as { count: number },
+        ).toMatchObject({ count: 2 });
+        expect(
+          db
+            .query(
+              "SELECT COUNT(*) AS count FROM queue_items WHERE parsed_signal_id = ? AND status IN ('PENDING','LEASED','EXECUTED')",
+            )
+            .get(close.parsedSignalId) as { count: number },
+        ).toMatchObject({ count: 0 });
+        // The originally opened trades must still be active - nothing was flattened.
+        expect(
+          db
+            .query(
+              `SELECT COUNT(*) AS count FROM logical_trades WHERE id IN (${openApproval.logicalTradeIds.map(() => "?").join(", ")})
+               AND json_extract(data_json, '$.status') IN ('OPEN','PENDING','PLANNED')`,
+            )
+            .get(...openApproval.logicalTradeIds) as { count: number },
         ).toMatchObject({ count: 2 });
       } finally {
         db.close();
       }
-      expect(alerts).toHaveLength(1);
-      expect(alerts[0]?.body).toMatchObject({ chat_id: "chat-1" });
-      expect(String(alerts[0]?.body.text)).toContain("CLOSE ALL");
+      expect(alerts.length).toBeGreaterThanOrEqual(1);
+      expect(String(alerts[0]?.body.text)).toContain("CLOSE_ALL_REQUIRES_OPERATOR");
     } finally {
       globalThis.fetch = previousFetch;
       await rm(tempDir, { recursive: true, force: true });

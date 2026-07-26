@@ -3851,15 +3851,30 @@ class AppStore {
         return { statusCode: 409, error: "Signal has already been approved or queued" };
       }
     }
+    // Close-all is never executable by any path. The operator approve endpoint passes
+    // trigger:"operator", which skips the evidence gate, so an innocuous "Approve" click used to
+    // reach the provider-wide fan-out and flatten the whole book. The fan-out is gone; this hold
+    // sits after the gate so it catches the operator bypass too. The corpus contains zero close-all
+    // messages, so this costs nothing real and fails closed if one ever arrives.
     if (signal.commandType === "CLOSE_TRADE" && signal.closeAll) {
-      return this.approveCloseAll(
-        parsedSignalId,
-        signal,
-        providerId,
-        targetAccountIds,
-        executionMode,
-        settings,
+      const heldQueueItems = targetAccountIds.map((targetAccountId) =>
+        this.holdForEvidence(
+          parsedSignalId,
+          signal,
+          targetAccountId,
+          executionMode,
+          settings,
+          "CLOSE_ALL_REQUIRES_OPERATOR",
+        ),
       );
+      return {
+        body: {
+          queueItemId: heldQueueItems[0],
+          heldQueueItems,
+          queuedCount: 0,
+          status: "HELD",
+        },
+      };
     }
     if (signal.commandType === "OPEN_TRADE") {
       const targetSignals = targetAccountIds.map((targetAccountId) => {
@@ -4171,9 +4186,15 @@ class AppStore {
           source?.rawMessageId ?? "",
           targetSignal,
         );
-        const closeAllMatches =
+        // Several active trades can legitimately share ONE provider order id: they are legs of a
+        // single position the provider identified with that id, so closing all of them is the
+        // intended fan-out, not a guess. Every OTHER kind of ambiguity IS a guess - the old
+        // condition promoted those too and silently closed tradeIds[0] - so it now falls through
+        // to the AMBIGUOUS branch and is held for an operator.
+        const sharesOneProviderOrderId =
           targetSignal.commandType === "CLOSE_TRADE" &&
           resolved.status === "AMBIGUOUS" &&
+          resolved.method === "provider-order-id" &&
           (resolved.tradeIds?.length ?? 0) > 0;
         const match =
           resolved.status === "MATCHED" && resolved.tradeId
@@ -4184,7 +4205,7 @@ class AppStore {
                 confidence: resolved.method === "provider-order-id" ? 0.99 : 0.97,
                 requiresManualReview: false,
               }
-            : closeAllMatches
+            : sharesOneProviderOrderId
               ? {
                   status: "MATCHED" as const,
                   tradeId: resolved.tradeIds![0]!,
@@ -4390,96 +4411,6 @@ class AppStore {
         },
       };
     }
-  }
-
-  private approveCloseAll(
-    parsedSignalId: string,
-    signal: ParsedSignal,
-    providerId: string,
-    targetAccountIds: string[],
-    executionMode: ExecutionMode,
-    settings: AppSettings,
-  ) {
-    const activeTrades = this.logicalTrades().filter(
-      (trade) =>
-        trade.providerId === providerId &&
-        targetAccountIds.includes(trade.accountId ?? "") &&
-        (trade.status === "OPEN" || trade.status === "PENDING"),
-    );
-    const queueItems: string[] = [];
-    const heldQueueItems: string[] = [];
-    const logicalTradeIds: string[] = [];
-    for (const trade of activeTrades) {
-      const accountId = trade.accountId!;
-      const config = this.providerConfig(providerId, accountId);
-      const targetSignal = enrichLifecycleSignalFromTrade(
-        { ...signal, accountId, providerId },
-        trade,
-      );
-      const hasBrokerTicket = this.brokerOrders(trade.id).some(
-        (order) =>
-          (order.action === "OPEN" || order.action === "PENDING_OPEN") &&
-          (truthyBrokerTicket(order.positionTicket) || truthyBrokerTicket(order.orderTicket)),
-      );
-      if (!hasBrokerTicket) {
-        heldQueueItems.push(
-          this.holdLifecycleForReconciliation(
-            parsedSignalId,
-            targetSignal,
-            accountId,
-            executionMode,
-            settings,
-            trade.executionMode === "VIRTUAL_TP" ? config.runner : undefined,
-            "close-all-trade-has-no-live-broker-ticket",
-          ),
-        );
-        continue;
-      }
-      const queueItem = buildExecutionCommand(targetSignal, {
-        id: `queue_${nanoid(10)}`,
-        accountId,
-        logicalTradeId: trade.id,
-        executionMode: trade.executionMode ?? "VIRTUAL_TP",
-        volume: config.riskMode === "fixed" ? config.riskAmount : settings.defaultLotSize,
-        riskPercent:
-          config.riskMode === "percent" ? config.riskAmount : settings.defaultRiskPercent,
-        runner: trade.executionMode === "VIRTUAL_TP" ? config.runner : undefined,
-      });
-      Object.assign(queueItem.payload, this.brokerTargetForCommand(trade.id, queueItem.payload));
-      this.appendTradeCommand(trade.id, targetSignal);
-      this.insertQueueItem(queueItem, parsedSignalId);
-      queueItems.push(queueItem.id);
-      logicalTradeIds.push(trade.id);
-    }
-    this.db
-      .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
-      .run(queueItems.length > 0 ? "APPROVED" : "HELD", parsedSignalId);
-    this.audit("signal.close-all", "warn", "Provider-wide close-all fanned out", {
-      parsedSignalId,
-      providerId,
-      fanoutCount: queueItems.length,
-      heldCount: heldQueueItems.length,
-      queueItems,
-      heldQueueItems,
-      logicalTradeIds,
-    });
-    this.dispatchAlert(
-      "close-all",
-      parsedSignalId,
-      `Telegram TC CLOSE ALL for provider ${providerId}: ${queueItems.length} trade(s) queued; ${heldQueueItems.length} held for reconciliation.`,
-      "alertOnDroppedLifecycle",
-    );
-    return {
-      body: {
-        queueItemId: queueItems[0],
-        queueItems,
-        heldQueueItems,
-        logicalTradeIds,
-        queuedCount: queueItems.length,
-        fanoutCount: queueItems.length,
-        status: queueItems.length > 0 ? "PENDING" : "HELD",
-      },
-    };
   }
 
   private tradedSymbolHoldReason(
