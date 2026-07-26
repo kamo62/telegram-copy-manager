@@ -2,8 +2,18 @@
 
 ## NEXT SESSION STARTS HERE — all 8 blocking items fixed, awaiting independent review
 
-Branch `fix/vipgold-duplicate-open-prevention` @ `d30c72f7` (NOT pushed). Gate: typecheck, lint,
-**604 tests**, build all green. Production is untouched on **v1.56.2**.
+Branch `fix/vipgold-duplicate-open-prevention` @ `fa758b2c` (NOT pushed). Gate: typecheck, lint,
+**609 tests**, build all green. Production is untouched on **v1.56.2**.
+
+**Dual independent review is DONE** (Fable/Opus + Codex sol, run in parallel without seeing each
+other). Sol reported no CRITICAL/HIGH. Fable found THREE HIGH, two of them introduced by item 5
+itself. All are fixed in `fa758b2c` and mutation-checked. Running only one reviewer would have
+shipped a close-all card that is permanently unreleasable on this exact two-account production
+setup. Keep running both.
+
+Remaining known issue, deliberately NOT blocking: "Requeue at market" is ignored for unbound held
+opens (github issue #9) - the UI offers it, the server queues the original LIMIT. Geometry is still
+correct and all other safety checks apply.
 
 The previous session recorded 7 blocking items. An independent Codex sol xhigh plan review found
 that **three of its five prescribed fixes were wrong**, and surfaced an 8th defect. All eight are now
