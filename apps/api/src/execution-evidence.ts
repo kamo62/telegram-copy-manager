@@ -83,13 +83,16 @@ function evaluateLifecycle(input: ExecutionEvidenceInput): ExecutionEvidenceVerd
     if (resolution.status === "MATCHED" && resolution.activeTradeCount === 1) {
       return execute("LIFECYCLE_INLINE_QUOTE");
     }
-    return hold(
-      resolution.status === "UNMATCHED"
-        ? "INLINE_QUOTE_ORIGIN_UNMATCHED"
-        : resolution.status === "AMBIGUOUS"
-          ? "INLINE_QUOTE_ORIGIN_AMBIGUOUS"
-          : `INLINE_QUOTE_ACTIVE_TRADE_COUNT:${resolution.activeTradeCount}`,
-    );
+    return {
+      ...hold(
+        resolution.status === "UNMATCHED"
+          ? "INLINE_QUOTE_ORIGIN_UNMATCHED"
+          : resolution.status === "AMBIGUOUS"
+            ? "INLINE_QUOTE_ORIGIN_AMBIGUOUS"
+            : `INLINE_QUOTE_ACTIVE_TRADE_COUNT:${resolution.activeTradeCount}`,
+      ),
+      ...(resolution.suggestion ? { suggestion: resolution.suggestion } : {}),
+    };
   }
   if (
     resolution &&

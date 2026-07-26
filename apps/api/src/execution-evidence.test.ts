@@ -188,6 +188,14 @@ describe("evaluateExecutionEvidence", () => {
         verdict: testCase.expected,
       });
     }
+
+    expect(
+      evaluateExecutionEvidence(
+        realEvidence(realMessage("provider_15k9j3v", "487"), {
+          orderIdNovelty: { providerOrderIdNeverSeen: false },
+        }),
+      ),
+    ).toMatchObject({ verdict: "HOLD", reason: "OPEN_PROVIDER_ORDER_ID_RESEEN" });
   });
 
   test("resolves real KAL inline quotes without authorizing quoted chatter", () => {
@@ -207,7 +215,7 @@ describe("evaluateExecutionEvidence", () => {
       verdict: "HOLD",
       reason: "INLINE_QUOTE_ORIGIN_UNMATCHED",
     });
-    expect(unmatched.suggestion).toBeUndefined();
+    expect(unmatched.suggestion).toBe("same-symbol trade trade-1");
 
     const remove = realMessage("provider_1gfxfwd", "16669");
     expect(

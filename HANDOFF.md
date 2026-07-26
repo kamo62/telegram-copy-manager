@@ -1,6 +1,15 @@
 # Handoff
 
-Updated: 2026-07-26 (v1.59.0 structure-first classification)
+Updated: 2026-07-26 (v1.59.0 evidence-gated execution step 3)
+
+## Evidence-gated execution step 3 (unreleased; version held at 1.59.0)
+
+- `approveSignal` is gated by default for automatic ingestion and accepts an explicit `operator` bypass for manual approval. The queue requeue path remains operator-controlled.
+- VIP Gold uses structured copier-new plus novel provider order IDs; KAL VIP uses complete prose geometry. Forwarded signals hold, provider order IDs are checked provider-wide across durable origins, and inline quotes require an exact same-provider fingerprint mapped through `trade_origins` to exactly one active trade.
+- Holds create `EVIDENCE_*` queue records, preserve same-symbol lifecycle candidates as suggestions, alert operators, and audit the verdict. Drops create ignored records and a distinct evidence-drop audit, including first-week close/cancel/delete vocabulary marking.
+- Ingestion now sends actionable review-required lifecycle candidates through the gate instead of silently skipping them. Step 4 resolution tightening/close-all deletion and step 5 parser guard deletions were not changed.
+- Corpus replay after wiring remained byte-identical to the step 1-2 budgets: no-resolution floor `provider_15k9j3v` `24/26/18`, `provider_1gfxfwd` `290/298/1289`; simulated resolution `49/1/18` and `395/193/1289` respectively (EXECUTE/HOLD/DROP). The gate delegates these pure verdicts, so no budget rewrite was needed.
+- Command-type tallies remain byte-identical: `NO_SIGNAL 1411`, `OPEN_TRADE 348`, `MARK_TP_HIT 138`, `CANCEL_PENDING 29`, `CLOSE_TRADE 15`, `MOVE_SL_TO_BE 4`. Version release metadata remains deferred to 1.60.0.
 
 ## v1.59.0 evidence corpus budget (2026-07-26)
 
@@ -15,7 +24,7 @@ Updated: 2026-07-26 (v1.59.0 structure-first classification)
 
 - Captured Telegram forward provenance (`forwarded_from` JSON metadata and `forward_date`) through the GramJS adapter and every raw-message INSERT path, with idempotent in-code columns and null ordinary-message values.
 - Added parser evidence facts only (`structuralKind` and `demotionMarkers`) and the unwired pure `evaluateExecutionEvidence` module with adversarial and provider-shape tests. No approval gate, close-all change, parser guard deletion, or MT5 contract change landed.
-- Remaining sequence: step 3 gate wiring, step 4 resolution/close-all tightening, step 5 parser guard deletion and corpus harness, then operator UX and v1.60.0 release metadata.
+- Remaining sequence: step 4 resolution/close-all tightening, step 5 parser guard deletion and corpus harness, then operator UX and v1.60.0 release metadata.
 
 ## v1.59.0 — structure-first classification
 

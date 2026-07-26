@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased (evidence-gated execution steps 1-2)
+## Unreleased (evidence-gated execution step 3)
 
-Release impact: No version bump; this additive groundwork is inert until the later gate-wiring step.
+Release impact: Minor because automatic approval now has a fail-closed evidence gate, explicit held/drop audit states, and provider policy configuration. The repository version remains 1.59.0; release metadata is deferred to 1.60.0 after steps 4-5.
 
-- Captured Telegram forward provenance in `raw_messages` and added pure, unwired execution-evidence facts, inline-quote lifecycle resolution, and verdict tests.
+- Wired the default-gated `approveSignal` path with operator bypass, provider-specific structured-id/prose-complete open evidence, forward provenance, provider-wide order-id novelty, and strict lifecycle resolution.
+- Added explicit `EVIDENCE_*` held queue items with alerts and operator suggestions, audited evidence drops, and stopped ingestion from silently skipping actionable review-required lifecycle signals.
+- Kept step 4 resolution/close-all changes and step 5 parser guard deletions out of this commit.
 
 ## 1.59.0 - 2026-07-26 (Minor)
 

@@ -32,6 +32,11 @@ import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import { nanoid } from "nanoid";
 import {
+  type ExecutionEvidenceProviderConfig,
+  evaluateExecutionEvidence,
+  type LifecycleResolutionEvidence,
+} from "./execution-evidence";
+import {
   createTelegramAdapter,
   demoDialogs,
   demoMessages,
@@ -165,6 +170,7 @@ interface AccountSlotInput {
 }
 
 interface ProviderExecutionConfig {
+  openEvidence?: ExecutionEvidenceProviderConfig["openEvidence"];
   parserMode?: ParserMode | string;
   lockedSymbol?: string;
   tradedSymbols?: string[];
@@ -480,6 +486,7 @@ export function createApi(options: ApiOptions = {}) {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
+      openEvidence?: ExecutionEvidenceProviderConfig["openEvidence"];
       takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
       workFromTpLeg?: number;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
@@ -690,6 +697,7 @@ export function createApi(options: ApiOptions = {}) {
     const body = await optionalJson<{ executionMode?: ExecutionMode }>(c.req.raw);
     const approved = store.approveSignal(c.req.param("id"), {
       executionMode: body.executionMode,
+      trigger: "operator",
     });
     if ("body" in approved) {
       return c.json(approved.body);
@@ -1350,8 +1358,9 @@ export function brokerOrderSourceForDealReason(reason: number | undefined): stri
 type RawMessageClassification = "entry" | "management" | "noise" | "unknown";
 type CorrelationMode = "off" | "shadow";
 type LifecycleResolution = {
-  method: "provider-order-id" | "reply-link" | "none";
+  method: "provider-order-id" | "reply-link" | "inline-quote" | "none";
   status: "MATCHED" | "AMBIGUOUS" | "UNMATCHED";
+  activeTradeCount: number;
   tradeId?: string;
   tradeIds?: string[];
   reason?: string;
@@ -1746,6 +1755,7 @@ class AppStore {
       lotSize?: number;
       riskMode?: "fixed" | "percent";
       riskAmount?: number;
+      openEvidence?: ExecutionEvidenceProviderConfig["openEvidence"];
       takeProfitLevels?: ProviderTakeProfitLevelInput[] | null;
       workFromTpLeg?: number;
       runner?: { enabled: boolean; lotSize: number; slBehavior: string; trailPips: number };
@@ -1768,6 +1778,7 @@ class AppStore {
       "lockedSymbol" in input ||
       "tradedSymbols" in input ||
       "shorthandLevels" in input ||
+      input.openEvidence !== undefined ||
       input.riskMode !== undefined ||
       input.riskAmount !== undefined ||
       "takeProfitLevels" in input ||
@@ -1778,6 +1789,7 @@ class AppStore {
       this.saveProviderConfig(id, {
         riskMode: input.riskMode ?? existingConfig.riskMode,
         riskAmount: positiveNumber(input.riskAmount, existingConfig.riskAmount),
+        openEvidence: input.openEvidence ?? existingConfig.openEvidence,
         takeProfitLevels:
           "takeProfitLevels" in input
             ? normalizeProviderTpLevels(input.takeProfitLevels)
@@ -1817,7 +1829,17 @@ class AppStore {
     const config = row?.provider_config_json
       ? parseJson<Partial<ProviderExecutionConfig>>(String(row.provider_config_json))
       : {};
+    const providerTitle = provider?.title.toLowerCase() ?? "";
+    const openEvidence =
+      config.openEvidence === "structured-id" || config.openEvidence === "prose-complete"
+        ? config.openEvidence
+        : providerId === "provider_15k9j3v" || providerTitle.includes("vip gold")
+          ? "structured-id"
+          : providerId === "provider_1gfxfwd" || providerTitle.includes("kal")
+            ? "prose-complete"
+            : "prose-complete";
     const providerLevelConfig: ProviderExecutionConfig = {
+      openEvidence,
       parserMode: normalizeParserMode(provider?.parserMode),
       lockedSymbol: normalizeLockedSymbol(config.lockedSymbol),
       tradedSymbols: normalizeTradedSymbols(config.tradedSymbols),
@@ -1840,6 +1862,7 @@ class AppStore {
       if (linkRow?.config_json) {
         const override = parseJson<Partial<ProviderExecutionConfig>>(String(linkRow.config_json));
         return {
+          openEvidence: providerLevelConfig.openEvidence,
           parserMode: providerLevelConfig.parserMode,
           lockedSymbol: providerLevelConfig.lockedSymbol,
           tradedSymbols: providerLevelConfig.tradedSymbols,
@@ -2328,6 +2351,7 @@ class AppStore {
       return {
         method: "provider-order-id",
         status: "MATCHED",
+        activeTradeCount: 1,
         tradeId: providerOrderCandidates[0]!.id,
       };
     }
@@ -2335,6 +2359,7 @@ class AppStore {
       return {
         method: "provider-order-id",
         status: "AMBIGUOUS",
+        activeTradeCount: providerOrderCandidates.length,
         tradeIds: providerOrderCandidates.map((trade) => trade.id),
         reason: "Multiple active logical trades share this provider order id",
       };
@@ -2345,55 +2370,153 @@ class AppStore {
     const replyToMessageId = lifecycle?.reply_to_message_id
       ? String(lifecycle.reply_to_message_id)
       : "";
-    if (!replyToMessageId) {
-      return { method: "none", status: "UNMATCHED", reason: "no-reply-link" };
+    if (replyToMessageId) {
+      const visited = new Set<string>();
+      let telegramMessageId = replyToMessageId;
+      for (let depth = 0; depth < 12; depth += 1) {
+        if (visited.has(telegramMessageId)) {
+          return {
+            method: "reply-link",
+            status: "UNMATCHED",
+            activeTradeCount: 0,
+            reason: "cycle",
+          };
+        }
+        visited.add(telegramMessageId);
+        const origins = this.db
+          .query(
+            "SELECT logical_trade_id FROM trade_origins WHERE provider_id = ? AND account_id = ? AND telegram_message_id = ?",
+          )
+          .all(providerId, accountId, telegramMessageId) as Row[];
+        const tradeIds = [...new Set(origins.map((origin) => String(origin.logical_trade_id)))];
+        if (tradeIds.length > 1) {
+          return {
+            method: "reply-link",
+            status: "AMBIGUOUS",
+            activeTradeCount: tradeIds.filter((id) => this.isActiveLogicalTrade(id)).length,
+            tradeIds,
+            reason: "multiple-origins",
+          };
+        }
+        if (tradeIds.length === 1) {
+          const trade = this.logicalTrade(tradeIds[0]!);
+          if (trade && this.isActiveLogicalTrade(trade.id)) {
+            return {
+              method: "reply-link",
+              status: "MATCHED",
+              activeTradeCount: 1,
+              tradeId: tradeIds[0],
+            };
+          }
+          return {
+            method: "reply-link",
+            status: "UNMATCHED",
+            activeTradeCount: 0,
+            reason: "inactive-origin",
+          };
+        }
+        const alias = this.db
+          .query(
+            `SELECT raw_messages.reply_to_message_id
+             FROM raw_message_aliases
+             JOIN raw_messages ON raw_messages.id = raw_message_aliases.raw_message_id
+             WHERE raw_message_aliases.provider_id = ?
+               AND raw_message_aliases.telegram_message_id = ?
+               AND raw_messages.provider_id = ?`,
+          )
+          .get(providerId, telegramMessageId, providerId) as Row | null;
+        if (!alias) {
+          return {
+            method: "reply-link",
+            status: "UNMATCHED",
+            activeTradeCount: 0,
+            reason: "gap-in-graph",
+          };
+        }
+        if (!alias.reply_to_message_id) {
+          return {
+            method: "reply-link",
+            status: "UNMATCHED",
+            activeTradeCount: 0,
+            reason: "chain-ended-no-origin",
+          };
+        }
+        telegramMessageId = String(alias.reply_to_message_id);
+      }
+      return {
+        method: "reply-link",
+        status: "UNMATCHED",
+        activeTradeCount: 0,
+        reason: "chain-too-deep",
+      };
     }
 
-    const visited = new Set<string>();
-    let telegramMessageId = replyToMessageId;
-    for (let depth = 0; depth < 12; depth += 1) {
-      if (visited.has(telegramMessageId)) {
-        return { method: "reply-link", status: "UNMATCHED", reason: "cycle" };
-      }
-      visited.add(telegramMessageId);
+    const inlineQuote = this.inlineQuotedSignal(lifecycleRawMessageId);
+    if (inlineQuote) {
+      const inlineFingerprint = createMessageFingerprint(inlineQuote);
       const origins = this.db
         .query(
-          "SELECT logical_trade_id FROM trade_origins WHERE provider_id = ? AND account_id = ? AND telegram_message_id = ?",
+          `SELECT DISTINCT trade_origins.logical_trade_id
+           FROM raw_messages
+           JOIN trade_origins
+             ON trade_origins.provider_id = raw_messages.provider_id
+            AND trade_origins.telegram_message_id = raw_messages.telegram_message_id
+           WHERE raw_messages.provider_id = ?
+             AND raw_messages.fingerprint = ?
+             AND trade_origins.account_id = ?`,
         )
-        .all(providerId, accountId, telegramMessageId) as Row[];
+        .all(providerId, inlineFingerprint, accountId) as Row[];
       const tradeIds = [...new Set(origins.map((origin) => String(origin.logical_trade_id)))];
-      if (tradeIds.length > 1) {
-        return { method: "reply-link", status: "AMBIGUOUS", reason: "multiple-origins" };
+      const activeTradeIds = tradeIds.filter((id) => this.isActiveLogicalTrade(id));
+      if (tradeIds.length === 0) {
+        return {
+          method: "inline-quote",
+          status: "UNMATCHED",
+          activeTradeCount: 0,
+          reason: "no-origin-fingerprint",
+        };
       }
-      if (tradeIds.length === 1) {
-        const trade = this.logicalTrade(tradeIds[0]!);
-        if (
-          trade &&
-          (trade.status === "OPEN" || trade.status === "PENDING" || trade.status === "PLANNED")
-        ) {
-          return { method: "reply-link", status: "MATCHED", tradeId: tradeIds[0] };
-        }
-        return { method: "reply-link", status: "UNMATCHED", reason: "inactive-origin" };
+      if (tradeIds.length !== 1) {
+        return {
+          method: "inline-quote",
+          status: "AMBIGUOUS",
+          activeTradeCount: activeTradeIds.length,
+          tradeIds,
+          reason: "multiple-origin-fingerprints",
+        };
       }
-      const alias = this.db
-        .query(
-          `SELECT raw_messages.reply_to_message_id
-           FROM raw_message_aliases
-           JOIN raw_messages ON raw_messages.id = raw_message_aliases.raw_message_id
-           WHERE raw_message_aliases.provider_id = ?
-             AND raw_message_aliases.telegram_message_id = ?
-             AND raw_messages.provider_id = ?`,
-        )
-        .get(providerId, telegramMessageId, providerId) as Row | null;
-      if (!alias) {
-        return { method: "reply-link", status: "UNMATCHED", reason: "gap-in-graph" };
+      if (activeTradeIds.length === 1) {
+        return {
+          method: "inline-quote",
+          status: "MATCHED",
+          activeTradeCount: 1,
+          tradeId: activeTradeIds[0],
+        };
       }
-      if (!alias.reply_to_message_id) {
-        return { method: "reply-link", status: "UNMATCHED", reason: "chain-ended-no-origin" };
-      }
-      telegramMessageId = String(alias.reply_to_message_id);
+      return {
+        method: "inline-quote",
+        status: "UNMATCHED",
+        activeTradeCount: 0,
+        reason: "inactive-origin",
+      };
     }
-    return { method: "reply-link", status: "UNMATCHED", reason: "chain-too-deep" };
+
+    return { method: "none", status: "UNMATCHED", activeTradeCount: 0, reason: "no-evidence" };
+  }
+
+  private inlineQuotedSignal(rawMessageId: string) {
+    const row = this.db
+      .query("SELECT raw_text FROM raw_messages WHERE id = ?")
+      .get(rawMessageId) as Row | null;
+    const rawText = row?.raw_text ? String(row.raw_text) : "";
+    return rawText
+      .match(/^Quoted signal:\s*([\s\S]*?)(?:\n\nComment:|\s+---\s+Comment:)/i)?.[1]
+      ?.trim();
+  }
+
+  private isActiveLogicalTrade(tradeId: string) {
+    const status = this.logicalTrade(tradeId)?.status;
+    return status === "OPEN" || status === "PENDING" || status === "PLANNED";
   }
 
   private shadowLifecycleCorrelation(
@@ -2625,20 +2748,17 @@ class AppStore {
             });
           }
         }
-        const mappingReviewOnly =
-          item.result.commandType === "OPEN_TRADE" && item.result.mappingStatus !== "mapped";
-        if (
-          !isAutoQueueableIngestionCommand(item.result.commandType) ||
-          (item.reviewRequired && !mappingReviewOnly)
-        ) {
+        if (!isAutoQueueableIngestionCommand(item.result.commandType)) {
           continue;
         }
-        const approval = this.approveSignal(item.parsedSignalId);
+        const approval = this.approveSignal(item.parsedSignalId, { trigger: "ingest" });
         if ("body" in approval) {
-          result.queued +=
-            approval.body.queuedCount ??
-            approval.body.queueItems?.length ??
-            (approval.body.queueItemId ? 1 : 0);
+          if (approval.body.status === "PENDING") {
+            result.queued +=
+              approval.body.queuedCount ??
+              approval.body.queueItems?.length ??
+              (approval.body.queueItemId ? 1 : 0);
+          }
         } else if (approval.statusCode !== 409) {
           result.errors += 1;
           const lifecycleCommand =
@@ -3426,7 +3546,7 @@ class AppStore {
 
   approveSignal(
     parsedSignalId: string,
-    options: { executionMode?: ExecutionMode } = {},
+    options: { executionMode?: ExecutionMode; trigger?: "ingest" | "operator" } = {},
   ):
     | {
         statusCode?: 200;
@@ -3489,6 +3609,93 @@ class AppStore {
     }
     const accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
     const provider = this.providerDetails(providerId);
+    const defaultTakeProfit = { value: settings.defaultTakeProfitPips, unit: "PIPS" as const };
+    if (options.trigger !== "operator") {
+      const evidenceTargets = targetAccountIds.map((targetAccountId) => {
+        const targetConfig = this.providerConfig(providerId, targetAccountId);
+        const targetSignal = applyProviderExecutionConfig(
+          targetAccountId === signal.accountId
+            ? signal
+            : this.reparseSignalForAccount(signal, providerId, targetAccountId),
+          targetConfig,
+          { defaultTakeProfit },
+        );
+        const resolution =
+          targetSignal.commandType !== "OPEN_TRADE" &&
+          targetSignal.commandType !== "NO_SIGNAL" &&
+          targetSignal.commandType !== "TRADE_SETUP"
+            ? this.resolveLifecycleTarget(
+                providerId,
+                targetAccountId,
+                source?.rawMessageId ?? "",
+                targetSignal,
+              )
+            : undefined;
+        const suggestion = resolution
+          ? matchLifecycleCommandToTrade(
+              targetSignal,
+              this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
+            )
+          : undefined;
+        const lifecycleResolution: LifecycleResolutionEvidence | undefined = resolution
+          ? {
+              method: resolution.method,
+              status: resolution.status,
+              activeTradeCount: resolution.activeTradeCount,
+              ...(suggestion?.status === "MATCHED" && suggestion.tradeId
+                ? { suggestion: `same-symbol trade ${suggestion.tradeId}` }
+                : {}),
+            }
+          : undefined;
+        const verdict = evaluateExecutionEvidence({
+          parsedSignal: targetSignal,
+          providerConfig: { openEvidence: targetConfig.openEvidence ?? "prose-complete" },
+          lifecycleResolution,
+          orderIdNovelty: {
+            providerOrderIdNeverSeen: !this.hasDuplicateProviderOrderId(
+              providerId,
+              targetAccountId,
+              targetSignal,
+            ),
+          },
+          forwarded: this.forwardedForParsedSignal(parsedSignalId),
+        });
+        return { accountId: targetAccountId, signal: targetSignal, verdict };
+      });
+      const failed = evidenceTargets.find((target) => target.verdict.verdict !== "EXECUTE");
+      if (failed) {
+        if (failed.verdict.verdict === "DROP") {
+          const queueItemId = this.dropForEvidence(
+            parsedSignalId,
+            failed.signal,
+            accountId,
+            executionMode,
+            settings,
+            failed.verdict.reason,
+          );
+          return { body: { queueItemId, status: "IGNORED" } };
+        }
+        const heldQueueItems = evidenceTargets.map((target) =>
+          this.holdForEvidence(
+            parsedSignalId,
+            target.signal,
+            target.accountId,
+            executionMode,
+            settings,
+            target.verdict.verdict === "HOLD" ? target.verdict.reason : failed.verdict.reason,
+            target.verdict.suggestion,
+          ),
+        );
+        return {
+          body: {
+            queueItemId: heldQueueItems[0],
+            heldQueueItems,
+            queuedCount: 0,
+            status: "HELD",
+          },
+        };
+      }
+    }
     if (signal.commandType === "OPEN_TRADE" && openTradeSourceExpired(source, settings)) {
       const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "HELD", {
         accountId,
@@ -3510,7 +3717,6 @@ class AppStore {
       this.alertHeldQueueItem(queueItemId, "EXPIRED_LATE");
       return { body: { queueItemId, status: "HELD" } };
     }
-    const defaultTakeProfit = { value: settings.defaultTakeProfitPips, unit: "PIPS" as const };
     // Keep exact lifecycle retries idempotent. Open-trade deduplication is handled
     // below per target account so provider order IDs can take precedence.
     if (signal.commandType !== "OPEN_TRADE") {
@@ -4500,7 +4706,7 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items ORDER BY created_at DESC",
+          "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, suggestion, origin_queue_item_id, leased_at, created_at FROM queue_items ORDER BY created_at DESC",
         )
         .all() as Row[]
     ).map(queueRow);
@@ -4511,6 +4717,7 @@ class AppStore {
       .query(
         `SELECT queue_items.id, queue_items.account_id, queue_items.logical_trade_id,
                 queue_items.status, queue_items.payload_json, queue_items.held_reason,
+                queue_items.suggestion,
                 queue_items.origin_queue_item_id, queue_items.created_at,
                 parsed_signals.provider_id, parsed_signals.result_json,
                 providers.title AS provider_title
@@ -4538,6 +4745,7 @@ class AppStore {
       return {
         id: String(row.id),
         heldReason: String(row.held_reason ?? ""),
+        suggestion: row.suggestion ? String(row.suggestion) : undefined,
         accountId,
         providerId: String(row.provider_id ?? ""),
         providerTitle: row.provider_id ? String(row.provider_title ?? row.provider_id) : undefined,
@@ -9524,6 +9732,7 @@ class AppStore {
     `);
     this.ensureColumn("queue_items", "lease_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("queue_items", "held_reason", "TEXT");
+    this.ensureColumn("queue_items", "suggestion", "TEXT");
     this.ensureColumn("queue_items", "origin_queue_item_id", "TEXT");
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_queue_items_parsed_signal_created ON queue_items(parsed_signal_id, created_at)",
@@ -10585,6 +10794,7 @@ class AppStore {
       settings: AppSettings;
       runner?: ProviderExecutionConfig["runner"];
       heldReason?: string;
+      suggestion?: string;
     },
   ) {
     const item = buildExecutionCommand(signal, {
@@ -10596,7 +10806,79 @@ class AppStore {
       runner: options.runner,
     });
     item.status = status;
-    return this.insertQueueItem(item, parsedSignalId, { heldReason: options.heldReason });
+    return this.insertQueueItem(item, parsedSignalId, {
+      heldReason: options.heldReason,
+      suggestion: options.suggestion,
+    });
+  }
+
+  private forwardedForParsedSignal(parsedSignalId: string) {
+    const row = this.db
+      .query(
+        `SELECT raw_messages.forwarded_from, raw_messages.forward_date
+         FROM parsed_signals
+         JOIN raw_messages ON raw_messages.id = parsed_signals.raw_message_id
+         WHERE parsed_signals.id = ?`,
+      )
+      .get(parsedSignalId) as Row | null;
+    return Boolean(row?.forwarded_from || row?.forward_date);
+  }
+
+  private holdForEvidence(
+    parsedSignalId: string,
+    signal: ParsedSignal,
+    accountId: string,
+    executionMode: ExecutionMode,
+    settings: AppSettings,
+    reason: string,
+    suggestion?: string,
+  ) {
+    const heldReason = `EVIDENCE_${reason}`;
+    const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "HELD", {
+      accountId,
+      executionMode,
+      settings,
+      heldReason,
+      suggestion,
+    });
+    this.db.query("UPDATE parsed_signals SET status = ? WHERE id = ?").run("HELD", parsedSignalId);
+    this.audit("signal.evidence-hold", "warn", "Signal held by execution evidence gate", {
+      parsedSignalId,
+      providerId: signal.providerId,
+      accountId,
+      queueItemId,
+      heldReason,
+      suggestion,
+    });
+    this.alertHeldQueueItem(queueItemId, heldReason);
+    return queueItemId;
+  }
+
+  private dropForEvidence(
+    parsedSignalId: string,
+    signal: ParsedSignal,
+    accountId: string,
+    executionMode: ExecutionMode,
+    settings: AppSettings,
+    reason: string,
+  ) {
+    const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "IGNORED", {
+      accountId,
+      executionMode,
+      settings,
+    });
+    this.db
+      .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+      .run("IGNORED", parsedSignalId);
+    this.audit("signal.evidence-drop", "warn", "Signal dropped by execution evidence gate", {
+      parsedSignalId,
+      providerId: signal.providerId,
+      accountId,
+      queueItemId,
+      reason,
+      firstWeekVocabularyAudit: /\b(?:CLOS|CANCEL|DELETE)/i.test(signal.originalText),
+    });
+    return queueItemId;
   }
 
   private holdLifecycleForReconciliation(
@@ -10681,12 +10963,12 @@ class AppStore {
   private insertQueueItem(
     item: ExecutionQueueItem,
     parsedSignalId: string,
-    metadata: { heldReason?: string; originQueueItemId?: string } = {},
+    metadata: { heldReason?: string; suggestion?: string; originQueueItemId?: string } = {},
   ) {
     const now = new Date().toISOString();
     this.db
       .query(
-        "INSERT INTO queue_items (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, lease_count, held_reason, origin_queue_item_id, leased_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO queue_items (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, lease_count, held_reason, suggestion, origin_queue_item_id, leased_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         item.id,
@@ -10697,6 +10979,7 @@ class AppStore {
         JSON.stringify(item.payload),
         0,
         metadata.heldReason ?? null,
+        metadata.suggestion ?? null,
         metadata.originQueueItemId ?? null,
         item.leasedAt ?? null,
         now,
@@ -10767,14 +11050,33 @@ class AppStore {
     });
   }
 
-  private hasDuplicateProviderOrderId(providerId: string, accountId: string, signal: ParsedSignal) {
+  private hasDuplicateProviderOrderId(
+    providerId: string,
+    _accountId: string,
+    signal: ParsedSignal,
+  ) {
     if (signal.commandType !== "OPEN_TRADE" || !signal.providerOrderId) return false;
-    return this.logicalTrades().some(
-      (trade) =>
-        trade.providerId === providerId &&
-        trade.accountId === accountId &&
-        trade.providerOrderId === signal.providerOrderId &&
-        ["OPEN", "PENDING", "PLANNED", "OUT_OF_SYNC"].includes(trade.status),
+    // The provider id is durable evidence across accounts and terminal states;
+    // a reposted id is an echo, not a new open.
+    return (
+      this.logicalTrades().some(
+        (trade) =>
+          trade.providerId === providerId &&
+          trade.providerOrderId === signal.providerOrderId &&
+          ["OPEN", "PENDING", "PLANNED", "CLOSED", "CANCELLED", "ARCHIVED", "OUT_OF_SYNC"].includes(
+            trade.status,
+          ),
+      ) ||
+      this.db
+        .query(
+          `SELECT 1
+           FROM trade_origins
+           JOIN logical_trades ON logical_trades.id = trade_origins.logical_trade_id
+           WHERE trade_origins.provider_id = ?
+             AND json_extract(logical_trades.data_json, '$.providerOrderId') = ?
+           LIMIT 1`,
+        )
+        .get(providerId, signal.providerOrderId) !== null
     );
   }
 
@@ -13382,6 +13684,7 @@ function queueRow(row: Row) {
     payload: parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json)),
     leaseCount: Number(row.lease_count ?? 0),
     heldReason: row.held_reason ? String(row.held_reason) : undefined,
+    suggestion: row.suggestion ? String(row.suggestion) : undefined,
     originQueueItemId: row.origin_queue_item_id ? String(row.origin_queue_item_id) : undefined,
     leasedAt: row.leased_at ? String(row.leased_at) : undefined,
     createdAt: String(row.created_at),
