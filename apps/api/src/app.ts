@@ -3589,9 +3589,25 @@ class AppStore {
       }
     | { statusCode: 409 | 422; error: string } {
     const existing = this.db
-      .query("SELECT id FROM queue_items WHERE parsed_signal_id = ?")
+      .query("SELECT id, status, account_id FROM queue_items WHERE parsed_signal_id = ?")
       .all(parsedSignalId) as Row[];
-    if (existing.some((item) => String(item.id) !== options.releasingQueueItemId)) {
+    const releasingQueueItemId = options.releasingQueueItemId;
+    const releasingRow = releasingQueueItemId
+      ? existing.find((item) => String(item.id) === releasingQueueItemId)
+      : undefined;
+    // The evidence gate holds one row per linked account, all sharing this parsed signal, and a
+    // release is always scoped to a single account. Sibling accounts own their own rows, so a
+    // release must judge only its own account or releasing the second account would 409 on the
+    // first account's freshly queued row. Same-account rows still block unless already terminal:
+    // that is the real double-approval this guard exists for.
+    const blocking = existing.filter((item) => {
+      if (String(item.id) === releasingQueueItemId) return false;
+      if (!releasingRow) return true;
+      if (String(item.account_id ?? "") !== String(releasingRow.account_id ?? "")) return false;
+      const status = String(item.status ?? "");
+      return status !== "DISMISSED" && status !== "IGNORED";
+    });
+    if (blocking.length > 0) {
       return { statusCode: 409, error: "Signal has already been approved or queued" };
     }
 
@@ -11162,7 +11178,7 @@ class AppStore {
       accountId,
       queueItemId,
       reason,
-      firstWeekVocabularyAudit: /\b(?:CLOS|CANCEL|DELETE)/i.test(signal.originalText),
+      firstWeekVocabularyAudit: /\b(?:CLOS|CANCEL|DELET|REMOV)/i.test(signal.originalText),
     });
     return queueItemId;
   }

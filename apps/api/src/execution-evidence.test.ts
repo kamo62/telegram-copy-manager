@@ -345,14 +345,57 @@ describe("evaluateExecutionEvidence", () => {
     expect(forwarded.verdict).toBe("HOLD");
   });
 
+  test("holds every risk-off inflection so a misclassified close is never silently dropped", () => {
+    // Real corpus: these were SILENTLY DROPPED while the regex required a literal "CLOSE",
+    // so "CLOSING" never matched. 16601/16602 are the genuine "Consider closing if you're
+    // not willing to risk" pair the safety net exists to catch.
+    for (const telegramMessageId of ["15499", "15688", "16536", "16601", "16602"]) {
+      const message = realMessage("provider_1gfxfwd", telegramMessageId);
+      expect(parsed(message.rawText, message.providerId).commandType).toBe("NO_SIGNAL");
+      const verdict = evaluateExecutionEvidence(realEvidence(message));
+      expect(verdict.verdict).toBe("HOLD");
+      expect(verdict.reason).toBe("RISK_OFF_NO_SIGNAL");
+      expect(verdict.tier).toBe("action-required");
+    }
+
+    // Synthetic: the corpus only ever exercises the "closing" inflection, which is exactly
+    // why the broken pattern survived review. Each of these is a word the net must catch.
+    for (const text of [
+      "Consider cancelling if you're not willing to risk",
+      "Consider deleting if you're not willing to risk",
+      "Consider removing if you're not willing to risk",
+      "He cancels his trades too early",
+    ]) {
+      const signal = parsed(text, "provider_1gfxfwd");
+      expect(signal.commandType).toBe("NO_SIGNAL");
+      expect(evaluateExecutionEvidence(evidence(signal, { providerConfig: proseConfig }))).toEqual(
+        expect.objectContaining({ verdict: "HOLD", reason: "RISK_OFF_NO_SIGNAL" }),
+      );
+    }
+
+    // Synthetic: ordinary prose that merely contains the stems must stay droppable, or the
+    // net degenerates into holding everything and operators stop reading the alerts.
+    for (const text of [
+      "The market closure is at 5pm",
+      "I will disclose my full strategy soon",
+      "Cancellation of the London session is unlikely",
+    ]) {
+      const signal = parsed(text, "provider_1gfxfwd");
+      expect(signal.commandType).toBe("NO_SIGNAL");
+      expect(
+        evaluateExecutionEvidence(evidence(signal, { providerConfig: proseConfig })).reason,
+      ).not.toBe("RISK_OFF_NO_SIGNAL");
+    }
+  });
+
   test("locks the 1,945-message corpus evidence budget per provider", () => {
     const noResolutionFloor = {
       provider_15k9j3v: { EXECUTE: 24, HOLD: 26, DROP: 18 },
-      provider_1gfxfwd: { EXECUTE: 290, HOLD: 368, DROP: 1219 },
+      provider_1gfxfwd: { EXECUTE: 290, HOLD: 375, DROP: 1212 },
     } as const;
     const simulatedResolutionExpected = {
       provider_15k9j3v: { EXECUTE: 49, HOLD: 1, DROP: 18 },
-      provider_1gfxfwd: { EXECUTE: 395, HOLD: 263, DROP: 1219 },
+      provider_1gfxfwd: { EXECUTE: 395, HOLD: 270, DROP: 1212 },
     } as const;
     const measuredFloor = {
       provider_15k9j3v: { EXECUTE: 0, HOLD: 0, DROP: 0 },

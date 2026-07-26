@@ -13167,6 +13167,97 @@ describe("step 3 evidence gate wiring", () => {
     }
   });
 
+  test("releases an evidence-held OPEN on every linked account, not just the first", async () => {
+    // Production runs two linked accounts. The gate holds one row per account sharing a single
+    // parsed signal, so a dedup that ignores only the releasing row 409s on the sibling and
+    // strands both rows HELD forever. Both releases must succeed, in either order.
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-evidence-multi-account-release-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(realFixtureMessages(["15226"])),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ openEvidence: "structured-id" }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442827",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+          eaVersion: "1.57.2",
+          eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-63442827/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+
+      await app.runTelegramIngestionOnce();
+      const held = await json<{ items: Array<{ id: string; accountId: string }> }>(
+        await app.request("/api/queue-items/held"),
+      );
+      const heldOpens = held.items.filter(
+        (item) => item.accountId === "mt5-63442826" || item.accountId === "mt5-63442827",
+      );
+      expect(heldOpens.map((item) => item.accountId).sort()).toEqual([
+        "mt5-63442826",
+        "mt5-63442827",
+      ]);
+
+      for (const heldOpen of heldOpens) {
+        const response = await app.request(`/api/queue-items/${heldOpen.id}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original" }),
+          headers: { "content-type": "application/json" },
+        });
+        expect({ accountId: heldOpen.accountId, status: response.status }).toEqual({
+          accountId: heldOpen.accountId,
+          status: 200,
+        });
+        const released = (await response.json()) as { accountId: string; logicalTradeId: string };
+        expect(released.accountId).toBe(heldOpen.accountId);
+        expect(released.logicalTradeId).toBeTruthy();
+      }
+
+      // Each account must end up with its own bound trade, and no held row may survive.
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const pending = db
+          .query("SELECT account_id FROM queue_items WHERE status = 'PENDING' ORDER BY account_id")
+          .all() as Array<{ account_id: string }>;
+        expect(pending.map((row) => row.account_id)).toEqual(["mt5-63442826", "mt5-63442827"]);
+        expect(
+          db.query("SELECT COUNT(*) AS n FROM queue_items WHERE status = 'HELD'").get(),
+        ).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("requires and honors an explicit active trade for a real corpus lifecycle release", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-evidence-lifecycle-release-"));
     const databasePath = join(tempDir, "app.db");

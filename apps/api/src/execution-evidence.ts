@@ -122,7 +122,7 @@ function isLifecycleCandidate(signal: ParsedSignal) {
 }
 
 function hasRiskOffVocabulary(text: string) {
-  return /\b(?:CLOSE(?:D|S|ING)?|CANCEL(?:LED|ED|S|ING)?|DELETE(?:D|S|ING)?|REMOVE(?:D|S|ING)?)\b/i.test(
+  return /\b(?:CLOS(?:E[SD]?|ING)|CANCEL(?:S|L?(?:ED|ING))?|DELET(?:E[SD]?|ING)|REMOV(?:E[SD]?|ING))\b/i.test(
     text,
   );
 }
