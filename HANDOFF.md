@@ -1,5 +1,75 @@
 # Handoff
 
+## UI REVIEW BACKLOG (2026-07-27, after v1.60.0 shipped)
+
+v1.60.0 is DEPLOYED and healthy. Both EAs on 1.60.0, evidence gate live and producing zero holds of
+its own. Current head `fbce560d`.
+
+Two independent UI reviews (Fable/Opus on 16 live screenshots in `output/ui-review/`, Codex sol on
+the frontend source) ran blind to each other and CONVERGED on four findings. Full outputs are in the
+session transcript; this is the actionable residue.
+
+### LIVE CONFIGURATION HAZARD - not a code bug, needs an owner decision
+
+**The Equity Guardian is DISABLED on both live accounts.**
+`mt5-1514065673`: threshold 0, enabled false. `mt5-54945785`: threshold 100,000,000, enabled false,
+and it has real breach history (paused 2026-07-20 at 10.21% drawdown, manually unpaused 07-21).
+So there is currently no drawdown protection on either account while KAL VIP copies onto the
+R1,068 account at 24% win rate. Decide the thresholds and re-enable, or accept explicitly.
+
+### Both reviewers, independently
+
+1. **Held row omits side, lots, SL and TP, and the price drift is unsigned.** The API computes drift
+   from a bid/ask midpoint without considering BUY vs SELL and discards the quote `updatedAt`
+   (`app.ts:5299`, `:4813`), so "+2.29%" is favourable on a sell and costly on a buy with no way to
+   tell - next to a market-execute button, on signals up to 5 days old. Carry side/SL/TP/quote-age
+   through the held API, sign the drift against direction, disable market release on a stale quote.
+2. **The review queue is buried.** `/review` navigates to `/logs` with Parser Lab rendered first;
+   held signals start thousands of px down. Give `/review` its own route with held signals first.
+3. **A failed cold load renders production as an unconfigured system.** Empty states are driven by
+   empty arrays, not by a *successful* response (`App.tsx:402`, `:836`, `:2342`), so a poll failure
+   shows "No MT5 account connected yet" and onboarding. Acting on either is destructive. Track
+   `hasLoadedSnapshot` and never infer zero from a failure.
+4. **Guardian threshold is unbounded** at both the form and the API (`EquityGuardianPage.tsx:107`,
+   `app.ts:5738`, `:14582`). Clamp the domain server-side.
+
+### Sol only (source-level)
+
+5. **"Market" vs "Original" is a FALSE CHOICE for lifecycle releases.** `requeueHeldLifecycle` never
+   branches on `mode`; it builds the same command and only echoes the choice into the audit
+   (`app.ts:5103`, `:5136`). Same shape as github issue #9 but a DIFFERENT path, so #9's fix will not
+   cover it. Collapse to one action and reject irrelevant `mode` server-side.
+6. **Parser "Approve" is one-click, no confirmation, and skips the evidence gate** via
+   `trigger:"operator"` (`ParserResult.tsx:166` -> `app.ts:763` -> `:3727`). This is the same bypass
+   that used to reach close-all fan-out. The gate is fail-closed everywhere except this button.
+7. **Manual force-push validates SL direction but not TP direction or ordering**
+   (`ManualSignalModal.tsx:78` vs `:102`; server repeats the omission at `app.ts:4505`).
+
+### Fixed this session
+
+- Providers table: removed TP # and SL (hardcoded em-dashes) and Profit (duplicated P/L exactly).
+- Configure gear and held-signal Dismiss were both `opacity:0` until row hover, from the global
+  `.data-table .icon-btn` rule at `base.css:6548`. On the review queue that meant both order-placing
+  buttons were prominent and the only decline button was invisible. Both scoped and fixed.
+  **That rule has now caused three real bugs** (clipped wide modal, invisible Configure, invisible
+  Dismiss). Consider inverting the default rather than scoping a fourth exception.
+- Provider config modal tightened to fit a 900px viewport without scrolling.
+
+### Corrections to earlier hypotheses (do not re-derive)
+
+- `HistoryPage.tsx` is NOT unreachable; `/history` resolves through `TAB_IDS` and renders it. The
+  dead code is the legacy `activeView === "trades" | "providers" | "parser" | "mapping"` branches,
+  which `parseRoute` never emits. Also dead: `AccountsOverview`, `SummaryPanel`, `Donut`,
+  `DitherSparkline`.
+- The History page does NOT block the main thread. That earlier observation was browser tab
+  contention from having ~10 tabs open, not an app defect.
+
+### Held queue state
+
+88 -> 15. All 74 `EXPIRED_LATE` bulk-dismissed. Remaining: 10 `SYMBOL_MAPPING_UNMAPPED` (need broker
+symbols mapped) and 5 `EA_OFFLINE` (past the auto-release age cap, need manual disposal). Alerting is
+still unconfigured, so nothing held is announced.
+
 ## NEXT SESSION STARTS HERE — all 8 blocking items fixed, awaiting independent review
 
 Branch `fix/vipgold-duplicate-open-prevention` @ `fa758b2c` (NOT pushed). Gate: typecheck, lint,
