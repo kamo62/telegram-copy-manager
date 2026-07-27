@@ -8,6 +8,8 @@ import { useConfirm } from "./ConfirmDialog";
 import { EmptyState } from "./EmptyState";
 import { Tag } from "./Tag";
 
+const STALE_AFTER_MS = 24 * 60 * 60 * 1_000;
+
 function reasonLabel(reason: string): string {
   return reason.replaceAll("_", " ");
 }
@@ -21,6 +23,17 @@ function ageLabel(createdAt: string): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 48) return `${hours}h`;
   return `${Math.floor(hours / 24)}d`;
+}
+
+function isStale(createdAt: string): boolean {
+  const createdAtMs = Date.parse(createdAt);
+  return Number.isFinite(createdAtMs) && Date.now() - createdAtMs >= STALE_AFTER_MS;
+}
+
+function reasonTone(reason: string): "warn" | "down" | "muted" {
+  if (reason === "EA_OFFLINE") return "warn";
+  if (reason.startsWith("SYMBOL_MAPPING_")) return "down";
+  return "muted";
 }
 
 function confirmationDescription(item: HeldQueueItem, action: string) {
@@ -51,7 +64,7 @@ export function HeldSignalsTable({
   const { locale } = useLocale();
   const { confirm, dialog } = useConfirm();
   const [selectedTradeIds, setSelectedTradeIds] = useState<Record<string, string>>({});
-  const { sortedRows, toggle, sortAria } = useSortableTable(items, "createdAt", "asc");
+  const { sortedRows, toggle, sortAria } = useSortableTable(items, "createdAt", "desc");
 
   async function requeue(item: HeldQueueItem, mode: HeldRequeueMode) {
     const requiresTradeSelection = item.commandType !== "OPEN_TRADE";
@@ -108,7 +121,11 @@ export function HeldSignalsTable({
               <th className="num" scope="col">
                 Price drift
               </th>
-              <th className="num" scope="col">
+              <th
+                className="num"
+                scope="col"
+                title="Lifecycle commands received while this signal was held. 0 means none were dropped; — means the count was not reported."
+              >
                 Dropped
               </th>
               <th scope="col">Actions</th>
@@ -116,7 +133,7 @@ export function HeldSignalsTable({
           </thead>
           <tbody>
             {sortedRows.map((item) => (
-              <tr key={item.id}>
+              <tr className={isStale(item.createdAt) ? "held-row-stale" : undefined} key={item.id}>
                 <td>
                   <time dateTime={item.createdAt}>{ageLabel(item.createdAt)}</time>
                 </td>
@@ -129,7 +146,7 @@ export function HeldSignalsTable({
                   <strong>{item.symbol}</strong>
                 </td>
                 <td>
-                  <Tag tone="warn">{reasonLabel(item.heldReason)}</Tag>
+                  <Tag tone={reasonTone(item.heldReason)}>{reasonLabel(item.heldReason)}</Tag>
                 </td>
                 <td className="num-cell held-price-cell">
                   <span>
@@ -150,12 +167,18 @@ export function HeldSignalsTable({
                   )}
                 </td>
                 <td className="num-cell">
-                  {item.droppedLifecycleCount > 0 ? (
+                  {typeof item.droppedLifecycleCount !== "number" ? (
+                    <span title="Dropped lifecycle count was not reported by this queue item">
+                      —
+                    </span>
+                  ) : item.droppedLifecycleCount > 0 ? (
                     <span className="held-dropped-badge" title={item.droppedLifecycle.join(", ")}>
                       {item.droppedLifecycleCount}
                     </span>
                   ) : (
-                    "—"
+                    <span title="No lifecycle commands were dropped while this signal was held">
+                      0
+                    </span>
                   )}
                 </td>
                 <td>

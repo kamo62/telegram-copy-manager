@@ -14,6 +14,11 @@ export type MoneyProps = {
   className?: string;
 };
 
+export function numericSignTone(value: number | null | undefined): "up" | "down" | null {
+  if (value === null || value === undefined || !Number.isFinite(value) || value === 0) return null;
+  return value > 0 ? "up" : "down";
+}
+
 function resolveTone(
   value: number | null | undefined,
   { signTone, warnAbove, dangerAbove }: Pick<MoneyProps, "signTone" | "warnAbove" | "dangerAbove">,
@@ -23,8 +28,7 @@ function resolveTone(
   if (dangerAbove !== undefined && abs >= dangerAbove) return "danger";
   if (warnAbove !== undefined && abs >= warnAbove) return "warn";
   if (signTone) {
-    if (value > 0) return "up";
-    if (value < 0) return "down";
+    return numericSignTone(value);
   }
   return null;
 }

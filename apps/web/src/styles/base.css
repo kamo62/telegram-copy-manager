@@ -755,181 +755,6 @@ h3 {
   color: var(--ink-2);
 }
 
-.accounts-overview {
-  margin: 16px 0;
-  padding: 18px 20px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-2);
-  display: grid;
-  gap: 14px;
-}
-
-.accounts-overview-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.accounts-overview-eyebrow {
-  font-size: 11px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--ink-3);
-}
-
-.accounts-overview-title {
-  margin: 2px 0 0;
-  font-family: var(--font-display);
-  font-size: 16px;
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.accounts-overview-stats {
-  display: flex;
-  gap: 22px;
-}
-
-.accounts-overview-stats > div {
-  display: grid;
-  gap: 1px;
-  text-align: right;
-}
-
-.accounts-overview-stats span {
-  font-size: 10px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--ink-3);
-}
-
-.accounts-overview-stats strong {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 16px;
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.accounts-overview-stats-divider {
-  color: var(--ink-3);
-  font-weight: 400;
-}
-
-.accounts-overview-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 6px;
-}
-
-.accounts-overview-row {
-  display: grid;
-  grid-template-columns: 16px 1fr auto auto 16px;
-  align-items: center;
-  gap: 14px;
-  width: 100%;
-  padding: 10px 14px;
-  background: var(--bg);
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-1);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    border-color var(--duration-1) var(--ease-out),
-    background var(--duration-1) var(--ease-out);
-}
-
-.accounts-overview-row:hover {
-  border-color: var(--accent);
-  background: var(--panel);
-}
-
-.accounts-overview-row:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--accent-ring);
-  border-color: var(--accent);
-}
-
-.accounts-overview-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.accounts-overview-dot.ok {
-  background: var(--ink);
-  box-shadow: none;
-}
-
-.accounts-overview-dot.off {
-  background: var(--panel);
-  border: 1px solid var(--ink-3);
-  opacity: 1;
-}
-
-.accounts-overview-row-body {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-
-.accounts-overview-row-body strong {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.accounts-overview-row-meta {
-  font-size: 11px;
-  color: var(--ink-3);
-}
-
-.accounts-overview-row-stats {
-  display: flex;
-  gap: 14px;
-  font-size: 11px;
-  color: var(--ink-3);
-}
-
-.accounts-overview-row-stats strong {
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-weight: 500;
-  margin-right: 3px;
-}
-
-.accounts-overview-status {
-  font-size: 10px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-
-.accounts-overview-status.ok {
-  background: var(--ink);
-  color: var(--panel);
-}
-
-.accounts-overview-status.off {
-  background: var(--panel-2);
-  color: var(--ink-3);
-}
-
-.accounts-overview-row svg {
-  color: var(--ink-3);
-}
-
 /* Workspace ---------------------------------------------------------------- */
 
 .workspace {
@@ -938,72 +763,6 @@ h3 {
   flex-direction: column;
   gap: var(--space-5);
   min-width: 0;
-}
-
-/* Legacy topbar (kept for test compatibility, restyled) -------------------- */
-
-.topbar {
-  display: none; /* replaced by status-bar in new shell */
-}
-
-/* Metrics ------------------------------------------------------------------ */
-
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--space-4);
-}
-
-.metric-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: var(--space-4);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-3);
-}
-
-.metric-card > svg {
-  flex-shrink: 0;
-  color: var(--ink-faint);
-  margin-top: 2px;
-}
-
-.metric-card span {
-  display: block;
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
-}
-
-.metric-card strong {
-  display: block;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 20px;
-  font-weight: 600;
-  line-height: 1.2;
-  color: var(--ink);
-  margin: 2px 0;
-}
-
-.metric-card small {
-  display: block;
-  font-size: 10px;
-  color: var(--ink-faint);
-}
-
-/* Loading dot for metrics */
-.metric-card .metric-loading {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: pulse 1.4s ease-in-out infinite;
 }
 
 /* Content grid ------------------------------------------------------------- */
@@ -1231,13 +990,6 @@ h3 {
   width: 14px;
   height: 14px;
   accent-color: var(--accent);
-}
-
-.provider-link-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  margin-top: 8px;
 }
 
 /* Provider settings -------------------------------------------------------- */
@@ -1475,45 +1227,6 @@ h3 {
   color: var(--ink-faint);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-.tp-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
-}
-
-.tp-leg {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 6px 4px;
-  background: var(--bg);
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-sm);
-  text-align: center;
-}
-
-.tp-leg span {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-}
-
-.tp-leg strong {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink);
-}
-
-.tp-leg small {
-  font-size: 10px;
-  color: var(--ink-dim);
 }
 
 /* Mapping ------------------------------------------------------------------ */
@@ -2205,9 +1918,6 @@ h3 {
   .content-grid {
     grid-template-columns: repeat(2, 1fr);
   }
-  .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
 }
 
 @media (max-width: 768px) {
@@ -2220,14 +1930,8 @@ h3 {
   .content-grid {
     grid-template-columns: 1fr;
   }
-  .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
   .mapping-form {
     grid-template-columns: 1fr;
-  }
-  .tp-grid {
-    grid-template-columns: repeat(2, 1fr);
   }
 }
 
@@ -3292,8 +2996,8 @@ h3 {
   display: grid;
   gap: 8px;
   padding: 10px 12px;
-  background: hsl(35 90% 97%);
-  border: 1px solid hsl(35 80% 88%);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
   border-radius: var(--radius-1);
 }
 
@@ -3315,14 +3019,14 @@ h3 {
 }
 
 .external-positions-head svg {
-  color: hsl(28 80% 38%);
+  color: var(--warn);
 }
 
 .external-positions-label {
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: hsl(28 80% 32%);
+  color: var(--warn-dim);
   font-size: 11px;
 }
 
@@ -3370,8 +3074,8 @@ h3 {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  background: var(--bg);
-  border: 1px solid var(--line-subtle);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line));
   border-radius: 4px;
   font-size: 12px;
 }
@@ -3435,32 +3139,7 @@ h3 {
 }
 
 .performance-mode-tabs {
-  display: inline-flex;
-  gap: 3px;
-  padding: 3px;
   margin-bottom: 12px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-}
-
-.performance-mode-tabs button {
-  padding: 6px 13px;
-  font-family: var(--font-ui);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--ink-dim);
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.performance-mode-tabs button.active {
-  background: var(--panel);
-  color: var(--accent);
-  font-weight: 600;
-  box-shadow: var(--shadow-sm);
 }
 
 .attribution-panel {
@@ -3563,6 +3242,14 @@ h3 {
   font-weight: 700;
 }
 
+.attribution-kpi-value.money-up {
+  color: var(--up-dim);
+}
+
+.attribution-kpi-value.money-down {
+  color: var(--down-dim);
+}
+
 .attribution-breakdown-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
@@ -3620,16 +3307,12 @@ h3 {
   background: var(--line-strong);
 }
 
-.attribution-bar.provider {
-  background: var(--ink);
+.attribution-bar.gain {
+  background: var(--up);
 }
 
-.attribution-bar.manual-external {
-  background: repeating-linear-gradient(90deg, var(--ink) 0 3px, var(--panel) 3px 5px);
-}
-
-.attribution-bar.unknown-ea {
-  background: repeating-linear-gradient(45deg, var(--ink) 0 2px, var(--panel) 2px 4px);
+.attribution-bar.loss {
+  background: var(--down);
 }
 
 .source-breakdown-list {
@@ -3923,48 +3606,6 @@ h3 {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--ink-3);
-}
-
-.provider-link-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.provider-link-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  font-size: 12px;
-  color: var(--ink-2);
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  cursor: pointer;
-  transition:
-    background var(--duration-1) var(--ease-out),
-    color var(--duration-1) var(--ease-out),
-    border-color var(--duration-1) var(--ease-out);
-}
-
-.provider-link-chip input {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--accent);
-  margin: 0;
-}
-
-.provider-link-chip:hover {
-  border-color: var(--accent);
-  color: var(--ink);
-}
-
-.provider-link-chip.is-on {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent);
-  font-weight: 500;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -6168,111 +5809,6 @@ select.config-strategy-input {
   overflow: visible;
 }
 
-.dither-sparkline {
-  display: block;
-  width: 100%;
-  margin-top: 6px;
-}
-
-/* Donut layout on AccountsOverview — donut on the left, legend right.
-   Collapses to stacked on narrow screens via the global card grid. */
-.accounts-overview-donut {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding: 16px 0;
-  margin-top: 8px;
-  border-top: 1px solid var(--line-subtle);
-}
-
-/* Donut + legend — used on the AccountsOverview "Equity by account" panel. */
-.donut-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.donut {
-  display: block;
-}
-.donut-center {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-  line-height: 1.1;
-}
-.donut-center-label {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-}
-.donut-center-value {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink);
-}
-.donut-legend {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 180px;
-}
-.donut-legend-row {
-  display: grid;
-  grid-template-columns: 10px 1fr auto;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-.donut-legend-dot {
-  width: 8px;
-  height: 8px;
-  border: 1px solid var(--ink);
-  border-radius: 2px;
-}
-.donut-pattern-0 {
-  background: var(--ink);
-}
-.donut-pattern-1 {
-  background: repeating-linear-gradient(135deg, var(--ink) 0 1px, var(--panel) 1px 3px);
-}
-.donut-pattern-2 {
-  background: repeating-linear-gradient(45deg, var(--ink) 0 1px, var(--panel) 1px 3px);
-}
-.donut-pattern-3 {
-  background: radial-gradient(var(--ink) 1px, var(--panel) 1px);
-  background-size: 3px 3px;
-}
-.donut-pattern-4 {
-  background: repeating-linear-gradient(0deg, var(--ink) 0 1px, var(--panel) 1px 3px);
-}
-.donut-pattern-5 {
-  background: repeating-linear-gradient(90deg, var(--ink) 0 1px, var(--panel) 1px 3px);
-}
-.donut-legend-label {
-  color: var(--ink-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.donut-legend-value {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--ink);
-  text-align: right;
-}
-
 /* Money / Stat tone utilities — used by <Money> and <Stat> primitives.
    Apply on the value span (not the row) so labels stay neutral. */
 .money {
@@ -6303,87 +5839,7 @@ select.config-strategy-input {
 }
 
 .kpi-window-toggle {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
   margin: 2px 0;
-  align-self: flex-start;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-pill);
-}
-
-.kpi-window-toggle button {
-  padding: 2px 8px;
-  font-family: var(--font-ui);
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--ink-3);
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-  transition:
-    background 0.12s,
-    color 0.12s;
-}
-
-.kpi-window-toggle button.active {
-  background: var(--ink);
-  color: var(--panel);
-  font-weight: 600;
-  box-shadow: none;
-}
-
-/* Summary tab: lightweight default landing (header + exposure sit above it). */
-.summary-panel {
-  margin-top: 12px;
-  padding: var(--space-5);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-3);
-  box-shadow: none;
-}
-
-.summary-panel-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
-}
-
-.summary-panel-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 18px;
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.summary-panel-meta {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  color: var(--ink-dim);
-}
-
-.summary-panel .dither-sparkline {
-  display: block;
-  width: 100%;
-}
-
-.summary-panel-empty {
-  margin: 8px 0;
-  font-size: 13px;
-  color: var(--ink-dim);
-}
-
-.summary-panel-hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--ink-faint);
 }
 
 @media (max-width: 1180px) {
@@ -6413,8 +5869,7 @@ select.config-strategy-input {
 
 /* Light-mode shadow / border tweaks for existing panels --------------------- */
 
-.panel,
-.metric-card {
+.panel {
   box-shadow: none;
 }
 
@@ -7091,6 +6546,10 @@ select.config-strategy-input {
 .closed-positions-table .num-cell {
   font-family: var(--font-mono);
   text-align: right;
+}
+
+.closed-positions-table {
+  min-width: 1080px;
 }
 
 .closed-positions-table tbody .closed-positions-detail-row > td {
@@ -8008,9 +7467,9 @@ select.config-strategy-input {
 /* WS7 workflow surfaces. Keep these at the end: base.css is cascade-order-sensitive. */
 .sidebar-count-held {
   margin-left: 0;
-  color: var(--ink);
-  background: var(--panel-2);
-  border: 1px dashed var(--ink);
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
 }
 
 .alerts-banner-link {
@@ -8093,6 +7552,10 @@ select.config-strategy-input {
   border: 1px double var(--ink);
   font-size: 11px;
   font-weight: 700;
+}
+
+.held-row-stale td {
+  background: color-mix(in srgb, var(--warn-soft) 70%, var(--panel));
 }
 
 .held-row-actions {
@@ -8593,6 +8056,6 @@ select.config-strategy-input {
 
 .held-table tbody tr:hover td .icon-btn,
 .held-table tbody tr:focus-within td .icon-btn,
-.held-table td .icon-btn:focus-visible {
+.held-table td .icon-btn.icon-btn:focus-visible {
   opacity: 1;
 }

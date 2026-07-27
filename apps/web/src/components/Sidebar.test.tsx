@@ -8,8 +8,24 @@ describe("Sidebar", () => {
     const view = render(
       <Sidebar
         accounts={[
-          { id: "online", label: "XM-Long account", online: true, status: "online" },
-          { id: "offline", label: "MT5-Offline", online: false, status: "offline" },
+          {
+            id: "online",
+            label: "XM-Long account",
+            broker: "XM",
+            currency: "USD",
+            equity: 24_800,
+            online: true,
+            status: "online",
+          },
+          {
+            id: "offline",
+            label: "MT5-Offline",
+            broker: "MT5",
+            currency: "ZAR",
+            equity: 1_070,
+            online: false,
+            status: "offline",
+          },
         ]}
         activeView="dashboard"
         onNavigate={() => {}}
@@ -31,6 +47,7 @@ describe("Sidebar", () => {
     expect(view.getByRole("button", { name: /Pending slot/ }).getAttribute("title")).toContain(
       "Waiting for EA",
     );
+    expect(view.getByText(/XM.*\$/).textContent).toContain("XM");
   });
 
   test("shows the complete signal review count", () => {

@@ -1,11 +1,9 @@
-import { type CSSProperties, type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { GrowthChart, type GrowthSeries } from "../components/GrowthChart";
 import { Money } from "../components/Money";
 import { Stat } from "../components/Stat";
-import { useColorAccents } from "../contexts/ColorAccentsContext";
 import { useLocale } from "../contexts/LocaleContext";
 import { apiGet } from "../lib/api";
-import { chartCategory } from "../lib/chartPalette";
 import { formatNumber, formatPercent } from "../lib/format";
 
 type PerformanceView = "overview" | "statistics";
@@ -177,7 +175,11 @@ export function PerformancePage({
 
   return (
     <div aria-labelledby="tab-performance" id="tabpanel-performance" role="tabpanel">
-      <div className="performance-mode-tabs" role="tablist" aria-label="Performance view">
+      <div
+        className="segmented-control performance-mode-tabs"
+        role="tablist"
+        aria-label="Performance view"
+      >
         <button
           aria-selected={view === "overview"}
           className={view === "overview" ? "active" : ""}
@@ -250,7 +252,6 @@ function AttributionPanel({
   setRange: (value: StatsRange) => void;
 }) {
   const { locale } = useLocale();
-  const { colorAccents } = useColorAccents();
   const activeCurrency = attribution?.currency ?? currency;
   const totals = attribution?.totals;
   const cards: Array<{ label: string; value: number; bucket?: AttributionBucket }> = [
@@ -312,7 +313,7 @@ function AttributionPanel({
             <section className="attribution-breakdown" aria-label="P/L by attribution bucket">
               <h4>P/L by source</h4>
               <div className="attribution-bars">
-                {rows.map((row, index) => (
+                {rows.map((row) => (
                   <div className="attribution-bar-row" key={row.bucket}>
                     <div>
                       <strong>{row.label}</strong>
@@ -321,15 +322,12 @@ function AttributionPanel({
                       </span>
                     </div>
                     <div className="attribution-bar-track" aria-hidden="true">
-                      <span
-                        className={`attribution-bar ${attributionBucketClass(row.bucket)}`}
-                        style={
-                          {
-                            "--chart-color": colorAccents ? chartCategory(index) : undefined,
-                            width: `${Math.max(4, (Math.abs(row.pnl) / maxAbsPnl) * 100)}%`,
-                          } as CSSProperties
-                        }
-                      />
+                      {row.pnl !== 0 ? (
+                        <span
+                          className={`attribution-bar ${row.pnl > 0 ? "gain" : "loss"}`}
+                          style={{ width: `${(Math.abs(row.pnl) / maxAbsPnl) * 100}%` }}
+                        />
+                      ) : null}
                     </div>
                     <Money value={row.pnl} currency={activeCurrency} locale={locale} signTone />
                   </div>

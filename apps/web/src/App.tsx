@@ -1242,6 +1242,9 @@ export function App({
       snapshot.mt5Accounts.map((account) => ({
         id: account.id,
         label: account.nickname || account.accountNumber || account.id,
+        broker: account.server.split("-")[0] || account.server,
+        currency: account.currency,
+        equity: account.equity,
         status: account.heartbeatStatus,
         online: account.heartbeatStatus === "online",
       })),
@@ -2182,11 +2185,11 @@ export function App({
   const slotFocused = showDashboard && Boolean(focusedSlot);
   const dashTab = (id: TabId) => showDashboard && !slotFocused && activeTab === id;
   const showTelegram = activeView === "telegram";
-  const showProviders = dashTab("providers") || activeView === "providers";
-  const showParser = dashTab("logs") || activeView === "parser";
-  const showTrades = dashTab("history") || activeView === "trades";
+  const showProviders = dashTab("providers");
+  const showParser = dashTab("logs");
+  const showTrades = dashTab("history");
   const showMt5 = activeView === "mt5";
-  const showMapping = dashTab("symbols") || activeView === "mapping";
+  const showMapping = dashTab("symbols");
   const showSettings = activeView === "settings";
   const showEquityGuardian = dashTab("equity-guardian");
   const showPerformance = dashTab("performance");

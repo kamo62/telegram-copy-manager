@@ -30,6 +30,9 @@ export interface SidebarAccount {
   label: string;
   status: string;
   online: boolean;
+  broker: string;
+  currency?: string;
+  equity?: number;
 }
 
 export interface SidebarPendingSlot {
@@ -128,6 +131,12 @@ export function Sidebar({
                   className={`sidebar-child-dot ${account.online ? "ok" : "off"}`}
                 />
                 <span className="sidebar-child-label">{account.label}</span>
+                <span aria-hidden="true" className="sidebar-account-meta">
+                  {account.broker}
+                  {typeof account.equity === "number"
+                    ? ` · ${compactMoney(account.equity, account.currency)}`
+                    : ""}
+                </span>
                 <ChevronRight aria-hidden="true" size={11} />
               </button>
             </li>
@@ -195,4 +204,13 @@ export function Sidebar({
       </div>
     </aside>
   );
+}
+
+function compactMoney(value: number, currency = "USD"): string {
+  return new Intl.NumberFormat(undefined, {
+    currency,
+    maximumFractionDigits: 2,
+    notation: "compact",
+    style: "currency",
+  }).format(value);
 }

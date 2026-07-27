@@ -119,7 +119,7 @@ export function SettingsPage({
           icon={<Sparkles aria-hidden="true" size={18} />}
           title="Display"
         >
-          <fieldset className="settings-theme-picker">
+          <fieldset className="segmented-control settings-theme-picker">
             <legend className="visually-hidden">Colour theme</legend>
             <button
               aria-pressed={theme === "light"}

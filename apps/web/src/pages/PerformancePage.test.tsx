@@ -40,9 +40,9 @@ describe("PerformancePage", () => {
               unknownEaPnl: -7.5,
             },
             attributionRows: [
-              { bucket: "provider", label: "Provider-linked", tradeCount: 1, pnl: -20 },
+              { bucket: "provider", label: "Provider-linked", tradeCount: 1, pnl: 20 },
               { bucket: "manual_external", label: "Manual / external", tradeCount: 1, pnl: -55 },
-              { bucket: "unknown_ea", label: "Unknown / EA", tradeCount: 1, pnl: -7.5 },
+              { bucket: "unknown_ea", label: "Unknown / EA", tradeCount: 0, pnl: 0 },
             ],
             sourceBreakdown: [
               { source: "manual-mobile", label: "Manual mobile", tradeCount: 1, pnl: -55 },
@@ -112,6 +112,9 @@ describe("PerformancePage", () => {
     ).toBeTruthy();
     expect(view.getByText("P/L attribution")).toBeTruthy();
     expect(view.getByText("Close-source breakdown")).toBeTruthy();
+    expect(view.container.querySelectorAll(".attribution-bar")).toHaveLength(2);
+    expect(view.container.querySelector(".attribution-bar.gain")).not.toBeNull();
+    expect(view.container.querySelector(".attribution-bar.loss")).not.toBeNull();
     expect(view.getAllByText("Manual mobile").length).toBeGreaterThanOrEqual(1);
     expect(view.getByText("Provider: KAL VIP")).toBeTruthy();
     const table = view.getByRole("table", { name: "Largest attribution trades" });
