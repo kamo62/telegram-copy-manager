@@ -75,8 +75,8 @@ export function ProvidersTable({
   const { locale } = useLocale();
   const isAccountMode = Boolean(accountId);
   const showCopyColumn = accounts.length > 0;
-  // base stat columns (11) + optional Copy column + optional Actions column
-  const columnCount = 11 + (showCopyColumn ? 1 : 0) + (isAccountMode ? 1 : 0);
+  // base stat columns (8) + optional Copy column + optional Actions column
+  const columnCount = 8 + (showCopyColumn ? 1 : 0) + (isAccountMode ? 1 : 0);
   const isCopiedBy = (provider: ProviderRowData, id: string) =>
     providerLinks.some(
       (link) => link.accountId === id && link.providerId === provider.id && link.enabled,
@@ -106,12 +106,6 @@ export function ProvidersTable({
             {sortable("title", "Name")}
             {sortable("lotSize", "Lots", true)}
             <th className="num" scope="col">
-              TP #
-            </th>
-            <th className="num" scope="col">
-              SL
-            </th>
-            <th className="num" scope="col">
               Pips
             </th>
             {sortable("winRate", "W/L %", true)}
@@ -122,14 +116,13 @@ export function ProvidersTable({
               P/L
             </th>
             <th className="num" scope="col">
-              Profit
-            </th>
-            <th className="num" scope="col">
               Gain
             </th>
             <th scope="col">Status</th>
             {showCopyColumn ? <th scope="col">{isAccountMode ? "Copy" : "Copied by"}</th> : null}
-            {isAccountMode ? <th aria-label="Actions" scope="col" /> : null}
+            {isAccountMode ? (
+              <th aria-label="Actions" className="providers-table-actions" scope="col" />
+            ) : null}
           </tr>
         </thead>
         <tbody>
@@ -154,8 +147,6 @@ export function ProvidersTable({
                 </span>
               </th>
               <td className="num-cell">{formatLot(provider.lotSize)}</td>
-              <td className="num-cell muted">—</td>
-              <td className="num-cell muted">—</td>
               <td className="num-cell">{formatPips(provider.pips, locale)}</td>
               <td className="num-cell">
                 {provider.winRate === undefined ? (
@@ -179,14 +170,6 @@ export function ProvidersTable({
               <td className="num-cell">
                 <Money
                   value={provider.pnl}
-                  currency={provider.currency ?? currency}
-                  locale={locale}
-                  signTone
-                />
-              </td>
-              <td className="num-cell">
-                <Money
-                  value={provider.profit}
                   currency={provider.currency ?? currency}
                   locale={locale}
                   signTone
@@ -250,7 +233,7 @@ export function ProvidersTable({
                 </td>
               ) : null}
               {isAccountMode ? (
-                <td className="data-table-actions">
+                <td className="data-table-actions providers-table-actions">
                   <button
                     aria-label={`Configure ${provider.title} for this account`}
                     className="icon-btn"

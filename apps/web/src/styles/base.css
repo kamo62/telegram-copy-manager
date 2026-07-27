@@ -8283,8 +8283,10 @@ select.config-strategy-input {
     display: none;
   }
 
-  .providers-table th:nth-child(n + 3):nth-child(-n + 10),
-  .providers-table td:nth-child(n + 3):nth-child(-n + 10) {
+  /* Hide the stat block (Pips .. Gain) only. Name, Lots, Status, Copy and the
+     Configure action must survive at every width. */
+  .providers-table th:nth-child(n + 3):nth-child(-n + 7),
+  .providers-table td:nth-child(n + 3):nth-child(-n + 7) {
     display: none;
   }
 }
@@ -8471,4 +8473,96 @@ select.config-strategy-input {
   .linked-account-actions .btn {
     min-height: 40px;
   }
+}
+
+/* Providers: keep Configure reachable without horizontal scrolling.
+   The stat columns can overflow on narrow viewports, but the row's only action
+   must never be the thing you have to scroll to find. Declared last so it wins
+   over the earlier .data-table-actions block regardless of cascade order. */
+.providers-table th.providers-table-actions,
+.providers-table td.providers-table-actions {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  width: 44px;
+  padding-left: 4px;
+  padding-right: 8px;
+  background: var(--surface-1, #101725);
+  box-shadow: -8px 0 8px -8px rgb(0 0 0 / 55%);
+}
+
+.providers-table tbody tr:hover td.providers-table-actions {
+  background: var(--surface-2, #16203040);
+}
+
+/* ---------------------------------------------------------------------------
+   Provider config modal: density pass.
+   The dialog was tall enough to scroll on a laptop for what is a short form -
+   two TP rows and four settings. Tightening the rhythm rather than removing
+   anything, so every control stays where it was. Declared last because this
+   file has duplicated selector blocks and later rules win.
+   --------------------------------------------------------------------------- */
+.modal.modal-wide .modal-head {
+  padding: 14px 18px;
+}
+
+.modal.modal-wide .modal-form {
+  gap: 12px;
+  padding: 14px 18px 16px;
+}
+
+.modal.modal-wide .config-section {
+  gap: 8px;
+  padding-bottom: 12px;
+}
+
+.modal.modal-wide .config-field input,
+.modal.modal-wide .config-field select {
+  height: 30px;
+}
+
+.modal.modal-wide .config-field select {
+  background-position:
+    calc(100% - 12px) 12px,
+    calc(100% - 8px) 12px;
+}
+
+.modal.modal-wide .config-tp-head {
+  padding-bottom: 4px;
+}
+
+.modal.modal-wide .config-tp-row {
+  padding: 2px 4px;
+}
+
+/* Order summary carried the most dead space: an 18px figure with a 12px gutter
+   above and below the divider. */
+.modal.modal-wide .config-resume {
+  padding: 12px 14px;
+}
+
+.modal.modal-wide .config-resume-title {
+  margin-bottom: 8px;
+}
+
+.modal.modal-wide .config-resume-grid {
+  gap: 10px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.modal.modal-wide .config-resume-stat strong {
+  font-size: 16px;
+}
+
+.modal.modal-wide .config-resume-list {
+  gap: 4px;
+}
+
+.modal.modal-wide .config-resume-list li {
+  line-height: 1.4;
+}
+
+.modal.modal-wide .config-hint {
+  margin: 0;
 }
