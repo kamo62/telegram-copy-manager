@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.60.1 - 2026-07-27 (Patch)
+
+Release impact: Patch because only presentation changes; no execution, approval, gating or MT5 contract behaviour is affected.
+
+- Realised P/L no longer clips mid-glyph at the container edge, and negative money is red in the attribution tiles as it is everywhere else.
+- Gain and loss bars use the gain/loss tokens instead of teal and blue, survive colour-accent mode, and a zero value draws no bar.
+- Zero is neutral rather than green, fixed in the shared sign-tone helper so every consumer inherits it.
+- Empty tables show an empty state instead of a bare header row; the pending-order price column is labelled TRIGGER.
+- Held signals sort newest-first, reason chips are toned by kind so a transient EA_OFFLINE reads differently from a symbol-mapping config error, and the dropped count distinguishes zero from unknown.
+- Sidebar accounts show broker and equity; the review badge is a solid chip; the external-activity panel matches the dark console; Telegram no longer reports connected and not connected at once; segmented controls share one treatment.
+- Removed dead components, four legacy view branches the router never emits, and ~600 lines of duplicated CSS blocks.
+
 ## 1.60.0 - 2026-07-27 (Minor)
 
 Release impact: Minor because automatic approval is now fail-closed behind an evidence gate, the held-signal release workflow became transactional, and provider-wide close fan-out was removed. The MT5 command contract is unchanged.

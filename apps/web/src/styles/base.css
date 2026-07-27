@@ -7176,6 +7176,18 @@ select.config-strategy-input {
   background: var(--chart-color, var(--line-strong));
 }
 
+/* Gain/loss IS meaning, so it must survive accent mode. This rule is more specific
+   than the plain .attribution-bar.gain/.loss pair above, and PerformancePage no
+   longer sets --chart-color, so without these the accent default silently rendered
+   every bar neutral grey and the profit/loss distinction was lost. */
+:root[data-color-accents="on"] .attribution-bar.gain {
+  background: var(--up);
+}
+
+:root[data-color-accents="on"] .attribution-bar.loss {
+  background: var(--down);
+}
+
 :root[data-color-accents="on"] .attribution-bar.manual-external,
 :root[data-color-accents="on"] .attribution-bar.unknown-ea {
   background: var(--chart-color, var(--line-strong));

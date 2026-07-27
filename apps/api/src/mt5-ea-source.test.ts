@@ -6,10 +6,16 @@ const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as { versio
 
 describe("MT5 Expert Advisor source", () => {
   test("keeps the EA on the same compatible app release line", () => {
+    // Compatibility is a MAJOR.MINOR contract: capability strings and the command
+    // contract move on minor bumps, so a drift there must fail. Patch releases that
+    // touch only the app (a UI fix, a copy change) must NOT force an EA recompile and
+    // reattach on a live terminal - that is real operational risk for no benefit, and
+    // an EA nobody rebuilds is worse than one legitimately a patch behind.
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
     expect(eaVersion).toBe("1.60.0");
-    expect(eaVersion).toBe(packageJson.version);
+    const line = (version: string) => version.split(".").slice(0, 2).join(".");
+    expect(line(eaVersion!)).toBe(line(packageJson.version!));
   });
 
   test("uses timer polling, WebRequest, typed MQL5 trade structures, and retcode reporting", () => {
