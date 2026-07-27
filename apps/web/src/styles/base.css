@@ -8581,3 +8581,18 @@ select.config-strategy-input {
 .modal.modal-wide .config-hint {
   margin: 0;
 }
+
+/* Held signals are the last line of defence before money moves, and the row's two
+   order-placing buttons (Market, Original) are always visible while Dismiss is an
+   .icon-btn, which the global rule hides at opacity:0 until the row is hovered.
+   That makes declining a signal the hardest action to find on the one surface
+   where declining matters most. Third bug caused by that global rule. */
+.held-table td .icon-btn {
+  opacity: 0.75;
+}
+
+.held-table tbody tr:hover td .icon-btn,
+.held-table tbody tr:focus-within td .icon-btn,
+.held-table td .icon-btn:focus-visible {
+  opacity: 1;
+}
