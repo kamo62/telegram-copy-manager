@@ -5953,8 +5953,8 @@ describe("Telegram TC API", () => {
       alertOnGuardianPause: false,
       alertOnEaOffline: false,
       alertOnExecFailed: false,
-      alertOnHeld: true,
-      alertOnDroppedLifecycle: true,
+      alertOnHeld: false,
+      alertOnDroppedLifecycle: false,
       alertOnTelegramStall: false,
     });
 

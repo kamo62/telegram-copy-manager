@@ -266,8 +266,12 @@ const defaultAppSettings: AppSettings = {
   alertOnGuardianPause: false,
   alertOnEaOffline: false,
   alertOnExecFailed: false,
-  alertOnHeld: true,
-  alertOnDroppedLifecycle: true,
+  // Alerting is off by default. It cannot deliver anything without a bot token and
+  // chat ID anyway, and defaulting these on produced "enabled" toggles on a channel
+  // that silently discarded every message. Turn them on once delivery is configured
+  // and proven with Send test message.
+  alertOnHeld: false,
+  alertOnDroppedLifecycle: false,
   alertOnTelegramStall: false,
 };
 const pendingOpenMissingGraceSeconds = 10;

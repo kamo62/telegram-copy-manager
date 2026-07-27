@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.61.0 - 2026-07-27 (Minor)
+
+Release impact: Minor because the EA gains an input and must be recompiled and reattached. The command contract and capability strings are unchanged.
+
+- **EA recompile and reattach required.** Build from this commit before relying on the new setting.
+- Added the `WriteTradeComment` EA input, which hides the `ttc:` tag from the broker-visible order comment. Every comment path is gated through one helper so disabling it can never leak a bare `:close` or `:tp1` suffix. Reconciliation still works: the server falls back to the position and order tickets recorded in `broker_orders`, and the EA identifies its own deals by magic number. The cost of hiding it is losing the last-resort attribution path, so a deal whose ticket was never recorded can no longer be recovered by comment.
+- Alerting now defaults to off. It cannot deliver without a bot token and chat ID, and defaulting the toggles on presented an enabled channel that silently discarded every message.
+- Settings explains how to obtain a bot token from @BotFather and how to read a chat ID from getUpdates, including the sign convention for direct messages versus groups and channels.
+
 ## 1.60.1 - 2026-07-27 (Patch)
 
 Release impact: Patch because only presentation changes; no execution, approval, gating or MT5 contract behaviour is affected.

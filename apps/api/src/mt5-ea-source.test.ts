@@ -13,7 +13,7 @@ describe("MT5 Expert Advisor source", () => {
     // an EA nobody rebuilds is worse than one legitimately a patch behind.
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
-    expect(eaVersion).toBe("1.60.0");
+    expect(eaVersion).toBe("1.61.0");
     const line = (version: string) => version.split(".").slice(0, 2).join(".");
     expect(line(eaVersion!)).toBe(line(packageJson.version!));
   });
@@ -213,8 +213,8 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.60.0"');
-    expect(source.match(/"1\.60\.0"/g)).toHaveLength(3);
+    expect(source).toContain('#property version   "1.61.0"');
+    expect(source.match(/"1\.61\.0"/g)).toHaveLength(3);
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
@@ -414,6 +414,28 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("ApplyPollConfig(response)");
     expect(source).toContain('ValueFor(body, "pollSeconds")');
     expect(source).toContain("EventSetTimer(CurrentPollSeconds)");
+  });
+
+  test("gates the broker-visible trade comment behind one input, with no bare suffixes", () => {
+    // The ttc: tag can be hidden from the broker. Every comment write must route through
+    // the gated helpers, or disabling the input would leak a bare ":close" / ":tp1" that
+    // explains nothing to the broker and matches nothing on the way back.
+    expect(source).toContain("input bool   WriteTradeComment");
+    expect(source).toMatch(
+      /string CompactTradeComment\([^)]*\)\s*\{\s*if\(!WriteTradeComment\)\s*return "";/,
+    );
+
+    // No call site may concatenate a suffix onto the tag directly.
+    expect(source).not.toMatch(/CompactTradeComment\([^)]*\)\s*\+\s*"/);
+
+    // Both suffixed helpers must bail out when the tag is hidden.
+    for (const helper of ["CompactTradeTpComment", "CompactTradeSuffixComment"]) {
+      const body = source.slice(source.indexOf(`string ${helper}(`));
+      expect(body.slice(0, 220)).toContain('if(base == "")');
+    }
+
+    // Identification must not depend on the comment: magic number stands alone.
+    expect(source).toContain("(ulong)magic == MagicNumber ||");
   });
 
   test("does not retry poll-line because polling leases queue items", () => {

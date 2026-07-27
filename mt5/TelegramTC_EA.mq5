@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.60.0"
+#property version   "1.61.0"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -15,6 +15,7 @@ input int    HistoryBackfillSeconds = 60;
 input double DefaultLots    = 0.10;
 input int    DeviationPoints = 20;
 input ulong  MagicNumber    = 26050901;
+input bool   WriteTradeComment = true;   // Write the ttc: tag into the broker-visible order comment
 // When > 0, every order's volume becomes SYMBOL_VOLUME_MIN × this multiplier,
 // overriding DefaultLots and any per-provider lot. Useful when you want
 // "smallest broker-acceptable size × N" across mixed asset classes (forex,
@@ -150,7 +151,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.60.0",
+      "1.61.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -1005,7 +1006,7 @@ bool ClosePositionTicket(
    request.price = positionType == POSITION_TYPE_BUY
       ? SymbolInfoDouble(symbol, SYMBOL_BID)
       : SymbolInfoDouble(symbol, SYMBOL_ASK);
-   request.comment = CompactTradeComment(command.logicalTradeId) + ":close";
+   request.comment = CompactTradeSuffixComment(command.logicalTradeId, ":close");
 
    PrintFormat("Telegram TC CLOSE command=%s ticket=%I64u queue=%s logicalTradeId=%s symbol=%s closeVolume=%.2f currentVolume=%.2f partialKind=%s targetPosition=%I64u",
       command.commandType,
@@ -1133,14 +1134,37 @@ string CompactTradeId(string logicalTradeId)
    return logicalTradeId;
 }
 
+// The ttc: tag is written into the broker-visible order comment. It is the FIRST key
+// used to map a broker deal back to a logical trade, but not the only one: the server
+// falls back to the position ticket and then the order ticket recorded in broker_orders,
+// and this EA identifies its own deals by MagicNumber independently. So hiding it is
+// safe for normal operation. The cost is losing the last-resort attribution path, so a
+// deal whose ticket was never recorded (a report lost in flight) can no longer be
+// recovered by comment and will look external. Leave it on unless the broker comment
+// needs to stay clean.
 string CompactTradeComment(string logicalTradeId)
 {
+   if(!WriteTradeComment)
+      return "";
    return "ttc:" + CompactTradeId(logicalTradeId);
 }
 
 string CompactTradeTpComment(string logicalTradeId, int leg)
 {
-   return CompactTradeComment(logicalTradeId) + ":tp" + IntegerToString(leg);
+   string base = CompactTradeComment(logicalTradeId);
+   if(base == "")
+      return "";
+   return base + ":tp" + IntegerToString(leg);
+}
+
+// Suffixed variants must never degrade into a bare suffix like ":close" when the tag
+// is hidden - that would leak an unexplained marker to the broker and match nothing.
+string CompactTradeSuffixComment(string logicalTradeId, string suffix)
+{
+   string base = CompactTradeComment(logicalTradeId);
+   if(base == "")
+      return "";
+   return base + suffix;
 }
 
 // Snapshot includes ALL positions, not just magic-matched. External (manual,
@@ -1766,7 +1790,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.60.0",
+      "1.61.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
