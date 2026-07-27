@@ -8495,6 +8495,21 @@ select.config-strategy-input {
   background: var(--surface-2, #16203040);
 }
 
+/* Data-table icon buttons are opacity:0 until the row is hovered. That suits a
+   secondary or destructive action, but Configure is this table's primary action
+   and the panel copy explicitly tells the operator to use it - so it cannot be
+   invisible until discovered by accident. Scoped to this table only; every other
+   table keeps the reveal-on-hover behaviour. */
+.providers-table td.providers-table-actions .icon-btn {
+  opacity: 0.75;
+}
+
+.providers-table tbody tr:hover td.providers-table-actions .icon-btn,
+.providers-table tbody tr:focus-within td.providers-table-actions .icon-btn,
+.providers-table td.providers-table-actions .icon-btn:focus-visible {
+  opacity: 1;
+}
+
 /* ---------------------------------------------------------------------------
    Provider config modal: density pass.
    The dialog was tall enough to scroll on a laptop for what is a short form -
