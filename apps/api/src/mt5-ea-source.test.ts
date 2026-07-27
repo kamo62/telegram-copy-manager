@@ -416,23 +416,42 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("EventSetTimer(CurrentPollSeconds)");
   });
 
-  test("gates the broker-visible trade comment behind one input, with no bare suffixes", () => {
-    // The ttc: tag can be hidden from the broker. Every comment write must route through
-    // the gated helpers, or disabling the input would leak a bare ":close" / ":tp1" that
-    // explains nothing to the broker and matches nothing on the way back.
-    expect(source).toContain("input bool   WriteTradeComment");
-    expect(source).toMatch(
-      /string CompactTradeComment\([^)]*\)\s*\{\s*if\(!WriteTradeComment\)\s*return "";/,
-    );
+  test("offers three broker-comment modes and still records identity locally in every one", () => {
+    // The operator picks what the BROKER sees. What we can reconcile must not depend on it.
+    expect(source).toContain("enum TradeCommentVisibility");
+    for (const mode of ["COMMENT_TAGGED", "COMMENT_HIDDEN", "COMMENT_CUSTOM"]) {
+      expect(source).toContain(mode);
+    }
+    expect(source).toContain("input TradeCommentVisibility TradeComment = COMMENT_TAGGED;");
+    expect(source).toContain("input string CustomTradeComment");
 
-    // No call site may concatenate a suffix onto the tag directly.
+    // Identity is logged at all three write sites regardless of mode, because hiding the
+    // tag removes the backend's last-resort attribution path and this log becomes it.
+    const identityCalls = source.match(/LogTradeIdentity\(/g) ?? [];
+    expect(identityCalls.length).toBeGreaterThanOrEqual(4); // 3 call sites + definition
+    expect(source).toMatch(/void LogTradeIdentity\([^)]*\)[\s\S]{0,400}?PrintFormat/);
+    for (const context of ['"open"', '"close"']) {
+      expect(source).toContain(`LogTradeIdentity(command.logicalTradeId, ${context}`);
+    }
+
+    // No call site may concatenate a suffix onto the comment directly.
     expect(source).not.toMatch(/CompactTradeComment\([^)]*\)\s*\+\s*"/);
 
-    // Both suffixed helpers must bail out when the tag is hidden.
+    // Suffixes are tagged-mode only: they must never corrupt a custom label or leak a
+    // bare ":close" when hidden.
     for (const helper of ["CompactTradeTpComment", "CompactTradeSuffixComment"]) {
-      const body = source.slice(source.indexOf(`string ${helper}(`));
-      expect(body.slice(0, 220)).toContain('if(base == "")');
+      const body = source.slice(
+        source.indexOf(`string ${helper}(`),
+        source.indexOf(`string ${helper}(`) + 260,
+      );
+      expect(body).toContain("!CommentCarriesTag()");
     }
+    expect(source).toMatch(
+      /bool CommentCarriesTag\(\)[\s\S]{0,120}?TradeComment == COMMENT_TAGGED/,
+    );
+
+    // A stray tag inside operator-supplied text would be parsed back as a real one.
+    expect(source).toMatch(/StringReplace\(custom, "ttc:", ""\)/);
 
     // Identification must not depend on the comment: magic number stands alone.
     expect(source).toContain("(ulong)magic == MagicNumber ||");

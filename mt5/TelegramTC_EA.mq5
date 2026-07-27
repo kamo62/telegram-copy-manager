@@ -15,7 +15,17 @@ input int    HistoryBackfillSeconds = 60;
 input double DefaultLots    = 0.10;
 input int    DeviationPoints = 20;
 input ulong  MagicNumber    = 26050901;
-input bool   WriteTradeComment = true;   // Write the ttc: tag into the broker-visible order comment
+// What the BROKER sees in the order comment. The logical trade id is always written
+// to the Experts log and always reported to the backend regardless of this setting,
+// so hiding it changes what the broker sees, never what we can reconcile.
+enum TradeCommentVisibility
+  {
+   COMMENT_TAGGED = 0,  // Tagged - broker sees ttc:<id>
+   COMMENT_HIDDEN = 1,  // Hidden - broker sees no comment
+   COMMENT_CUSTOM = 2   // Custom - broker sees CustomTradeComment
+  };
+input TradeCommentVisibility TradeComment = COMMENT_TAGGED;
+input string CustomTradeComment = "";    // Used only when TradeComment = Custom
 // When > 0, every order's volume becomes SYMBOL_VOLUME_MIN × this multiplier,
 // overriding DefaultLots and any per-provider lot. Useful when you want
 // "smallest broker-acceptable size × N" across mixed asset classes (forex,
@@ -311,6 +321,7 @@ bool ExecuteOpenTrade(SignalCommand &command)
    request.volume = CommandVolume(command);
    request.deviation = DeviationPoints;
    request.comment = CompactTradeComment(command.logicalTradeId);
+   LogTradeIdentity(command.logicalTradeId, "open", request.comment);
 
    if(command.orderType == "LIMIT" || command.orderType == "STOP")
    {
@@ -435,6 +446,7 @@ bool ExecuteSplitOrders(SignalCommand &command)
       request.volume = LegVolume(command, leg, baseVolume);
       request.deviation = DeviationPoints;
       request.comment = CompactTradeTpComment(command.logicalTradeId, leg + 1);
+      LogTradeIdentity(command.logicalTradeId, "tp" + IntegerToString(leg + 1), request.comment);
       request.sl = SafeStopPrice(command.brokerSymbol, referencePrice, command.stopLoss, command.direction, true);
       request.tp = SafeStopPrice(command.brokerSymbol, referencePrice, command.tp[leg], command.direction, false);
 
@@ -1007,6 +1019,7 @@ bool ClosePositionTicket(
       ? SymbolInfoDouble(symbol, SYMBOL_BID)
       : SymbolInfoDouble(symbol, SYMBOL_ASK);
    request.comment = CompactTradeSuffixComment(command.logicalTradeId, ":close");
+   LogTradeIdentity(command.logicalTradeId, "close", request.comment);
 
    PrintFormat("Telegram TC CLOSE command=%s ticket=%I64u queue=%s logicalTradeId=%s symbol=%s closeVolume=%.2f currentVolume=%.2f partialKind=%s targetPosition=%I64u",
       command.commandType,
@@ -1142,28 +1155,64 @@ string CompactTradeId(string logicalTradeId)
 // deal whose ticket was never recorded (a report lost in flight) can no longer be
 // recovered by comment and will look external. Leave it on unless the broker comment
 // needs to stay clean.
+// Always record the mapping locally, whatever the broker is shown. The ttc: tag is the
+// FIRST key the backend uses to map a broker deal to a logical trade, but not the only
+// one: it falls back to the position ticket then the order ticket from broker_orders,
+// and this EA identifies its own deals by MagicNumber. Hiding the tag removes the
+// last-resort attribution path, so this log line IS that path - it is how an operator
+// re-attaches a deal by hand when a report was lost in flight.
+void LogTradeIdentity(string logicalTradeId, string context, string brokerComment)
+{
+   PrintFormat("Telegram TC IDENTITY logicalTradeId=%s ttc=%s context=%s brokerComment=\"%s\"",
+      logicalTradeId,
+      CompactTradeId(logicalTradeId),
+      context,
+      brokerComment);
+}
+
+// MT5 truncates order comments around 31 chars and a stray "ttc:" inside a custom
+// string would be parsed back as a real tag, so the custom text is sanitised.
+string SanitizedCustomComment()
+{
+   string custom = CustomTradeComment;
+   StringReplace(custom, "ttc:", "");
+   StringTrimLeft(custom);
+   StringTrimRight(custom);
+   if(StringLen(custom) > 31)
+      custom = StringSubstr(custom, 0, 31);
+   return custom;
+}
+
 string CompactTradeComment(string logicalTradeId)
 {
-   if(!WriteTradeComment)
+   if(TradeComment == COMMENT_HIDDEN)
       return "";
+   if(TradeComment == COMMENT_CUSTOM)
+      return SanitizedCustomComment();
    return "ttc:" + CompactTradeId(logicalTradeId);
+}
+
+// Suffixes belong to the tagged form only. Appending ":close" to a hidden comment
+// would leak a bare marker that explains nothing to the broker and matches nothing
+// coming back; appending it to a custom label would corrupt the operator's own text.
+bool CommentCarriesTag()
+{
+   return TradeComment == COMMENT_TAGGED;
 }
 
 string CompactTradeTpComment(string logicalTradeId, int leg)
 {
    string base = CompactTradeComment(logicalTradeId);
-   if(base == "")
-      return "";
+   if(!CommentCarriesTag() || base == "")
+      return base;
    return base + ":tp" + IntegerToString(leg);
 }
 
-// Suffixed variants must never degrade into a bare suffix like ":close" when the tag
-// is hidden - that would leak an unexplained marker to the broker and match nothing.
 string CompactTradeSuffixComment(string logicalTradeId, string suffix)
 {
    string base = CompactTradeComment(logicalTradeId);
-   if(base == "")
-      return "";
+   if(!CommentCarriesTag() || base == "")
+      return base;
    return base + suffix;
 }
 
