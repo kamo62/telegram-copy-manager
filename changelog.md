@@ -1,16 +1,20 @@
 # Changelog
 
-## Unreleased (evidence-gated execution step 3)
+## 1.60.0 - 2026-07-27 (Minor)
 
-Release impact: Minor because automatic approval now has a fail-closed evidence gate, explicit held/drop audit states, and provider policy configuration. The repository version remains 1.59.0; release metadata is deferred to 1.60.0 after steps 4-5.
+Release impact: Minor because automatic approval is now fail-closed behind an evidence gate, the held-signal release workflow became transactional, and provider-wide close fan-out was removed. The MT5 command contract is unchanged.
 
 - Wired the default-gated `approveSignal` path with operator bypass, provider-specific structured-id/prose-complete open evidence, forward provenance, provider-wide order-id novelty, and strict lifecycle resolution.
 - Added explicit `EVIDENCE_*` held queue items with alerts and operator suggestions, audited evidence drops, and stopped ingestion from silently skipping actionable review-required lifecycle signals.
-- Routed identity-less held OPEN releases, including EA reconnect auto-release, through scoped approved-open materialization; lifecycle releases now require an explicitly selected active trade and broker binding.
-- Disposed ordinary `NO_SIGNAL`/`TRADE_SETUP` ingestion results as audited `IGNORED` records while holding and alerting risk-off vocabulary; real-corpus tests keep command tallies unchanged.
-- Held every lifecycle `closeAll` signal at `CLOSE_ALL_REQUIRES_OPERATOR`, persisted evidence tiers, forced evidence-hold alerts, and sized held opens from the target account's provider risk config.
-- Demoted conflicting per-account DROP verdicts to audited HOLDs and kept unbound lifecycle requeue fail-closed.
-- Kept step 4 resolution/close-all changes and step 5 parser guard deletions out of this commit.
+- Routed identity-less held OPEN releases, including EA reconnect auto-release, through scoped approved-open materialization; lifecycle releases require an explicitly selected active trade and broker binding.
+- Disposed ordinary `NO_SIGNAL`/`TRADE_SETUP` ingestion results as audited `IGNORED` records while holding and alerting risk-off vocabulary.
+- Fixed the risk-off vocabulary net, which required a literal `CLOSE` and so never matched `closing`, `cancelling`, `deleting` or `removing`. A genuine misclassified close was previously dropped silently. The first-week drop audit had the same class of hole and was widened.
+- Fixed multi-account release: the approval dedup judged all rows sharing a parsed signal, so with two linked accounts releasing either one returned 409 and both stayed held forever. The guard is now account-scoped.
+- Made every held-signal release transactional with deferred alerts, so a failed release no longer leaves an orphaned trade, a wrong parsed status, or an alert for work that rolled back.
+- Releasing a held `MARK_TP_HIT` now records the TP leg instead of queueing a command the EA rejects and dismissing the card as handled.
+- Added compare-and-swap on every held release: exactly one HELD row must transition, so a crash or concurrent release can no longer leave both an executable row and the original hold.
+- Removed provider-wide close fan-out and its operator-approval path. Close-all now holds per account and is released per trade, with remaining active trades re-held so an incomplete close is visible.
+- Ambiguous closes no longer resolve to an arbitrary first match; only trades genuinely sharing one provider order id still close together.
 
 ## 1.59.0 - 2026-07-26 (Minor)
 
