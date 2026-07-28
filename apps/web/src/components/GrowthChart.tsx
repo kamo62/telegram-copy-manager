@@ -80,7 +80,7 @@ export function GrowthChart({
             ) : null}
           </span>
         </div>
-        <div className="chart-toggle" role="tablist" aria-label="Chart view">
+        <div className="segmented-control chart-toggle" role="tablist" aria-label="Chart view">
           <button
             aria-selected={view === "growth"}
             className={view === "growth" ? "active" : ""}

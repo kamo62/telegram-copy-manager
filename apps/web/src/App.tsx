@@ -81,6 +81,28 @@ export type PerAccountProviderConfig = Partial<
   Pick<ProviderRowData, "riskMode" | "riskAmount" | "takeProfitLevels" | "runner" | "workFromTpLeg">
 >;
 
+type HeldReleaseResult = {
+  status?: "PENDING" | "RECORDED";
+  remainingTradeCount?: number;
+};
+
+export function heldReleaseToast(
+  item: Pick<HeldQueueItem, "commandType" | "symbol">,
+  mode: HeldRequeueMode,
+  result: HeldReleaseResult,
+) {
+  const symbol = item.symbol.trim();
+  if (result.status === "RECORDED") {
+    return symbol ? `TP hit recorded for ${symbol}` : "TP hit recorded for selected trade";
+  }
+  if (result.remainingTradeCount && result.remainingTradeCount > 0) {
+    const suffix = result.remainingTradeCount === 1 ? "trade remains" : "trades remain";
+    return `Close queued for selected trade; ${result.remainingTradeCount} ${suffix} held`;
+  }
+  const subject = symbol || item.commandType.replaceAll("_", " ").toLowerCase();
+  return mode === "market" ? `${subject} requeued at market` : `${subject} requeued`;
+}
+
 export interface AccountPerformanceSnapshot {
   accountId?: string;
   currency: string;
@@ -1220,6 +1242,9 @@ export function App({
       snapshot.mt5Accounts.map((account) => ({
         id: account.id,
         label: account.nickname || account.accountNumber || account.id,
+        broker: account.server.split("-")[0] || account.server,
+        currency: account.currency,
+        equity: account.equity,
         status: account.heartbeatStatus,
         online: account.heartbeatStatus === "online",
       })),
@@ -2006,12 +2031,17 @@ export function App({
     }
   }
 
-  async function requeueHeldItem(item: HeldQueueItem, mode: HeldRequeueMode) {
+  async function requeueHeldItem(
+    item: HeldQueueItem,
+    mode: HeldRequeueMode,
+    logicalTradeId?: string,
+  ) {
     try {
-      await apiPost(`/api/queue-items/${item.id}/requeue`, { mode });
-      toast.success(
-        mode === "market" ? `${item.symbol} requeued at market` : `${item.symbol} requeued`,
-      );
+      const result = await apiPost<HeldReleaseResult>(`/api/queue-items/${item.id}/requeue`, {
+        mode,
+        ...(logicalTradeId ? { logicalTradeId } : {}),
+      });
+      toast.success(heldReleaseToast(item, mode, result));
       await Promise.all([refreshHeldItems(), refreshDashboard()]);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to requeue held signal");
@@ -2155,11 +2185,11 @@ export function App({
   const slotFocused = showDashboard && Boolean(focusedSlot);
   const dashTab = (id: TabId) => showDashboard && !slotFocused && activeTab === id;
   const showTelegram = activeView === "telegram";
-  const showProviders = dashTab("providers") || activeView === "providers";
-  const showParser = dashTab("logs") || activeView === "parser";
-  const showTrades = dashTab("history") || activeView === "trades";
+  const showProviders = dashTab("providers");
+  const showParser = dashTab("logs");
+  const showTrades = dashTab("history");
   const showMt5 = activeView === "mt5";
-  const showMapping = dashTab("symbols") || activeView === "mapping";
+  const showMapping = dashTab("symbols");
   const showSettings = activeView === "settings";
   const showEquityGuardian = dashTab("equity-guardian");
   const showPerformance = dashTab("performance");

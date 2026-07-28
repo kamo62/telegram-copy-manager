@@ -394,7 +394,11 @@ export function AccountHeader({
                   <WindowIcon size={13} />
                 </span>
               </div>
-              <div className="kpi-window-toggle" role="tablist" aria-label="P/L window">
+              <div
+                className="segmented-control kpi-window-toggle"
+                role="tablist"
+                aria-label="P/L window"
+              >
                 {windowOptions.map((option) => (
                   <button
                     aria-selected={pnlWindow === option.key}

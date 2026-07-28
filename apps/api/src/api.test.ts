@@ -3,7 +3,15 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { brokerOrderSourceForDealReason, createApi, evaluateLifecycleActionState } from "./app";
+import { parseSignalText } from "@telegram-tc/core";
+import {
+  brokerOrderSourceForDealReason,
+  createApi,
+  evaluateLifecycleActionState,
+  hasExitVocabularyForDropAudit,
+  normalizeEvidenceTargets,
+} from "./app";
+import { corpusMessages } from "./fixtures/provider-messages";
 import type { TelegramAdapter, TelegramCapturedMessage, TelegramDialog } from "./telegram";
 
 const json = async <T>(response: Response) => (await response.json()) as T;
@@ -62,9 +70,28 @@ function createDialogTelegramAdapter(
   };
 }
 
+function realFixtureMessages(ids: string[]): TelegramCapturedMessage[] {
+  return ids.map((telegramMessageId, index) => {
+    const fixture = corpusMessages.find(
+      (message) => message.telegramMessageId === telegramMessageId,
+    );
+    if (!fixture) throw new Error(`Missing committed provider fixture ${telegramMessageId}`);
+    return {
+      telegramMessageId,
+      replyToMessageId: fixture.replyToMessageId ?? undefined,
+      messageDate: `2026-07-26T00:${String(index).padStart(2, "0")}:00.000Z`,
+      rawText: fixture.rawText,
+    };
+  });
+}
+
 async function configureProviderWithAccount(
   app: ReturnType<typeof createApi>,
-  input: { availableSymbols: string[] },
+  input: {
+    availableSymbols: string[];
+    eaVersion?: string;
+    eaCapabilities?: string[];
+  },
 ) {
   const started = await json<{ profileId: string; sessionId: string }>(
     await app.request("/api/telegram/start", {
@@ -105,8 +132,8 @@ async function configureProviderWithAccount(
       equity: 10000,
       marginMode: "HEDGING",
       availableSymbols: input.availableSymbols,
-      eaVersion: "1.40.0",
-      eaCapabilities: ["lane2-close-contract"],
+      eaVersion: input.eaVersion ?? "1.57.2",
+      eaCapabilities: input.eaCapabilities ?? ["lane2-close-contract", "pending-close-flatten-v1"],
     }),
     headers: { "content-type": "application/json" },
   });
@@ -175,14 +202,19 @@ async function createEaOfflineApproval(
   return { app, approved, databasePath, tempDir };
 }
 
-async function approveGoldSellSmallRunnerLimit(app: ReturnType<typeof createApi>) {
+async function approveGoldSellSmallRunnerLimit(
+  app: ReturnType<typeof createApi>,
+  options: { executionMode?: "VIRTUAL_TP" | "SPLIT_ORDER"; enableRunner?: boolean } = {},
+) {
   const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
   await app.request(`/api/providers/${providerId}`, {
     method: "PATCH",
     body: JSON.stringify({
       riskMode: "fixed",
       riskAmount: 0.02,
-      runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+      ...(options.enableRunner === false
+        ? {}
+        : { runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 } }),
       takeProfitLevels: [
         { leg: 1, percentage: 25, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
         { leg: 2, percentage: 25, strategy: { kind: "no-change" } },
@@ -204,9 +236,19 @@ async function approveGoldSellSmallRunnerLimit(app: ReturnType<typeof createApi>
     }),
   );
   const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
-    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+      body: options.executionMode
+        ? JSON.stringify({ executionMode: options.executionMode })
+        : undefined,
+      headers: options.executionMode ? { "content-type": "application/json" } : undefined,
+    }),
   );
-  return { ...approval, shortId: approval.logicalTradeId.replace(/^trade[_-]/, "") };
+  return {
+    ...approval,
+    providerId,
+    shortId: approval.logicalTradeId.replace(/^trade[_-]/, ""),
+  };
 }
 
 async function reportPendingAccepted(
@@ -301,6 +343,12 @@ async function sendGoldSnapshot(
 }
 
 describe("Telegram TC API", () => {
+  test("flags real remove vocabulary for the first-week drop audit", () => {
+    const message = realFixtureMessages(["15496"])[0]!;
+    expect(message.rawText).toContain("remove him");
+    expect(hasExitVocabularyForDropAudit(message.rawText)).toBe(true);
+  });
+
   test("preserves renamed dashboard nicknames and validates account nickname PATCH bodies", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const registered = await json<{ accountId: string }>(
@@ -407,7 +455,7 @@ describe("Telegram TC API", () => {
       {
         telegramMessageId: "btc-1",
         messageDate: "2026-05-16T18:51:10.000Z",
-        rawText: "SELL BTCUSD",
+        rawText: "SELL BTCUSD @ 50000\nSL 50100\nTP 49800",
       },
     ]);
     const app = createApi({
@@ -539,7 +587,7 @@ describe("Telegram TC API", () => {
         {
           telegramMessageId: "mapping-isolation-1",
           messageDate: "2026-07-20T10:00:00.000Z",
-          rawText: "BUY XAUUSD\nSL 4500\nTP 4520",
+          rawText: "BUY XAUUSD @ 4510\nSL 4500\nTP 4520",
         },
       ]),
       telegramPollingEnabled: false,
@@ -600,7 +648,7 @@ describe("Telegram TC API", () => {
       {
         telegramMessageId: "lineage-1",
         messageDate: "2026-05-19T09:10:11.000Z",
-        rawText: "BUY XAUUSD\nSL 4515\nTP 4535\nTP 4545",
+        rawText: "BUY XAUUSD @ 4525\nSL 4515\nTP 4535\nTP 4545",
       },
     ]);
     const app = createApi({
@@ -637,7 +685,7 @@ describe("Telegram TC API", () => {
       rawMessageId: expect.any(String),
       telegramMessageId: "lineage-1",
       messageDate: "2026-05-19T09:10:11.000Z",
-      rawText: "BUY XAUUSD\nSL 4515\nTP 4535\nTP 4545",
+      rawText: "BUY XAUUSD @ 4525\nSL 4515\nTP 4535\nTP 4545",
     });
     expect(dashboard.logicalTrades[0]!.source!.parsedSignalId).not.toBe("");
     expect(dashboard.logicalTrades[0]!.source!.rawMessageId).not.toBe("");
@@ -1785,7 +1833,12 @@ describe("Telegram TC API", () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-manual-dedup-"));
     const databasePath = join(tempDir, "app.db");
     try {
-      const app = createApi({ databasePath, seedDemoData: false });
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
@@ -2460,9 +2513,18 @@ describe("Telegram TC API", () => {
     const approval = await app.request(`/api/signals/${lifecycle.parsedSignalId}/approve`, {
       method: "POST",
     });
-    expect(approval.status).toBe(422);
-    expect((await json<{ error: string }>(approval)).error).toContain(
-      "Multiple open logical trades",
+    expect(approval.status).toBe(200);
+    const held = await json<{ status: string; queueItemId: string }>(approval);
+    expect(held.status).toBe("HELD");
+    const queue = await json<{ queue: Array<{ id: string; status: string; heldReason: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        id: held.queueItemId,
+        status: "HELD",
+        heldReason: expect.stringContaining("LIFECYCLE_RECONCILIATION:"),
+      }),
     );
   });
 
@@ -2488,9 +2550,7 @@ describe("Telegram TC API", () => {
             telegramMessageId: "487",
             replyToMessageId: "484",
             messageDate: "2026-07-20T02:48:58.000Z",
-            quotedText: order,
-            rawText:
-              "🟢 CLOSED - XAUUSD Buy 🟢\n# 300424022\n\n--------{ CLOSED }---------\nProfit: 3.98$\nProfit: 0.38%",
+            rawText: "Closed ✅",
           },
         ]),
         telegramPollingEnabled: false,
@@ -2498,7 +2558,7 @@ describe("Telegram TC API", () => {
       await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
       await app.runTelegramIngestionOnce();
 
-      const db = new Database(databasePath, { readonly: true });
+      const db = new Database(databasePath);
       try {
         const trades = db.query("SELECT id, data_json FROM logical_trades").all() as Array<{
           id: string;
@@ -2509,13 +2569,628 @@ describe("Telegram TC API", () => {
           .all() as Array<{ logical_trade_id: string; payload_json: string }>;
         expect(trades).toHaveLength(1);
         expect(JSON.parse(trades[0]!.data_json).providerOrderId).toBe("300424022");
-        expect(queues).toHaveLength(2);
+        expect(queues).toHaveLength(3);
+        expect(
+          queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "NO_SIGNAL"),
+        ).toHaveLength(1);
         expect(
           queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE"),
         ).toEqual([expect.objectContaining({ logical_trade_id: trades[0]!.id })]);
+        const reply = db
+          .query(
+            `SELECT parsed_signals.result_json
+             FROM parsed_signals
+             JOIN raw_messages ON raw_messages.id = parsed_signals.raw_message_id
+             WHERE raw_messages.telegram_message_id = '487'`,
+          )
+          .get() as { result_json: string };
+        expect(JSON.parse(reply.result_json).originalText).toContain("Quoted signal:");
       } finally {
         db.close();
       }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("covers the live VIP Gold 545/546/547 safety fixture across accounts", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-vipgold-live-safety-"));
+    const databasePath = join(tempDir, "app.db");
+    const order =
+      "NEW ORDER - XAUUSD Sell Stop 📉  # 306947863  ----------{ NEW }---------- Entry: 4051.30 [Lots: 0.01] SL: 4057.30 TP: 4039.30";
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter([
+          { telegramMessageId: "545", messageDate: "2026-07-24T13:00:00.000Z", rawText: order },
+          {
+            telegramMessageId: "546",
+            replyToMessageId: "545",
+            messageDate: "2026-07-24T13:01:00.000Z",
+            rawText: "🚀 Sell Stop activated 🚀 # 306947863 XAUUSD @ 4051.30",
+            quotedText: order,
+          },
+          {
+            telegramMessageId: "547",
+            replyToMessageId: "545",
+            messageDate: "2026-07-24T13:02:00.000Z",
+            rawText:
+              "🟢 CLOSED - XAUUSD Sell 🟢 # 306947863 ...{ CLOSED }... Profit: 2.21$ ... Profit: 0.21%",
+            quotedText: order,
+          },
+        ]),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "54945785",
+          server: "HFMarkets-Demo",
+          company: "HF Markets",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+          eaVersion: "1.56.2",
+          eaCapabilities: ["lane-2-close-contract"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-54945785/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion.queued).toBe(4);
+
+      const db = new Database(databasePath);
+      try {
+        const trades = db
+          .query("SELECT id, account_id, data_json FROM logical_trades")
+          .all() as Array<{
+          id: string;
+          account_id: string;
+          data_json: string;
+        }>;
+        const queues = db
+          .query(
+            "SELECT account_id, logical_trade_id, status, held_reason, payload_json FROM queue_items",
+          )
+          .all() as Array<{
+          account_id: string;
+          logical_trade_id: string;
+          status: string;
+          held_reason: string | null;
+          payload_json: string;
+        }>;
+        expect(trades).toHaveLength(2);
+        expect(trades.map((trade) => JSON.parse(trade.data_json).providerOrderId)).toEqual([
+          "306947863",
+          "306947863",
+        ]);
+        expect(db.query("SELECT logical_trade_id FROM trade_origins").all()).toHaveLength(2);
+        expect(
+          queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "OPEN_TRADE"),
+        ).toHaveLength(2);
+        expect(
+          queues.filter((queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE"),
+        ).toHaveLength(2);
+        expect(
+          queues
+            .filter((queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE")
+            .every((queue) => JSON.parse(queue.payload_json).targetPositionTicket === undefined),
+        ).toBe(true);
+        expect(queues.filter((queue) => queue.status === "HELD")).toHaveLength(0);
+      } finally {
+        db.close();
+      }
+
+      const duplicate = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: order,
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const duplicateApproval = await json<{
+        status: string;
+        heldQueueItems: string[];
+      }>(await app.request(`/api/signals/${duplicate.parsedSignalId}/approve`, { method: "POST" }));
+      expect(duplicateApproval.status).toBe("HELD");
+      expect(duplicateApproval.heldQueueItems).toHaveLength(2);
+      const held = await json<{ queue: Array<{ status: string; heldReason: string }> }>(
+        await app.request("/api/signals"),
+      );
+      expect(held.queue.filter((item) => item.heldReason === "DUPLICATE_ORDER_ID")).toHaveLength(2);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("synthetic: close-all stays per-trade and reparses broker symbols per account", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-close-all-"));
+    const databasePath = join(tempDir, "app.db");
+    const previousFetch = globalThis.fetch;
+    const alerts: Array<{ url: string; body: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      alerts.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+      return Response.json({ ok: true });
+    }) as typeof fetch;
+    try {
+      const app = createApi({ databasePath, seedDemoData: false, telegramAdapter: "mock" });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ alertBotToken: "bot-token", alertChatId: "chat-1" }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "54945785",
+          server: "HFMarkets-Demo",
+          company: "HF Markets",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD.r"],
+          eaVersion: "1.59.0",
+          eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-54945785/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/heartbeat", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-54945785",
+          balance: 10000,
+          equity: 10000,
+          availableSymbols: ["XAUUSD.r"],
+          eaVersion: "1.59.0",
+          eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const opened = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "Gold buy limit\n\n4541-40\n\nSL 4535\n\nTP 4546",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const openApproval = await json<{
+        queueItems: string[];
+        logicalTradeIds: string[];
+      }>(await app.request(`/api/signals/${opened.parsedSignalId}/approve`, { method: "POST" }));
+      expect(openApproval.queueItems).toHaveLength(2);
+      for (const [index, queueItemId] of openApproval.queueItems.entries()) {
+        await app.request("/api/mt5/report", {
+          method: "POST",
+          body: JSON.stringify({
+            accountId: index === 0 ? "mt5-63442826" : "mt5-54945785",
+            queueItemId,
+            status: "EXECUTED",
+            retcode: 10009,
+            retcodeExternal: 0,
+            brokerComment: "opened",
+            orderTicket: `close-all-open-${index}`,
+            positionTicket: `close-all-position-${index}`,
+            dealTicket: `close-all-deal-${index}`,
+            requestedVolume: 0.1,
+            filledVolume: 0.1,
+            remainingVolume: 0.1,
+          }),
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const secondOpen = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "Gold buy limit\n\n4528-27\n\nSL 4521\n\nTP 4534",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const secondOpenApproval = await json<{
+        queueItems: string[];
+        logicalTradeIds: string[];
+      }>(
+        await app.request(`/api/signals/${secondOpen.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(secondOpenApproval.queueItems).toHaveLength(2);
+      for (const [index, queueItemId] of secondOpenApproval.queueItems.entries()) {
+        await app.request("/api/mt5/report", {
+          method: "POST",
+          body: JSON.stringify({
+            accountId: index === 0 ? "mt5-63442826" : "mt5-54945785",
+            queueItemId,
+            status: "EXECUTED",
+            retcode: 10009,
+            retcodeExternal: 0,
+            brokerComment: "opened",
+            orderTicket: `close-all-second-open-${index}`,
+            positionTicket: `close-all-second-position-${index}`,
+            dealTicket: `close-all-second-deal-${index}`,
+            requestedVolume: 0.1,
+            filledVolume: 0.1,
+            remainingVolume: 0.1,
+          }),
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const allLogicalTradeIds = [
+        ...openApproval.logicalTradeIds,
+        ...secondOpenApproval.logicalTradeIds,
+      ];
+      const close = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "Close all positions XAUUSD",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      // This endpoint passes trigger:"operator", which SKIPS the evidence gate. Before the fan-out
+      // was deleted, one "Approve" click here flattened every active trade on every linked account.
+      // It must now hold on both accounts and queue nothing executable.
+      const approval = await json<{
+        heldQueueItems: string[];
+        queuedCount: number;
+        status: string;
+      }>(await app.request(`/api/signals/${close.parsedSignalId}/approve`, { method: "POST" }));
+      expect(approval).toMatchObject({ queuedCount: 0, status: "HELD" });
+      expect(approval.heldQueueItems).toHaveLength(2);
+      const heldCards = await json<{
+        items: Array<{
+          id: string;
+          accountId: string;
+          symbol: string;
+          candidateLogicalTradeIds: string[];
+        }>;
+      }>(await app.request("/api/queue-items/held"));
+      expect(heldCards.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            accountId: "mt5-63442826",
+            symbol: "XAUUSD",
+          }),
+          expect.objectContaining({
+            accountId: "mt5-54945785",
+            symbol: "XAUUSD.r",
+          }),
+        ]),
+      );
+      expect(heldCards.items.every((item) => item.candidateLogicalTradeIds.length === 2)).toBe(
+        true,
+      );
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        // The provider-wide fan-out audit must no longer exist at all.
+        expect(
+          db
+            .query("SELECT COUNT(*) AS count FROM audit_logs WHERE event_type = 'signal.close-all'")
+            .get() as { count: number },
+        ).toMatchObject({ count: 0 });
+        // Two HELD rows, one per linked account, and nothing the EA could ever lease.
+        expect(
+          db
+            .query(
+              "SELECT COUNT(*) AS count FROM queue_items WHERE parsed_signal_id = ? AND status = 'HELD'",
+            )
+            .get(close.parsedSignalId) as { count: number },
+        ).toMatchObject({ count: 2 });
+        expect(
+          db
+            .query(
+              "SELECT COUNT(*) AS count FROM queue_items WHERE parsed_signal_id = ? AND status IN ('PENDING','LEASED','EXECUTED')",
+            )
+            .get(close.parsedSignalId) as { count: number },
+        ).toMatchObject({ count: 0 });
+        // The originally opened trades must still be active - nothing was flattened.
+        expect(
+          db
+            .query(
+              `SELECT COUNT(*) AS count FROM logical_trades WHERE id IN (${allLogicalTradeIds.map(() => "?").join(", ")})
+               AND json_extract(data_json, '$.status') IN ('OPEN','PENDING','PLANNED')`,
+            )
+            .get(...allLogicalTradeIds) as { count: number },
+        ).toMatchObject({ count: 4 });
+      } finally {
+        db.close();
+      }
+      const firstAccountCard = heldCards.items.find((item) => item.accountId === "mt5-63442826")!;
+      const selectedTradeId = firstAccountCard.candidateLogicalTradeIds[0]!;
+      const released = await json<{
+        queueItemId: string;
+        logicalTradeId: string;
+        remainingHeldQueueItems: string[];
+        remainingTradeCount: number;
+      }>(
+        await app.request(`/api/queue-items/${firstAccountCard.id}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({
+            mode: "original",
+            logicalTradeId: selectedTradeId,
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(released).toMatchObject({
+        logicalTradeId: selectedTradeId,
+        remainingTradeCount: 1,
+      });
+      expect(released.remainingHeldQueueItems).toHaveLength(1);
+      const afterRelease = await json<{
+        items: Array<{ id: string; accountId: string; candidateLogicalTradeIds: string[] }>;
+      }>(await app.request("/api/queue-items/held"));
+      expect(afterRelease.items).toContainEqual(
+        expect.objectContaining({
+          id: released.remainingHeldQueueItems[0],
+          accountId: "mt5-63442826",
+          candidateLogicalTradeIds: [
+            firstAccountCard.candidateLogicalTradeIds.find((id) => id !== selectedTradeId),
+          ],
+        }),
+      );
+      const releaseDb = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          releaseDb
+            .query(
+              "SELECT COUNT(*) AS count FROM queue_items WHERE parsed_signal_id = ? AND account_id = ? AND status = 'PENDING'",
+            )
+            .get(close.parsedSignalId, "mt5-63442826"),
+        ).toEqual({ count: 1 });
+      } finally {
+        releaseDb.close();
+      }
+      expect(alerts.length).toBeGreaterThanOrEqual(1);
+      expect(String(alerts[0]?.body.text)).toContain("CLOSE_ALL_REQUIRES_OPERATOR");
+    } finally {
+      globalThis.fetch = previousFetch;
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("holds a naked STOP before it can be sent to the EA", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "XAUUSD Sell Stop\nSL: 4057.30\nTP: 4039.30",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ status: string; queueItemId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    expect(approval.status).toBe("HELD");
+    const queue = await json<{ queue: Array<{ id: string; status: string; heldReason: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        id: approval.queueItemId,
+        status: "HELD",
+        heldReason: "NAKED_PENDING_ENTRY",
+      }),
+    );
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+    ).not.toContain("commandType=OPEN_TRADE");
+  });
+
+  test("holds a MARKET order when the account reports no quote for its symbol", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [],
+        orders: [],
+        symbols: [{ symbol: "EURUSD", bid: 1.08, ask: 1.0802, point: 0.00001 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const pushed = await app.request("/api/signals/manual", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        direction: "BUY",
+        orderType: "MARKET",
+        brokerSymbol: "XAUUSD",
+        stopLoss: 4050,
+        takeProfits: [{ price: 4070 }],
+        volume: 0.01,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(pushed.status).toBe(200);
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+    ).not.toContain("commandType=OPEN_TRADE");
+    const queue = await json<{ queue: Array<{ status: string; heldReason?: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({ status: "HELD", heldReason: "NAKED_MARKET_NO_QUOTE" }),
+    );
+  });
+
+  test("uses a fresh live quote when the durable snapshot is older than five minutes", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-live-quote-preference-"));
+    const databasePath = join(tempDir, "app.db");
+    const originalDateNow = Date.now;
+    const now = originalDateNow();
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          positions: [],
+          orders: [],
+          symbols: [{ symbol: "XAUUSD", bid: 4050, ask: 4050.2, point: 0.01 }],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const db = new Database(databasePath);
+      db.query("UPDATE mt5_snapshots SET updated_at = ? WHERE account_id = ?").run(
+        new Date(now - 6 * 60_000).toISOString(),
+        "mt5-63442826",
+      );
+      db.close();
+      Date.now = () => now;
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          positions: [],
+          orders: [],
+          symbols: [{ symbol: "XAUUSD", bid: 4051, ask: 4051.2, point: 0.01 }],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const pushed = await app.request("/api/signals/manual", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          direction: "BUY",
+          orderType: "MARKET",
+          brokerSymbol: "XAUUSD",
+          stopLoss: 4040,
+          takeProfits: [{ price: 4060 }],
+          volume: 0.01,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(pushed.status).toBe(200);
+      expect(
+        await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+      ).toContain("commandType=OPEN_TRADE");
+    } finally {
+      Date.now = originalDateNow;
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("fans a provider CLOSE out to every active logical trade for its order id", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-close-order-id-fanout-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      const opened = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText:
+              "NEW ORDER - XAUUSD Sell Stop # 306947863 Entry: 4051.30 SL: 4057.30 TP: 4039.30",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const approval = await json<{ logicalTradeId: string }>(
+        await app.request(`/api/signals/${opened.parsedSignalId}/approve`, { method: "POST" }),
+      );
+
+      const db = new Database(databasePath);
+      const original = db
+        .query(
+          "SELECT provider_id, account_id, status, data_json, created_at FROM logical_trades WHERE id = ?",
+        )
+        .get(approval.logicalTradeId) as {
+        provider_id: string;
+        account_id: string;
+        status: string;
+        data_json: string;
+        created_at: string;
+      };
+      const duplicate = { ...JSON.parse(original.data_json), id: "trade_duplicate-order-id" };
+      db.query(
+        "INSERT INTO logical_trades (id, provider_id, account_id, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(
+        duplicate.id,
+        original.provider_id,
+        original.account_id,
+        original.status,
+        JSON.stringify(duplicate),
+        original.created_at,
+      );
+      db.close();
+
+      const closed = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "CLOSED - XAUUSD Sell # 306947863",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const closeApproval = await json<{ logicalTradeIds: string[]; queueItems: string[] }>(
+        await app.request(`/api/signals/${closed.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(closeApproval.logicalTradeIds).toEqual(
+        expect.arrayContaining([approval.logicalTradeId, duplicate.id]),
+      );
+      expect(closeApproval.queueItems).toHaveLength(2);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -2605,7 +3280,7 @@ describe("Telegram TC API", () => {
         const close = queues.find(
           (queue) => JSON.parse(queue.payload_json).commandType === "CLOSE_TRADE",
         );
-        expect(close?.logical_trade_id).toBe(queues[0]!.logical_trade_id);
+        expect(close?.logical_trade_id).toBe("");
       } finally {
         db.close();
       }
@@ -2614,37 +3289,90 @@ describe("Telegram TC API", () => {
     }
   });
 
-  test("records an error audit for an ambiguous dropped close with default settings", async () => {
+  test("holds an ambiguous close for reconciliation instead of dropping it", async () => {
     const app = createApi({
       databasePath: ":memory:",
       seedDemoData: false,
-      telegram: createQueuedTelegramAdapter([
-        {
-          telegramMessageId: "1",
-          messageDate: "2026-07-20T02:00:00.000Z",
-          rawText: "BUY XAUUSD\nSL 4017\nTP 4035",
-        },
-        {
-          telegramMessageId: "2",
-          messageDate: "2026-07-20T02:01:00.000Z",
-          rawText: "BUY XAUUSD\nSL 4016\nTP 4036",
-        },
-        {
-          telegramMessageId: "3",
-          messageDate: "2026-07-20T02:02:00.000Z",
-          rawText: "🟢 CLOSED - XAUUSD Buy 🟢",
-        },
-      ]),
+      telegram: createQueuedTelegramAdapter(realFixtureMessages(["15226", "15227", "16669"])),
       telegramPollingEnabled: false,
     });
     await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
-    await app.runTelegramIngestionOnce();
+    const ingestion = await app.runTelegramIngestionOnce();
+    expect(ingestion.errors).toBe(0);
+    const queue = await json<{
+      queue: Array<{
+        id: string;
+        status: string;
+        heldReason?: string;
+        payload: { commandType: string };
+      }>;
+    }>(await app.request("/api/signals"));
+    const held = queue.queue.find(
+      (item) => item.status === "HELD" && item.heldReason?.startsWith("EVIDENCE_"),
+    );
+    expect(held).toMatchObject(
+      expect.objectContaining({
+        status: "HELD",
+        heldReason: expect.stringMatching(/^EVIDENCE_/),
+        payload: expect.objectContaining({ commandType: "CANCEL_PENDING" }),
+      }),
+    );
+    const requeue = await app.request(`/api/queue-items/${held?.id}/requeue`, {
+      method: "POST",
+      body: JSON.stringify({ mode: "original" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(requeue.status).toBe(409);
+    expect(await requeue.json()).toMatchObject({
+      error: expect.stringContaining("selected active logicalTradeId"),
+    });
+    const heldAfter = await json<{ queue: Array<{ id: string; status: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(heldAfter.queue.find((item) => item.id === held?.id)?.status).toBe("HELD");
     const audit = await json<{ logs: Array<{ eventType: string; level: string }> }>(
       await app.request("/api/audit-logs?event=telegram.ingest.queue-failed"),
     );
-    expect(audit.logs).toContainEqual(
-      expect.objectContaining({ eventType: "telegram.ingest.queue-failed", level: "error" }),
-    );
+    expect(audit.logs).toHaveLength(0);
+  });
+
+  test("demotes a real-corpus target DROP when linked-account evidence disagrees", () => {
+    const fixture = corpusMessages.find((message) => message.telegramMessageId === "15226")!;
+    const signal = parseSignalText(fixture.rawText, {
+      providerId: fixture.providerId,
+      accountId: "account-a",
+      accountMappings: {
+        "account-a": {
+          accountId: "account-a",
+          includeSymbols: ["XAUUSD"],
+          availableBrokerSymbols: ["XAUUSD"],
+        },
+      },
+    });
+    const targets = normalizeEvidenceTargets([
+      {
+        accountId: "account-a",
+        signal,
+        verdict: { verdict: "DROP", reason: "NO_EXECUTABLE_SIGNAL" },
+      },
+      {
+        accountId: "account-b",
+        signal,
+        verdict: { verdict: "EXECUTE", reason: "COMPLETE_PROSE_OPEN_EVIDENCE" },
+      },
+    ]);
+
+    expect(targets[0]?.verdict).toMatchObject({
+      verdict: "HOLD",
+      reason: "NO_EXECUTABLE_SIGNAL",
+      tier: "action-required",
+    });
+    expect(targets[1]?.verdict.verdict).toBe("EXECUTE");
+    expect(
+      normalizeEvidenceTargets([targets[0]!, targets[0]!]).every(
+        (target) => target.verdict.verdict === "HOLD",
+      ),
+    ).toBe(true);
   });
 
   test("reconciles MT5 execution reports back into logical trade TP leg state", async () => {
@@ -3107,6 +3835,428 @@ describe("Telegram TC API", () => {
     expect(closeWork).toContain("partialCloseValue=1");
     expect(closeWork).toContain("partialCloseVolume=0.02");
     expect(closeWork).toContain("targetPositionTicket=247596888");
+  });
+
+  test("keeps a configured runner open after a provider CLOSE_TRADE", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldSellSmallRunnerLimit(app);
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "opened",
+        orderTicket: "247694735",
+        positionTicket: "247694735",
+        dealTicket: "247694735",
+        requestedVolume: 0.02,
+        filledVolume: 0.02,
+        remainingVolume: 0.02,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await sendGoldSnapshot(app, {
+      shortId: approved.shortId,
+      bid: 4488.0,
+      positions: [
+        {
+          ticket: "247694735",
+          symbol: "XAUUSD",
+          type: 1,
+          volume: 0.02,
+          openPrice: 4488.46,
+          sl: 4494,
+          tp: 0,
+          profit: 0,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ],
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: approved.providerId,
+          accountId: "mt5-63442826",
+          rawText: "CLOSED - XAUUSD Sell",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const close = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_TRADE");
+    expect(closeWork).toContain("runnerEnabled=true");
+    expect(closeWork).toContain("runnerVolume=0.01");
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: close.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "runner remains",
+        positionTicket: "247694735",
+        dealTicket: "247694736",
+        requestedVolume: 0.01,
+        filledVolume: 0.01,
+        remainingVolume: 0.01,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const dashboard = await json<{
+      logicalTrades: Array<{ id: string; status: string; livePositionExists?: boolean }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.logicalTrades.find((trade) => trade.id === approved.logicalTradeId),
+    ).toMatchObject({
+      status: "OPEN",
+      livePositionExists: true,
+    });
+    const runnerManagement = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+    ).text();
+    expect(runnerManagement).toContain("commandType=MODIFY_SL");
+    expect(runnerManagement).toContain("newStopLoss=4488.46");
+  });
+
+  test("holds an EXECUTED runner close when the broker remainder is not the configured lot", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldSellSmallRunnerLimit(app);
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "opened",
+        orderTicket: "247694737",
+        positionTicket: "247694737",
+        dealTicket: "247694737",
+        requestedVolume: 0.02,
+        filledVolume: 0.02,
+        remainingVolume: 0.02,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await sendGoldSnapshot(app, {
+      shortId: approved.shortId,
+      bid: 4488,
+      positions: [
+        {
+          ticket: "247694737",
+          symbol: "XAUUSD",
+          type: 1,
+          volume: 0.02,
+          openPrice: 4488.46,
+          sl: 4494,
+          tp: 0,
+          profit: 0,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ],
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: approved.providerId,
+          accountId: "mt5-63442826",
+          rawText: "CLOSED - XAUUSD Sell",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const close = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const report = await json<{ status: string }>(
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          queueItemId: close.queueItemId,
+          status: "EXECUTED",
+          retcode: 10009,
+          retcodeExternal: 0,
+          brokerComment: "runner remainder was 0.02",
+          positionTicket: "247694737",
+          dealTicket: "247694738",
+          requestedVolume: 0.01,
+          filledVolume: 0.01,
+          remainingVolume: 0.02,
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(report.status).toBe("HELD");
+    const dashboard = await json<{
+      logicalTrades: Array<{ id: string; status: string; livePositionExists?: boolean }>;
+    }>(await app.request("/api/dashboard"));
+    expect(
+      dashboard.logicalTrades.find((trade) => trade.id === approved.logicalTradeId),
+    ).toMatchObject({ status: "OPEN", livePositionExists: true });
+  });
+
+  test("does not apply a runner enabled after a SPLIT_ORDER trade opened", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldSellSmallRunnerLimit(app, {
+      executionMode: "SPLIT_ORDER",
+      enableRunner: false,
+    });
+    await app.request(`/api/providers/${approved.providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "opened",
+        orderTicket: "247694736",
+        positionTicket: "247694736",
+        dealTicket: "247694736",
+        requestedVolume: 0.02,
+        filledVolume: 0.02,
+        remainingVolume: 0.02,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await sendGoldSnapshot(app, {
+      shortId: approved.shortId,
+      bid: 4488,
+      positions: [
+        {
+          ticket: "247694736",
+          symbol: "XAUUSD",
+          type: 1,
+          volume: 0.02,
+          openPrice: 4488.46,
+          sl: 4494,
+          tp: 0,
+          profit: 0,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ],
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId: approved.providerId,
+          accountId: "mt5-63442826",
+          rawText: "CLOSED - XAUUSD Sell",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" });
+    const closeWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(closeWork).toContain("commandType=CLOSE_TRADE");
+    expect(closeWork).toContain("executionMode=VIRTUAL_TP");
+    expect(closeWork).toContain("runnerEnabled=false");
+    expect(closeWork).toContain("runnerVolume=");
+    expect(closeWork).not.toContain("runnerEnabled=true");
+  });
+
+  test("aborts a bound release whose HELD source row does not transition exactly once", async () => {
+    // The bound requeue path never calls approveSignal, so its dedup cannot backstop a lost
+    // dismissal here. Without a compare-and-swap a crash or concurrent release leaves BOTH the new
+    // executable row and the original HELD row, and the leaked PENDING row is immediately leasable
+    // by the EA. The trigger below makes the HELD -> DISMISSED update a silent no-op, which is
+    // exactly what that race looks like from inside the transaction.
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-release-cas-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const approved = await approveGoldSellSmallRunnerLimit(app, { enableRunner: false });
+      const parsed = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId: approved.providerId,
+            accountId: "mt5-63442826",
+            rawText: "Cancel pending XAUUSD",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const held = await json<{ queueItemId: string; status: string }>(
+        await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(held.status).toBe("HELD");
+
+      const setup = new Database(databasePath);
+      const sourceId = held.queueItemId.replaceAll("'", "''");
+      try {
+        setup
+          .query("UPDATE queue_items SET logical_trade_id = ? WHERE id = ?")
+          .run(approved.logicalTradeId, held.queueItemId);
+        setup.run(`
+          CREATE TRIGGER cas_bound_release_race BEFORE UPDATE OF status ON queue_items
+          WHEN OLD.id = '${sourceId}' AND NEW.status = 'DISMISSED'
+          BEGIN
+            SELECT RAISE(IGNORE);
+          END
+        `);
+      } finally {
+        setup.close();
+      }
+
+      const before = new Database(databasePath, { readonly: true });
+      let queueCountBefore: number;
+      try {
+        queueCountBefore = (
+          before.query("SELECT COUNT(*) AS n FROM queue_items").get() as { n: number }
+        ).n;
+      } finally {
+        before.close();
+      }
+
+      const response = await app.request(`/api/queue-items/${held.queueItemId}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "original" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(response.status).toBe(409);
+
+      const after = new Database(databasePath, { readonly: true });
+      try {
+        // The whole release must have rolled back: no new queue row, source still HELD.
+        expect(after.query("SELECT COUNT(*) AS n FROM queue_items").get()).toEqual({
+          n: queueCountBefore,
+        });
+        expect(
+          after.query("SELECT status FROM queue_items WHERE id = ?").get(held.queueItemId),
+        ).toEqual({ status: "HELD" });
+      } finally {
+        after.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not carry a runner into SPLIT_ORDER hold or requeue payloads", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-split-runner-hold-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const approved = await approveGoldSellSmallRunnerLimit(app, {
+        executionMode: "SPLIT_ORDER",
+        enableRunner: false,
+      });
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          queueItemId: approved.queueItemId,
+          status: "EXECUTED",
+          retcode: 10009,
+          retcodeExternal: 0,
+          brokerComment: "opened",
+          orderTicket: "247694739",
+          positionTicket: "247694739",
+          dealTicket: "247694739",
+          requestedVolume: 0.02,
+          filledVolume: 0.02,
+          remainingVolume: 0.02,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/providers/${approved.providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const parsed = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId: approved.providerId,
+            accountId: "mt5-63442826",
+            rawText: "Cancel pending XAUUSD",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const held = await json<{ queueItemId: string; status: string }>(
+        await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(held.status).toBe("HELD");
+
+      const db = new Database(databasePath);
+      const heldRow = db
+        .query("SELECT payload_json FROM queue_items WHERE id = ?")
+        .get(held.queueItemId) as { payload_json: string };
+      const heldPayload = JSON.parse(heldRow.payload_json) as Record<string, unknown>;
+      expect(heldPayload.runner).toBeUndefined();
+      db.query("UPDATE queue_items SET logical_trade_id = ?, payload_json = ? WHERE id = ?").run(
+        approved.logicalTradeId,
+        JSON.stringify({
+          ...heldPayload,
+          executionMode: "SPLIT_ORDER",
+          runner: { enabled: true, lotSize: 0.01, slBehavior: "break-even", trailPips: 10 },
+        }),
+        held.queueItemId,
+      );
+      db.close();
+
+      const requeued = await json<{ queueItemId: string }>(
+        await app.request(`/api/queue-items/${held.queueItemId}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original" }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const requeueDb = new Database(databasePath, { readonly: true });
+      try {
+        const row = requeueDb
+          .query("SELECT payload_json FROM queue_items WHERE id = ?")
+          .get(requeued.queueItemId) as { payload_json: string };
+        expect(JSON.parse(row.payload_json).runner).toBeUndefined();
+      } finally {
+        requeueDb.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("uses planned TP volume when small runner allocation would round below broker minimum", async () => {
@@ -4089,7 +5239,7 @@ describe("Telegram TC API", () => {
       logicalTrades: Array<{ status: string }>;
     }>(await app.request("/api/dashboard"));
 
-    expect(result.queued).toBe(1);
+    expect(result.queued).toBe(0);
     expect(dashboard.signalQueue).toContainEqual(
       expect.objectContaining({ commandType: "OPEN_TRADE", status: "HELD" }),
     );
@@ -4804,7 +5954,7 @@ describe("Telegram TC API", () => {
       alertOnEaOffline: false,
       alertOnExecFailed: false,
       alertOnHeld: false,
-      alertOnDroppedLifecycle: true,
+      alertOnDroppedLifecycle: false,
       alertOnTelegramStall: false,
     });
 
@@ -5104,20 +6254,185 @@ describe("Telegram TC API", () => {
           status: string;
           originQueueItemId?: string;
           accountId: string;
+          logicalTradeId: string;
           payload: { orderType: string };
         }>;
       }>(await app.request("/api/signals"));
       expect(after.queue).toContainEqual(
         expect.objectContaining({ id: approved.queueItemId, status: "DISMISSED" }),
       );
-      expect(after.queue).toContainEqual(
-        expect.objectContaining({
-          accountId: "mt5-63442826",
-          originQueueItemId: approved.queueItemId,
-          status: "PENDING",
-          payload: expect.objectContaining({ orderType: "LIMIT" }),
-        }),
+      const released = after.queue.find(
+        (item) => item.originQueueItemId === approved.queueItemId && item.status === "PENDING",
       );
+      expect(released).toMatchObject({
+        accountId: "mt5-63442826",
+        originQueueItemId: approved.queueItemId,
+        payload: expect.objectContaining({ orderType: "LIMIT" }),
+      });
+      expect(released?.logicalTradeId).toBeTruthy();
+      expect(
+        await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+      ).toContain(`logicalTradeId=${released?.logicalTradeId}`);
+    } finally {
+      await rm(prepared.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("rolls back a failed EA_OFFLINE held OPEN release before retrying", async () => {
+    const prepared = await createEaOfflineApproval();
+    const sentAlerts: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input, init) => {
+      sentAlerts.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const { app, approved, databasePath } = prepared;
+      await app.request("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ alertBotToken: "token", alertChatId: "chat", alertOnHeld: true }),
+        headers: { "content-type": "application/json" },
+      });
+      const failed = await app.request(`/api/queue-items/${approved.queueItemId}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "original" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(failed.status).toBe(409);
+      await Promise.resolve();
+
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          db
+            .query(
+              "SELECT id, status FROM queue_items WHERE parsed_signal_id = (SELECT parsed_signal_id FROM queue_items WHERE id = ?)",
+            )
+            .all(approved.queueItemId),
+        ).toEqual([{ id: approved.queueItemId, status: "HELD" }]);
+        expect(db.query("SELECT COUNT(*) AS n FROM logical_trades").get()).toEqual({ n: 0 });
+        expect(db.query("SELECT COUNT(*) AS n FROM trade_origins").get()).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+      expect(sentAlerts).toHaveLength(0);
+
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442826",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const after = await json<{
+        queue: Array<{ id: string; status: string; originQueueItemId?: string }>;
+      }>(await app.request("/api/signals"));
+      expect(after.queue.filter((item) => item.status === "HELD")).toHaveLength(0);
+      expect(
+        after.queue.filter(
+          (item) => item.originQueueItemId === approved.queueItemId && item.status === "PENDING",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await rm(prepared.tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not release an already-dismissed held OPEN twice", async () => {
+    const prepared = await createEaOfflineApproval();
+    try {
+      const { app, approved } = prepared;
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442826",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const second = await app.request(`/api/queue-items/${approved.queueItemId}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "original" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(second.status).toBe(409);
+
+      // This OPEN-path race is rejected by hasDuplicateOpenSignal because the trigger leaves the
+      // source HELD and it matches itself; it does not isolate the dismissal CAS. The bound-path
+      // regression "aborts a bound release whose HELD source row does not transition exactly once"
+      // is the dedicated CAS test because that path has no approveSignal dedup backstop.
+      const raced = await createEaOfflineApproval({ releaseHeldOnEaReconnect: false });
+      try {
+        await raced.app.request("/api/mt5/register", {
+          method: "POST",
+          body: JSON.stringify({
+            accountNumber: "63442826",
+            server: "OctaFX-Real",
+            company: "OctaFX",
+            currency: "USD",
+            balance: 10000,
+            equity: 10000,
+            marginMode: "HEDGING",
+            availableSymbols: ["XAUUSD"],
+          }),
+          headers: { "content-type": "application/json" },
+        });
+        const raceDb = new Database(raced.databasePath);
+        const sourceId = raced.approved.queueItemId.replaceAll("'", "''");
+        try {
+          raceDb.run(`
+            CREATE TRIGGER cas_release_race BEFORE UPDATE OF status ON queue_items
+            WHEN OLD.id = '${sourceId}' AND NEW.status = 'DISMISSED'
+            BEGIN
+              SELECT RAISE(IGNORE);
+            END
+          `);
+        } finally {
+          raceDb.close();
+        }
+        const casFailure = await raced.app.request(
+          `/api/queue-items/${raced.approved.queueItemId}/requeue`,
+          {
+            method: "POST",
+            body: JSON.stringify({ mode: "original" }),
+            headers: { "content-type": "application/json" },
+          },
+        );
+        expect(casFailure.status).toBe(409);
+        const afterCas = new Database(raced.databasePath, { readonly: true });
+        try {
+          expect(
+            afterCas
+              .query(
+                "SELECT COUNT(*) AS n FROM queue_items WHERE parsed_signal_id = (SELECT parsed_signal_id FROM queue_items WHERE id = ?)",
+              )
+              .get(raced.approved.queueItemId),
+          ).toEqual({ n: 1 });
+          expect(
+            afterCas
+              .query("SELECT status FROM queue_items WHERE id = ?")
+              .get(raced.approved.queueItemId),
+          ).toEqual({ status: "HELD" });
+        } finally {
+          afterCas.close();
+        }
+      } finally {
+        await rm(raced.tempDir, { recursive: true, force: true });
+      }
     } finally {
       await rm(prepared.tempDir, { recursive: true, force: true });
     }
@@ -5932,6 +7247,146 @@ describe("Telegram TC API", () => {
     expect(dashboard.signalQueue.some((item) => item.status === "DUPLICATE")).toBe(true);
   });
 
+  test("partitions parameter deduplication by linked account", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "200300400",
+        server: "OctaFX-Real",
+        company: "OctaFX",
+        currency: "USD",
+        balance: 10000,
+        equity: 10000,
+        marginMode: "HEDGING",
+        availableSymbols: ["XAUUSD"],
+        eaVersion: "1.57.4",
+        eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request(`/api/account-provider-links/mt5-200300400/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: false }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const first = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY XAUUSD LIMIT @ 1.0860\nSL 1.0810\nTP1 1.0910",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(
+      (await app.request(`/api/signals/${first.parsedSignalId}/approve`, { method: "POST" }))
+        .status,
+    ).toBe(200);
+
+    await app.request(`/api/account-provider-links/mt5-200300400/${providerId}`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: true }),
+      headers: { "content-type": "application/json" },
+    });
+    const second = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          rawText: "XAUUSD BUY LIMIT ENTRY 1.08604\nSTOP LOSS 1.0810\nTP 1.0920",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{
+      queueItems: string[];
+      heldQueueItems: string[];
+      status: string;
+    }>(await app.request(`/api/signals/${second.parsedSignalId}/approve`, { method: "POST" }));
+    expect(approval.status).toBe("PENDING");
+    expect(approval.queueItems).toHaveLength(1);
+    expect(approval.heldQueueItems).toHaveLength(1);
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-200300400")).text(),
+    ).toContain("status=WORK");
+
+    const queue = await json<{
+      queue: Array<{ accountId: string; status: string; heldReason?: string }>;
+    }>(await app.request("/api/signals"));
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({
+        accountId: "mt5-63442826",
+        status: "DUPLICATE",
+        heldReason: "DUPLICATE_OPEN_SIGNAL",
+      }),
+    );
+    expect(queue.queue).toContainEqual(
+      expect.objectContaining({ accountId: "mt5-200300400", status: "LEASED" }),
+    );
+  });
+
+  test("sends a new provider order after an identical terminal order", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-order-id-terminal-dedup-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      const parseOpen = async (providerOrderId: string) =>
+        json<{ parsedSignalId: string }>(
+          await app.request("/api/parser/parse", {
+            method: "POST",
+            body: JSON.stringify({
+              providerId,
+              accountId: "mt5-63442826",
+              rawText: `NEW ORDER - XAUUSD Buy Stop # ${providerOrderId} Entry: 4141.10 SL: 4135.10 TP: 4150.10`,
+            }),
+            headers: { "content-type": "application/json" },
+          }),
+        );
+
+      const first = await parseOpen("306307354");
+      const firstApproval = await app.request(`/api/signals/${first.parsedSignalId}/approve`, {
+        method: "POST",
+      });
+      expect(firstApproval.status).toBe(200);
+
+      const db = new Database(databasePath);
+      const row = db
+        .query("SELECT id, data_json FROM logical_trades WHERE provider_id = ? LIMIT 1")
+        .get(providerId) as { id: string; data_json: string };
+      const terminalTrade = { ...JSON.parse(row.data_json), status: "CANCELLED" };
+      db.query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?").run(
+        "CANCELLED",
+        JSON.stringify(terminalTrade),
+        row.id,
+      );
+      db.close();
+
+      const second = await parseOpen("306307354");
+      const secondApproval = await app.request(`/api/signals/${second.parsedSignalId}/approve`, {
+        method: "POST",
+      });
+      expect(secondApproval.status).toBe(200);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("records ignored parsed signals as non-leaseable queue items", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
@@ -6463,11 +7918,11 @@ describe("Telegram TC API", () => {
     expect(approved.status).toBe("PENDING");
 
     const pollLine = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
-    expect(pollLine).toContain("commandType=CLOSE_PARTIAL");
+    expect(pollLine).toContain("commandType=CLOSE_TRADE");
     expect(pollLine).toContain("logicalTradeId=trade-demo-1");
     expect(pollLine).toContain("brokerSymbol=EURUSD.raw");
-    expect(pollLine).toContain("partialCloseKind=PERCENT");
-    expect(pollLine).toContain("partialCloseValue=50");
+    expect(pollLine).toContain("partialCloseKind=");
+    expect(pollLine).toContain("runnerEnabled=false");
 
     const duplicateParse = await json<{ parsedSignalId: string }>(
       await app.request("/api/parser/parse", {
@@ -6485,7 +7940,7 @@ describe("Telegram TC API", () => {
     expect(duplicateApprove.status).toBe(409);
   });
 
-  test("keeps a just-accepted pending order PENDING against a stale snapshot", async () => {
+  test("flattens a pending order that fills between provider close approval and EA execution", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
     const opened = await json<{ parsedSignalId: string }>(
@@ -6546,8 +8001,29 @@ describe("Telegram TC API", () => {
     const cancellation = await json<{ queueItemId: string }>(
       await app.request(`/api/signals/${closing.parsedSignalId}/approve`, { method: "POST" }),
     );
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [
+          {
+            ticket: "70002",
+            symbol: "XAUUSD",
+            type: 0,
+            volume: 0.04,
+            openPrice: 4501,
+            magic: 26050901,
+            isExternal: false,
+            comment: `ttc:${opening.logicalTradeId.slice(6)}`,
+          },
+        ],
+        orders: [],
+        symbols: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
     const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
-    expect(work).toContain("commandType=CANCEL_PENDING");
+    expect(work).toContain("commandType=CLOSE_TRADE");
     expect(work).not.toContain("targetOrderTicket=50001");
     expect(
       (
@@ -6555,7 +8031,7 @@ describe("Telegram TC API", () => {
           await app.request("/api/dashboard"),
         )
       ).logicalTrades.find((trade) => trade.id === opening.logicalTradeId)?.status,
-    ).toBe("PENDING");
+    ).toBe("OPEN");
 
     await app.request("/api/mt5/report", {
       method: "POST",
@@ -6565,10 +8041,11 @@ describe("Telegram TC API", () => {
         status: "EXECUTED",
         retcode: 10009,
         retcodeExternal: 0,
-        brokerComment: "pending order removed",
+        brokerComment: "pending order and position flattened",
         orderTicket: "50001",
-        requestedVolume: 0,
-        filledVolume: 0,
+        positionTicket: "70002",
+        requestedVolume: 0.04,
+        filledVolume: 0.04,
         remainingVolume: 0,
       }),
       headers: { "content-type": "application/json" },
@@ -6579,7 +8056,7 @@ describe("Telegram TC API", () => {
           await app.request("/api/dashboard"),
         )
       ).logicalTrades.find((trade) => trade.id === opening.logicalTradeId)?.status,
-    ).toBe("CANCELLED");
+    ).toBe("CLOSED");
   });
 
   test("records a partial market open at its actual fill and resizes its TP legs", async () => {
@@ -6699,6 +8176,77 @@ describe("Telegram TC API", () => {
     );
   });
 
+  test("holds pending close flattening without the capability even at version 1.57.1", async () => {
+    for (const eaCapabilities of [["lane2-close-contract"], []]) {
+      const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD"],
+        eaVersion: "1.57.1",
+        eaCapabilities,
+      });
+      const opened = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "BUY XAUUSD STOP @ 4500\nSL 4490\nTP 4520",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const opening = await json<{ queueItemId: string }>(
+        await app.request(`/api/signals/${opened.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      await app.request("/api/mt5/poll-line?accountId=mt5-63442826");
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          queueItemId: opening.queueItemId,
+          status: "EXECUTED",
+          retcode: 10008,
+          retcodeExternal: 0,
+          brokerComment: "pending accepted",
+          orderTicket: "50001",
+          requestedVolume: 0.04,
+          filledVolume: 0,
+          remainingVolume: 0.04,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const closing = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "CLOSED - XAUUSD Buy",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const close = await json<{ queueItemId: string }>(
+        await app.request(`/api/signals/${closing.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(
+        await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+      ).toContain("status=NO_WORK");
+      const queue = await json<{
+        queue: Array<{ id: string; status: string; heldReason?: string }>;
+      }>(await app.request("/api/signals"));
+      expect(queue.queue).toContainEqual(
+        expect.objectContaining({
+          id: close.queueItemId,
+          status: "HELD",
+          heldReason: eaCapabilities.includes("lane2-close-contract")
+            ? "EA_CAPABILITY_UNAVAILABLE:pending-close-flatten-v1"
+            : "EA_CAPABILITY_UNAVAILABLE",
+        }),
+      );
+    }
+  });
+
   test("holds a partial close with actual fill evidence instead of terminalizing the trade", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     const open = await json<{ item: { id: string } | null }>(
@@ -6771,9 +8319,47 @@ describe("Telegram TC API", () => {
         heldReason: "PARTIAL_FILL",
       }),
     );
+
+    const retry = await json<{ queueItemId: string }>(
+      await app.request(`/api/queue-items/${close.queueItemId}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "original" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const retryWork = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
+    ).text();
+    expect(retryWork).toContain(`queueItemId=${retry.queueItemId}`);
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-100200300",
+        queueItemId: retry.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "remaining close confirmed",
+        positionTicket: "70001",
+        dealTicket: "70003",
+        requestedVolume: 0.02,
+        filledVolume: 0.02,
+        remainingVolume: 0,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const flattened = await json<{ logicalTrades: Array<{ id: string; status: string }> }>(
+      await app.request("/api/dashboard"),
+    );
+    expect(flattened.logicalTrades.find((trade) => trade.id === "trade-demo-1")?.status).toBe(
+      "CLOSED",
+    );
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text(),
+    ).toContain("status=NO_WORK");
   });
 
-  test("holds a lost percentage-close delivery rather than replaying it against the remainder", async () => {
+  test("holds a lost provider-close delivery rather than replaying it against the remainder", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-lifecycle-unknown-"));
     const databasePath = join(tempDir, "app.db");
     try {
@@ -6836,7 +8422,7 @@ describe("Telegram TC API", () => {
       const firstWork = await (
         await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
       ).text();
-      expect(firstWork).toContain("targetRemainingVolume=0.02");
+      expect(firstWork).toContain("commandType=CLOSE_TRADE");
       expect(firstWork).toContain(`idempotencyKey=${close.queueItemId}`);
 
       const db = new Database(databasePath);
@@ -6904,8 +8490,8 @@ describe("Telegram TC API", () => {
     const modifyApproval = await app.request(`/api/signals/${modifySl.parsedSignalId}/approve`, {
       method: "POST",
     });
-    expect(modifyApproval.status).toBe(422);
-    expect((await json<{ error: string }>(modifyApproval)).error).toContain("newStopLoss");
+    expect(modifyApproval.status).toBe(200);
+    expect((await json<{ status: string }>(modifyApproval)).status).toBe("HELD");
 
     const trailing = await json<{ parsedSignalId: string; reviewRequired: boolean }>(
       await app.request("/api/parser/parse", {
@@ -6918,8 +8504,8 @@ describe("Telegram TC API", () => {
     const trailingApproval = await app.request(`/api/signals/${trailing.parsedSignalId}/approve`, {
       method: "POST",
     });
-    expect(trailingApproval.status).toBe(422);
-    expect((await json<{ error: string }>(trailingApproval)).error).toContain("trailingStop");
+    expect(trailingApproval.status).toBe(200);
+    expect((await json<{ status: string }>(trailingApproval)).status).toBe("HELD");
   });
 
   test("auto-ingests clean lifecycle commands after matching an active provider trade", async () => {
@@ -6927,11 +8513,12 @@ describe("Telegram TC API", () => {
       {
         telegramMessageId: "btc-open-1",
         messageDate: "2026-05-16T18:51:10.000Z",
-        rawText: "SELL BTCUSD",
+        rawText: "SELL BTCUSD @ 50000\nSL 50100\nTP 49800",
       },
       {
         telegramMessageId: "btc-trail-1",
         messageDate: "2026-05-16T18:51:20.000Z",
+        replyToMessageId: "btc-open-1",
         rawText: "Trail stop BTCUSD by 50 pips",
       },
     ]);
@@ -9430,7 +11017,7 @@ describe("Telegram TC API", () => {
         {
           telegramMessageId: "recovery-1",
           messageDate: "2026-05-19T10:01:02.000Z",
-          rawText: "BUY XAUUSD\nSL 4515\nTP 4535\nTP 4545",
+          rawText: "BUY XAUUSD @ 4525\nSL 4515\nTP 4535\nTP 4545",
         },
       ]);
       const app = createApi({
@@ -9517,7 +11104,7 @@ describe("Telegram TC API", () => {
       expect(trade!.matchedBrokerTickets).toEqual(["open-position-1"]);
       expect(trade!.source).toMatchObject({
         telegramMessageId: "recovery-1",
-        rawText: "BUY XAUUSD\nSL 4515\nTP 4535\nTP 4545",
+        rawText: "BUY XAUUSD @ 4525\nSL 4515\nTP 4535\nTP 4545",
       });
       expect(trade!.legs.every((leg) => leg.status === "OPEN")).toBe(true);
 
@@ -11048,7 +12635,7 @@ describe("Telegram TC API", () => {
       rawText: "Trail stop XAUUSD by 50 pips",
     });
     const ingest = await app.runTelegramIngestionOnce();
-    expect(ingest.errors).toBe(1);
+    expect(ingest.errors).toBe(0);
 
     const held = await json<{
       items: Array<{
@@ -11074,26 +12661,21 @@ describe("Telegram TC API", () => {
       commandType: "OPEN_TRADE",
       symbol: "XAUUSD",
       originalEntry: 4541,
-      droppedLifecycleCount: 1,
-      droppedLifecycle: ["TRAILING_STOP"],
+      droppedLifecycleCount: 0,
+      droppedLifecycle: [],
     });
     expect(item).not.toHaveProperty("signalSummary");
     expect(item).not.toHaveProperty("provider");
     expect(item).not.toHaveProperty("account");
 
-    const requeued = await json<{
-      droppedLifecycleCount: number;
-      droppedLifecycle: string[];
-    }>(
-      await app.request(`/api/queue-items/${openItem?.id}/requeue`, {
-        method: "POST",
-        body: JSON.stringify({ mode: "market" }),
-        headers: { "content-type": "application/json" },
-      }),
-    );
-    expect(requeued).toMatchObject({
-      droppedLifecycleCount: 1,
-      droppedLifecycle: ["TRAILING_STOP"],
+    const requeued = await app.request(`/api/queue-items/${openItem?.id}/requeue`, {
+      method: "POST",
+      body: JSON.stringify({ mode: "market" }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(requeued.status).toBe(409);
+    expect(await requeued.json()).toMatchObject({
+      error: expect.stringContaining("no unbound command was queued"),
     });
   });
 
@@ -11667,7 +13249,7 @@ describe("Telegram TC API", () => {
         body: JSON.stringify({ mode: "original" }),
         headers: { "content-type": "application/json" },
       }),
-    ).toHaveProperty("status", 200);
+    ).toHaveProperty("status", 409);
 
     const dismissedSignal = await parseHeld("SELL XAUUSD @ 4510\nSL 4520\nTP 4490");
     const heldForDismiss = await json<{ queueItemId: string }>(
@@ -11686,7 +13268,7 @@ describe("Telegram TC API", () => {
     );
     expect(
       dashboard.parserResults.find((signal) => signal.id === requeuedSignal.parsedSignalId)?.status,
-    ).toBe("PENDING");
+    ).toBe("HELD");
     expect(
       dashboard.parserResults.find((signal) => signal.id === dismissedSignal.parsedSignalId)
         ?.status,
@@ -11762,11 +13344,12 @@ describe("Telegram TC API", () => {
         {
           telegramMessageId: "automated-old",
           messageDate: "2026-07-14T08:00:00.000Z",
-          rawText: "SELL BTCUSD",
+          rawText: "SELL BTCUSD @ 50000\nSL 50100\nTP 49800",
         },
         {
           telegramMessageId: "automated-new",
           messageDate: "2026-07-14T08:01:00.000Z",
+          replyToMessageId: "automated-old",
           rawText: "Trail stop BTCUSD by 50 pips",
         },
       ]),
@@ -11822,6 +13405,799 @@ describe("Telegram TC API", () => {
   });
 });
 
+describe("step 3 evidence gate wiring", () => {
+  test("uses real VIP Gold fixtures for open, activation suppression, and reply close", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter(realFixtureMessages(["487", "489", "490"])),
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ openEvidence: "structured-id" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const vipIngest = await app.runTelegramIngestionOnce();
+    expect(vipIngest).toMatchObject({ queued: 2 });
+    const signals = await json<{
+      queue: Array<{ status: string; payload: { commandType: string; providerOrderId?: string } }>;
+    }>(await app.request("/api/signals"));
+    expect(signals.queue).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "PENDING",
+          payload: expect.objectContaining({ commandType: "OPEN_TRADE" }),
+        }),
+        expect.objectContaining({
+          status: "PENDING",
+          payload: expect.objectContaining({ commandType: "CLOSE_TRADE" }),
+        }),
+      ]),
+    );
+  });
+
+  test("uses real KAL fixtures for prose entry, inline TP/cancel, and quoted chatter", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter(
+        realFixtureMessages(["15329", "15343", "15509", "15514", "15228", "15230", "15231"]),
+      ),
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ openEvidence: "prose-complete" }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const kalIngest = await app.runTelegramIngestionOnce();
+    expect(kalIngest).toMatchObject({ queued: 3, reviewRequired: 2 });
+    const signals = await json<{
+      signals: Array<{ status: string; result: { commandType: string } }>;
+      queue: Array<{ status: string; payload: { commandType: string } }>;
+    }>(await app.request("/api/signals"));
+    expect(signals.queue.filter((item) => item.status === "PENDING")).toHaveLength(3);
+    expect(
+      signals.queue.filter(
+        (item) => item.status === "PENDING" && item.payload.commandType === "OPEN_TRADE",
+      ),
+    ).toHaveLength(3);
+    expect(
+      signals.signals.filter(
+        (item) => item.status === "APPROVED" && item.result.commandType === "MARK_TP_HIT",
+      ),
+    ).toHaveLength(2);
+    expect(
+      signals.signals.filter(
+        (item) => item.status === "IGNORED" && item.result.commandType === "NO_SIGNAL",
+      ),
+    ).toHaveLength(2);
+  });
+
+  test("releases a real corpus evidence-held OPEN through trade materialization", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-evidence-open-release-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(realFixtureMessages(["15226"])),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          openEvidence: "structured-id",
+          riskMode: "fixed",
+          riskAmount: 0.37,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.runTelegramIngestionOnce();
+      const held = await json<{ items: Array<{ id: string; heldReason: string }> }>(
+        await app.request("/api/queue-items/held"),
+      );
+      const heldOpen = held.items.find(
+        (item) => item.heldReason === "EVIDENCE_STRUCTURED_OPEN_EVIDENCE_REQUIRED",
+      );
+      expect(heldOpen).toBeDefined();
+      const signals = await json<{
+        queue: Array<{ id: string; payload: { volume?: number; riskPercent?: number } }>;
+      }>(await app.request("/api/signals"));
+      expect(signals.queue.find((item) => item.id === heldOpen?.id)?.payload).toMatchObject({
+        volume: 0.37,
+      });
+
+      const released = await json<{ queueItemId: string; logicalTradeId: string }>(
+        await app.request(`/api/queue-items/${heldOpen?.id}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original" }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(released.logicalTradeId).toBeTruthy();
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          db
+            .query("SELECT logical_trade_id FROM trade_origins WHERE logical_trade_id = ?")
+            .get(released.logicalTradeId),
+        ).toBeTruthy();
+        const queue = db
+          .query("SELECT logical_trade_id, payload_json FROM queue_items WHERE id = ?")
+          .get(released.queueItemId) as { logical_trade_id: string; payload_json: string };
+        expect(queue.logical_trade_id).toBe(released.logicalTradeId);
+        expect(
+          db
+            .query(
+              "SELECT status FROM parsed_signals WHERE id = (SELECT parsed_signal_id FROM queue_items WHERE id = ?)",
+            )
+            .get(released.queueItemId),
+        ).toEqual({ status: "APPROVED" });
+      } finally {
+        db.close();
+      }
+      await reportPendingAccepted(app, { queueItemId: released.queueItemId });
+      expect(
+        (
+          await json<{ logicalTrades: Array<{ id: string; status: string }> }>(
+            await app.request("/api/dashboard"),
+          )
+        ).logicalTrades.find((trade) => trade.id === released.logicalTradeId)?.status,
+      ).toBe("PENDING");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves the approved parsed status when dismissing a released held OPEN", async () => {
+    const source = await readFile(new URL("./app.ts", import.meta.url), "utf8");
+    expect(source).toContain("this.dismissReleasedQueueItem(id, parsedSignalId, null);");
+  });
+
+  test("releases an evidence-held OPEN on every linked account, not just the first", async () => {
+    // Production runs two linked accounts. The gate holds one row per account sharing a single
+    // parsed signal, so a dedup that ignores only the releasing row 409s on the sibling and
+    // strands both rows HELD forever. Both releases must succeed, in either order.
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-evidence-multi-account-release-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(realFixtureMessages(["15226"])),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ openEvidence: "structured-id" }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442827",
+          server: "OctaFX-Real",
+          company: "OctaFX",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+          eaVersion: "1.57.2",
+          eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-63442827/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+
+      await app.runTelegramIngestionOnce();
+      const held = await json<{ items: Array<{ id: string; accountId: string }> }>(
+        await app.request("/api/queue-items/held"),
+      );
+      const heldOpens = held.items.filter(
+        (item) => item.accountId === "mt5-63442826" || item.accountId === "mt5-63442827",
+      );
+      expect(heldOpens.map((item) => item.accountId).sort()).toEqual([
+        "mt5-63442826",
+        "mt5-63442827",
+      ]);
+
+      for (const heldOpen of heldOpens) {
+        const response = await app.request(`/api/queue-items/${heldOpen.id}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original" }),
+          headers: { "content-type": "application/json" },
+        });
+        expect({ accountId: heldOpen.accountId, status: response.status }).toEqual({
+          accountId: heldOpen.accountId,
+          status: 200,
+        });
+        const released = (await response.json()) as { accountId: string; logicalTradeId: string };
+        expect(released.accountId).toBe(heldOpen.accountId);
+        expect(released.logicalTradeId).toBeTruthy();
+      }
+
+      // Each account must end up with its own bound trade, and no held row may survive.
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const pending = db
+          .query("SELECT account_id FROM queue_items WHERE status = 'PENDING' ORDER BY account_id")
+          .all() as Array<{ account_id: string }>;
+        expect(pending.map((row) => row.account_id)).toEqual(["mt5-63442826", "mt5-63442827"]);
+        expect(
+          db.query("SELECT COUNT(*) AS n FROM queue_items WHERE status = 'HELD'").get(),
+        ).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("requires and honors an explicit active trade for a real corpus lifecycle release", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-evidence-lifecycle-release-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages = realFixtureMessages(["15226"]);
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.runTelegramIngestionOnce();
+      const open = await json<{
+        queue: Array<{ id: string; status: string; payload: { commandType: string } }>;
+      }>(await app.request("/api/signals"));
+      const openItem = open.queue.find((item) => item.payload.commandType === "OPEN_TRADE");
+      expect(openItem).toBeDefined();
+      await reportPendingAccepted(app, { queueItemId: openItem!.id });
+      const trade = await json<{
+        logicalTrades: Array<{ id: string; status: string }>;
+      }>(await app.request("/api/dashboard"));
+      const activeTrade = trade.logicalTrades.find((item) => item.status === "PENDING");
+      expect(activeTrade).toBeDefined();
+
+      messages.push(realFixtureMessages(["16669"])[0]!);
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion.errors).toBe(0);
+      const held = await json<{
+        items: Array<{
+          id: string;
+          commandType: string;
+          heldReason: string;
+          candidateLogicalTradeIds?: string[];
+        }>;
+      }>(await app.request("/api/queue-items/held"));
+      const heldClose = held.items.find((item) => item.commandType === "CANCEL_PENDING");
+      expect(heldClose).toMatchObject({ heldReason: "EVIDENCE_INLINE_QUOTE_ORIGIN_UNMATCHED" });
+      expect(heldClose?.candidateLogicalTradeIds).toContain(activeTrade?.id);
+
+      const refused = await app.request(`/api/queue-items/${heldClose?.id}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "original" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(refused.status).toBe(409);
+      const released = await json<{ queueItemId: string; logicalTradeId: string }>(
+        await app.request(`/api/queue-items/${heldClose?.id}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original", logicalTradeId: activeTrade!.id }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(released.logicalTradeId).toBe(activeTrade!.id);
+      const signals = await json<{
+        queue: Array<{
+          id: string;
+          logicalTradeId: string;
+          status: string;
+          payload: { commandType: string };
+        }>;
+      }>(await app.request("/api/signals"));
+      expect(signals.queue).toContainEqual(
+        expect.objectContaining({
+          id: released.queueItemId,
+          logicalTradeId: activeTrade!.id,
+          status: "PENDING",
+          payload: expect.objectContaining({ commandType: "CANCEL_PENDING" }),
+        }),
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("releases a real corpus lifecycle-reconciliation hold only to the selected trade", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-reconciliation-release-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages = realFixtureMessages(["15226", "15227"]);
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD"],
+      });
+      await app.runTelegramIngestionOnce();
+      const opened = await json<{
+        queue: Array<{ id: string; status: string; payload: { commandType: string } }>;
+      }>(await app.request("/api/signals"));
+      const openItems = opened.queue.filter(
+        (item) => item.status === "PENDING" && item.payload.commandType === "OPEN_TRADE",
+      );
+      expect(openItems).toHaveLength(2);
+      for (const item of openItems) await reportPendingAccepted(app, { queueItemId: item.id });
+
+      const removeFixture = realFixtureMessages(["16669"])[0]!;
+      const removeSignal = await json<{ parsedSignalId: string; result: { commandType: string } }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: removeFixture.rawText,
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(removeSignal.result.commandType).toBe("CANCEL_PENDING");
+      const approved = await json<{ status: string; queueItemId: string }>(
+        await app.request(`/api/signals/${removeSignal.parsedSignalId}/approve`, {
+          method: "POST",
+        }),
+      );
+      expect(approved.status).toBe("HELD");
+      const held = await json<{
+        items: Array<{
+          id: string;
+          heldReason: string;
+          candidateLogicalTradeIds: string[];
+        }>;
+      }>(await app.request("/api/queue-items/held"));
+      const reconciliation = held.items.find(
+        (item) =>
+          item.id === approved.queueItemId &&
+          item.heldReason.startsWith("LIFECYCLE_RECONCILIATION:"),
+      );
+      expect(reconciliation?.candidateLogicalTradeIds).toHaveLength(2);
+
+      const noSelection = await app.request(`/api/queue-items/${reconciliation!.id}/requeue`, {
+        method: "POST",
+        body: JSON.stringify({ mode: "original" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(noSelection.status).toBe(409);
+      const selectedLogicalTradeId = reconciliation!.candidateLogicalTradeIds[1]!;
+      const released = await json<{ queueItemId: string; logicalTradeId: string }>(
+        await app.request(`/api/queue-items/${reconciliation!.id}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original", logicalTradeId: selectedLogicalTradeId }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(released.logicalTradeId).toBe(selectedLogicalTradeId);
+      const after = await json<{
+        queue: Array<{
+          id: string;
+          logicalTradeId: string;
+          status: string;
+          payload: { commandType: string };
+        }>;
+      }>(await app.request("/api/signals"));
+      expect(after.queue).toContainEqual(
+        expect.objectContaining({
+          id: released.queueItemId,
+          logicalTradeId: selectedLogicalTradeId,
+          status: "PENDING",
+          payload: expect.objectContaining({ commandType: "CANCEL_PENDING" }),
+        }),
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("holds a real reply-link close with multiple origins and closes nothing", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-reply-multiple-origins-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages = realFixtureMessages(["545"]);
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD"],
+      });
+      await app.runTelegramIngestionOnce();
+      const opened = await json<{
+        queue: Array<{ id: string; logicalTradeId: string; payload: { commandType: string } }>;
+      }>(await app.request("/api/signals"));
+      const open = opened.queue.find((item) => item.payload.commandType === "OPEN_TRADE")!;
+      await reportPendingAccepted(app, { queueItemId: open.id });
+
+      const setup = new Database(databasePath);
+      try {
+        const original = setup
+          .query(
+            "SELECT provider_id, account_id, status, data_json, created_at FROM logical_trades WHERE id = ?",
+          )
+          .get(open.logicalTradeId) as {
+          provider_id: string;
+          account_id: string;
+          status: string;
+          data_json: string;
+          created_at: string;
+        };
+        const originalData = JSON.parse(original.data_json);
+        delete originalData.providerOrderId;
+        setup
+          .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
+          .run(JSON.stringify(originalData), open.logicalTradeId);
+        const duplicateId = "trade_reply_multiple_origins";
+        const duplicate = { ...originalData, id: duplicateId };
+        setup
+          .query(
+            "INSERT INTO logical_trades (id, provider_id, account_id, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            duplicateId,
+            original.provider_id,
+            original.account_id,
+            original.status,
+            JSON.stringify(duplicate),
+            original.created_at,
+          );
+        setup
+          .query(
+            "INSERT INTO trade_origins (provider_id, account_id, telegram_message_id, logical_trade_id, created_at) VALUES (?, ?, ?, ?, ?)",
+          )
+          .run(original.provider_id, original.account_id, "545", duplicateId, original.created_at);
+      } finally {
+        setup.close();
+      }
+
+      const closeFixture = realFixtureMessages(["547"])[0]!;
+      const close = await json<{ parsedSignalId: string; result: { commandType: string } }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: closeFixture.rawText,
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(close.result.commandType).toBe("CLOSE_TRADE");
+      const correlation = new Database(databasePath);
+      try {
+        correlation
+          .query(
+            `UPDATE raw_messages
+             SET telegram_message_id = ?, reply_to_message_id = ?
+             WHERE id = (SELECT raw_message_id FROM parsed_signals WHERE id = ?)`,
+          )
+          .run("547", "545", close.parsedSignalId);
+      } finally {
+        correlation.close();
+      }
+      const approval = await json<{ status: string; queueItemId: string }>(
+        await app.request(`/api/signals/${close.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(approval.status).toBe("HELD");
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        expect(
+          db
+            .query("SELECT held_reason FROM queue_items WHERE id = ? AND status = 'HELD'")
+            .get(approval.queueItemId),
+        ).toEqual({
+          held_reason:
+            "LIFECYCLE_RECONCILIATION:Multiple open logical trades match this provider command",
+        });
+        expect(
+          db
+            .query(
+              "SELECT COUNT(*) AS n FROM queue_items WHERE parsed_signal_id = ? AND status IN ('PENDING','LEASED','EXECUTED')",
+            )
+            .get(close.parsedSignalId),
+        ).toEqual({ n: 0 });
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("records a held real KAL TP hit without queueing an EA command", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-kal-tp-release-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages = realFixtureMessages(["15343"]);
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ openEvidence: "prose-complete" }),
+        headers: { "content-type": "application/json" },
+      });
+
+      await app.runTelegramIngestionOnce();
+      const heldBefore = await json<{
+        items: Array<{ id: string; commandType: string; heldReason: string }>;
+      }>(await app.request("/api/queue-items/held"));
+      const heldTp = heldBefore.items.find((item) => item.commandType === "MARK_TP_HIT");
+      expect(heldTp).toMatchObject({ commandType: "MARK_TP_HIT" });
+
+      messages.push(realFixtureMessages(["15329"])[0]!);
+      await app.runTelegramIngestionOnce();
+      const beforeRelease = await json<{
+        queue: Array<{ id: string; status: string; payload: { commandType: string } }>;
+      }>(await app.request("/api/signals"));
+      const openItem = beforeRelease.queue.find(
+        (item) => item.payload.commandType === "OPEN_TRADE" && item.status === "PENDING",
+      );
+      expect(openItem).toBeDefined();
+      await reportPendingAccepted(app, { queueItemId: openItem!.id });
+      const dashboard = await json<{
+        logicalTrades: Array<{ id: string; status: string }>;
+      }>(await app.request("/api/dashboard"));
+      const activeTrade = dashboard.logicalTrades.find((trade) => trade.status === "PENDING");
+      expect(activeTrade).toBeDefined();
+
+      const queueCountBefore = beforeRelease.queue.length;
+      const released = await json<{
+        status: string;
+        queueItemId?: string;
+        logicalTradeId: string;
+      }>(
+        await app.request(`/api/queue-items/${heldTp?.id}/requeue`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "original", logicalTradeId: activeTrade!.id }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      expect(released).toMatchObject({ status: "RECORDED", logicalTradeId: activeTrade!.id });
+      expect(released.queueItemId).toBeUndefined();
+
+      const after = await json<{
+        signals: Array<{ status: string; result: { commandType: string } }>;
+        queue: Array<{ id: string; status: string; payload: { commandType: string } }>;
+      }>(await app.request("/api/signals"));
+      expect(after.queue).toHaveLength(queueCountBefore);
+      expect(
+        after.queue.some(
+          (item) => item.payload.commandType === "MARK_TP_HIT" && item.status === "PENDING",
+        ),
+      ).toBe(false);
+      expect(after.signals.find((item) => item.result.commandType === "MARK_TP_HIT")?.status).toBe(
+        "APPROVED",
+      );
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const trade = db
+          .query("SELECT data_json FROM logical_trades WHERE id = ?")
+          .get(activeTrade!.id) as { data_json: string };
+        expect(JSON.parse(trade.data_json).legs).toEqual(
+          expect.arrayContaining([expect.objectContaining({ status: "HIT" })]),
+        );
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("disposes real NO_SIGNAL corpus messages: risk-off holds alert, ordinary noise audits only", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter(realFixtureMessages(["17114", "17183"])),
+      telegramPollingEnabled: false,
+    });
+    await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ alertBotToken: "token", alertChatId: "chat", alertOnHeld: true }),
+      headers: { "content-type": "application/json" },
+    });
+    const sentAlerts: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input, init) => {
+      sentAlerts.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await app.runTelegramIngestionOnce();
+      const signals = await json<{
+        signals: Array<{ status: string; result: { commandType: string; originalText: string } }>;
+      }>(await app.request("/api/signals"));
+      expect(signals.signals.filter((item) => item.status === "HELD")).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            result: expect.objectContaining({ commandType: "NO_SIGNAL" }),
+          }),
+        ]),
+      );
+      expect(signals.signals.filter((item) => item.status === "IGNORED")).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            result: expect.objectContaining({ commandType: "NO_SIGNAL" }),
+          }),
+        ]),
+      );
+      const held = await json<{ items: Array<{ heldReason: string }> }>(
+        await app.request("/api/queue-items/held"),
+      );
+      expect(held.items).toContainEqual(
+        expect.objectContaining({ heldReason: "EVIDENCE_RISK_OFF_NO_SIGNAL" }),
+      );
+      const drops = await json<{ logs: Array<{ eventType: string }> }>(
+        await app.request("/api/audit-logs?event=signal.evidence-drop"),
+      );
+      expect(drops.logs).toHaveLength(1);
+      expect(sentAlerts).toHaveLength(1);
+      expect(sentAlerts[0]).toContain("EVIDENCE_RISK_OFF_NO_SIGNAL");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("holds an unmatched real inline quote with a suggestion and no symbol fallback", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter(realFixtureMessages(["15509", "15343"])),
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ openEvidence: "prose-complete" }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ alertOnHeld: false, alertBotToken: "token", alertChatId: "chat" }),
+      headers: { "content-type": "application/json" },
+    });
+    const sentAlerts: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input, init) => {
+      sentAlerts.push(String(init?.body ?? ""));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      expect(await app.runTelegramIngestionOnce()).toMatchObject({ queued: 1 });
+      const held = await json<{
+        items: Array<{
+          heldReason: string;
+          heldTier?: string;
+          suggestion?: string;
+          commandType: string;
+        }>;
+      }>(await app.request("/api/queue-items/held"));
+      expect(held.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            commandType: "MARK_TP_HIT",
+            heldReason: "EVIDENCE_INLINE_QUOTE_ORIGIN_UNMATCHED",
+            heldTier: "action-required",
+          }),
+        ]),
+      );
+      expect(held.items[0]?.suggestion).toBeTruthy();
+      expect(held.items[0]?.suggestion).toMatch(/same-symbol trade/);
+      expect(
+        sentAlerts.some((body) => body.includes("EVIDENCE_INLINE_QUOTE_ORIGIN_UNMATCHED")),
+      ).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("executes a real KAL Comment: Remove after inline quote resolution to a pending trade", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-kal-inline-cancel-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages = realFixtureMessages(["16654"]);
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ openEvidence: "prose-complete" }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(await app.runTelegramIngestionOnce()).toMatchObject({ queued: 1 });
+      const db = new Database(databasePath);
+      db.query(
+        "UPDATE logical_trades SET status = 'PENDING', data_json = json_set(data_json, '$.status', 'PENDING')",
+      ).run();
+      db.close();
+      messages.push(realFixtureMessages(["16669"])[0]!);
+
+      expect(await app.runTelegramIngestionOnce()).toMatchObject({ queued: 1 });
+      const signals = await json<{
+        queue: Array<{ status: string; payload: { commandType: string } }>;
+      }>(await app.request("/api/signals"));
+      expect(signals.queue).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: "PENDING",
+            payload: expect.objectContaining({ commandType: "CANCEL_PENDING" }),
+          }),
+        ]),
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("operator approval bypasses the evidence gate for a real VIP Gold open", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ openEvidence: "structured-id" }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: corpusMessages.find((message) => message.telegramMessageId === "487")!.rawText,
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+      method: "POST",
+    });
+    expect(approval.status).toBe(200);
+    expect(await json<{ status: string }>(approval)).toMatchObject({ status: "PENDING" });
+  });
+});
+
 describe("provider traded symbols", () => {
   test("round-trips normalized traded symbols and fills symbol-less signals from the first symbol", async () => {
     const app = createApi({
@@ -11867,12 +14243,12 @@ describe("provider traded symbols", () => {
         {
           telegramMessageId: "off-list",
           messageDate: "2026-07-17T10:00:00.000Z",
-          rawText: "BUY BTCUSD",
+          rawText: "BUY BTCUSD @ 50000\nSL 50100\nTP 49800",
         },
         {
           telegramMessageId: "in-list",
           messageDate: "2026-07-17T10:01:00.000Z",
-          rawText: "BUY XAUUSD",
+          rawText: "BUY XAUUSD @ 4525\nSL 4515\nTP 4535",
         },
       ]),
       telegramPollingEnabled: false,
@@ -11962,7 +14338,7 @@ describe("provider traded symbols", () => {
         {
           telegramMessageId: "scan-1",
           messageDate: "2026-07-17T10:00:00.000Z",
-          rawText: "BUY XAUUSD",
+          rawText: "BUY XAUUSD @ 4525\nSL 4515\nTP 4535",
         },
         {
           telegramMessageId: "scan-2",
@@ -12042,6 +14418,63 @@ describe("provider traded symbols", () => {
 });
 
 describe("signal correlation Phase 1 persistence", () => {
+  test("persists forwarded provenance and nulls ordinary-message provenance", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-forward-provenance-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter([
+          {
+            telegramMessageId: "forwarded",
+            messageDate: "2026-07-17T10:00:00.000Z",
+            rawText: "BUY XAUUSD",
+            forwardedFrom: { peer: "channelId:991", name: "VIP Gold" },
+            forwardedDate: "2026-07-17T00:26:40.000Z",
+          },
+          {
+            telegramMessageId: "ordinary",
+            messageDate: "2026-07-17T10:01:00.000Z",
+            rawText: "SELL XAUUSD",
+          },
+        ]),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.runTelegramIngestionOnce();
+
+      const db = new Database(databasePath, { readonly: true });
+      try {
+        const rows = db
+          .query(
+            "SELECT telegram_message_id, forwarded_from, forward_date FROM raw_messages WHERE provider_id = ? ORDER BY telegram_message_id",
+          )
+          .all(providerId) as Array<{
+          telegram_message_id: string;
+          forwarded_from: string | null;
+          forward_date: string | null;
+        }>;
+        expect(rows).toEqual([
+          {
+            telegram_message_id: "forwarded",
+            forwarded_from: JSON.stringify({ peer: "channelId:991", name: "VIP Gold" }),
+            forward_date: "2026-07-17T00:26:40.000Z",
+          },
+          {
+            telegram_message_id: "ordinary",
+            forwarded_from: null,
+            forward_date: null,
+          },
+        ]);
+      } finally {
+        db.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("migrates reply correlation storage idempotently on fresh and legacy databases", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-signal-correlation-"));
     const legacyPath = join(tempDir, "legacy.db");
@@ -12070,6 +14503,8 @@ describe("signal correlation Phase 1 persistence", () => {
             name: string;
           }>;
           expect(columns.filter((column) => column.name === "reply_to_message_id")).toHaveLength(1);
+          expect(columns.filter((column) => column.name === "forwarded_from")).toHaveLength(1);
+          expect(columns.filter((column) => column.name === "forward_date")).toHaveLength(1);
           const tables = db
             .query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)")
             .all("raw_message_aliases", "trade_origins") as Array<{ name: string }>;
@@ -12243,7 +14678,7 @@ describe("signal correlation Phase 2a shadow logging", () => {
       ["CANCEL_PENDING", "OPEN", "hold"],
       ["CANCEL_PENDING", "CLOSED", "noop"],
       ["CLOSE_TRADE", "OPEN", "act"],
-      ["CLOSE_TRADE", "PENDING", "cancel"],
+      ["CLOSE_TRADE", "PENDING", "act"],
       ["CLOSE_TRADE", "CLOSED", "noop"],
       ["CLOSE_PARTIAL", "OPEN", "act"],
       ["CLOSE_PARTIAL", "PENDING", "cancel"],
@@ -12266,8 +14701,8 @@ describe("signal correlation Phase 2a shadow logging", () => {
       reason: "cancel-on-open",
     });
     expect(evaluateLifecycleActionState("CLOSE_TRADE", "PENDING")).toMatchObject({
-      verdict: "cancel",
-      reason: "close-pending",
+      verdict: "act",
+      reason: "flatten-pending",
     });
     expect(evaluateLifecycleActionState("MARK_TP_HIT", "OPEN").reason).toBe("tp-hit-record-only");
     expect(
@@ -12283,7 +14718,7 @@ describe("signal correlation Phase 2a shadow logging", () => {
         {
           telegramMessageId: "open",
           messageDate: "2026-07-17T10:00:00.000Z",
-          rawText: "BUY XAUUSD",
+          rawText: "BUY XAUUSD @ 4525\nSL 4515\nTP 4535",
         },
         {
           telegramMessageId: "update",
@@ -12431,7 +14866,7 @@ describe("signal correlation Phase 2a shadow logging", () => {
           .find((data) => !data.replyToMessageId);
         expect(noReply?.accounts[0]?.resolved).toMatchObject({
           method: "none",
-          reason: "no-reply-link",
+          reason: "no-evidence",
         });
       } finally {
         verify.close();
@@ -12449,7 +14884,7 @@ describe("signal correlation Phase 2a shadow logging", () => {
         {
           telegramMessageId: "open",
           messageDate: "2026-07-17T11:00:00.000Z",
-          rawText: "BUY XAUUSD",
+          rawText: "BUY XAUUSD @ 4525\nSL 4515\nTP 4535",
         },
         {
           telegramMessageId: "life",

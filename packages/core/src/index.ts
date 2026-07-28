@@ -130,9 +130,17 @@ export interface ParsedSignal {
   providerId?: string;
   accountId?: string;
   executionMode?: ExecutionMode;
+  closeAll?: boolean;
   /** Provider-side order id (e.g. VIP Gold "# 299490138"), when the message carries one. */
   providerOrderId?: string;
+  /** Extraction facts for the later evidence gate; never a verdict. */
+  evidence?: ParsedSignalEvidence;
   fingerprint: string;
+}
+
+export interface ParsedSignalEvidence {
+  structuralKind: "copier-new" | "copier-closed" | "none";
+  demotionMarkers: string[];
 }
 
 export interface LogicalTrade {
@@ -192,6 +200,7 @@ export interface RunnerConfig {
 export interface LifecycleMatch {
   status: "MATCHED" | "UNMATCHED" | "AMBIGUOUS";
   tradeId?: string;
+  tradeIds?: string[];
   confidence: number;
   requiresManualReview: boolean;
   reason?: string;
@@ -528,11 +537,19 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const matchedPatternIds: string[] = [...candidate.matchedPatternIds];
   const warnings: string[] = [];
   const missingFields: string[] = [];
-  let commandType = detectCommandType(
-    upper,
-    matchedPatternIds,
-    Boolean(candidate.quotedText && /\b(?:LIMIT|STOP|ENTRY)\b/i.test(candidate.quotedText)),
-  );
+  const quotedStatusCommandType = classifyQuotedNewOrderStatus(candidate, matchedPatternIds);
+  let commandType =
+    quotedStatusCommandType ??
+    detectCommandType(
+      upper,
+      matchedPatternIds,
+      Boolean(candidate.quotedText && /\b(?:LIMIT|STOP|ENTRY)\b/i.test(candidate.quotedText)),
+      Boolean(candidate.commentText) || /\bNEW\s+ORDER\b[\s\S]*\bCOMMENT\s*:/i.test(original),
+      /\bNEW\s+ORDER\b/.test(upper) &&
+        /\bENTRY\b/.test(upper) &&
+        /\bSL\b/.test(upper) &&
+        /\bTP\b/.test(upper),
+    );
   let direction = detectDirection(upper);
   let orderType: OrderType | undefined = detectOrderType(upper);
   let entry = commandType === "OPEN_TRADE" ? extractEntry(text, direction, orderType) : undefined;
@@ -645,6 +662,7 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   const newStopLoss = commandType === "MODIFY_SL" ? extractLifecyclePrice(text, "SL") : undefined;
   const trailingStop = commandType === "TRAILING_STOP" ? extractTrailingStop(upper) : undefined;
   const partialClose = commandType === "CLOSE_PARTIAL" ? extractPartialClose(upper) : undefined;
+  const closeAll = commandType === "CLOSE_TRADE" && isCloseAllInstruction(upper);
   const quotedSignal =
     candidate.quotedText && commandType !== "OPEN_TRADE" && commandType !== "NO_SIGNAL"
       ? parseSignalText(candidate.quotedText, { ...context, geometryInferenceSymbol: undefined })
@@ -702,6 +720,9 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   if (commandType === "TRAILING_STOP" && !trailingStop) {
     missingFields.push("trailingStop");
   }
+  if (commandType === "CLOSE_PARTIAL" && !partialClose) {
+    missingFields.push("partialClose");
+  }
 
   if (commandType !== "NO_SIGNAL" && effectiveMappingStatus !== "mapped") {
     warnings.push("Symbol could not be mapped to a broker symbol");
@@ -719,6 +740,8 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     takeProfitCount: takeProfits.length || (defaultTakeProfit ? 1 : 0),
     missingFieldCount: missingFields.length,
   });
+
+  const providerOrderId = extractProviderOrderId(text) ?? extractProviderOrderId(original);
 
   return {
     originalText: original,
@@ -747,7 +770,12 @@ export function parseSignalText(originalText: string, context: ParserContext = {
     warnings: [...new Set(warnings)],
     providerId: context.providerId,
     accountId: context.accountId,
-    providerOrderId: text.match(/#\s*(\d{6,})/)?.[1],
+    closeAll,
+    providerOrderId,
+    evidence: {
+      structuralKind: signalStructuralKind(original, commandType),
+      demotionMarkers: signalDemotionMarkers(original, upper),
+    },
     fingerprint: createMessageFingerprint(original),
   };
 }
@@ -817,6 +845,7 @@ export function shouldRequireManualReview(signal: ParsedSignal, aggressive = fal
   // NOT waive the genuine safety holds below: an unmapped symbol, a missing field
   // (including a pending order with no level), conflicting stop geometry, or a
   // non-signal all still hold in both modes.
+  if (signal.closeAll) return false;
   return (
     (!aggressive && signal.confidence < 0.75) ||
     signal.mappingStatus !== "mapped" ||
@@ -873,17 +902,12 @@ export function createLogicalTradeFromSignal(
   };
 }
 
-export function matchLifecycleCommandToTrade(
+export function matchLifecycleCommandToTrades(
   command: ParsedSignal,
   trades: LogicalTrade[],
-): LifecycleMatch {
+): LogicalTrade[] {
   if (command.commandType === "OPEN_TRADE" || command.commandType === "NO_SIGNAL") {
-    return {
-      status: "UNMATCHED",
-      confidence: 0,
-      requiresManualReview: true,
-      reason: "Open commands create trades instead of matching existing trades",
-    };
+    return [];
   }
 
   const candidates = trades.filter((trade) => {
@@ -902,11 +926,27 @@ export function matchLifecycleCommandToTrade(
 
   // An explicit provider id is authoritative when the trade has one too. A
   // different id must never fall back to a same-symbol close/cancel.
-  const idCompatibleCandidates = command.providerOrderId
+  return command.providerOrderId
     ? candidates.filter(
         (trade) => !trade.providerOrderId || trade.providerOrderId === command.providerOrderId,
       )
     : candidates;
+}
+
+export function matchLifecycleCommandToTrade(
+  command: ParsedSignal,
+  trades: LogicalTrade[],
+): LifecycleMatch {
+  if (command.commandType === "OPEN_TRADE" || command.commandType === "NO_SIGNAL") {
+    return {
+      status: "UNMATCHED",
+      confidence: 0,
+      requiresManualReview: true,
+      reason: "Open commands create trades instead of matching existing trades",
+    };
+  }
+
+  const idCompatibleCandidates = matchLifecycleCommandToTrades(command, trades);
   const providerOrderCandidates = command.providerOrderId
     ? idCompatibleCandidates.filter((trade) => trade.providerOrderId === command.providerOrderId)
     : [];
@@ -916,6 +956,15 @@ export function matchLifecycleCommandToTrade(
       tradeId: providerOrderCandidates[0]!.id,
       confidence: 0.99,
       requiresManualReview: false,
+    };
+  }
+  if (providerOrderCandidates.length > 1) {
+    return {
+      status: "AMBIGUOUS",
+      tradeIds: providerOrderCandidates.map((trade) => trade.id),
+      confidence: 0.45,
+      requiresManualReview: true,
+      reason: "Multiple active logical trades share this provider order id",
     };
   }
   if (idCompatibleCandidates.length === 1) {
@@ -1090,7 +1139,7 @@ function normalizeFrenchVocabulary(text: string): string {
 
 function extractSignalCandidate(text: string) {
   text = normalizeFrenchVocabulary(text);
-  const quoted = text.match(/Quoted signal:\n([\s\S]*?)(?:\n\nComment:\n([\s\S]*))?$/i);
+  const quoted = text.match(/Quoted signal:\s*([\s\S]*?)(?:\s+---\s+|\n\n)Comment:\s*([\s\S]*)$/i);
   // A quoted block is context, never an instruction. The ONLY comment that re-opens it
   // is an explicit put-back. Anything else — ordinary reply prose, an empty comment, or
   // no comment at all — must fall through to the comment (or to nothing), because
@@ -1140,7 +1189,21 @@ function detectCommandType(
   upper: string,
   matchedPatternIds: string[],
   hasQuotedPendingSignal = false,
+  hasLifecycleComment = false,
+  hasStructuralNewOrder = false,
 ): CommandType {
+  if (hasStructuralNewOrder && !hasLifecycleComment) {
+    matchedPatternIds.push("open.new-order-structure");
+    return "OPEN_TRADE";
+  }
+  if (isProviderClosedStatus(upper)) {
+    matchedPatternIds.push("lifecycle.provider-closed");
+    return "CLOSE_TRADE";
+  }
+  if (isCloseAllInstruction(upper)) {
+    matchedPatternIds.push("lifecycle.close-all");
+    return "CLOSE_TRADE";
+  }
   const pendingOrderRemoval = isPendingOrderRemoval(upper, hasQuotedPendingSignal);
   if (isDeferredOrNegatedInstruction(upper) && !pendingOrderRemoval) {
     matchedPatternIds.push("noise.deferred-or-negated");
@@ -1164,23 +1227,27 @@ function detectCommandType(
     matchedPatternIds.push("lifecycle.deleted-cancel");
     return "CANCEL_PENDING";
   }
-  const activationNotice = upper
+  // Line-anchored on purpose. Matching anywhere in the message would let recap
+  // prose ("our BUY STOP FILLED yesterday") inside a genuine new order silently
+  // skip the entry, which is the one place the hold-everything rule cannot help.
+  const activationLines = upper
     .replace(/[^A-Z0-9#\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
   if (
-    /^(?:BUY|SELL)\s+(?:LIMIT|STOP)\s+(?:ACTIVATED|TRIGGERED|FILLED)(?:\s*#\s*\d+)?$/.test(
-      activationNotice,
-    ) ||
-    /^(?:ACTIVATED|TRIGGERED|FILLED|ORDER\s+FILLED)$/.test(activationNotice)
+    activationLines.some((line) => isActivationStatusLine(line) && !isHistoricalStatusLine(line))
   ) {
-    matchedPatternIds.push("lifecycle.activation");
-    return "NO_SIGNAL";
+    if (
+      hasLifecycleComment ||
+      !hasCompleteOpenStructure(upper) ||
+      !activationLines.some((line) => /\bLIVE\b/.test(line) && !/#\s*\d{6,}\b/.test(line))
+    ) {
+      matchedPatternIds.push("lifecycle.activation");
+      return "NO_SIGNAL";
+    }
   }
-  // "CLOSED - <symbol> <side>" (with the "{ CLOSED }" block / profit report) is the
-  // provider closing its position. Align by closing our matching trade.
-  if (/\bCLOSED\s*[-–—]\s*[A-Z]{2,}/.test(upper) || /\{\s*CLOSED\s*\}/.test(upper)) {
-    matchedPatternIds.push("lifecycle.provider-closed");
+  if (isProviderClosedStatus(upper)) {
     return "CLOSE_TRADE";
   }
   if (/\bTP\b.*\b(NOT\s+(?:REACHED|HIT)|WAIT|MONITOR)\b/.test(upper)) {
@@ -1213,7 +1280,7 @@ function detectCommandType(
   }
   if (isCloseCommand(upper)) {
     matchedPatternIds.push("lifecycle.close");
-    if (/\b(HALF|PARTIAL)\b|\b\d{1,3}\s*%(?=\s|$)|\bTP\s*[1-4]\b/.test(upper)) {
+    if (/^\s*CLOSE\s+TP\s*[1-4]\b/.test(upper)) {
       return "CLOSE_PARTIAL";
     }
     return "CLOSE_TRADE";
@@ -1239,6 +1306,191 @@ function detectCommandType(
   if (hasOpenTradeIntent(upper)) return "OPEN_TRADE";
   matchedPatternIds.push("noise.no-signal");
   return "NO_SIGNAL";
+}
+
+function isActivationStatusLine(line: string): boolean {
+  const symbol = "(?:GOLD|SILVER|[A-Z]{6}|(?:US|NAS|SPX|GER|UK|JP)\\d{2,4})";
+  const sideAndOrder = `(?:(?:BUY|SELL)(?:\\s+${symbol})?\\s+(?:LIMIT|STOP)|(?:BUY|SELL)\\s+(?:LIMIT|STOP)\\s+${symbol}|${symbol}\\s+(?:BUY|SELL)\\s+(?:LIMIT|STOP))`;
+  const status = "(?:ACTIVATED|TRIGGERED|FILLED|EXECUTED|OPENED|LIVE)";
+  return (
+    new RegExp(`\\b${sideAndOrder}\\b.*\\b${status}\\b`).test(line) ||
+    new RegExp(`\\b${status}\\b.*\\b${sideAndOrder}\\b`).test(line) ||
+    /\bORDER\b.*\b(?:OPENED|LIVE)\b/.test(line) ||
+    /\b(?:IS|NOW)\s+(?:OPENED|LIVE)\b/.test(line) ||
+    /^\s*(?:ORDER\s+)?FILLED\b/.test(line)
+  );
+}
+
+function isHistoricalStatusLine(line: string): boolean {
+  return /\b(?:YESTERDAY|EARLIER|RECAP|FROM\s+EARLIER)\b/.test(line);
+}
+
+function isProviderClosedStatus(upper: string): boolean {
+  const tradeText = upper
+    .replace(/\b(?:MARKETS?|SESSION)\s+(?:IS\s+|ARE\s+)?(?:NOW\s+)?CLOSED\b/g, "")
+    .replace(/\bCLOSED\s+FOR\s+(?:THE\s+)?DAY\b/g, "");
+  if (!/\bCLOS(?:ED|ING)\b/.test(tradeText)) return false;
+
+  const closeSymbol = "(?:GOLD|SILVER|XAU/?USD|XAG/?USD|[A-Z]{6}|(?:US|NAS|SPX|GER|UK|JP)\\d{2,4})";
+  const normalizedLines = tradeText.split("\n").map((line) =>
+    line
+      .replace(/[^A-Z0-9#\s]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+  );
+  if (
+    /\bCLOS(?:ED|ING)\s+(?:ABOVE|BELOW|UNDER|OVER)[^\n]{0,24}\b(?:SL|TP|ENTRY|[0-9]+)/.test(
+      tradeText,
+    ) ||
+    /\b(?:REGISTRATION|MARKET|SESSION)\b[^\n]{0,24}\bCLOSED\b/.test(tradeText) ||
+    /\b(?:CANDLE|DAILY|WEEKLY|MONTHLY|TIMEFRAME|H[1-4])\b[\s\S]*\bCLOS(?:ED|ING)\b/.test(tradeText)
+  ) {
+    return false;
+  }
+  return (
+    /\{\s*CLOSED\s*\}/.test(tradeText) ||
+    new RegExp(`\\bCLOSED\\s*[-:—–]\\s*${closeSymbol}\\b`).test(tradeText) ||
+    normalizedLines.some((line) => /^CLOSED$/.test(line)) ||
+    /\b(?:CLOSED|CLOSING)\s+(?:HALF|MOST\s+POSITIONS?|ALL\s+(?:POSITIONS?|TRADES?|ORDERS?)|(?:\d{1,3}\s*(?:%|PERCENT)|1\s*\/\s*2))(?=\s|$)/.test(
+      tradeText,
+    ) ||
+    /\bPARTIALLY\s+CLOSED\b/.test(tradeText) ||
+    /\b(?:POSITION(?:S)?|TRADE(?:S)?|ORDER(?:S)?)\s+(?:IS\s+)?(?:FULLY\s+)?CLOSED\b/.test(
+      tradeText,
+    ) ||
+    /\bCLOSED\s+(?:POSITION(?:S)?|TRADE(?:S)?|ORDER(?:S)?)\b/.test(tradeText) ||
+    /\bCLOSED\b[^\n]{0,32}\b(?:TP\s*[1-4]|SL|ENTRY)\b/.test(tradeText) ||
+    /\bCLOSED\b[^\n]{0,32}#\s*\d{6,}\b/.test(tradeText)
+  );
+}
+
+function signalStructuralKind(
+  original: string,
+  commandType: CommandType,
+): ParsedSignalEvidence["structuralKind"] {
+  if (/\{\s*CLOSED\s*\}/i.test(original) || /\bCLOSED\s*[-:]\s*[A-Z0-9/]+/i.test(original)) {
+    return "copier-closed";
+  }
+  if (
+    commandType === "OPEN_TRADE" &&
+    /\bNEW\s+ORDER\b/i.test(original) &&
+    /\bENTRY\b/i.test(original)
+  ) {
+    return "copier-new";
+  }
+  return "none";
+}
+
+function signalDemotionMarkers(original: string, upper: string): string[] {
+  const markers: string[] = [];
+  if (
+    /\b(?:DO\s+NOT|DON'?T|NOT\s+NOW|NO\s+TRADE|WAIT\s+FOR|ONLY\s+AFTER|AFTER\s+CONFIRMATION|NOT\s+ENTER)\b/.test(
+      upper,
+    )
+  ) {
+    markers.push("negation");
+  }
+  if (
+    /\b(?:EDUCATION\s+ONLY|FOR\s+EXAMPLE|FOR\s+INSTANCE|JUST\s+AN\s+EXAMPLE|HYPOTHETICAL|EXAMPLE\s+ALERT)\b/.test(
+      upper,
+    )
+  ) {
+    markers.push("education/example");
+  }
+  if (
+    /\b(?:RECAP|DAILY\s+TARGET|TARGET\s+SMASHED|TRADES?\s+CLOSED\s+TODAY|CLOSED\s+TODAY|\d+\s+WINNERS?)\b/.test(
+      upper,
+    ) ||
+    /\b(?:CLOSED|CLOSING)\b[\s\S]{0,32}\b(?:YESTERDAY|EARLIER|RECAP|WINNERS?)\b/.test(original)
+  ) {
+    markers.push("recap");
+  }
+  return [...new Set(markers)];
+}
+
+function isCloseAllInstruction(upper: string): boolean {
+  return (
+    /^\s*(?:CLOSE|CLOSING)\s+(?:ALL|EVERY)\s+(?:POSITIONS?|TRADES?|ORDERS?)\b/.test(upper) ||
+    /^\s*(?:CLOSE|FLATTEN)\s+EVERYTHING\b/.test(upper) ||
+    /^\s*ALL\s+OUT\b/.test(upper) ||
+    /^\s*(?:ALL|EVERY|BOTH)\s+(?:POSITIONS?|TRADES?|ORDERS?)\s+CLOSED\b/.test(upper) ||
+    /^\s*(?:POSITIONS|TRADES|ORDERS)\s+CLOSED\b/.test(upper) ||
+    /^\s*(?:EVERYTHING|ALL)\s+CLOSED\b/.test(upper) ||
+    /^\s*CLOSED\s+(?:ALL|EVERY|BOTH)\s+(?:POSITIONS?|TRADES?|ORDERS?)\b/.test(upper) ||
+    /^\s*CLOSED\s+EVERYTHING\b/.test(upper)
+  );
+}
+
+function hasCompleteOpenStructure(upper: string): boolean {
+  return (
+    /\b(BUY|SELL)\b/.test(upper) &&
+    /\b(?:SL|STOP\s*LOSS)\b/.test(upper) &&
+    /\b(?:TP|TAKE\s*PROFIT)\b/.test(upper)
+  );
+}
+
+function classifyQuotedNewOrderStatus(
+  candidate: ReturnType<typeof extractSignalCandidate>,
+  matchedPatternIds: string[],
+): CommandType | undefined {
+  if (
+    !candidate.quotedText ||
+    !candidate.commentText ||
+    !/\bNEW\s+ORDER\b/i.test(candidate.quotedText)
+  ) {
+    return undefined;
+  }
+  const comment = candidate.commentText;
+  const upper = comment.toUpperCase();
+  const mark = (pattern: string) => {
+    matchedPatternIds.push(`lifecycle.quoted-status.${pattern}`);
+  };
+  if (/\b(?:DELETED|CANCELLED|CANCELED)\b/.test(upper)) {
+    mark("deleted");
+    matchedPatternIds.push("lifecycle.deleted-cancel");
+    return "CANCEL_PENDING";
+  }
+  if (/\bCLOS(?:ED|ING)\b/.test(upper)) {
+    if (
+      isCloseAllInstruction(upper) ||
+      isProviderClosedStatus(upper) ||
+      /^\s*CLOSED\s*[+−-]?\s*\d+(?:\.\d+)?\s*PIPS?\b/.test(upper)
+    ) {
+      mark("closed");
+      matchedPatternIds.push("lifecycle.provider-closed");
+      return "CLOSE_TRADE";
+    }
+    mark("closed-non-trade");
+    return "NO_SIGNAL";
+  }
+  if (/\bMODIFIED\b/.test(upper)) {
+    const modificationPatterns: string[] = [];
+    const normalized = upper.replace(/\bMODIFIED\b/g, "MODIFY");
+    const modification = detectCommandType(normalized, modificationPatterns, true, true);
+    if (
+      modification === "MODIFY_SL" ||
+      modification === "MODIFY_TP" ||
+      modification === "MOVE_SL_TO_BE" ||
+      modification === "TRAILING_STOP"
+    ) {
+      mark("modified-command");
+      return modification;
+    }
+    mark("modified");
+    return "NO_SIGNAL";
+  }
+  if (upper.split("\n").some((line) => isActivationStatusLine(line))) {
+    mark("activation");
+    matchedPatternIds.push("lifecycle.activation");
+    return "NO_SIGNAL";
+  }
+  return undefined;
+}
+
+function extractProviderOrderId(text: string): string | undefined {
+  // Provider tickets in this integration are six or more digits; short hashtags
+  // are TP numbering or social text, not durable order identities.
+  return text.match(/#\s*(\d{6,})\b/)?.[1];
 }
 
 function isPendingOrderRemoval(upper: string, hasQuotedPendingSignal: boolean): boolean {
@@ -1807,9 +2059,6 @@ function extractRiskPercent(text: string): number | undefined {
 function extractPartialClose(upper: string): PartialCloseInstruction | undefined {
   const tpLeg = upper.match(/\bTP\s*([1-4])\b/);
   if (tpLeg?.[1]) return { kind: "TP_LEG", value: Number(tpLeg[1]) };
-  const percent = upper.match(/\b(\d{1,3})\s*%(?=\s|$)/);
-  if (percent?.[1]) return { kind: "PERCENT", value: Number(percent[1]) };
-  if (/\bHALF\b/.test(upper)) return { kind: "PERCENT", value: 50 };
   return undefined;
 }
 

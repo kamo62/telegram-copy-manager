@@ -23,7 +23,7 @@ export function Panel({
       <header>
         <h2>{title}</h2>
         {tabs && activeTab && onTabChange ? (
-          <div className="panel-tabs" role="tablist">
+          <div className="segmented-control panel-tabs" role="tablist">
             {tabs.map((tab) => (
               <button
                 aria-selected={activeTab === tab}

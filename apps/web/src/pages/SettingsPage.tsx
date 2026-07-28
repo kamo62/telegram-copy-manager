@@ -119,7 +119,7 @@ export function SettingsPage({
           icon={<Sparkles aria-hidden="true" size={18} />}
           title="Display"
         >
-          <fieldset className="settings-theme-picker">
+          <fieldset className="segmented-control settings-theme-picker">
             <legend className="visually-hidden">Colour theme</legend>
             <button
               aria-pressed={theme === "light"}
@@ -377,16 +377,49 @@ export function SettingsPage({
         </SettingsSection>
 
         <SettingsSection
-          description="Send operational alerts through a Telegram bot. Each alert type can be enabled independently."
+          description="Send operational alerts through a Telegram bot. Alerting is off until a bot token and chat ID are set; each alert type is then enabled independently."
           icon={<Bell aria-hidden="true" size={18} />}
           title="Alerting"
         >
+          <details className="settings-help">
+            <summary>How to get a bot token and chat ID</summary>
+            <div className="settings-help-body">
+              <p>
+                <strong>Bot token.</strong> Open Telegram and message <code>@BotFather</code>. Send{" "}
+                <code>/newbot</code>, give it a name and a username ending in <code>bot</code>.
+                BotFather replies with a token shaped like <code>123456789:AAH...</code> — paste
+                that below. Treat it like a password: anyone holding it can post as your bot. Use{" "}
+                <code>/revoke</code> if it ever leaks.
+              </p>
+              <p>
+                <strong>Chat ID.</strong> Decide where alerts should land, then get its numeric ID:
+              </p>
+              <ul>
+                <li>
+                  <strong>Direct message to yourself</strong> — message your new bot once (bots
+                  cannot open a conversation first), then visit{" "}
+                  <code>https://api.telegram.org/bot&lt;token&gt;/getUpdates</code> and read{" "}
+                  <code>result[0].message.chat.id</code>. It is a positive number.
+                </li>
+                <li>
+                  <strong>Group or channel</strong> — add the bot as a member (for a channel, as an
+                  admin with post rights), send any message there, then call the same{" "}
+                  <code>getUpdates</code> URL. Group and channel IDs are negative and usually start{" "}
+                  <code>-100</code>.
+                </li>
+              </ul>
+              <p>
+                Save, then use <strong>Send test message</strong> to confirm delivery before relying
+                on it. A wrong chat ID fails silently.
+              </p>
+            </div>
+          </details>
           <div className="settings-grid">
             <Field
               hint={
                 settings.alertBotConfigured
                   ? "A bot token is configured. Enter a replacement token only to change it."
-                  : "Token issued by BotFather. Leave blank until alerting is configured."
+                  : "Issued by @BotFather via /newbot. See the help above. Leave blank to keep alerting off."
               }
               htmlFor="alertBotToken"
               label="Bot token"
@@ -395,12 +428,13 @@ export function SettingsPage({
                 className="settings-input mono"
                 id="alertBotToken"
                 name="alertBotToken"
-                placeholder="123456:ABC..."
+                placeholder="123456789:AAH..."
+                title="Get this from @BotFather in Telegram with /newbot. Expand the help above for the full walkthrough."
                 type="password"
               />
             </Field>
             <Field
-              hint="Telegram chat or channel ID that receives operational alerts."
+              hint="Where alerts are delivered. Positive for a direct message, negative (usually -100...) for a group or channel."
               htmlFor="alertChatId"
               label="Chat ID"
             >
@@ -410,6 +444,7 @@ export function SettingsPage({
                 id="alertChatId"
                 name="alertChatId"
                 placeholder="-100..."
+                title="Message the bot, then read result[0].message.chat.id from https://api.telegram.org/bot<token>/getUpdates. Expand the help above for the full walkthrough."
                 type="text"
               />
             </Field>

@@ -1,6 +1,7 @@
 import { ArrowRight, ShieldAlert } from "lucide-react";
 import type { DashboardSnapshot, ExternalBrokerPosition } from "../App";
 import { EmptyState } from "../components/EmptyState";
+import { numericSignTone } from "../components/Money";
 import { useLocale } from "../contexts/LocaleContext";
 import { formatMoney, formatNumber } from "../lib/format";
 
@@ -130,7 +131,7 @@ export function OperationsPage({
                 </div>
                 <div>
                   <dt>Today</dt>
-                  <dd className={(performance?.today ?? 0) < 0 ? "down" : "up"}>
+                  <dd className={numericSignTone(performance?.today ?? null) ?? undefined}>
                     {formatMoney(performance?.today ?? null, currency, locale)}
                   </dd>
                 </div>

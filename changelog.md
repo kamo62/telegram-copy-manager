@@ -1,5 +1,128 @@
 # Changelog
 
+## 1.61.0 - 2026-07-27 (Minor)
+
+Release impact: Minor because the EA gains an input and must be recompiled and reattached. The command contract and capability strings are unchanged.
+
+- **EA recompile and reattach required.** Build from this commit before relying on the new setting.
+- Added the `TradeComment` EA input, a dropdown choosing what the BROKER sees in the order comment: `Tagged` (`ttc:<id>`, the default and previous behaviour), `Hidden` (no comment), or `Custom` (operator text from `CustomTradeComment`). Suffixes are tagged-mode only, so hiding can never leak a bare `:close` or `:tp1` and a custom label is never corrupted; custom text is stripped of any stray `ttc:` and truncated to the MT5 comment limit.
+- The logical trade id is now written to the Experts log at every open, TP and close regardless of the mode chosen, so what the broker sees never changes what can be reconciled. This matters because the tag is the backend's FIRST attribution key: it falls back to the position then order ticket in `broker_orders`, and the EA identifies its own deals by magic number, but hiding the tag removes the last-resort path and this log line becomes it.
+- Alerting now defaults to off. It cannot deliver without a bot token and chat ID, and defaulting the toggles on presented an enabled channel that silently discarded every message.
+- Settings explains how to obtain a bot token from @BotFather and how to read a chat ID from getUpdates, including the sign convention for direct messages versus groups and channels.
+
+## 1.60.1 - 2026-07-27 (Patch)
+
+Release impact: Patch because only presentation changes; no execution, approval, gating or MT5 contract behaviour is affected.
+
+- Realised P/L no longer clips mid-glyph at the container edge, and negative money is red in the attribution tiles as it is everywhere else.
+- Gain and loss bars use the gain/loss tokens instead of teal and blue, survive colour-accent mode, and a zero value draws no bar.
+- Zero is neutral rather than green, fixed in the shared sign-tone helper so every consumer inherits it.
+- Empty tables show an empty state instead of a bare header row; the pending-order price column is labelled TRIGGER.
+- Held signals sort newest-first, reason chips are toned by kind so a transient EA_OFFLINE reads differently from a symbol-mapping config error, and the dropped count distinguishes zero from unknown.
+- Sidebar accounts show broker and equity; the review badge is a solid chip; the external-activity panel matches the dark console; Telegram no longer reports connected and not connected at once; segmented controls share one treatment.
+- Removed dead components, four legacy view branches the router never emits, and ~600 lines of duplicated CSS blocks.
+
+## 1.60.0 - 2026-07-27 (Minor)
+
+Release impact: Minor because automatic approval is now fail-closed behind an evidence gate, the held-signal release workflow became transactional, and provider-wide close fan-out was removed. The MT5 command contract is unchanged.
+
+- Wired the default-gated `approveSignal` path with operator bypass, provider-specific structured-id/prose-complete open evidence, forward provenance, provider-wide order-id novelty, and strict lifecycle resolution.
+- Added explicit `EVIDENCE_*` held queue items with alerts and operator suggestions, audited evidence drops, and stopped ingestion from silently skipping actionable review-required lifecycle signals.
+- Routed identity-less held OPEN releases, including EA reconnect auto-release, through scoped approved-open materialization; lifecycle releases require an explicitly selected active trade and broker binding.
+- Disposed ordinary `NO_SIGNAL`/`TRADE_SETUP` ingestion results as audited `IGNORED` records while holding and alerting risk-off vocabulary.
+- Fixed the risk-off vocabulary net, which required a literal `CLOSE` and so never matched `closing`, `cancelling`, `deleting` or `removing`. A genuine misclassified close was previously dropped silently. The first-week drop audit had the same class of hole and was widened.
+- Fixed multi-account release: the approval dedup judged all rows sharing a parsed signal, so with two linked accounts releasing either one returned 409 and both stayed held forever. The guard is now account-scoped.
+- Made every held-signal release transactional with deferred alerts, so a failed release no longer leaves an orphaned trade, a wrong parsed status, or an alert for work that rolled back.
+- Releasing a held `MARK_TP_HIT` now records the TP leg instead of queueing a command the EA rejects and dismissing the card as handled.
+- Added compare-and-swap on every held release: exactly one HELD row must transition, so a crash or concurrent release can no longer leave both an executable row and the original hold.
+- Removed provider-wide close fan-out and its operator-approval path. Close-all now holds per account and is released per trade, with remaining active trades re-held so an incomplete close is visible.
+- Ambiguous closes no longer resolve to an arbitrary first match; only trades genuinely sharing one provider order id still close together.
+
+## 1.59.0 - 2026-07-26 (Minor)
+
+Release impact: Minor because signal precedence, reply hydration, and provider-wide close-all change live lifecycle behaviour while preserving the existing MT5 command contract.
+
+- Structural close/open evidence now outranks prose, with reply-only close reports hydrated from stored Telegram context.
+- Added bounded provider-wide close-all fan-out for both present-tense instructions and past-tense ALL-quantified close reports, with per-trade reconciliation holds and operator audit/alert evidence.
+- Recognized OPENED/LIVE lifecycle comments without reopening quoted orders, queued the configured runner SL strategy, and rejected invalid zero target-remaining PERCENT closes.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; the EA must be rebuilt from the final 1.59.0 source.**
+
+## 1.58.1 - 2026-07-26 (Patch)
+
+Release impact: Patch because this restores structural lifecycle detection and corrects close-volume and runner execution without changing the public payload contract.
+
+- Held casual `CLOSED` prose for review while preserving structural provider closes, including the live msg-547 close and full-close semantics for partial-sounding wording.
+- Fixed activation detection for symbol-between-side/order forms, status-first forms, recap lines, and `LIVE` entry wording.
+- Kept sub-minimum partial slices held instead of escalating them to full closes; runner-only fallback still closes fully when there is no room.
+- Reported successful runner closes as `EXECUTED` with the remnant volume and ignored newly enabled runners for legacy `SPLIT_ORDER` trades.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; the EA must be rebuilt from the final 1.58.1 source.**
+
+## 1.58.0 - 2026-07-25 (Minor)
+
+Release impact: Minor because provider close messages now close the traded position by default, with only an explicitly configured runner left open.
+
+- Simplified CLOSED parsing to one provider-close event; prose amounts no longer create partial closes.
+- Made CLOSE_TRADE runner-aware and fail closed to a full close when the non-runner slice cannot meet broker volume rules.
+- Required filled-volume or observed-volume confirmation before marking a close slice executed.
+- Classified EXECUTED, OPENED, and LIVE pending-order notices as lifecycle events while preserving genuine new orders after historical recaps.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; the EA must be rebuilt from the final 1.58.0 source.**
+
+## 1.57.5 - 2026-07-25 (Patch)
+
+Release impact: Patch because this closes parser, account-routing, and partial-close sizing defects without changing the MT5 payload contract.
+
+- Recognized prefixed activation notices while letting complete new-order blocks win over recap prose.
+- Shared conservative CLOSED classification across quoted and raw messages; live VIP Gold msg-547 remains a full close despite its profit percentage.
+- Scoped parameter deduplication per account and queued clean linked accounts while recording duplicate accounts.
+- Mirrored PERCENT, LOTS, TP_LEG, target-remaining-volume, and requested-versus-filled partial sizing in the runnable flatten model.
+- **Recompile and reattach the EA; build from the final 1.57.5 commit.**
+
+## 1.57.4 - 2026-07-25 (Patch)
+
+Release impact: Patch. Completes the CLOSE_PARTIAL safety hardening and removes the unsafe pending-close version fallback.
+
+- Mirrored aggregated partial-close semantics in the runnable flatten model: only DONE slices become idempotently executed; failed, PLACED, and DONE_PARTIAL slices remain held and retryable.
+- Added regressions for quoted CLOSED classification, line-anchored activation detection, capability-only pending flatten gating, and aggregate partial-close reporting.
+- **Recompile and reattach the EA. Build the EA binary from the final 1.57.4 commit only. Intermediate 1.57.1/1.57.2 builds carry the CLOSE_PARTIAL regression; CLOSE_PARTIAL is deliberately not capability-gated.**
+
+## 1.57.3 - 2026-07-25 (Patch)
+
+Release impact: Patch. Repairs three CLOSE_PARTIAL regressions introduced by the 1.57.1 flatten rewrite. The EA must be recompiled and reattached.
+
+`ExecuteClose` serves both CLOSE_TRADE and CLOSE_PARTIAL, but the flatten rewrite applied CLOSE_TRADE semantics to both. A partial close therefore cancelled every working pending order for the logical trade, which destroys the remaining entries of a multi-entry setup; it also reported PARTIAL and stayed held even when it fully succeeded, because the surviving position looked like an incomplete flatten; and it was never marked idempotently executed, so a replay could close a second slice of the same position.
+
+Partial closes now run their own path: they never touch pending orders, they report EXECUTED on a DONE deal, and they mark the ticket executed so a replay cannot double-close. Full closes keep the 1.57.2 hardening, where a ticket completes only once the broker confirms the position is gone and PLACED or DONE_PARTIAL stays retryable. Covered by EA source-contract regressions and a partial-close case in the runnable flatten model; all three fixes were mutation-checked.
+
+## 1.57.2 - 2026-07-24 (Patch)
+
+Release impact: Patch because this closes four trade-safety defects without changing the public API shape; the EA must be recompiled and reattached before the new pending-close contract can execute.
+
+- Added the unique pending-close-flatten-v1 EA capability and gated pending-trade CLOSE_TRADE flattening on a fresh compatible register/heartbeat or EA version >=1.57.1; older EAs remain held.
+- Rejected requeue of unbound LIFECYCLE_RECONCILIATION:* items and made the EA reject empty lifecycle identities instead of treating them as wildcards.
+- Kept PLACED and DONE_PARTIAL closes retryable until broker state confirms the position is gone, preserving idempotency without over-closing.
+- Added runnable flatten-state regression coverage for pending removal, fill rescan, partial retry, and idempotent replay, plus server and EA-contract regressions.
+- **Operators must recompile and reattach mt5/TelegramTC_EA.mq5 before using pending-trade flattening.** The new capability is pending-close-flatten-v1; no push or deployment was performed.
+
+## 1.57.1 - 2026-07-24 (Patch)
+
+Release impact: Patch because this closes trade-safety review gaps without changing the public API shape; the EA close implementation must be recompiled and redeployed before pending-trade flattening is enabled.
+
+- Classified every status word in quoted NEW-order comments before open detection and constrained provider ticket extraction so TP numbering and short hashtags cannot become order identities.
+- Made provider order IDs take precedence over open-signal deduplication, ignored terminal trades for deduplication, and preferred fresh in-memory EA quotes over stale durable snapshots.
+- Held unmatched, ambiguous, incomplete, and incompatible lifecycle commands with explicit reconciliation evidence instead of dropping them.
+- Changed provider CLOSE handling for pending logical trades to a capability-gated flatten command that cancels pending orders and closes positions, reporting UNKNOWN/PARTIAL when exposure is not confirmed gone.
+- Added regression coverage for all six findings and aligned app and EA metadata at 1.57.1.
+- **Operators must recompile and reattach `mt5/TelegramTC_EA.mq5` before using the pending-trade flattening path.** Legacy EAs remain held by the existing capability gate.
+
+## 1.57.0 - 2026-07-24 (Minor)
+
+Release impact: Minor because this adds broker-agnostic duplicate-open, naked-order, and provider-order lifecycle safety behavior without changing the MT5 payload contract.
+
+- Classified provider activation/status replies as lifecycle context, including the live Sell Stop trailing-price format.
+- Held duplicate provider order IDs and malformed pending or market orders before EA delivery.
+- Persisted provider order IDs on logical trades and fanned provider closes across every active logical trade for that order ID.
+- Added live VIP Gold 545/546/547 regression coverage and aligned application and EA metadata at 1.57.0.
+
 ## 1.56.2 - 2026-07-24 (Patch)
 
 Release impact: Patch because this corrects account attribution and canonical mapping validation without changing execution or held-for-review behavior.

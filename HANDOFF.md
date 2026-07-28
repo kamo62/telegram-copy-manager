@@ -1,5 +1,400 @@
 # Handoff
 
+## UI REVIEW BACKLOG (2026-07-27, after v1.60.0 shipped)
+
+v1.60.0 is DEPLOYED and healthy. Both EAs on 1.60.0, evidence gate live and producing zero holds of
+its own. Current head `fbce560d`.
+
+Two independent UI reviews (Fable/Opus on 16 live screenshots in `output/ui-review/`, Codex sol on
+the frontend source) ran blind to each other and CONVERGED on four findings. Full outputs are in the
+session transcript; this is the actionable residue.
+
+### LIVE CONFIGURATION HAZARD - not a code bug, needs an owner decision
+
+**The Equity Guardian is DISABLED on both live accounts.**
+`mt5-1514065673`: threshold 0, enabled false. `mt5-54945785`: threshold 100,000,000, enabled false,
+and it has real breach history (paused 2026-07-20 at 10.21% drawdown, manually unpaused 07-21).
+So there is currently no drawdown protection on either account while KAL VIP copies onto the
+R1,068 account at 24% win rate. Decide the thresholds and re-enable, or accept explicitly.
+
+### Both reviewers, independently
+
+1. **Held row omits side, lots, SL and TP, and the price drift is unsigned.** The API computes drift
+   from a bid/ask midpoint without considering BUY vs SELL and discards the quote `updatedAt`
+   (`app.ts:5299`, `:4813`), so "+2.29%" is favourable on a sell and costly on a buy with no way to
+   tell - next to a market-execute button, on signals up to 5 days old. Carry side/SL/TP/quote-age
+   through the held API, sign the drift against direction, disable market release on a stale quote.
+2. **The review queue is buried.** `/review` navigates to `/logs` with Parser Lab rendered first;
+   held signals start thousands of px down. Give `/review` its own route with held signals first.
+3. **A failed cold load renders production as an unconfigured system.** Empty states are driven by
+   empty arrays, not by a *successful* response (`App.tsx:402`, `:836`, `:2342`), so a poll failure
+   shows "No MT5 account connected yet" and onboarding. Acting on either is destructive. Track
+   `hasLoadedSnapshot` and never infer zero from a failure.
+4. **Guardian threshold is unbounded** at both the form and the API (`EquityGuardianPage.tsx:107`,
+   `app.ts:5738`, `:14582`). Clamp the domain server-side.
+
+### Sol only (source-level)
+
+5. **"Market" vs "Original" is a FALSE CHOICE for lifecycle releases.** `requeueHeldLifecycle` never
+   branches on `mode`; it builds the same command and only echoes the choice into the audit
+   (`app.ts:5103`, `:5136`). Same shape as github issue #9 but a DIFFERENT path, so #9's fix will not
+   cover it. Collapse to one action and reject irrelevant `mode` server-side.
+6. **Parser "Approve" is one-click, no confirmation, and skips the evidence gate** via
+   `trigger:"operator"` (`ParserResult.tsx:166` -> `app.ts:763` -> `:3727`). This is the same bypass
+   that used to reach close-all fan-out. The gate is fail-closed everywhere except this button.
+7. **Manual force-push validates SL direction but not TP direction or ordering**
+   (`ManualSignalModal.tsx:78` vs `:102`; server repeats the omission at `app.ts:4505`).
+
+### Fixed this session
+
+- Providers table: removed TP # and SL (hardcoded em-dashes) and Profit (duplicated P/L exactly).
+- Configure gear and held-signal Dismiss were both `opacity:0` until row hover, from the global
+  `.data-table .icon-btn` rule at `base.css:6548`. On the review queue that meant both order-placing
+  buttons were prominent and the only decline button was invisible. Both scoped and fixed.
+  **That rule has now caused three real bugs** (clipped wide modal, invisible Configure, invisible
+  Dismiss). Consider inverting the default rather than scoping a fourth exception.
+- Provider config modal tightened to fit a 900px viewport without scrolling.
+
+### Corrections to earlier hypotheses (do not re-derive)
+
+- `HistoryPage.tsx` is NOT unreachable; `/history` resolves through `TAB_IDS` and renders it. The
+  dead code is the legacy `activeView === "trades" | "providers" | "parser" | "mapping"` branches,
+  which `parseRoute` never emits. Also dead: `AccountsOverview`, `SummaryPanel`, `Donut`,
+  `DitherSparkline`.
+- The History page does NOT block the main thread. That earlier observation was browser tab
+  contention from having ~10 tabs open, not an app defect.
+
+### Held queue state
+
+88 -> 15. All 74 `EXPIRED_LATE` bulk-dismissed. Remaining: 10 `SYMBOL_MAPPING_UNMAPPED` (need broker
+symbols mapped) and 5 `EA_OFFLINE` (past the auto-release age cap, need manual disposal). Alerting is
+still unconfigured, so nothing held is announced.
+
+## NEXT SESSION STARTS HERE — all 8 blocking items fixed, awaiting independent review
+
+Branch `fix/vipgold-duplicate-open-prevention` @ `fa758b2c` (NOT pushed). Gate: typecheck, lint,
+**609 tests**, build all green. Production is untouched on **v1.56.2**.
+
+**Dual independent review is DONE** (Fable/Opus + Codex sol, run in parallel without seeing each
+other). Sol reported no CRITICAL/HIGH. Fable found THREE HIGH, two of them introduced by item 5
+itself. All are fixed in `fa758b2c` and mutation-checked. Running only one reviewer would have
+shipped a close-all card that is permanently unreleasable on this exact two-account production
+setup. Keep running both.
+
+Remaining known issue, deliberately NOT blocking: "Requeue at market" is ignored for unbound held
+opens (github issue #9) - the UI offers it, the server queues the original LIMIT. Geometry is still
+correct and all other safety checks apply.
+
+The previous session recorded 7 blocking items. An independent Codex sol xhigh plan review found
+that **three of its five prescribed fixes were wrong**, and surfaced an 8th defect. All eight are now
+fixed and mutation-checked. What remains before deploy is the dual independent review of the diff,
+then the deploy steps below.
+
+### What was fixed (commits)
+
+- `1a85e0d8` — items 1 and 4, plus the drop-audit vocabulary hole.
+- `dccc808e` — items 2, 3 and 8 (release atomicity).
+- `d30c72f7` — item 5 (close-all).
+
+### Corrections to the OLD handoff text (do not follow the deleted list)
+
+The previous top section prescribed fixes that were wrong. Recorded here so nobody re-derives them:
+
+1. **Item 4's proposed regex was buggy.** `CANCEL(?:L?(?:E[DS]?|ING))?` drops `cancels` and admits
+   malformed `CANCELE`. Shipped instead:
+   `CLOS(?:E[SD]?|ING)|CANCEL(?:S|L?(?:ED|ING))?|DELET(?:E[SD]?|ING)|REMOV(?:E[SD]?|ING)`.
+   The corpus contains no `cancels`, so replay alone would never have caught it.
+2. **Item 1's proposed predicate was wrong.** "Still block PENDING/LEASED/EXECUTED" breaks the
+   SECOND release: once account A is released it holds a PENDING row that would then 409 account B.
+   A release is always account-scoped, so the guard ignores ALL different-account rows regardless of
+   status and blocks any non-source row for the releasing account.
+3. **Item 5's "DELETE close-all entirely" was UNSAFE.** The `closeAll` flag carries a fail-closed
+   guard: `evaluateLifecycle` and `evaluateOpen` hold on it BEFORE resolution is consulted. Remove
+   the flag and a close-all resolving via provider order id, reply link, or exact inline quote
+   returns EXECUTE instead of HOLD — a new execute path on the most dangerous command in the system.
+   Correct scope, now shipped: delete `approveCloseAll` and the promotion, KEEP the flag, both
+   holds, and `isCloseAllInstruction` as a classifier, and ADD a refusal on the operator path.
+
+### Item 8 (new, found by the review)
+
+HELD release transitions were not atomic. No requeue variant verified that its source row actually
+transitioned, and nothing prevented a duplicate release. A crash between statements left BOTH an
+executable row and the original HELD row, and a leaked PENDING row is immediately leasable by the
+EA. Guardian-unpause and EA-reconnect automation inherit the same path. All three variants now run
+in a transaction with a compare-and-swap requiring exactly one HELD row to transition.
+
+**Testing note that matters:** a CAS regression written against the held-OPEN path is VACUOUS —
+`approveSignal`'s dedup masks a lost dismissal there, so the test passes with no CAS at all. The
+regression deliberately targets the **bound** requeue path, which never calls `approveSignal`.
+
+### DEPLOY ORDERING CONSTRAINT (blocking)
+
+**Items 1 and 2 must reach production together.** Item 1 alone is more dangerous than the current
+state: it opens the release path while failed releases can still leak leasable rows. Separate local
+commits are fine as long as no intermediate artifact is deployed.
+
+### DEPLOY STEPS (owner actions, verified against source, not code)
+
+1. **`alertOnHeld: true` will not reach prod on its own.** `normalizeAppSettings` coerces with
+   `input.alertOnHeld === true`, so prod's stored `false` survives the deploy; the `true` default
+   only applies to fresh databases. Evidence holds force-alert regardless, but EA_OFFLINE /
+   NAKED_PENDING_ENTRY / DUPLICATE_ORDER_ID / SYMBOL_MAPPING / GUARDIAN /
+   EA_CAPABILITY_UNAVAILABLE holds stay silent. Flip it with a settings PATCH on the live box.
+2. **Alerting is entirely unconfigured in prod.** `alertBotToken` and `alertChatId` are EMPTY, so no
+   alert of any kind is delivered today — guardian pauses, EA offline and execution failures
+   included. Set both, then use "Send test message". Owner accepted this as post-deploy previously,
+   but evidence holds are now the primary safety surface, so it is effectively required.
+3. **Old `EA_CAPABILITY_UNAVAILABLE` holds do not auto-release.** `releaseEaOfflineHeldQueueItems`
+   filters `held_reason = 'EA_OFFLINE'` exactly, so each capability hold needs a manual requeue
+   after the recompiled EA attaches. In-flight PENDING items are unaffected.
+4. **EA recompile + reattach**, built from the final commit only.
+
+### Remaining before deploy
+
+- Dual independent review (Fable + Sol) over `48903580..d30c72f7`. NOT yet done.
+- Version/changelog metadata for 1.60.0 is still deferred; the working tree is deliberately
+  untouched on `package.json`, `changelog.md` and the EA source.
+
+### Lower priority (recorded, not blocking)
+
+- "Requeue at market" is silently ignored for held opens (`requeueHeldOpen` drops `mode`) while the
+  UI promises a market order.
+- The risk-off NO_SIGNAL rule holds banter: 93 of 1411 NO_SIGNALs become action-required alerts.
+  Deliberate for the first-week audit; consider an fyi tier after.
+- `dismissReleasedQueueItem` writing parsed status `PENDING` is now a deliberate default with an
+  explicit `"APPROVED"` override for the TP-hit path. Audit other callers if the default ever moves.
+
+### Delegation gotchas (cost ~40 minutes this session)
+
+- `Agent(isolation:"worktree")` branches from **main**, not the current HEAD.
+- `codex:codex-rescue` is a forwarder that exits in ~60s, so the harness deletes the "unchanged"
+  worktree while Codex is still running, and Codex falls back to the real repo.
+- **Codex writes to the directory the rescue agent was invoked from.** A prompt-level `cd` does not
+  move its sandbox root, so parallel Codex lanes in separate worktrees are impossible. Run them
+  sequentially, and guard the tree with a watcher on `git status --porcelain`.
+- A cancelled rescue agent can RESUME its old thread and re-apply a superseded spec. Cancel the
+  Codex job AND `TaskStop` the Claude-side agent, then reset the tree.
+- A Codex lane can finish its work and then hang without committing; check file mtimes against the
+  clock rather than trusting the elapsed counter.
+
+
+## START HERE — session boundary 2026-07-26
+
+Branch `fix/vipgold-duplicate-open-prevention` @ `ef409994`, 13 commits ahead of main, PUSHED.
+Production is untouched on **v1.56.2**. Nothing from this branch is deployed.
+Full plan: `PLAN-evidence-gated-execution.md`. Gate: typecheck, lint, **598 tests**, build all green.
+
+### Two things that are live risks RIGHT NOW on the production box
+1. **Orphan path in prod since v1.51.0.** The EA-reconnect auto-release requeues a held pending
+   order with no logical trade bound; the EA only rejects unbound *lifecycle* commands, so an OPEN
+   goes through and cannot be reconciled. FIXED in this branch but NOT DEPLOYED. If you want it
+   sooner, extract it as a standalone patch rather than waiting for steps 4-5.
+2. **The duplicate-open and false-dedup fixes are not deployed.** Both original incidents are fixed
+   on this branch (stable since v1.57.0) but prod still runs v1.56.2, so a VIP Gold "activated"
+   message can still orphan, and a new order at a cancelled order's price can still be swallowed.
+
+### Deploy prerequisites (owner action, not code)
+- **Alerting is entirely unconfigured in prod**: `alertBotToken` and `alertChatId` are EMPTY and all
+  `alertOn*` flags are unset, so NO alerts of any kind are sent today (guardian pauses, EA offline,
+  execution failures included). Evidence holds now force alert dispatch, but they still cannot send
+  without a token + chat id. Configure in Settings -> Alerting and use "Send test message".
+  Owner has accepted this as a post-deploy item, not a blocker.
+- Deploying this branch requires an **EA recompile + reattach** built from the final commit only.
+
+### Where the plan stands
+- Steps 1-3 COMPLETE: forward provenance capture, the pure evidence model, and the gate wired at
+  `approveSignal` (default-gated, `"operator"` bypass), plus two rounds of review fixes.
+- Steps 4-5 REMAINING: demote the same-symbol fallback to a suggestion everywhere, DELETE close-all
+  (`isCloseAllInstruction`, the `closeAll` flag, `approveCloseAll`) since the corpus contains zero
+  close-all messages, and remove ~250-300 lines of parser guard piles. Then release as v1.60.0.
+
+### Review discipline that actually worked — keep doing this
+- **Test from the real corpus, never invented strings.** 1945 real messages are committed at
+  `apps/api/src/fixtures/provider-messages.ts`; the replay harness is at
+  `scratchpad/replay.ts`. Nine review rounds were spent chasing phrasings the providers never send.
+- **Run Sol AND Fable in parallel, independently.** In the last round each found a critical the
+  other missed (Sol: release-path orphan; Fable: close-all gate escape + silent alerts).
+- **Review BEFORE committing.** The last round caught a book-flattening bug pre-commit.
+- Corpus command-type tallies are the inertness check: NO_SIGNAL 1411, OPEN_TRADE 348,
+  MARK_TP_HIT 138, CANCEL_PENDING 29, CLOSE_TRADE 15, MOVE_SL_TO_BE 4. Any step that is not meant to
+  change classification must leave these byte-identical.
+
+### Measured ground truth (do not re-derive)
+- VIP Gold `provider_15k9j3v`: structured copier blocks, 60/68 carry `#` ids, 25/26 lifecycle
+  messages carry a Telegram reply id, closes arrive as reply comments, and it closes MANUALLY.
+- KAL VIP `provider_1gfxfwd`: prose, ZERO order ids, only 8/160 lifecycle messages carry a reply id;
+  152 embed the original signal verbatim as inline `Quoted signal:` text. Lifecycle is 138 TP-hits
+  and 15 cancels; it never sends close instructions. 40% of its noise is ALSO quoted form, so the
+  quote alone is never evidence — the comment must independently parse to a lifecycle command.
+- Zero close-all phrasings exist in the entire corpus.
+
+
+## Independent review follow-up — F1-F5 fixed locally (2026-07-26), version remains 1.59.0
+
+- Lifecycle `closeAll` is now monotone fail-closed at `evaluateLifecycle`: a matched inline quote can no longer execute or reach provider-wide `approveCloseAll`; it returns `CLOSE_ALL_REQUIRES_OPERATOR`.
+- Evidence holds default to alert-enabled, force the evidence alert path even when an older database stored `alertOnHeld=false`, and persist `heldTier` (`action-required` or `fyi`) for later quieting. Production must have the alert bot token and chat id configured before deploy or held signals remain invisible.
+- Held OPEN payloads use the target account's provider risk configuration. Conflicting account verdicts demote DROP to HOLD; unbound lifecycle release remains a 409 refusal and leaves the original held card HELD.
+- Real corpus command-type tallies remain byte-identical: `NO_SIGNAL 1411`, `OPEN_TRADE 348`, `MARK_TP_HIT 138`, `CANCEL_PENDING 29`, `CLOSE_TRADE 15`, `MOVE_SL_TO_BE 4`. Evidence budgets remain `provider_15k9j3v` no-resolution `24/26/18`, simulated `49/1/18`; `provider_1gfxfwd` no-resolution `290/368/1219`, simulated `395/263/1219` (EXECUTE/HOLD/DROP).
+- Verification includes the full Bun gate, targeted real-corpus regressions, `git diff --check`, and mutation checks for all five fixes. No push, deploy, or EA compilation was performed.
+
+## Step 3 open questions — ANSWERED locally (2026-07-26), independent review still pending
+
+Both reviewers hit usage limits mid-review (reset 2:10pm SAST), so commit 9c665eab is
+recorded as PENDING INDEPENDENT REVIEW. The two questions flagged in that commit message
+were investigated directly and both came back clean:
+
+1. **Can KAL chatter whose inline quote fingerprint-matches a live trade execute?** NO.
+   Protection is two-factor and independent. The quote identifies WHICH trade; the comment
+   must independently parse to a lifecycle command. Verified against the real corpus:
+   `Comment: This one's abit riskier ...` -> NO_SIGNAL and `Comment: 120 pips if you kept
+   limits` -> NO_SIGNAL, and `isLifecycleCandidate` (execution-evidence.ts) excludes
+   NO_SIGNAL / OPEN_TRADE / TRADE_SETUP, so neither reaches `evaluateLifecycle` no matter how
+   cleanly its quote resolves. The genuine `Comment: Tp 2 150pips` -> MARK_TP_HIT does reach it.
+2. **Does account-scoped resolution silently skip the second account?** NO.
+   `resolveLifecycleTarget` is invoked INSIDE the per-target-account loop (app.ts:3627, and
+   again at :4059), so each linked account resolves its own trade through its own
+   `trade_origins` row. The `trade_origins.account_id = ?` filter is correct by design; a
+   two-account fan-out resolves both accounts independently.
+
+Still outstanding for the reviewers when limits reset: whether the gate is genuinely the only
+path to queue insertion/lease (requeue, auto-release, guardian unpause, manual push, retry,
+EA-offline release, the lifecycle path at :3887), and whether any genuine instruction can now
+be LOST rather than held — the risk direction that inverted with this commit.
+
+
+Updated: 2026-07-26 (v1.59.0 evidence-gated execution step 3 safety follow-up)
+
+## Evidence-gated execution step 3 (unreleased; version held at 1.59.0)
+
+- `approveSignal` is gated by default for automatic ingestion and accepts an explicit `operator` bypass for manual approval. The queue requeue path remains operator-controlled.
+- VIP Gold uses structured copier-new plus novel provider order IDs; KAL VIP uses complete prose geometry. Forwarded signals hold, provider order IDs are checked provider-wide across durable origins, and inline quotes require an exact same-provider fingerprint mapped through `trade_origins` to exactly one active trade.
+- Holds create `EVIDENCE_*` queue records, preserve same-symbol lifecycle candidates as suggestions, alert operators, and audit the verdict. Drops create ignored records and a distinct evidence-drop audit, including first-week close/cancel/delete vocabulary marking.
+- Ingestion now disposes `NO_SIGNAL` and `TRADE_SETUP` through the evidence layer: ordinary noise is audited `IGNORED` without alerts, while risk-off close/cancel/delete vocabulary is held and alerted. Step 4 resolution tightening/close-all deletion and step 5 parser guard deletions were not changed.
+- Identity-less held OPEN releases now route through scoped operator approval, materializing a logical trade and `trade_origins` row before PENDING delivery. The EA_OFFLINE reconnect auto-release orphan path was pre-existing since v1.51.0 and is now closed. Evidence-held lifecycle releases require an explicitly selected ACTIVE `logicalTradeId`, then enrich from that trade and bind broker targets; missing or inactive selections stay HELD/409.
+- Real corpus API tests now exercise reply-link and inline-quote resolution, release/reconciliation, reconnect release, and NO_SIGNAL disposal. Pure evidence budgets updated for the risk-off hold rule: no-resolution floor `provider_15k9j3v` `24/26/18`, `provider_1gfxfwd` `290/368/1219`; simulated-resolution `49/1/18` and `395/263/1219` respectively (EXECUTE/HOLD/DROP). Command-type tallies remain byte-identical.
+- Command-type tallies remain byte-identical: `NO_SIGNAL 1411`, `OPEN_TRADE 348`, `MARK_TP_HIT 138`, `CANCEL_PENDING 29`, `CLOSE_TRADE 15`, `MOVE_SL_TO_BE 4`. Version release metadata remains deferred to 1.60.0.
+
+## v1.59.0 evidence corpus budget (2026-07-26)
+
+- Replaced provider-shape test probes with 14 verbatim real provider messages from the committed 1,945-message corpus. The two original compact incident repros and reviewer-only states without real equivalents remain explicitly labelled synthetic in `apps/api/src/execution-evidence.test.ts`.
+- The pure `evaluateExecutionEvidence` corpus budgets are recorded separately:
+  - No-resolution floor: `provider_15k9j3v` EXECUTE 24, HOLD 26, DROP 18; `provider_1gfxfwd` EXECUTE 290, HOLD 368, DROP 1219.
+  - Simulated-resolution expected (reply id -> `reply-link`; `Quoted signal:` -> `inline-quote`, one active trade): `provider_15k9j3v` EXECUTE 49, HOLD 1, DROP 18; `provider_1gfxfwd` EXECUTE 395, HOLD 263, DROP 1219.
+- Real API corpus tests also drive `resolveLifecycleTarget` for reply-link and inline-quote fingerprints; the pure simulated budget remains a verdict-count control, not resolution proof.
+- `inline-quote` is first-class hard evidence only for an exact single-provider origin fingerprint mapping to exactly one active trade; unmatched or ambiguous resolution holds and never falls back to same-symbol matching.
+- These budgets are evidence-module counts only; the corpus command-type replay remains byte-identical to its pre-change baseline. No runtime version, deployment, or push changed.
+
+## Evidence-gated execution steps 1-2 (unreleased; no version bump)
+
+- Captured Telegram forward provenance (`forwarded_from` JSON metadata and `forward_date`) through the GramJS adapter and every raw-message INSERT path, with idempotent in-code columns and null ordinary-message values.
+- Added parser evidence facts only (`structuralKind` and `demotionMarkers`) and the unwired pure `evaluateExecutionEvidence` module with adversarial and provider-shape tests. No approval gate, close-all change, parser guard deletion, or MT5 contract change landed.
+- Remaining sequence: step 4 resolution/close-all tightening, step 5 parser guard deletion and corpus harness, then operator UX and v1.60.0 release metadata.
+
+## v1.59.0 — structure-first classification
+
+- Structural lifecycle evidence wins before prose guards; reply-only Telegram comments hydrate from the stored provider message so `Closed ✅` resolves deterministically.
+- Present-tense close-all instructions and past-tense ALL-quantified close reports (for example, `All positions closed ✅`) fan out one CLOSE_TRADE per active provider trade across enabled linked accounts, with `signal.close-all` audit evidence, fan-out counts, alerts, and reconciliation holds for missing tickets.
+- OPENED/LIVE activation comments stay lifecycle context while complete LIVE-branded entries remain opens; runner-preserving provider closes verify the configured remainder and queue its SL strategy.
+- EA and the runnable flatten model hold PERCENT closes with `targetRemainingVolume <= 0`; non-VIRTUAL_TP lifecycle holds/requeues strip runner payloads.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.59.0 source before enabling live execution. Nothing was pushed or deployed.**
+
+## v1.58.1 — close-safety follow-up
+
+- Provider close detection is structural: `{ CLOSED }`, `CLOSED - <SYMBOL>`, standalone `CLOSED`, explicit partial-sounding close wording, trade-context close wording, and provider IDs close fully; casual prose is held for review.
+- Activation detection handles symbol-between-side/order and status-first forms, removes `ALREADY` as a historical veto, keeps historical recap lines safe, and does not mistake `GOLD BUY LIMIT ... LIVE` for an activation.
+- EA partial slices below broker minimum/step return zero and remain retryable; only the runner close caller falls back to a full close. Successful runner closes exclude their marked remnant from incomplete-flatten counting and report `EXECUTED` with `remainingVolume`.
+- Close payloads apply the current runner only when the persisted logical trade execution mode is `VIRTUAL_TP`; legacy `SPLIT_ORDER` trades close fully.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.58.1 source before enabling live execution. Nothing was pushed or deployed.**
+
+## v1.58.0 — simplifying close semantics
+
+- Provider CLOSED prose always produces `CLOSE_TRADE`, including partial-sounding amounts and TP wording; only TP-leg allocation or explicit operator/manual commands produce `CLOSE_PARTIAL`.
+- `CLOSE_TRADE` closes the full position unless the provider runner is enabled and the non-runner slice meets broker minimum/step; otherwise it closes fully, including 0.01-lot positions.
+- EA close idempotency now requires a confirmed fill or observed volume delta, and runner survival is reflected in the app flatten model.
+- Activation, executed, opened, and live pending-order notices never open trades; historical recap lines do not suppress a complete new order.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.58.0 source before enabling live execution. Nothing was pushed or deployed.**
+
+## v1.57.5 — NO-GO review fixes
+
+- Activation notices accept symbol, order, and label prefixes plus trailing order/price text; complete Entry/SL/TP new-order blocks win over leading recap prose.
+- Quoted and raw CLOSED messages use one conservative classifier: TP legs, quantities, fractions, and ambiguity never become a full close; the live VIP Gold msg-547 profit percentage remains part of `CLOSE_TRADE`.
+- Open-signal parameter deduplication is account-scoped; duplicate linked accounts are recorded while clean accounts continue to queue.
+- The runnable partial-close model requests the EA-equivalent PERCENT, LOTS, or TP_LEG slice and marks a ticket executed only when filled volume covers the request.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.57.5 commit. Nothing was pushed or deployed.**
+
+## v1.57.4 — final pre-deploy safety completion
+
+- The runnable flatten model now mirrors `ExecutePartialClose`: pending orders remain untouched, one aggregate report covers all attempted positions, only `DONE` slices are marked idempotently executed, and `PLACED`, `DONE_PARTIAL`, or failed slices stay `PARTIAL`/held for retry or reconciliation. An already-executed or zero-attempt partial command reports `UNKNOWN`.
+- Pending-trade flattening is capability-only: `pending-close-flatten-v1` is required on a fresh heartbeat. EA version `1.57.1` alone, or `lane2-close-contract` alone, is held.
+- **Recompile and reattach `mt5/TelegramTC_EA.mq5`; build the EA binary from the final 1.57.4 commit only. Intermediate 1.57.1/1.57.2 binaries carry the CLOSE_PARTIAL regression. CLOSE_PARTIAL is deliberately not capability-gated.**
+- A held `PLACED`/`DONE_PARTIAL` partial close can still be requeued by an operator after its broker order fills. PERCENT payloads recalculate against `targetRemainingVolume`; LOTS and TP_LEG payloads do not know the filled amount. Reconcile the current MT5 snapshot and history for the position ticket, compare filled and remaining volume with the held report, and only then requeue an operator-adjusted residual close. Do not blindly requeue LOTS/TP_LEG work.
+
+## v1.57.3 — CLOSE_PARTIAL regressions from the 1.57.1 flatten rewrite (FIXED)
+
+Found in an Opus 5 review of 757bca9a; three prior review passes missed them.
+`ExecuteClose` (`mt5/TelegramTC_EA.mq5`) serves both CLOSE_TRADE and
+CLOSE_PARTIAL (dispatch at `:241`), but the flatten rewrite applied CLOSE_TRADE
+semantics to both, so a partial close:
+
+1. cancelled every working pending order for the logical trade, destroying the
+   remaining entries of a multi-entry/ladder setup;
+2. reported PARTIAL and stayed held even when it fully succeeded, because the
+   surviving position looked like an incomplete flatten;
+3. was never marked idempotently executed (the marker required the position to
+   be gone), so a replay could close a second slice of the same position.
+
+The server capability gate did not shield any of this:
+`requiresPendingCloseFlattenContract` (`apps/api/src/app.ts`) returns false for
+CLOSE_PARTIAL. The old EA did not cancel pendings, so the regression would have
+appeared only after the recompile.
+
+Fix: partial closes run their own `ExecutePartialClose` path that never touches
+pending orders, reports EXECUTED on a DONE deal, and marks the ticket executed
+so a replay cannot double-close. Full closes keep the 1.57.2 hardening
+(complete only once the broker confirms the position is gone; PLACED and
+DONE_PARTIAL stay retryable) via a `fullClose` gate. Covered by EA
+source-contract regressions plus a partial-close case in the runnable flatten
+model; all three fixes were mutation-checked.
+
+Applied all four second-pass HIGH/MEDIUM close-flatten and EA-contract fixes on
+fix/vipgold-duplicate-open-prevention; nothing was pushed or deployed.
+
+- Pending-trade CLOSE_TRADE flattening now requires the fresh
+  pending-close-flatten-v1 capability or EA version >=1.57.1. The recompiled
+  EA advertises both lane2-close-contract and pending-close-flatten-v1.
+- Requeue rejects unbound LIFECYCLE_RECONCILIATION:* items, and the EA rejects
+  every lifecycle command with an empty logicalTradeId; empty identity is
+  never a wildcard.
+- PLACED and DONE_PARTIAL closes stay retryable until broker state confirms
+  the ticket is gone. Partial retry uses the current remaining volume and
+  idempotent replay cannot double-close.
+- Added runnable flatten-state coverage for pending-order removal, fill
+  rescan, partial handling, and idempotent replay, plus server/API and EA
+  contract regressions.
+- **EA recompile and reattach are required before this new flattening behavior
+  can run.** Old EAs keep the prior safe behavior and are held from the new
+  pending-close path until a fresh compatible register/heartbeat is confirmed.
+
+Applied all six HIGH/MEDIUM trade-safety review fixes on `fix/vipgold-duplicate-open-prevention`; nothing was pushed or deployed.
+
+- Quoted NEW-order status comments now stay lifecycle context: activated/triggered/filled are `NO_SIGNAL`, deleted is `CANCEL_PENDING`, closed is `CLOSE_TRADE`, and modified is non-open unless a complete supported modification command is present.
+- Provider order IDs take precedence over fingerprint/parameter deduplication, terminal trades no longer block reposts, fresh live EA quotes win over stale durable snapshots, and short hashtags/TP numbering are not ticket identities.
+- Unmatched, ambiguous, incomplete, and incompatible lifecycle commands are persisted as `HELD` with `LIFECYCLE_RECONCILIATION:*` reasons and original-message evidence.
+- Provider CLOSE on a pending logical trade remains `CLOSE_TRADE`; the EA now cancels matching pending orders, re-scans for fills, closes matching positions, and reports `UNKNOWN`/`PARTIAL` when exposure is not fully confirmed gone.
+- **EA recompile and reattach/redeploy are required before this flattening behavior can run.** The server holds close work for EAs without `lane2-close-contract`; legacy EAs are not silently used.
+- Added regressions for all six findings, including the pending-fill-before-close orphan case. Full gate was run after the final patch; no push/deploy was performed.
+
+Updated: 2026-07-24 (v1.57.0 duplicate-open prevention)
+
+Implemented the scoped trade-safety batch on `fix/vipgold-duplicate-open-prevention`; nothing was pushed or deployed.
+
+- Activation/status replies, including VIP Gold msg 546, stay lifecycle context and never create an open.
+- Provider order IDs are persisted on logical trades; duplicate `(provider, account, order id)` opens are HELD as `DUPLICATE_ORDER_ID`.
+- Naked STOP/LIMIT entries and known-unquoted MARKET orders are HELD before EA delivery.
+- Provider CLOSE commands fan out to every active logical trade sharing the provider order id.
+- Added exact live 545/546/547, duplicate-id, naked-order, quote, and close-fanout regression coverage.
+- Full gate passed after the final metadata/test pass: `bun run typecheck`, `bun run lint`, `bun test` (541 passed, 0 failed), and `bun run build`.
+
 Updated: 2026-07-24 (v1.56.2 follow-up review fixes)
 
 ## Session progress (2026-07-24) - required Medium fixes applied locally

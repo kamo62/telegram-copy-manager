@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import { createBrowserRouter, MemoryRouter, RouterProvider } from "react-router-dom";
 import packageJson from "../../../package.json";
-import { App, type DashboardSnapshot, dashboardSnapshotsEqual } from "./App";
+import { App, type DashboardSnapshot, dashboardSnapshotsEqual, heldReleaseToast } from "./App";
 import { SettingsPage } from "./pages/SettingsPage";
 
 // App now reads its view/tab/account from the URL, so every render needs Router context.
@@ -235,6 +235,23 @@ function installFakeEventSource() {
     },
   };
 }
+
+test("held release messages distinguish recorded TP hits and symbol-less close-all work", () => {
+  expect(
+    heldReleaseToast({ commandType: "MARK_TP_HIT", symbol: "XAUUSD.r" }, "original", {
+      status: "RECORDED",
+    }),
+  ).toBe("TP hit recorded for XAUUSD.r");
+  expect(
+    heldReleaseToast({ commandType: "CLOSE_TRADE", symbol: "" }, "original", {
+      status: "PENDING",
+      remainingTradeCount: 2,
+    }),
+  ).toBe("Close queued for selected trade; 2 trades remain held");
+  expect(
+    heldReleaseToast({ commandType: "CLOSE_TRADE", symbol: "" }, "original", { status: "PENDING" }),
+  ).toBe("close trade requeued");
+});
 
 function heartbeatDashboard(heartbeatStatus = "online"): DashboardSnapshot {
   const current = heartbeatStatus === "online";

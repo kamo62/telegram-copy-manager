@@ -85,6 +85,7 @@ export function TelegramSetupPage({
             ) : null}
           </div>
           <DialogPicker
+            connected={isConnected}
             dialogs={dialogs}
             onRefresh={onRefreshDialogs}
             onRemove={onRemoveDialog}

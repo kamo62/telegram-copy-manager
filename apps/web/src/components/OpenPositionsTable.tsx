@@ -225,49 +225,57 @@ export function OpenPositionsTable({
         </div>
       </header>
 
-      <div className="data-table-wrap">
-        <table className="data-table open-positions-table">
-          <thead>
-            <tr>
-              <th scope="col">Origin</th>
-              {aggregate ? <th scope="col">Account</th> : null}
-              <th scope="col">Side</th>
-              <th scope="col">Symbol</th>
-              <th className="num" scope="col">
-                Volume
-              </th>
-              <th className="num" scope="col">
-                Open
-              </th>
-              <th className="num" scope="col">
-                Current
-              </th>
-              <th className="num" scope="col">
-                SL
-              </th>
-              <th className="num" scope="col">
-                TP
-              </th>
-              <th className="num" scope="col">
-                Floating P/L
-              </th>
-              <th scope="col">Ticket</th>
-            </tr>
-          </thead>
-          <tbody>
-            {positions.map((p) => (
-              <PositionRowComponent
-                key={`${p.accountNumber}-${p.ticket}`}
-                onDismiss={p.origin === "external" ? dismiss : undefined}
-                position={p}
-                aggregate={aggregate}
-                locale={locale}
-                currency={p.currency}
-              />
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {positions.length > 0 ? (
+        <div className="data-table-wrap">
+          <table className="data-table open-positions-table">
+            <thead>
+              <tr>
+                <th scope="col">Origin</th>
+                {aggregate ? <th scope="col">Account</th> : null}
+                <th scope="col">Side</th>
+                <th scope="col">Symbol</th>
+                <th className="num" scope="col">
+                  Volume
+                </th>
+                <th className="num" scope="col">
+                  Open
+                </th>
+                <th className="num" scope="col">
+                  Current
+                </th>
+                <th className="num" scope="col">
+                  SL
+                </th>
+                <th className="num" scope="col">
+                  TP
+                </th>
+                <th className="num" scope="col">
+                  Floating P/L
+                </th>
+                <th scope="col">Ticket</th>
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p) => (
+                <PositionRowComponent
+                  key={`${p.accountNumber}-${p.ticket}`}
+                  onDismiss={p.origin === "external" ? dismiss : undefined}
+                  position={p}
+                  aggregate={aggregate}
+                  locale={locale}
+                  currency={p.currency}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <EmptyState
+          body="Approved signals will appear here while they're running."
+          glyph={<Activity aria-hidden="true" size={28} />}
+          title="No positions open right now"
+        />
+      )}
 
       {pendingOrders.length > 0 ? (
         <section className="open-positions-pending">
@@ -284,7 +292,7 @@ export function OpenPositionsTable({
                     Volume
                   </th>
                   <th className="num" scope="col">
-                    Trigger price
+                    Trigger
                   </th>
                   <th className="num" scope="col">
                     SL

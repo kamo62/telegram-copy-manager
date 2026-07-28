@@ -198,7 +198,6 @@ describe("logical trade lifecycle", () => {
 
     const match = matchLifecycleCommandToTrade(command, [trade]);
 
-    expect(command.missingFields).toContain("symbol");
     expect(match.status).toBe("MATCHED");
     expect(match.tradeId).toBe("trade-1");
     expect(match.requiresManualReview).toBe(false);

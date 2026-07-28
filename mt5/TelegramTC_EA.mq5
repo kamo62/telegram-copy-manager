@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.56.2"
+#property version   "1.61.0"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -15,6 +15,17 @@ input int    HistoryBackfillSeconds = 60;
 input double DefaultLots    = 0.10;
 input int    DeviationPoints = 20;
 input ulong  MagicNumber    = 26050901;
+// What the BROKER sees in the order comment. The logical trade id is always written
+// to the Experts log and always reported to the backend regardless of this setting,
+// so hiding it changes what the broker sees, never what we can reconcile.
+enum TradeCommentVisibility
+  {
+   COMMENT_TAGGED = 0,  // Tagged - broker sees ttc:<id>
+   COMMENT_HIDDEN = 1,  // Hidden - broker sees no comment
+   COMMENT_CUSTOM = 2   // Custom - broker sees CustomTradeComment
+  };
+input TradeCommentVisibility TradeComment = COMMENT_TAGGED;
+input string CustomTradeComment = "";    // Used only when TradeComment = Custom
 // When > 0, every order's volume becomes SYMBOL_VOLUME_MIN × this multiplier,
 // overriding DefaultLots and any per-provider lot. Useful when you want
 // "smallest broker-acceptable size × N" across mixed asset classes (forex,
@@ -58,6 +69,7 @@ struct SignalCommand
    double targetRemainingVolume;
    string idempotencyKey;
    bool runnerEnabled;
+   double runnerVolume;
    ulong targetOrderTicket;
    ulong targetPositionTicket;
    ulong targetDealTicket;
@@ -82,7 +94,7 @@ int trailingStopStateCount = 0;
 int CurrentPollSeconds = 0;
 datetime LastHeartbeatSentAt = 0;
 datetime LastHistoryBackfillAt = 0;
-string EaCapabilitiesJson = "[\"lane2-close-contract\"]";
+string EaCapabilitiesJson = "[\"lane2-close-contract\",\"pending-close-flatten-v1\"]";
 
 int OnInit()
 {
@@ -149,7 +161,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.40.0",
+      "1.61.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -215,7 +227,12 @@ void PollAndExecute()
    SignalCommand command = {};
    if(!ParseCommand(response, command))
    {
-      ReportFailure(command.queueItemId, "Could not parse poll payload", "parser");
+      ReportUnknown(command.queueItemId, "Could not parse poll payload", "parser");
+      return;
+   }
+   if(IsLifecycleCommand(command.commandType) && command.logicalTradeId == "")
+   {
+      ReportUnknown(command.queueItemId, "Lifecycle command rejected", "empty logicalTradeId");
       return;
    }
 
@@ -290,7 +307,7 @@ bool ExecuteOpenTrade(SignalCommand &command)
 {
    if(!EnsureSymbol(command.brokerSymbol))
    {
-      ReportFailure(command.queueItemId, "Symbol is unavailable or has no fresh tick", command.brokerSymbol);
+      ReportUnknown(command.queueItemId, "Symbol is unavailable or has no fresh tick; reconcile quote before retry", command.brokerSymbol);
       return false;
    }
 
@@ -304,6 +321,7 @@ bool ExecuteOpenTrade(SignalCommand &command)
    request.volume = CommandVolume(command);
    request.deviation = DeviationPoints;
    request.comment = CompactTradeComment(command.logicalTradeId);
+   LogTradeIdentity(command.logicalTradeId, "open", request.comment);
 
    if(command.orderType == "LIMIT" || command.orderType == "STOP")
    {
@@ -428,6 +446,7 @@ bool ExecuteSplitOrders(SignalCommand &command)
       request.volume = LegVolume(command, leg, baseVolume);
       request.deviation = DeviationPoints;
       request.comment = CompactTradeTpComment(command.logicalTradeId, leg + 1);
+      LogTradeIdentity(command.logicalTradeId, "tp" + IntegerToString(leg + 1), request.comment);
       request.sl = SafeStopPrice(command.brokerSymbol, referencePrice, command.stopLoss, command.direction, true);
       request.tp = SafeStopPrice(command.brokerSymbol, referencePrice, command.tp[leg], command.direction, false);
 
@@ -752,39 +771,222 @@ void ModifyPositionTp(SignalCommand &command, ulong ticket, double takeProfit)
 
 void ExecuteClose(SignalCommand &command)
 {
+   // CLOSE_PARTIAL only reduces an open position: it must never cancel working
+   // pending orders, and the position surviving with a smaller volume is the
+   // expected result rather than an incomplete flatten. Only CLOSE_TRADE runs
+   // the flatten path below.
+   if(command.commandType != "CLOSE_TRADE")
+   {
+      ExecutePartialClose(command);
+      return;
+   }
+
+   ulong pendingTickets[];
+   int pendingFound = CollectPendingOrderTickets(command, pendingTickets);
+   ulong initialPositions[];
+   int initialPositionCount = CollectPositionTickets(command, initialPositions);
+   if(pendingFound <= 0 && initialPositionCount <= 0)
+   {
+      ReportUnknown(command.queueItemId, "No matching pending order or position; reconcile broker snapshot/history", command.commandType);
+      return;
+   }
+
+   int pendingRemoved = 0;
+   int pendingFailures = 0;
+   MqlTradeResult lastResult = {};
+   ulong lastOrderTicket = 0;
+   ulong lastPositionTicket = 0;
+   ulong lastDealTicket = 0;
+   for(int index = 0; index < pendingFound; index++)
+   {
+      MqlTradeResult result = {};
+      if(RemovePendingOrder(command, pendingTickets[index], result))
+         pendingRemoved++;
+      else
+         pendingFailures++;
+      lastResult = result;
+      lastOrderTicket = pendingTickets[index];
+   }
+
+   // A pending order may fill while the remove request is in flight. Re-scan
+   // after cancellation so CLOSE_TRADE handles the newly-created position too.
+   ulong positionTickets[];
+   int positionFound = CollectPositionTickets(command, positionTickets);
+   int positionsClosed = 0;
+   int positionFailures = 0;
+   bool partialResult = false;
+   double requestedVolume = 0.0;
+   double filledVolume = 0.0;
+   double remainingVolume = 0.0;
+   for(int index = 0; index < positionFound; index++)
+   {
+      ulong ticket = positionTickets[index];
+      if(LifecycleAlreadyExecuted(command, ticket))
+      {
+         positionFailures++;
+         lastPositionTicket = ticket;
+         continue;
+      }
+      MqlTradeResult result = {};
+      double requested = 0.0;
+      double filled = 0.0;
+      double remaining = 0.0;
+      if(ClosePositionTicket(command, ticket, result, requested, filled, remaining))
+         positionsClosed++;
+      else
+         positionFailures++;
+      if(result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED)
+         partialResult = true;
+      requestedVolume += requested;
+      filledVolume += filled;
+      remainingVolume += remaining;
+      lastResult = result;
+      lastPositionTicket = ticket;
+      lastDealTicket = result.deal;
+   }
+
+   ulong remainingPendingTickets[];
+   ulong remainingPositionTickets[];
+   int remainingPending = CollectPendingOrderTickets(command, remainingPendingTickets);
+   int remainingPositionMatches = CollectPositionTickets(command, remainingPositionTickets);
+   int remainingPositions = 0;
+   for(int index = 0; index < remainingPositionMatches; index++)
+      if(!LifecycleAlreadyExecuted(command, remainingPositionTickets[index]))
+         remainingPositions++;
+   string status = "UNKNOWN";
+   if(remainingPending == 0 && remainingPositions == 0 && pendingFailures == 0 && positionFailures == 0 && !partialResult)
+      status = "EXECUTED";
+   else if(pendingRemoved > 0 || positionsClosed > 0)
+      status = "PARTIAL";
+
+   string evidence = status == "EXECUTED"
+      ? "Pending orders and positions flattened"
+      : "Flatten incomplete; reconcile broker snapshot/history before retrying";
+   ReportWithVolumes(
+      command.queueItemId,
+      status,
+      lastResult.retcode,
+      lastResult.retcode_external,
+      lastResult.comment,
+      lastOrderTicket,
+      lastPositionTicket,
+      lastDealTicket,
+      0.0,
+      lastResult.price,
+      requestedVolume,
+      filledVolume,
+      remainingVolume,
+      evidence
+   );
+}
+
+void ExecutePartialClose(SignalCommand &command)
+{
+   if(command.partialCloseKind == "PERCENT" && command.targetRemainingVolume <= 0.0)
+   {
+      ReportUnknown(command.queueItemId, "No valid target remaining volume provided", command.commandType);
+      return;
+   }
    ulong tickets[];
    int found = CollectPositionTickets(command, tickets);
    if(found <= 0)
    {
-      ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
+      ReportUnknown(command.queueItemId, "No matching position; reconcile broker snapshot/history", command.commandType);
       return;
    }
 
-   int pending = 0;
+   // One aggregated report per command. Reporting per ticket would let a later
+   // EXECUTED slice overwrite an earlier failed one (last write wins on the
+   // queue item), leaving the command marked done while a slice never retried.
+   int attempted = 0;
+   int succeeded = 0;
+   bool partialResult = false;
+   double requestedVolume = 0.0;
+   double filledVolume = 0.0;
+   double remainingVolume = 0.0;
+   MqlTradeResult lastResult = {};
+   ulong lastPositionTicket = 0;
+   ulong lastDealTicket = 0;
    for(int index = 0; index < found; index++)
    {
-      if(LifecycleAlreadyExecuted(command, tickets[index]))
+      ulong ticket = tickets[index];
+      if(LifecycleAlreadyExecuted(command, ticket))
          continue;
-      pending++;
-      ClosePositionTicket(command, tickets[index]);
+      attempted++;
+      MqlTradeResult result = {};
+      double requested = 0.0;
+      double filled = 0.0;
+      double remaining = 0.0;
+      if(ClosePositionTicket(command, ticket, result, requested, filled, remaining))
+         succeeded++;
+      if(result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED)
+         partialResult = true;
+      requestedVolume += requested;
+      filledVolume += filled;
+      remainingVolume += remaining;
+      lastResult = result;
+      lastPositionTicket = ticket;
+      lastDealTicket = result.deal;
    }
-   if(pending == 0)
+
+   if(attempted > 0)
+   {
+      // Anything short of every attempted slice completing stays PARTIAL, which
+      // the server holds for review rather than treating as terminal.
+      string status = (succeeded == attempted && !partialResult) ? "EXECUTED" : "PARTIAL";
+      ReportWithVolumes(
+         command.queueItemId,
+         status,
+         lastResult.retcode,
+         lastResult.retcode_external,
+         lastResult.comment,
+         lastResult.order,
+         lastPositionTicket,
+         lastDealTicket,
+         0.0,
+         lastResult.price,
+         requestedVolume,
+         filledVolume,
+         remainingVolume,
+         status == "EXECUTED" ? "" : "Partial close did not complete; reconcile broker snapshot/history"
+      );
+   }
+
+   if(attempted == 0)
       ReportUnknown(command.queueItemId, "Lifecycle command was already executed; reconcile broker snapshot/history", command.commandType);
 }
 
-void ClosePositionTicket(SignalCommand &command, ulong ticket)
+bool ClosePositionTicket(
+   SignalCommand &command,
+   ulong ticket,
+   MqlTradeResult &result,
+   double &requestedVolume,
+   double &filledVolume,
+   double &remainingVolume
+)
 {
+   requestedVolume = 0.0;
+   filledVolume = 0.0;
+   remainingVolume = 0.0;
    if(!PositionSelectByTicket(ticket))
    {
-      ReportFailure(command.queueItemId, "No matching position found", command.brokerSymbol);
-      return;
+      result.comment = "Position disappeared before close";
+      return false;
    }
 
    string symbol = PositionGetString(POSITION_SYMBOL);
    long positionType = PositionGetInteger(POSITION_TYPE);
    double currentVolume = PositionGetDouble(POSITION_VOLUME);
    double closeVolume = command.commandType == "CLOSE_PARTIAL" ? 0.0 : currentVolume;
-   if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "PERCENT")
+   if(command.commandType == "CLOSE_TRADE" && command.runnerEnabled)
+   {
+      closeVolume = command.runnerVolume >= currentVolume
+         ? currentVolume
+         : NormalizeCloseVolume(symbol, currentVolume - command.runnerVolume, currentVolume);
+      if(closeVolume <= 0.0)
+         closeVolume = currentVolume;
+   }
+   else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "PERCENT")
       closeVolume = NormalizeCloseVolume(symbol, currentVolume - command.targetRemainingVolume, currentVolume);
    else if(command.commandType == "CLOSE_PARTIAL" && command.partialCloseKind == "TP_LEG")
    {
@@ -798,12 +1000,13 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
 
    if(closeVolume <= 0.0)
    {
-      ReportFailure(command.queueItemId, "No valid partial-close volume provided", command.commandType);
-      return;
+      result.comment = command.commandType == "CLOSE_PARTIAL"
+         ? "No valid partial-close volume provided"
+         : "No valid close volume provided";
+      return false;
    }
 
    MqlTradeRequest request = {};
-   MqlTradeResult result = {};
    request.action = TRADE_ACTION_DEAL;
    request.position = ticket;
    request.symbol = symbol;
@@ -815,7 +1018,8 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
    request.price = positionType == POSITION_TYPE_BUY
       ? SymbolInfoDouble(symbol, SYMBOL_BID)
       : SymbolInfoDouble(symbol, SYMBOL_ASK);
-   request.comment = CompactTradeComment(command.logicalTradeId) + ":close";
+   request.comment = CompactTradeSuffixComment(command.logicalTradeId, ":close");
+   LogTradeIdentity(command.logicalTradeId, "close", request.comment);
 
    PrintFormat("Telegram TC CLOSE command=%s ticket=%I64u queue=%s logicalTradeId=%s symbol=%s closeVolume=%.2f currentVolume=%.2f partialKind=%s targetPosition=%I64u",
       command.commandType,
@@ -829,11 +1033,18 @@ void ClosePositionTicket(SignalCommand &command, ulong ticket)
       command.targetPositionTicket);
 
    bool sent = OrderSend(request, result);
-   if(sent && IsTradeSuccess(result.retcode))
+   bool positionGone = !PositionSelectByTicket(ticket);
+   remainingVolume = positionGone ? 0.0 : PositionGetDouble(POSITION_VOLUME);
+   double observedFilledVolume = positionGone ? currentVolume : MathMax(0.0, currentVolume - remainingVolume);
+   filledVolume = MathMax(result.volume, observedFilledVolume);
+   bool fullClose = closeVolume >= currentVolume - 0.000001;
+   bool filledConfirmed = filledVolume + 0.000001 >= request.volume;
+   // Full closes require the position gone. Slice closes require a DONE result
+   // plus broker-confirmed volume, either from the deal or the observed delta.
+   if(sent && result.retcode == TRADE_RETCODE_DONE && filledConfirmed && (positionGone || !fullClose))
       MarkLifecycleExecuted(command, ticket);
-   double filledVolume = result.volume;
-   double remainingVolume = MathMax(0.0, currentVolume - filledVolume);
-   ReportWithVolumes(command.queueItemId, result.retcode == TRADE_RETCODE_DONE_PARTIAL ? "PARTIAL" : (IsTradeSuccess(result.retcode) ? "EXECUTED" : "FAILED"), result.retcode, result.retcode_external, result.comment, result.order, ticket, result.deal, request.price, result.price, request.volume, filledVolume, remainingVolume, sent ? "" : IntegerToString(GetLastError()));
+   requestedVolume = request.volume;
+   return sent && IsTradeSuccess(result.retcode);
 }
 
 ulong FindPositionTicket(SignalCommand &command)
@@ -921,7 +1132,7 @@ bool OrderMatchesCommand(SignalCommand &command)
 bool MatchesLogicalTradeComment(string brokerComment, string logicalTradeId)
 {
    if(logicalTradeId == "")
-      return true;
+      return false;
    if(StringFind(brokerComment, logicalTradeId) >= 0)
       return true;
    return StringFind(brokerComment, CompactTradeId(logicalTradeId)) >= 0;
@@ -936,14 +1147,73 @@ string CompactTradeId(string logicalTradeId)
    return logicalTradeId;
 }
 
+// The ttc: tag is written into the broker-visible order comment. It is the FIRST key
+// used to map a broker deal back to a logical trade, but not the only one: the server
+// falls back to the position ticket and then the order ticket recorded in broker_orders,
+// and this EA identifies its own deals by MagicNumber independently. So hiding it is
+// safe for normal operation. The cost is losing the last-resort attribution path, so a
+// deal whose ticket was never recorded (a report lost in flight) can no longer be
+// recovered by comment and will look external. Leave it on unless the broker comment
+// needs to stay clean.
+// Always record the mapping locally, whatever the broker is shown. The ttc: tag is the
+// FIRST key the backend uses to map a broker deal to a logical trade, but not the only
+// one: it falls back to the position ticket then the order ticket from broker_orders,
+// and this EA identifies its own deals by MagicNumber. Hiding the tag removes the
+// last-resort attribution path, so this log line IS that path - it is how an operator
+// re-attaches a deal by hand when a report was lost in flight.
+void LogTradeIdentity(string logicalTradeId, string context, string brokerComment)
+{
+   PrintFormat("Telegram TC IDENTITY logicalTradeId=%s ttc=%s context=%s brokerComment=\"%s\"",
+      logicalTradeId,
+      CompactTradeId(logicalTradeId),
+      context,
+      brokerComment);
+}
+
+// MT5 truncates order comments around 31 chars and a stray "ttc:" inside a custom
+// string would be parsed back as a real tag, so the custom text is sanitised.
+string SanitizedCustomComment()
+{
+   string custom = CustomTradeComment;
+   StringReplace(custom, "ttc:", "");
+   StringTrimLeft(custom);
+   StringTrimRight(custom);
+   if(StringLen(custom) > 31)
+      custom = StringSubstr(custom, 0, 31);
+   return custom;
+}
+
 string CompactTradeComment(string logicalTradeId)
 {
+   if(TradeComment == COMMENT_HIDDEN)
+      return "";
+   if(TradeComment == COMMENT_CUSTOM)
+      return SanitizedCustomComment();
    return "ttc:" + CompactTradeId(logicalTradeId);
+}
+
+// Suffixes belong to the tagged form only. Appending ":close" to a hidden comment
+// would leak a bare marker that explains nothing to the broker and matches nothing
+// coming back; appending it to a custom label would corrupt the operator's own text.
+bool CommentCarriesTag()
+{
+   return TradeComment == COMMENT_TAGGED;
 }
 
 string CompactTradeTpComment(string logicalTradeId, int leg)
 {
-   return CompactTradeComment(logicalTradeId) + ":tp" + IntegerToString(leg);
+   string base = CompactTradeComment(logicalTradeId);
+   if(!CommentCarriesTag() || base == "")
+      return base;
+   return base + ":tp" + IntegerToString(leg);
+}
+
+string CompactTradeSuffixComment(string logicalTradeId, string suffix)
+{
+   string base = CompactTradeComment(logicalTradeId);
+   if(!CommentCarriesTag() || base == "")
+      return base;
+   return base + suffix;
 }
 
 // Snapshot includes ALL positions, not just magic-matched. External (manual,
@@ -1168,6 +1438,7 @@ bool ParseCommand(string body, SignalCommand &command)
    command.targetRemainingVolume = StringToDouble(ValueFor(body, "targetRemainingVolume"));
    command.idempotencyKey = ValueFor(body, "idempotencyKey");
    command.runnerEnabled = ValueFor(body, "runnerEnabled") == "true";
+   command.runnerVolume = StringToDouble(ValueFor(body, "runnerVolume"));
    command.targetOrderTicket = (ulong)StringToInteger(ValueFor(body, "targetOrderTicket"));
    command.targetPositionTicket = (ulong)StringToInteger(ValueFor(body, "targetPositionTicket"));
    command.targetDealTicket = (ulong)StringToInteger(ValueFor(body, "targetDealTicket"));
@@ -1180,6 +1451,17 @@ bool ParseCommand(string body, SignalCommand &command)
       command.tpVolume[index] = StringToDouble(ValueFor(body, "tp" + leg + "Volume"));
    }
    return command.queueItemId != "" && command.commandType != "";
+}
+
+bool IsLifecycleCommand(string commandType)
+{
+   return commandType == "CANCEL_PENDING" ||
+          commandType == "MOVE_SL_TO_BE" ||
+          commandType == "MODIFY_SL" ||
+          commandType == "MODIFY_TP" ||
+          commandType == "TRAILING_STOP" ||
+          commandType == "CLOSE_TRADE" ||
+          commandType == "CLOSE_PARTIAL";
 }
 
 void ApplyPollConfig(string body)
@@ -1444,9 +1726,11 @@ double NormalizeCloseVolume(string symbol, double requested, double currentVolum
    double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
    if(step <= 0.0 || requested <= 0.0 || currentVolume <= 0.0)
       return 0.0;
+   if(requested >= currentVolume - step * 0.000001)
+      return currentVolume;
    double volume = MathMin(maxVolume, requested);
    volume = NormalizeDouble(MathFloor((volume + step * 0.000001) / step) * step, VolumeDigits(step));
-   if(volume < minVolume || volume >= currentVolume - step * 0.000001)
+   if(volume < minVolume || volume <= 0.0)
       return 0.0;
    return volume;
 }
@@ -1555,7 +1839,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.40.0",
+      "1.61.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

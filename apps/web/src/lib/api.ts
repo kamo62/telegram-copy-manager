@@ -20,6 +20,7 @@ interface ApiOptions extends Omit<RequestInit, "body"> {
 export interface HeldQueueItem {
   id: string;
   heldReason: string;
+  heldTier?: "action-required" | "fyi";
   accountId: string;
   providerId: string;
   commandType: string;
@@ -29,6 +30,7 @@ export interface HeldQueueItem {
   driftPct: number | null;
   droppedLifecycleCount: number;
   droppedLifecycle: string[];
+  candidateLogicalTradeIds?: string[];
   createdAt: string;
 }
 

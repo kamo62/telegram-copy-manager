@@ -1,4 +1,5 @@
 import { formatMoney, formatNumber, formatPercent } from "../lib/format";
+import { numericSignTone } from "./Money";
 
 export type StatUnit = "money" | "percent" | "ratio" | "count" | "duration-min" | "raw";
 export type StatTone = "up" | "down" | "warn" | "danger" | "muted" | "neutral";
@@ -82,8 +83,7 @@ function resolveTone(
   if (props.warnAbove !== undefined && abs >= props.warnAbove) return "warn";
   if (props.upWhenAtLeast !== undefined && value >= props.upWhenAtLeast) return "up";
   if (props.signTone) {
-    if (value > 0) return "up";
-    if (value < 0) return "down";
+    return numericSignTone(value);
   }
   return null;
 }

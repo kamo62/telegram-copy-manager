@@ -17,6 +17,7 @@ export function DialogPicker({
   onSelect,
   onRemove,
   selectedDialogIds = [],
+  connected = false,
   loading = false,
 }: {
   dialogs: TelegramDialogSummary[];
@@ -24,6 +25,7 @@ export function DialogPicker({
   onSelect: (dialog: TelegramDialogSummary) => Promise<void>;
   onRemove?: (dialog: TelegramDialogSummary) => Promise<void> | void;
   selectedDialogIds?: string[];
+  connected?: boolean;
   loading?: boolean;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
@@ -54,13 +56,15 @@ export function DialogPicker({
           </span>
         </div>
         <button
-          aria-label="Refresh Telegram dialogs"
+          aria-label={
+            dialogs.length === 0 && connected ? "Load Telegram dialogs" : "Refresh Telegram dialogs"
+          }
           className="btn btn-ghost btn-small"
           onClick={() => void onRefresh()}
           type="button"
         >
           <RefreshCw aria-hidden="true" size={12} />
-          Refresh
+          {dialogs.length === 0 && connected ? "Load dialogs" : "Refresh"}
         </button>
       </div>
       <div className="dialog-picker-filters">
@@ -95,7 +99,9 @@ export function DialogPicker({
           body={
             loading
               ? "Pulling your Telegram dialogs from the API…"
-              : "Once Telegram is connected, your channels and groups will appear here."
+              : connected
+                ? "Telegram is connected. Load dialogs to choose channels and groups."
+                : "Once Telegram is connected, your channels and groups will appear here."
           }
           title="No dialogs loaded"
         />

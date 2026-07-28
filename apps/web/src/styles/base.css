@@ -755,181 +755,6 @@ h3 {
   color: var(--ink-2);
 }
 
-.accounts-overview {
-  margin: 16px 0;
-  padding: 18px 20px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-2);
-  display: grid;
-  gap: 14px;
-}
-
-.accounts-overview-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.accounts-overview-eyebrow {
-  font-size: 11px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--ink-3);
-}
-
-.accounts-overview-title {
-  margin: 2px 0 0;
-  font-family: var(--font-display);
-  font-size: 16px;
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.accounts-overview-stats {
-  display: flex;
-  gap: 22px;
-}
-
-.accounts-overview-stats > div {
-  display: grid;
-  gap: 1px;
-  text-align: right;
-}
-
-.accounts-overview-stats span {
-  font-size: 10px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--ink-3);
-}
-
-.accounts-overview-stats strong {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 16px;
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.accounts-overview-stats-divider {
-  color: var(--ink-3);
-  font-weight: 400;
-}
-
-.accounts-overview-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  gap: 6px;
-}
-
-.accounts-overview-row {
-  display: grid;
-  grid-template-columns: 16px 1fr auto auto 16px;
-  align-items: center;
-  gap: 14px;
-  width: 100%;
-  padding: 10px 14px;
-  background: var(--bg);
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-1);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition:
-    border-color var(--duration-1) var(--ease-out),
-    background var(--duration-1) var(--ease-out);
-}
-
-.accounts-overview-row:hover {
-  border-color: var(--accent);
-  background: var(--panel);
-}
-
-.accounts-overview-row:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px var(--accent-ring);
-  border-color: var(--accent);
-}
-
-.accounts-overview-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.accounts-overview-dot.ok {
-  background: var(--ink);
-  box-shadow: none;
-}
-
-.accounts-overview-dot.off {
-  background: var(--panel);
-  border: 1px solid var(--ink-3);
-  opacity: 1;
-}
-
-.accounts-overview-row-body {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-}
-
-.accounts-overview-row-body strong {
-  font-family: var(--font-mono);
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.accounts-overview-row-meta {
-  font-size: 11px;
-  color: var(--ink-3);
-}
-
-.accounts-overview-row-stats {
-  display: flex;
-  gap: 14px;
-  font-size: 11px;
-  color: var(--ink-3);
-}
-
-.accounts-overview-row-stats strong {
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-weight: 500;
-  margin-right: 3px;
-}
-
-.accounts-overview-status {
-  font-size: 10px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-
-.accounts-overview-status.ok {
-  background: var(--ink);
-  color: var(--panel);
-}
-
-.accounts-overview-status.off {
-  background: var(--panel-2);
-  color: var(--ink-3);
-}
-
-.accounts-overview-row svg {
-  color: var(--ink-3);
-}
-
 /* Workspace ---------------------------------------------------------------- */
 
 .workspace {
@@ -938,72 +763,6 @@ h3 {
   flex-direction: column;
   gap: var(--space-5);
   min-width: 0;
-}
-
-/* Legacy topbar (kept for test compatibility, restyled) -------------------- */
-
-.topbar {
-  display: none; /* replaced by status-bar in new shell */
-}
-
-/* Metrics ------------------------------------------------------------------ */
-
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--space-4);
-}
-
-.metric-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: var(--space-4);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-3);
-}
-
-.metric-card > svg {
-  flex-shrink: 0;
-  color: var(--ink-faint);
-  margin-top: 2px;
-}
-
-.metric-card span {
-  display: block;
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ink-dim);
-}
-
-.metric-card strong {
-  display: block;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 20px;
-  font-weight: 600;
-  line-height: 1.2;
-  color: var(--ink);
-  margin: 2px 0;
-}
-
-.metric-card small {
-  display: block;
-  font-size: 10px;
-  color: var(--ink-faint);
-}
-
-/* Loading dot for metrics */
-.metric-card .metric-loading {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: pulse 1.4s ease-in-out infinite;
 }
 
 /* Content grid ------------------------------------------------------------- */
@@ -1231,13 +990,6 @@ h3 {
   width: 14px;
   height: 14px;
   accent-color: var(--accent);
-}
-
-.provider-link-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  margin-top: 8px;
 }
 
 /* Provider settings -------------------------------------------------------- */
@@ -1475,45 +1227,6 @@ h3 {
   color: var(--ink-faint);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-}
-
-.tp-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
-}
-
-.tp-leg {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 6px 4px;
-  background: var(--bg);
-  border: 1px solid var(--line-subtle);
-  border-radius: var(--radius-sm);
-  text-align: center;
-}
-
-.tp-leg span {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-}
-
-.tp-leg strong {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink);
-}
-
-.tp-leg small {
-  font-size: 10px;
-  color: var(--ink-dim);
 }
 
 /* Mapping ------------------------------------------------------------------ */
@@ -2205,9 +1918,6 @@ h3 {
   .content-grid {
     grid-template-columns: repeat(2, 1fr);
   }
-  .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
 }
 
 @media (max-width: 768px) {
@@ -2220,14 +1930,8 @@ h3 {
   .content-grid {
     grid-template-columns: 1fr;
   }
-  .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
   .mapping-form {
     grid-template-columns: 1fr;
-  }
-  .tp-grid {
-    grid-template-columns: repeat(2, 1fr);
   }
 }
 
@@ -3292,8 +2996,8 @@ h3 {
   display: grid;
   gap: 8px;
   padding: 10px 12px;
-  background: hsl(35 90% 97%);
-  border: 1px solid hsl(35 80% 88%);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
   border-radius: var(--radius-1);
 }
 
@@ -3315,14 +3019,14 @@ h3 {
 }
 
 .external-positions-head svg {
-  color: hsl(28 80% 38%);
+  color: var(--warn);
 }
 
 .external-positions-label {
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: hsl(28 80% 32%);
+  color: var(--warn-dim);
   font-size: 11px;
 }
 
@@ -3370,8 +3074,8 @@ h3 {
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
-  background: var(--bg);
-  border: 1px solid var(--line-subtle);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line));
   border-radius: 4px;
   font-size: 12px;
 }
@@ -3435,32 +3139,7 @@ h3 {
 }
 
 .performance-mode-tabs {
-  display: inline-flex;
-  gap: 3px;
-  padding: 3px;
   margin-bottom: 12px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-}
-
-.performance-mode-tabs button {
-  padding: 6px 13px;
-  font-family: var(--font-ui);
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--ink-dim);
-  background: transparent;
-  border: 0;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.performance-mode-tabs button.active {
-  background: var(--panel);
-  color: var(--accent);
-  font-weight: 600;
-  box-shadow: var(--shadow-sm);
 }
 
 .attribution-panel {
@@ -3563,6 +3242,14 @@ h3 {
   font-weight: 700;
 }
 
+.attribution-kpi-value.money-up {
+  color: var(--up-dim);
+}
+
+.attribution-kpi-value.money-down {
+  color: var(--down-dim);
+}
+
 .attribution-breakdown-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.65fr);
@@ -3620,16 +3307,12 @@ h3 {
   background: var(--line-strong);
 }
 
-.attribution-bar.provider {
-  background: var(--ink);
+.attribution-bar.gain {
+  background: var(--up);
 }
 
-.attribution-bar.manual-external {
-  background: repeating-linear-gradient(90deg, var(--ink) 0 3px, var(--panel) 3px 5px);
-}
-
-.attribution-bar.unknown-ea {
-  background: repeating-linear-gradient(45deg, var(--ink) 0 2px, var(--panel) 2px 4px);
+.attribution-bar.loss {
+  background: var(--down);
 }
 
 .source-breakdown-list {
@@ -3923,48 +3606,6 @@ h3 {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--ink-3);
-}
-
-.provider-link-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.provider-link-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  font-size: 12px;
-  color: var(--ink-2);
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  cursor: pointer;
-  transition:
-    background var(--duration-1) var(--ease-out),
-    color var(--duration-1) var(--ease-out),
-    border-color var(--duration-1) var(--ease-out);
-}
-
-.provider-link-chip input {
-  width: 14px;
-  height: 14px;
-  accent-color: var(--accent);
-  margin: 0;
-}
-
-.provider-link-chip:hover {
-  border-color: var(--accent);
-  color: var(--ink);
-}
-
-.provider-link-chip.is-on {
-  background: var(--accent-soft);
-  border-color: var(--accent);
-  color: var(--accent);
-  font-weight: 500;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -6168,111 +5809,6 @@ select.config-strategy-input {
   overflow: visible;
 }
 
-.dither-sparkline {
-  display: block;
-  width: 100%;
-  margin-top: 6px;
-}
-
-/* Donut layout on AccountsOverview — donut on the left, legend right.
-   Collapses to stacked on narrow screens via the global card grid. */
-.accounts-overview-donut {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  padding: 16px 0;
-  margin-top: 8px;
-  border-top: 1px solid var(--line-subtle);
-}
-
-/* Donut + legend — used on the AccountsOverview "Equity by account" panel. */
-.donut-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.donut {
-  display: block;
-}
-.donut-center {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-  line-height: 1.1;
-}
-.donut-center-label {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-faint);
-}
-.donut-center-value {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink);
-}
-.donut-legend {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 180px;
-}
-.donut-legend-row {
-  display: grid;
-  grid-template-columns: 10px 1fr auto;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-.donut-legend-dot {
-  width: 8px;
-  height: 8px;
-  border: 1px solid var(--ink);
-  border-radius: 2px;
-}
-.donut-pattern-0 {
-  background: var(--ink);
-}
-.donut-pattern-1 {
-  background: repeating-linear-gradient(135deg, var(--ink) 0 1px, var(--panel) 1px 3px);
-}
-.donut-pattern-2 {
-  background: repeating-linear-gradient(45deg, var(--ink) 0 1px, var(--panel) 1px 3px);
-}
-.donut-pattern-3 {
-  background: radial-gradient(var(--ink) 1px, var(--panel) 1px);
-  background-size: 3px 3px;
-}
-.donut-pattern-4 {
-  background: repeating-linear-gradient(0deg, var(--ink) 0 1px, var(--panel) 1px 3px);
-}
-.donut-pattern-5 {
-  background: repeating-linear-gradient(90deg, var(--ink) 0 1px, var(--panel) 1px 3px);
-}
-.donut-legend-label {
-  color: var(--ink-dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.donut-legend-value {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--ink);
-  text-align: right;
-}
-
 /* Money / Stat tone utilities — used by <Money> and <Stat> primitives.
    Apply on the value span (not the row) so labels stay neutral. */
 .money {
@@ -6303,87 +5839,7 @@ select.config-strategy-input {
 }
 
 .kpi-window-toggle {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
   margin: 2px 0;
-  align-self: flex-start;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-pill);
-}
-
-.kpi-window-toggle button {
-  padding: 2px 8px;
-  font-family: var(--font-ui);
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--ink-3);
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-pill);
-  cursor: pointer;
-  transition:
-    background 0.12s,
-    color 0.12s;
-}
-
-.kpi-window-toggle button.active {
-  background: var(--ink);
-  color: var(--panel);
-  font-weight: 600;
-  box-shadow: none;
-}
-
-/* Summary tab: lightweight default landing (header + exposure sit above it). */
-.summary-panel {
-  margin-top: 12px;
-  padding: var(--space-5);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-3);
-  box-shadow: none;
-}
-
-.summary-panel-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
-}
-
-.summary-panel-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: 18px;
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.summary-panel-meta {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  color: var(--ink-dim);
-}
-
-.summary-panel .dither-sparkline {
-  display: block;
-  width: 100%;
-}
-
-.summary-panel-empty {
-  margin: 8px 0;
-  font-size: 13px;
-  color: var(--ink-dim);
-}
-
-.summary-panel-hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--ink-faint);
 }
 
 @media (max-width: 1180px) {
@@ -6413,8 +5869,7 @@ select.config-strategy-input {
 
 /* Light-mode shadow / border tweaks for existing panels --------------------- */
 
-.panel,
-.metric-card {
+.panel {
   box-shadow: none;
 }
 
@@ -7093,6 +6548,10 @@ select.config-strategy-input {
   text-align: right;
 }
 
+.closed-positions-table {
+  min-width: 1080px;
+}
+
 .closed-positions-table tbody .closed-positions-detail-row > td {
   background: var(--panel-2);
   padding: 0;
@@ -7717,6 +7176,18 @@ select.config-strategy-input {
   background: var(--chart-color, var(--line-strong));
 }
 
+/* Gain/loss IS meaning, so it must survive accent mode. This rule is more specific
+   than the plain .attribution-bar.gain/.loss pair above, and PerformancePage no
+   longer sets --chart-color, so without these the accent default silently rendered
+   every bar neutral grey and the profit/loss distinction was lost. */
+:root[data-color-accents="on"] .attribution-bar.gain {
+  background: var(--up);
+}
+
+:root[data-color-accents="on"] .attribution-bar.loss {
+  background: var(--down);
+}
+
 :root[data-color-accents="on"] .attribution-bar.manual-external,
 :root[data-color-accents="on"] .attribution-bar.unknown-ea {
   background: var(--chart-color, var(--line-strong));
@@ -8008,9 +7479,9 @@ select.config-strategy-input {
 /* WS7 workflow surfaces. Keep these at the end: base.css is cascade-order-sensitive. */
 .sidebar-count-held {
   margin-left: 0;
-  color: var(--ink);
-  background: var(--panel-2);
-  border: 1px dashed var(--ink);
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn);
 }
 
 .alerts-banner-link {
@@ -8093,6 +7564,10 @@ select.config-strategy-input {
   border: 1px double var(--ink);
   font-size: 11px;
   font-weight: 700;
+}
+
+.held-row-stale td {
+  background: color-mix(in srgb, var(--warn-soft) 70%, var(--panel));
 }
 
 .held-row-actions {
@@ -8283,8 +7758,10 @@ select.config-strategy-input {
     display: none;
   }
 
-  .providers-table th:nth-child(n + 3):nth-child(-n + 10),
-  .providers-table td:nth-child(n + 3):nth-child(-n + 10) {
+  /* Hide the stat block (Pips .. Gain) only. Name, Lots, Status, Copy and the
+     Configure action must survive at every width. */
+  .providers-table th:nth-child(n + 3):nth-child(-n + 7),
+  .providers-table td:nth-child(n + 3):nth-child(-n + 7) {
     display: none;
   }
 }
@@ -8471,4 +7948,126 @@ select.config-strategy-input {
   .linked-account-actions .btn {
     min-height: 40px;
   }
+}
+
+/* Providers: keep Configure reachable without horizontal scrolling.
+   The stat columns can overflow on narrow viewports, but the row's only action
+   must never be the thing you have to scroll to find. Declared last so it wins
+   over the earlier .data-table-actions block regardless of cascade order. */
+.providers-table th.providers-table-actions,
+.providers-table td.providers-table-actions {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  width: 44px;
+  padding-left: 4px;
+  padding-right: 8px;
+  background: var(--surface-1, #101725);
+  box-shadow: -8px 0 8px -8px rgb(0 0 0 / 55%);
+}
+
+.providers-table tbody tr:hover td.providers-table-actions {
+  background: var(--surface-2, #16203040);
+}
+
+/* Data-table icon buttons are opacity:0 until the row is hovered. That suits a
+   secondary or destructive action, but Configure is this table's primary action
+   and the panel copy explicitly tells the operator to use it - so it cannot be
+   invisible until discovered by accident. Scoped to this table only; every other
+   table keeps the reveal-on-hover behaviour. */
+.providers-table td.providers-table-actions .icon-btn {
+  opacity: 0.75;
+}
+
+.providers-table tbody tr:hover td.providers-table-actions .icon-btn,
+.providers-table tbody tr:focus-within td.providers-table-actions .icon-btn,
+.providers-table td.providers-table-actions .icon-btn:focus-visible {
+  opacity: 1;
+}
+
+/* ---------------------------------------------------------------------------
+   Provider config modal: density pass.
+   The dialog was tall enough to scroll on a laptop for what is a short form -
+   two TP rows and four settings. Tightening the rhythm rather than removing
+   anything, so every control stays where it was. Declared last because this
+   file has duplicated selector blocks and later rules win.
+   --------------------------------------------------------------------------- */
+.modal.modal-wide .modal-head {
+  padding: 14px 18px;
+}
+
+.modal.modal-wide .modal-form {
+  gap: 12px;
+  padding: 14px 18px 16px;
+}
+
+.modal.modal-wide .config-section {
+  gap: 8px;
+  padding-bottom: 12px;
+}
+
+.modal.modal-wide .config-field input,
+.modal.modal-wide .config-field select {
+  height: 30px;
+}
+
+.modal.modal-wide .config-field select {
+  background-position:
+    calc(100% - 12px) 12px,
+    calc(100% - 8px) 12px;
+}
+
+.modal.modal-wide .config-tp-head {
+  padding-bottom: 4px;
+}
+
+.modal.modal-wide .config-tp-row {
+  padding: 2px 4px;
+}
+
+/* Order summary carried the most dead space: an 18px figure with a 12px gutter
+   above and below the divider. */
+.modal.modal-wide .config-resume {
+  padding: 12px 14px;
+}
+
+.modal.modal-wide .config-resume-title {
+  margin-bottom: 8px;
+}
+
+.modal.modal-wide .config-resume-grid {
+  gap: 10px;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+}
+
+.modal.modal-wide .config-resume-stat strong {
+  font-size: 16px;
+}
+
+.modal.modal-wide .config-resume-list {
+  gap: 4px;
+}
+
+.modal.modal-wide .config-resume-list li {
+  line-height: 1.4;
+}
+
+.modal.modal-wide .config-hint {
+  margin: 0;
+}
+
+/* Held signals are the last line of defence before money moves, and the row's two
+   order-placing buttons (Market, Original) are always visible while Dismiss is an
+   .icon-btn, which the global rule hides at opacity:0 until the row is hovered.
+   That makes declining a signal the hardest action to find on the one surface
+   where declining matters most. Third bug caused by that global rule. */
+.held-table td .icon-btn {
+  opacity: 0.75;
+}
+
+.held-table tbody tr:hover td .icon-btn,
+.held-table tbody tr:focus-within td .icon-btn,
+.held-table td .icon-btn.icon-btn:focus-visible {
+  opacity: 1;
 }
