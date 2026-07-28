@@ -178,6 +178,20 @@ describe("GramJS backlog pagination", () => {
     }
   });
 
+  test("a bulk import is not cut down to the poll's message cap", async () => {
+    // The historical import endpoint asks for up to 50,000 with a dateFrom.
+    // Before pagination it received its whole page; the caps exist to bound a
+    // 2-second poll, so they must not silently truncate a caller that asked
+    // for more than the poll's budget.
+    const { adapter } = gramjsAdapterWithBacklog(backlog(2_400));
+    const result = await adapter.fetchRecentMessages("session", "dialog", 5_000, {
+      dateFrom: "2026-06-01T00:00:00.000Z",
+    });
+
+    expect(result.messages).toHaveLength(2_400);
+    expect(result.gap).toBeUndefined();
+  });
+
   test("reports a gap when a truncated drain captured no text at all", async () => {
     // A budget spent entirely on media/empty messages still walked through the
     // backlog. Without a gap the caller reads the pass as complete and clears

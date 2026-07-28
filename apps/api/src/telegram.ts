@@ -129,16 +129,22 @@ export function parseTelegramFetchCap(raw: string | undefined, fallback: number)
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-function telegramFetchLimits() {
+// The caps bound a 2-second poll, not every caller. `limit` is the caller's
+// declared appetite, so a bulk import asking for 5000 messages must not be cut
+// to the poll's 1000: before pagination it would have received its whole page.
+function telegramFetchLimits(limit: number) {
+  const configuredMaxMessages = parseTelegramFetchCap(
+    process.env.TELEGRAM_FETCH_MAX_MESSAGES,
+    DEFAULT_TELEGRAM_FETCH_MAX_MESSAGES,
+  );
   return {
     maxPages: parseTelegramFetchCap(
       process.env.TELEGRAM_FETCH_MAX_PAGES,
       DEFAULT_TELEGRAM_FETCH_MAX_PAGES,
     ),
-    maxMessages: parseTelegramFetchCap(
-      process.env.TELEGRAM_FETCH_MAX_MESSAGES,
-      DEFAULT_TELEGRAM_FETCH_MAX_MESSAGES,
-    ),
+    maxMessages: Number.isFinite(limit)
+      ? Math.max(configuredMaxMessages, limit)
+      : configuredMaxMessages,
   };
 }
 
@@ -423,7 +429,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     const fromTime = options.dateFrom ? new Date(options.dateFrom).getTime() : undefined;
     const toTime = options.dateTo ? new Date(options.dateTo).getTime() : undefined;
     const offsetDate = options.offsetDate ?? options.dateTo;
-    const { maxPages, maxMessages } = telegramFetchLimits();
+    const { maxPages, maxMessages } = telegramFetchLimits(limit);
     const startedAt = Date.now();
     let pages = 0;
     let totalMessages = 0;
