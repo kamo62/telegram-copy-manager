@@ -1,184 +1,168 @@
 # Handoff
 
-## UI REVIEW BACKLOG (2026-07-27, after v1.60.0 shipped)
+## START HERE — 2026-07-28
 
-v1.60.0 is DEPLOYED and healthy. Both EAs on 1.60.0, evidence gate live and producing zero holds of
-its own. Current head `fbce560d`.
+Branch `fix/vipgold-duplicate-open-prevention` @ `74e8b011`, clean, pushed, **merged to main**
+(`9442d85e`, PR #10). Repo version **1.61.0**, EA source **1.61.0**.
+**Production runs v1.60.1.** v1.61.0 is committed but NOT deployed because it needs an EA rebuild.
 
-Two independent UI reviews (Fable/Opus on 16 live screenshots in `output/ui-review/`, Codex sol on
-the frontend source) ran blind to each other and CONVERGED on four findings. Full outputs are in the
-session transcript; this is the actionable residue.
+Both EAs online and healthy on **1.60.0**. Held queue: 7.
 
-### LIVE CONFIGURATION HAZARD - not a code bug, needs an owner decision
+### DO THIS FIRST — one action is blocked waiting on you
 
-**The Equity Guardian is DISABLED on both live accounts.**
-`mt5-1514065673`: threshold 0, enabled false. `mt5-54945785`: threshold 100,000,000, enabled false,
-and it has real breach history (paused 2026-07-20 at 10.21% drawdown, manually unpaused 07-21).
-So there is currently no drawdown protection on either account while KAL VIP copies onto the
-R1,068 account at 24% win rate. Decide the thresholds and re-enable, or accept explicitly.
+**Two KAL VIP limit orders are held for the HF account and need releasing.** The HF EA was offline
+around 04:15 today, so `mt5-54945785` missed both while FTMO took them and still shows them PENDING
+with live broker tickets (`505560003`, `505559675`).
 
-### Both reviewers, independently
+| Hold | Signal | Entry | SL | TPs |
+|---|---|---|---|---|
+| `queue_vl3WvtuH-h` | Gold BUY limit | 4016-15 | 4010 | 4021 / 4028 |
+| `queue_Yl6Bc_hUyO` | Gold SELL limit | 4071-72 | 4077 | 4066 / 4059 |
 
-1. **Held row omits side, lots, SL and TP, and the price drift is unsigned.** The API computes drift
-   from a bid/ask midpoint without considering BUY vs SELL and discards the quote `updatedAt`
-   (`app.ts:5299`, `:4813`), so "+2.29%" is favourable on a sell and costly on a buy with no way to
-   tell - next to a market-execute button, on signals up to 5 days old. Carry side/SL/TP/quote-age
-   through the held API, sign the drift against direction, disable market release on a stale quote.
-2. **The review queue is buried.** `/review` navigates to `/logs` with Parser Lab rendered first;
-   held signals start thousands of px down. Give `/review` its own route with held signals first.
-3. **A failed cold load renders production as an unconfigured system.** Empty states are driven by
-   empty arrays, not by a *successful* response (`App.tsx:402`, `:836`, `:2342`), so a poll failure
-   shows "No MT5 account connected yet" and onboarding. Acting on either is destructive. Track
-   `hasLoadedSnapshot` and never infer zero from a failure.
-4. **Guardian threshold is unbounded** at both the form and the API (`EquityGuardianPage.tsx:107`,
-   `app.ts:5738`, `:14582`). Clamp the domain server-side.
+They are still valid: unfilled limit orders bracketing spot (gold was ~4048). They are NOT stale
+setups — an earlier read of mine said they were, which was wrong, because current price being past
+the TP levels is meaningless for an order that never filled.
 
-### Sol only (source-level)
+**Blocked by:** `maxOpenTradeAgeSeconds` is 1800 (30 min) and these are ~3h old, so `approveSignal`
+correctly re-holds them `EXPIRED_LATE`. The release refuses cleanly and leaves the row HELD (that is
+the item-2 transaction fix working).
 
-5. **"Market" vs "Original" is a FALSE CHOICE for lifecycle releases.** `requeueHeldLifecycle` never
-   branches on `mode`; it builds the same command and only echoes the choice into the audit
-   (`app.ts:5103`, `:5136`). Same shape as github issue #9 but a DIFFERENT path, so #9's fix will not
-   cover it. Collapse to one action and reject irrelevant `mode` server-side.
-6. **Parser "Approve" is one-click, no confirmation, and skips the evidence gate** via
-   `trigger:"operator"` (`ParserResult.tsx:166` -> `app.ts:763` -> `:3727`). This is the same bypass
-   that used to reach close-all fan-out. The gate is fail-closed everywhere except this button.
-7. **Manual force-push validates SL direction but not TP direction or ordering**
-   (`ManualSignalModal.tsx:78` vs `:102`; server repeats the omission at `app.ts:4505`).
+**To release:** widen the window in Settings → Execution defaults (e.g. 6h), release both with
+`mode: "original"` (NOT market — market would invert the TP geometry), then set it back to 30 min.
+Do NOT create manual signals instead: manual trades carry no provider linkage, so KAL VIP's later
+TP-hit and close messages would have nothing to act on, and HF's positions would need managing by
+hand while FTMO's close automatically.
 
-### Fixed this session
+```
+curl -sS -X POST http://192.168.0.100:18787/api/queue-items/<id>/requeue \
+  -H "content-type: application/json" -d '{"mode":"original"}'
+```
 
-- Providers table: removed TP # and SL (hardcoded em-dashes) and Profit (duplicated P/L exactly).
-- Configure gear and held-signal Dismiss were both `opacity:0` until row hover, from the global
-  `.data-table .icon-btn` rule at `base.css:6548`. On the review queue that meant both order-placing
-  buttons were prominent and the only decline button was invisible. Both scoped and fixed.
-  **That rule has now caused three real bugs** (clipped wide modal, invisible Configure, invisible
-  Dismiss). Consider inverting the default rather than scoping a fourth exception.
-- Provider config modal tightened to fit a 900px viewport without scrolling.
+### Live issues to look at
 
-### Corrections to earlier hypotheses (do not re-derive)
+1. **Telegram ingestion is erroring.** `telegram.ingest.error — Telegram provider ingestion failed`
+   fired at 06:58 (x2) and 07:10 today. This is how signals arrive at all. Not yet diagnosed.
+2. **HF EA drops out intermittently.** It was 64 min stale yesterday afternoon and offline again
+   around 04:15 today, which is what caused the two held orders above. FTMO has been rock solid.
+3. **`EA_OFFLINE` holds do not auto-release past 15 min** (`EA_OFFLINE_RELEASE_MAX_AGE_SECONDS`),
+   so every HF dropout leaves work needing manual disposal.
 
-- `HistoryPage.tsx` is NOT unreachable; `/history` resolves through `TAB_IDS` and renders it. The
-  dead code is the legacy `activeView === "trades" | "providers" | "parser" | "mapping"` branches,
-  which `parseRoute` never emits. Also dead: `AccountsOverview`, `SummaryPanel`, `Donut`,
-  `DitherSparkline`.
-- The History page does NOT block the main thread. That earlier observation was browser tab
-  contention from having ~10 tabs open, not an app defect.
+### Settled decisions (do not reopen)
 
-### Held queue state
+- **Equity Guardian stays OFF by default.** Owner decision, 2026-07-28. Still worth clamping the
+  threshold server-side so a typo cannot silently disable protection when it IS enabled — a live
+  account was found holding `100,000,000%`.
+- **Alerting stays off.** Defaults now `false`; Settings carries the BotFather `/newbot` and
+  `getUpdates` chat-id walkthrough for when it is wanted. The evidence-hold forced-alert path is
+  deliberately left in place; it only has effect once a token and chat id exist.
 
-88 -> 15. All 74 `EXPIRED_LATE` bulk-dismissed. Remaining: 10 `SYMBOL_MAPPING_UNMAPPED` (need broker
-symbols mapped) and 5 `EA_OFFLINE` (past the auto-release age cap, need manual disposal). Alerting is
-still unconfigured, so nothing held is announced.
+### BATCH B — the safety backlog, not started
 
-## NEXT SESSION STARTS HERE — all 8 blocking items fixed, awaiting independent review
+All need API changes, so they want the same treatment the release work got: implement, then Fable
+and Sol independently on the diff.
 
-Branch `fix/vipgold-duplicate-open-prevention` @ `fa758b2c` (NOT pushed). Gate: typecheck, lint,
-**609 tests**, build all green. Production is untouched on **v1.56.2**.
+1. **Held rows omit side, lots, SL and TP, and drift is unsigned.** The API computes drift from a
+   bid/ask midpoint ignoring BUY vs SELL and discards the quote `updatedAt` (`app.ts:5299`, `:4813`).
+   **This bit for real today**: I had to pull raw provider messages and cross-check FTMO's broker
+   tickets to work out which side the two held orders were, and read them wrong on the first pass.
+   The card shows `-0.56%` / `+0.80%` with no side, next to a Market button.
+2. **"Market" vs "Original" is a false choice for lifecycle releases.** `requeueHeldLifecycle`
+   never branches on `mode`; it only echoes the choice into the audit (`app.ts:5103`, `:5136`).
+   Different path from github issue #9, so that fix will not cover it.
+3. **Parser "Approve" is one-click and skips the evidence gate** via `trigger:"operator"`
+   (`ParserResult.tsx:166` → `app.ts:763` → `:3727`). The gate is fail-closed everywhere else.
+4. **Manual force-push validates SL direction but not TP direction or ordering**
+   (`ManualSignalModal.tsx:78` vs `:102`; server repeats it at `app.ts:4505`).
+5. **Guardian threshold clamping** (above).
+6. **Consider an `EXPIRED_LATE` exemption for unfilled limit orders.** Today's blocker: a 30-minute
+   age cap is right for market opens but wrong for a limit order still bracketing spot. FTMO proves
+   the setup stays live for hours.
 
-**Dual independent review is DONE** (Fable/Opus + Codex sol, run in parallel without seeing each
-other). Sol reported no CRITICAL/HIGH. Fable found THREE HIGH, two of them introduced by item 5
-itself. All are fixed in `fa758b2c` and mutation-checked. Running only one reviewer would have
-shipped a close-all card that is permanently unreleasable on this exact two-account production
-setup. Keep running both.
+### UI backlog beyond Batch B (from the two reviews, not started)
 
-Remaining known issue, deliberately NOT blocking: "Requeue at market" is ignored for unbound held
-opens (github issue #9) - the UI offers it, the server queues the original LIMIT. Geometry is still
-correct and all other safety checks apply.
+- `/review` opens `/logs` with Parser Lab first; held signals are thousands of px down. Give it its
+  own route with held signals first.
+- A failed cold load renders production as an unconfigured system ("No MT5 account connected yet"),
+  because empty states key off empty arrays rather than a *successful* response (`App.tsx:402`,
+  `:836`, `:2342`). Acting on either is destructive. Track `hasLoadedSnapshot`.
+- Held reason chips could drive the right remedy: `SYMBOL_MAPPING_UNMAPPED` needs "Map symbol", not
+  "Market" — releasing an unmapped symbol at market cannot work.
+- Three different counts for the same thing (banner 18 / sidebar badge 16 / table 8 rows).
+- A demo account (`1514065673`, FTMO-Demo) shows a green `LIVE` pill on Operations.
 
-The previous session recorded 7 blocking items. An independent Codex sol xhigh plan review found
-that **three of its five prescribed fixes were wrong**, and surfaced an 8th defect. All eight are now
-fixed and mutation-checked. What remains before deploy is the dual independent review of the diff,
-then the deploy steps below.
+### Shipped since the last handoff
 
-### What was fixed (commits)
+- **v1.60.0** — evidence-gated execution: 8 blocking release-workflow items + 3 HIGH review findings.
+- **v1.60.1** — 15-item presentation pass + 2 review fixes.
+- **v1.61.0** — EA `TradeComment` dropdown (Tagged / Hidden / Custom) with identity always logged
+  locally, alerting default off, BotFather help. **Needs EA recompile + reattach.**
 
-- `1a85e0d8` — items 1 and 4, plus the drop-audit vocabulary hole.
-- `dccc808e` — items 2, 3 and 8 (release atomicity).
-- `d30c72f7` — item 5 (close-all).
+Gate at head: typecheck, lint (incl. CSS duplicate guard), **616 tests**, build. Corpus tallies held
+byte-identical throughout: `NO_SIGNAL 1411 / OPEN_TRADE 348 / MARK_TP_HIT 138 / CANCEL_PENDING 29 /
+CLOSE_TRADE 15 / MOVE_SL_TO_BE 4`.
 
-### Corrections to the OLD handoff text (do not follow the deleted list)
+### Resolved this session (do not re-investigate)
 
-The previous top section prescribed fixes that were wrong. Recorded here so nobody re-derives them:
+- **Why FTMO missed KAL VIP trades on 07-27.** Gold resolved to `XAUUSD.RAW`, which FTMO does not
+  offer (it has plain `XAUUSD`; HF has `XAUUSDb`). Exactly two signals were missed, 06:21 and 08:10.
+  A `canonicalOverrides: {"XAUUSD.RAW": "XAUUSD"}` mapping was added between 08:10 and 08:50 and it
+  has worked since. Not an ongoing fault.
+- **The History page does not block the main thread.** That was browser tab contention from ~10 open
+  tabs, not an app defect.
+- **`HistoryPage.tsx` is reachable.** `/history` resolves through `TAB_IDS`. The dead code is the
+  legacy `activeView === "trades" | "providers" | "parser" | "mapping"` branches.
+- Held queue cleared 88 → 20 → 7 across two passes; all `EXPIRED_LATE`, `SYMBOL_MAPPING_UNMAPPED`
+  and stale `EA_OFFLINE` disposed. The 4 `EVIDENCE_LIFECYCLE_RESOLUTION_REQUIRED` (07-27 14:47 and
+  15:22, one per account per event) and 1 `PARTIAL_FILL` were deliberately kept as actionable.
 
-1. **Item 4's proposed regex was buggy.** `CANCEL(?:L?(?:E[DS]?|ING))?` drops `cancels` and admits
-   malformed `CANCELE`. Shipped instead:
-   `CLOS(?:E[SD]?|ING)|CANCEL(?:S|L?(?:ED|ING))?|DELET(?:E[SD]?|ING)|REMOV(?:E[SD]?|ING)`.
-   The corpus contains no `cancels`, so replay alone would never have caught it.
-2. **Item 1's proposed predicate was wrong.** "Still block PENDING/LEASED/EXECUTED" breaks the
-   SECOND release: once account A is released it holds a PENDING row that would then 409 account B.
-   A release is always account-scoped, so the guard ignores ALL different-account rows regardless of
-   status and blocks any non-source row for the releasing account.
-3. **Item 5's "DELETE close-all entirely" was UNSAFE.** The `closeAll` flag carries a fail-closed
-   guard: `evaluateLifecycle` and `evaluateOpen` hold on it BEFORE resolution is consulted. Remove
-   the flag and a close-all resolving via provider order id, reply link, or exact inline quote
-   returns EXECUTE instead of HOLD — a new execute path on the most dangerous command in the system.
-   Correct scope, now shipped: delete `approveCloseAll` and the promotion, KEEP the flag, both
-   holds, and `isCloseAllInstruction` as a classifier, and ADD a refusal on the operator path.
+### Working discipline that keeps paying (keep doing this)
 
-### Item 8 (new, found by the review)
+- **Run Fable AND Sol independently, blind to each other.** On the release diff Sol reported no HIGH
+  findings while Fable found three — two of which would have left a permanently unreleasable card on
+  this exact two-account setup. On the UI they converged on four, which is far stronger than either
+  alone.
+- **Mutation-check every fix: revert the mechanism, the test must fail.** Six tests were found during
+  this work that passed with their mechanism entirely removed, including a compare-and-swap that was
+  a `void dismissed;` no-op behind a green assertion. A green suite is not evidence.
+- **A CAS regression written against the held-OPEN path is vacuous** — `approveSignal`'s dedup masks
+  a lost dismissal there. Target the **bound** requeue path, which never calls `approveSignal`.
+- **`base.css` is the single largest defect source.** ~8,600 lines with duplicated top-level blocks
+  where the later one silently wins. It has now caused FOUR real bugs: clipped wide modal, invisible
+  Configure gear, invisible held-signal Dismiss, and gain/loss bars rendering neutral grey because
+  `:root[data-color-accents="on"] .attribution-bar` outranked `.gain`/`.loss`. Before editing any
+  selector, grep for every occurrence and edit the one that wins. Consider inverting the
+  `.data-table .icon-btn { opacity: 0 }` default rather than scoping a fifth exception.
+- **Test from the real corpus**, never invented provider strings. 1,945 messages at
+  `apps/api/src/fixtures/provider-messages.ts`; the assertions live in
+  `apps/api/src/execution-evidence.test.ts` (the standalone `scratchpad/replay.ts` is gone, but the
+  invariants are committed as a real test).
 
-HELD release transitions were not atomic. No requeue variant verified that its source row actually
-transitioned, and nothing prevented a duplicate release. A crash between statements left BOTH an
-executable row and the original HELD row, and a leaked PENDING row is immediately leasable by the
-EA. Guardian-unpause and EA-reconnect automation inherit the same path. All three variants now run
-in a transaction with a compare-and-swap requiring exactly one HELD row to transition.
+### Delegation gotchas (cost ~40 min; still true)
 
-**Testing note that matters:** a CAS regression written against the held-OPEN path is VACUOUS —
-`approveSignal`'s dedup masks a lost dismissal there, so the test passes with no CAS at all. The
-regression deliberately targets the **bound** requeue path, which never calls `approveSignal`.
-
-### DEPLOY ORDERING CONSTRAINT (blocking)
-
-**Items 1 and 2 must reach production together.** Item 1 alone is more dangerous than the current
-state: it opens the release path while failed releases can still leak leasable rows. Separate local
-commits are fine as long as no intermediate artifact is deployed.
-
-### DEPLOY STEPS (owner actions, verified against source, not code)
-
-1. **`alertOnHeld: true` will not reach prod on its own.** `normalizeAppSettings` coerces with
-   `input.alertOnHeld === true`, so prod's stored `false` survives the deploy; the `true` default
-   only applies to fresh databases. Evidence holds force-alert regardless, but EA_OFFLINE /
-   NAKED_PENDING_ENTRY / DUPLICATE_ORDER_ID / SYMBOL_MAPPING / GUARDIAN /
-   EA_CAPABILITY_UNAVAILABLE holds stay silent. Flip it with a settings PATCH on the live box.
-2. **Alerting is entirely unconfigured in prod.** `alertBotToken` and `alertChatId` are EMPTY, so no
-   alert of any kind is delivered today — guardian pauses, EA offline and execution failures
-   included. Set both, then use "Send test message". Owner accepted this as post-deploy previously,
-   but evidence holds are now the primary safety surface, so it is effectively required.
-3. **Old `EA_CAPABILITY_UNAVAILABLE` holds do not auto-release.** `releaseEaOfflineHeldQueueItems`
-   filters `held_reason = 'EA_OFFLINE'` exactly, so each capability hold needs a manual requeue
-   after the recompiled EA attaches. In-flight PENDING items are unaffected.
-4. **EA recompile + reattach**, built from the final commit only.
-
-### Remaining before deploy
-
-- Dual independent review (Fable + Sol) over `48903580..d30c72f7`. NOT yet done.
-- Version/changelog metadata for 1.60.0 is still deferred; the working tree is deliberately
-  untouched on `package.json`, `changelog.md` and the EA source.
-
-### Lower priority (recorded, not blocking)
-
-- "Requeue at market" is silently ignored for held opens (`requeueHeldOpen` drops `mode`) while the
-  UI promises a market order.
-- The risk-off NO_SIGNAL rule holds banter: 93 of 1411 NO_SIGNALs become action-required alerts.
-  Deliberate for the first-week audit; consider an fyi tier after.
-- `dismissReleasedQueueItem` writing parsed status `PENDING` is now a deliberate default with an
-  explicit `"APPROVED"` override for the TP-hit path. Audit other callers if the default ever moves.
-
-### Delegation gotchas (cost ~40 minutes this session)
-
-- `Agent(isolation:"worktree")` branches from **main**, not the current HEAD.
-- `codex:codex-rescue` is a forwarder that exits in ~60s, so the harness deletes the "unchanged"
-  worktree while Codex is still running, and Codex falls back to the real repo.
+- `Agent(isolation:"worktree")` branches from **main**, not current HEAD.
 - **Codex writes to the directory the rescue agent was invoked from.** A prompt-level `cd` does not
-  move its sandbox root, so parallel Codex lanes in separate worktrees are impossible. Run them
-  sequentially, and guard the tree with a watcher on `git status --porcelain`.
-- A cancelled rescue agent can RESUME its old thread and re-apply a superseded spec. Cancel the
-  Codex job AND `TaskStop` the Claude-side agent, then reset the tree.
-- A Codex lane can finish its work and then hang without committing; check file mtimes against the
-  clock rather than trusting the elapsed counter.
+  move its sandbox root, so parallel Codex lanes in separate worktrees are impossible. Run
+  sequentially and guard the tree with a watcher on `git status --porcelain`.
+- A cancelled rescue agent can RESUME its old thread and re-apply a superseded spec. Cancel the Codex
+  job AND `TaskStop` the Claude-side agent, then reset the tree.
+- A Codex lane can finish its work and then hang without committing, and it can be dispatched twice
+  for one prompt. Check file mtimes against the clock rather than trusting the elapsed counter.
+- Codex often cannot commit (read-only `.git` in its sandbox). Expect to verify and commit yourself.
 
+### Useful commands
 
-## START HERE — session boundary 2026-07-26
+- Deploy: `bun run deploy` (backs up live DB, rsyncs, rebuilds, swaps container, verifies)
+- Health: `curl -s http://192.168.0.100:18787/api/health`
+- Held queue: `curl -s http://192.168.0.100:18787/api/queue-items/held`
+- Accounts + EA versions: `curl -s http://192.168.0.100:18787/api/mt5/accounts`
+- KAL VIP messages: `curl -s "http://192.168.0.100:18787/api/providers/provider_1gfxfwd/messages?limit=10"`
+- Rollback: `git checkout <sha> && bun run deploy` (pre-deploy DB backups are on the box)
+
+---
+
+# History below this line
+
+## Session boundary 2026-07-26 (historical — prod has since moved to v1.60.1)
 
 Branch `fix/vipgold-duplicate-open-prevention` @ `ef409994`, 13 commits ahead of main, PUSHED.
 Production is untouched on **v1.56.2**. Nothing from this branch is deployed.
