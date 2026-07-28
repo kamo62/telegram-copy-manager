@@ -40,7 +40,7 @@ function createQueuedTelegramAdapter(messages: TelegramCapturedMessage[]): Teleg
       ];
     },
     async fetchRecentMessages() {
-      return messages;
+      return { messages, gap: undefined };
     },
   };
 }
@@ -65,7 +65,7 @@ function createDialogTelegramAdapter(
       return dialogs;
     },
     async fetchRecentMessages() {
-      return messages;
+      return { messages, gap: undefined };
     },
   };
 }
@@ -487,6 +487,58 @@ describe("Telegram TC API", () => {
     });
     expect(dashboard.signalQueue.filter((item) => item.status === "PENDING")).toHaveLength(1);
     expect(dashboard.signalQueue[0]?.symbol).toBe("BTCUSD");
+  });
+
+  test("audits a Telegram ingestion gap reported by the adapter", async () => {
+    const telegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      async fetchRecentMessages() {
+        return {
+          messages: [
+            {
+              telegramMessageId: "gap-130",
+              messageDate: "2026-07-01T00:02:10.000Z",
+              rawText: "BUY XAUUSD",
+            },
+          ],
+          gap: {
+            fromIso: "2026-06-30T00:00:00.000Z",
+            toIso: "2026-07-01T00:00:31.000Z",
+            reason: "page-cap",
+          },
+        };
+      },
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram,
+      telegramPollingEnabled: false,
+    });
+    const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+
+    await app.runTelegramIngestionOnce();
+
+    const audit = await json<{
+      logs: Array<{
+        eventType: string;
+        level: string;
+        message: string;
+        data: Record<string, unknown>;
+      }>;
+    }>(await app.request("/api/audit-logs?event=telegram.ingest.gap"));
+    expect(audit.logs).toHaveLength(1);
+    expect(audit.logs[0]).toMatchObject({
+      eventType: "telegram.ingest.gap",
+      level: "error",
+      message: "Telegram backlog drain was truncated",
+      data: {
+        providerId,
+        fromIso: "2026-06-30T00:00:00.000Z",
+        toIso: "2026-07-01T00:00:31.000Z",
+        reason: "page-cap",
+      },
+    });
   });
 
   test("uses the freshest online linked account for provider parsing and mixed dashboard money", async () => {
@@ -5347,14 +5399,17 @@ describe("Telegram TC API", () => {
       },
       async fetchRecentMessages(sessionId, dialogId, limit) {
         calls.push(`messages:${sessionId}:${dialogId}:${limit}`);
-        return [
-          {
-            telegramMessageId: "555",
-            messageDate: "2026-05-09T08:00:00.000Z",
-            rawText: "SELL XAUUSD 2365\nSL 2375\nTP1 2350",
-            senderName: "Real FX Channel",
-          },
-        ];
+        return {
+          messages: [
+            {
+              telegramMessageId: "555",
+              messageDate: "2026-05-09T08:00:00.000Z",
+              rawText: "SELL XAUUSD 2365\nSL 2375\nTP1 2350",
+              senderName: "Real FX Channel",
+            },
+          ],
+          gap: undefined,
+        };
       },
     };
     const app = createApi({ databasePath: ":memory:", seedDemoData: false, telegram });
@@ -13378,13 +13433,16 @@ describe("Telegram TC API", () => {
       name: "gramjs",
       async fetchRecentMessages() {
         if (failFetch) throw new Error("Telegram unavailable");
-        return [
-          {
-            telegramMessageId: "backlog-1",
-            messageDate: "2026-07-14T08:00:00.000Z",
-            rawText: "BUY XAUUSD",
-          },
-        ];
+        return {
+          messages: [
+            {
+              telegramMessageId: "backlog-1",
+              messageDate: "2026-07-14T08:00:00.000Z",
+              rawText: "BUY XAUUSD",
+            },
+          ],
+          gap: undefined,
+        };
       },
     };
     const app = createApi({
@@ -14357,23 +14415,26 @@ describe("provider traded symbols", () => {
       },
       async fetchRecentMessages(sessionId, dialogId, limit) {
         calls.push(`messages:${sessionId}:${dialogId}:${limit}`);
-        return [
-          {
-            telegramMessageId: "scan-1",
-            messageDate: "2026-07-17T10:00:00.000Z",
-            rawText: "BUY XAUUSD",
-          },
-          {
-            telegramMessageId: "scan-2",
-            messageDate: "2026-07-17T10:01:00.000Z",
-            rawText: "SELL XAUUSD",
-          },
-          {
-            telegramMessageId: "scan-3",
-            messageDate: "2026-07-17T10:02:00.000Z",
-            rawText: "BUY EURUSD",
-          },
-        ];
+        return {
+          messages: [
+            {
+              telegramMessageId: "scan-1",
+              messageDate: "2026-07-17T10:00:00.000Z",
+              rawText: "BUY XAUUSD",
+            },
+            {
+              telegramMessageId: "scan-2",
+              messageDate: "2026-07-17T10:01:00.000Z",
+              rawText: "SELL XAUUSD",
+            },
+            {
+              telegramMessageId: "scan-3",
+              messageDate: "2026-07-17T10:02:00.000Z",
+              rawText: "BUY EURUSD",
+            },
+          ],
+          gap: undefined,
+        };
       },
     };
     try {

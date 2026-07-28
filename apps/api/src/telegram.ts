@@ -35,6 +35,20 @@ export interface TelegramFetchOptions {
   dateFrom?: string;
   dateTo?: string;
   offsetDate?: string;
+  offsetId?: string;
+  budgetMs?: number;
+}
+
+export interface TelegramFetchGap {
+  fromIso: string;
+  toIso: string;
+  reason: "page-cap" | "message-cap" | "time-cap";
+  resumeOffsetId?: string;
+}
+
+export interface TelegramFetchResult {
+  messages: TelegramCapturedMessage[];
+  gap?: TelegramFetchGap;
 }
 
 export interface TelegramSessionHealth {
@@ -72,12 +86,14 @@ export interface TelegramAdapter {
     dialogId: string,
     limit: number,
     options?: TelegramFetchOptions,
-  ): Promise<TelegramCapturedMessage[]>;
+  ): Promise<TelegramFetchResult>;
   sessionHealth?(sessionId: string): TelegramSessionHealth;
 }
 
 const DEFAULT_RECONNECT_RETRY_DELAY_MS = 2_000;
 const MAX_RECONNECT_RETRY_DELAY_MS = 10_000;
+const DEFAULT_TELEGRAM_FETCH_MAX_PAGES = 20;
+const DEFAULT_TELEGRAM_FETCH_MAX_MESSAGES = 1_000;
 const DEFAULT_TELEGRAM_LOG_LEVEL = "error";
 const TELEGRAM_LOG_LEVELS = new Set(["none", "error", "warn", "info", "debug"]);
 
@@ -105,6 +121,25 @@ export function parseReconnectRetryDelay(raw: string | undefined): number {
   return Number.isFinite(parsed) && parsed >= 0
     ? Math.min(Math.floor(parsed), MAX_RECONNECT_RETRY_DELAY_MS)
     : DEFAULT_RECONNECT_RETRY_DELAY_MS;
+}
+
+export function parseTelegramFetchCap(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function telegramFetchLimits() {
+  return {
+    maxPages: parseTelegramFetchCap(
+      process.env.TELEGRAM_FETCH_MAX_PAGES,
+      DEFAULT_TELEGRAM_FETCH_MAX_PAGES,
+    ),
+    maxMessages: parseTelegramFetchCap(
+      process.env.TELEGRAM_FETCH_MAX_MESSAGES,
+      DEFAULT_TELEGRAM_FETCH_MAX_MESSAGES,
+    ),
+  };
 }
 
 export async function withTelegramRpcTimeout<T>(operation: Promise<T>, timeoutMs: number) {
@@ -175,7 +210,7 @@ class MockTelegramAdapter implements TelegramAdapter {
   }
 
   async fetchRecentMessages(_sessionId: string, _dialogId: string, limit: number) {
-    return demoMessages().slice(0, limit);
+    return { messages: demoMessages().slice(0, limit), gap: undefined };
   }
 
   sessionHealth(sessionId: string): TelegramSessionHealth {
@@ -209,7 +244,10 @@ interface GramjsClient {
   isUserAuthorized(): Promise<boolean>;
   getMe(): Promise<{ phone?: string | number | bigint }>;
   getDialogs(params: { limit: number }): Promise<GramjsDialog[]>;
-  iterMessages(entity: unknown, params: { limit: number }): AsyncIterable<GramjsMessage>;
+  iterMessages(
+    entity: unknown,
+    params: { limit: number; offsetDate?: number; offsetId?: number },
+  ): AsyncIterable<GramjsMessage>;
 }
 
 interface GramjsDialog {
@@ -385,36 +423,111 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     const fromTime = options.dateFrom ? new Date(options.dateFrom).getTime() : undefined;
     const toTime = options.dateTo ? new Date(options.dateTo).getTime() : undefined;
     const offsetDate = options.offsetDate ?? options.dateTo;
-    for await (const message of client.iterMessages(entity, {
-      limit,
-      offsetDate: offsetDate ? Math.floor(new Date(offsetDate).getTime() / 1000) : undefined,
-    } as { limit: number; offsetDate?: number })) {
-      const rawText = String(message.message ?? "").trim();
-      if (!rawText) continue;
-      const messageDate = message.date
-        ? new Date(message.date * 1000).toISOString()
-        : new Date().toISOString();
-      const messageTime = new Date(messageDate).getTime();
-      if (toTime !== undefined && messageTime > toTime) continue;
-      if (fromTime !== undefined && messageTime < fromTime) break;
-      const quoted = await message.getReplyMessage?.();
-      const quotedText = String(quoted?.message ?? "").trim();
-      messages.push({
-        telegramMessageId: String(message.id),
-        replyToMessageId:
-          message.replyTo?.replyToMsgId === undefined
-            ? undefined
-            : String(message.replyTo.replyToMsgId),
-        messageDate,
-        rawText,
-        quotedText: quotedText || undefined,
-        senderName: message.sender?.username ?? message.sender?.firstName,
-        forwardedFrom: forwardedFrom(message.fwdFrom),
-        forwardedDate: telegramDateIso(message.fwdFrom?.date),
-      });
+    const { maxPages, maxMessages } = telegramFetchLimits();
+    const startedAt = Date.now();
+    let pages = 0;
+    let totalMessages = 0;
+    let offsetId = options.offsetId === undefined ? undefined : Number(options.offsetId);
+    let oldestReachedId: number | undefined;
+    let gapReason: TelegramFetchGap["reason"] | undefined;
+    let reachedFromTime = false;
+
+    for (;;) {
+      if (options.budgetMs !== undefined && Date.now() - startedAt >= options.budgetMs) {
+        gapReason = "time-cap";
+        break;
+      }
+      if (pages >= maxPages) {
+        gapReason = "page-cap";
+        break;
+      }
+      let pageMessages = 0;
+      let oldestId = offsetId;
+      pages += 1;
+      const pageOptions =
+        pages === 1
+          ? offsetId === undefined
+            ? {
+                limit,
+                offsetDate: offsetDate
+                  ? Math.floor(new Date(offsetDate).getTime() / 1000)
+                  : undefined,
+              }
+            : { limit, offsetId }
+          : { limit, offsetId };
+      for await (const message of client.iterMessages(
+        entity,
+        pageOptions as { limit: number; offsetDate?: number; offsetId?: number },
+      )) {
+        if (options.budgetMs !== undefined && Date.now() - startedAt >= options.budgetMs) {
+          gapReason = "time-cap";
+          break;
+        }
+        if (fromTime !== undefined && totalMessages >= maxMessages) {
+          gapReason = "message-cap";
+          break;
+        }
+        pageMessages += 1;
+        totalMessages += 1;
+        const numericId = Number(message.id);
+        if (Number.isFinite(numericId) && (oldestId === undefined || numericId < oldestId)) {
+          oldestId = numericId;
+        }
+        if (
+          Number.isFinite(numericId) &&
+          (oldestReachedId === undefined || numericId < oldestReachedId)
+        ) {
+          oldestReachedId = numericId;
+        }
+        const rawText = String(message.message ?? "").trim();
+        if (!rawText) continue;
+        const messageDate = message.date
+          ? new Date(message.date * 1000).toISOString()
+          : new Date().toISOString();
+        const messageTime = new Date(messageDate).getTime();
+        if (toTime !== undefined && messageTime > toTime) continue;
+        if (fromTime !== undefined && messageTime < fromTime) {
+          reachedFromTime = true;
+          break;
+        }
+        const quoted = await message.getReplyMessage?.();
+        const quotedText = String(quoted?.message ?? "").trim();
+        messages.push({
+          telegramMessageId: String(message.id),
+          replyToMessageId:
+            message.replyTo?.replyToMsgId === undefined
+              ? undefined
+              : String(message.replyTo.replyToMsgId),
+          messageDate,
+          rawText,
+          quotedText: quotedText || undefined,
+          senderName: message.sender?.username ?? message.sender?.firstName,
+          forwardedFrom: forwardedFrom(message.fwdFrom),
+          forwardedDate: telegramDateIso(message.fwdFrom?.date),
+        });
+      }
+      if (gapReason || reachedFromTime || pageMessages === 0 || fromTime === undefined) break;
+      offsetId = oldestId;
     }
     this.markContact(sessionId);
-    return messages;
+    const oldestCaptured = messages.map((message) => message.messageDate).sort()[0];
+    const resumeOffsetId = oldestReachedId === undefined ? undefined : String(oldestReachedId);
+    // A truncated drain must report a gap even when it captured no text at all.
+    // A budget spent entirely on media or empty messages still advanced through
+    // the backlog, and without a gap the caller reads the pass as complete and
+    // clears the resume cursor, skipping everything older for good.
+    return {
+      messages,
+      gap:
+        gapReason && options.dateFrom
+          ? {
+              fromIso: options.dateFrom,
+              toIso: oldestCaptured ?? options.dateFrom,
+              reason: gapReason,
+              resumeOffsetId,
+            }
+          : undefined,
+    };
   }
 
   private async resolveDialogEntity(client: GramjsClient, sessionId: string, dialogId: string) {
