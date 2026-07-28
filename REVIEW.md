@@ -50,6 +50,30 @@ Against 739px for Operations and 1,422px for Providers. This is why held signals
 thousands of pixels below the fold, which the handoff already flags as an operator problem.
 Needs a product call.
 
+## F6 — The document outline is inverted · CONFIRMED
+
+Measured on `/logs`:
+
+| element | role | size / weight |
+|---|---|---|
+| `h1.brand` "TG-TC · Signals & logs" | status-bar chrome | **15px** / 650 |
+| `h2` "Signals & logs" | actual page title | **30px** / 650 |
+| `h2.account-header-title` "Last known" | account card | 28px / 500 |
+| `h2` "Parser Lab", "Held signals", … | panel titles | 18px / 600 |
+
+The only `h1` on the page is the smallest text on it, and it names the app rather than the
+page. One heading level (`h2`) then covers three roles at three sizes. Screen readers get
+"TG-TC · Signals & logs" as the document's top-level heading.
+
+Fix is to promote the page title to `h1` and demote the status-bar brand to a non-heading
+element. Three tests query the brand via `getByRole("heading")` (`App.test.tsx:505`, `:2471`,
+`:2496`) and would need updating, which is why this is not in the mechanical batch.
+
+## F7 — Two H3 treatments
+
+`h3` renders at 13px/650 on Operations and 15px/500 on Settings. Minor next to F6 but part
+of the same absent scale.
+
 ## Fixes applied
 
 **F1** — `.settings-section` joined the `margin-inline` inset group in `signal-desk.css`,
