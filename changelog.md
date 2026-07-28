@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.62.0 - 2026-07-28 (Minor)
+
+Release impact: Minor because Telegram ingestion now exposes a resumable backfill workflow. No EA
+recompile is required for this release. The EA source version string moves with the release line but
+no EA behaviour, command contract, or capability string changed. The recompile still outstanding is
+the one v1.61.0 asked for, whenever it suits.
+
+Fixes silent permanent signal loss after a capture outage. A single poll fetched one page of 50
+messages, newest first, then advanced the provider watermark to the newest of them, so everything
+older in the gap was never fetched again.
+
+- Paginated Telegram drains backwards through the backlog until they reach the provider watermark,
+  bounded by page, message, and time budgets.
+- Added a resume cursor and a floor so a backlog too large for one poll continues on the next one
+  instead of being skipped. The floor is the watermark as it stood when the backlog opened, and the
+  backfill drains down to it. Both clear once the backlog is fully drained.
+- Split ingestion into a live pass and a backfill pass, live first, so capturing new signals is
+  never starved behind a backfill.
+- The provider watermark now only ever moves forward, so an older backfill batch cannot drag it
+  back and re-open a gap that was already closed.
+- A second outage keeps the older floor and takes the newer resume point, so a fresh truncation
+  cannot discard an outstanding backlog.
+- Collapsing duplicate provider rows carries the outstanding backlog across instead of dropping it.
+- A message already folded into another message's anchor no longer returns as a row of its own when
+  a pass boundary separates it from that anchor.
+- A truncated drain reports the un-fetched window and audits it, including when the truncated pass
+  captured no text at all.
+- The page and message caps bound a poll, not every caller, so a dated bulk import is no longer
+  silently cut to the poll's budget.
+
 ## 1.61.0 - 2026-07-27 (Minor)
 
 Release impact: Minor because the EA gains an input and must be recompiled and reattached. The command contract and capability strings are unchanged.

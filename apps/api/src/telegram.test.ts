@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { createTelegramAdapter, GRAMJS_CLIENT_OPTIONS, telegramLogLevel } from "./telegram";
+import {
+  createTelegramAdapter,
+  GRAMJS_CLIENT_OPTIONS,
+  type TelegramCapturedMessage,
+  telegramLogLevel,
+} from "./telegram";
 
 type GramjsAdapterTestSeam = {
   clients: Map<string, unknown>;
@@ -34,24 +39,32 @@ function gramjsAdapterWithReply(
 
 describe("GramJS reply-link capture", () => {
   test("captures replyToMessageId from the structured reply header", async () => {
-    const messages = await gramjsAdapterWithReply(7n).fetchRecentMessages("session", "dialog", 1);
+    const { messages } = await gramjsAdapterWithReply(7n).fetchRecentMessages(
+      "session",
+      "dialog",
+      1,
+    );
 
     expect(messages[0]).toMatchObject({ replyToMessageId: "7", quotedText: undefined });
   });
 
   test("leaves replyToMessageId undefined when the reply header is absent", async () => {
-    const messages = await gramjsAdapterWithReply().fetchRecentMessages("session", "dialog", 1);
+    const { messages } = await gramjsAdapterWithReply().fetchRecentMessages("session", "dialog", 1);
 
     expect(messages[0]?.replyToMessageId).toBeUndefined();
   });
 
   test("round-trips forwarded metadata and leaves it null for ordinary messages", async () => {
-    const forwarded = await gramjsAdapterWithReply(undefined, {
+    const { messages: forwarded } = await gramjsAdapterWithReply(undefined, {
       fromId: { channelId: 991n },
       fromName: "VIP Gold",
       date: 1_784_344_000,
     }).fetchRecentMessages("session", "dialog", 1);
-    const ordinary = await gramjsAdapterWithReply().fetchRecentMessages("session", "dialog", 1);
+    const { messages: ordinary } = await gramjsAdapterWithReply().fetchRecentMessages(
+      "session",
+      "dialog",
+      1,
+    );
 
     expect(forwarded[0]).toMatchObject({
       forwardedFrom: { peer: "channelId:991", name: "VIP Gold" },
@@ -59,6 +72,170 @@ describe("GramJS reply-link capture", () => {
     });
     expect(ordinary[0]?.forwardedFrom).toBeUndefined();
     expect(ordinary[0]?.forwardedDate).toBeUndefined();
+  });
+});
+
+function backlog(count: number) {
+  const start = Date.parse("2026-07-01T00:00:00.000Z");
+  return Array.from({ length: count }, (_, index) => {
+    const id = count - index;
+    return { id, date: Math.floor((start + id * 1_000) / 1_000), message: `signal ${id}` };
+  });
+}
+
+function gramjsAdapterWithBacklog(messages: ReturnType<typeof backlog>) {
+  const calls: Array<{ limit: number; offsetDate?: number; offsetId?: number }> = [];
+  const adapter = createTelegramAdapter("gramjs");
+  const seam = adapter as unknown as GramjsAdapterTestSeam;
+  seam.clients.set("session", {
+    getDialogs: async () => [{ id: "dialog", entity: "dialog" }],
+    iterMessages: (
+      _entity: unknown,
+      params: { limit: number; offsetDate?: number; offsetId?: number },
+    ) => {
+      calls.push(params);
+      const start =
+        params.offsetId === undefined
+          ? 0
+          : messages.findIndex((message) => message.id < params.offsetId!);
+      return (async function* () {
+        for (const message of messages.slice(
+          start < 0 ? messages.length : start,
+          start + params.limit,
+        )) {
+          yield message;
+        }
+      })();
+    },
+  });
+  return { adapter, calls };
+}
+
+describe("GramJS backlog pagination", () => {
+  test("drains a backlog larger than one page without duplicates", async () => {
+    const { adapter } = gramjsAdapterWithBacklog(backlog(130));
+    const result = await adapter.fetchRecentMessages("session", "dialog", 50, {
+      dateFrom: "2026-06-30T00:00:00.000Z",
+    });
+
+    expect(result.gap).toBeUndefined();
+    expect(result.messages).toHaveLength(130);
+    expect(result.messages.map((message) => message.telegramMessageId)).toEqual(
+      Array.from({ length: 130 }, (_, index) => String(130 - index)),
+    );
+    expect(new Set(result.messages.map((message) => message.telegramMessageId)).size).toBe(130);
+    expect(result.messages[0]).toMatchObject({
+      telegramMessageId: "130",
+      rawText: "signal 130",
+      messageDate: "2026-07-01T00:02:10.000Z",
+    } satisfies Partial<TelegramCapturedMessage>);
+  });
+
+  test("stops paginating once it reaches dateFrom", async () => {
+    const { adapter, calls } = gramjsAdapterWithBacklog(backlog(130));
+    const result = await adapter.fetchRecentMessages("session", "dialog", 50, {
+      dateFrom: "2026-07-01T00:01:10.000Z",
+    });
+
+    expect(result.messages.map((message) => message.telegramMessageId)).toEqual(
+      Array.from({ length: 61 }, (_, index) => String(130 - index)),
+    );
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toEqual({ limit: 50, offsetId: 81 });
+  });
+
+  test("fetches exactly one page when dateFrom is undefined", async () => {
+    const { adapter, calls } = gramjsAdapterWithBacklog(backlog(130));
+    const result = await adapter.fetchRecentMessages("session", "dialog", 50);
+
+    expect(result.messages.map((message) => message.telegramMessageId)).toEqual(
+      Array.from({ length: 50 }, (_, index) => String(130 - index)),
+    );
+    expect(calls).toEqual([{ limit: 50, offsetDate: undefined }]);
+  });
+
+  test("reports a gap when the page cap truncates a drain", async () => {
+    const prior = process.env.TELEGRAM_FETCH_MAX_PAGES;
+    process.env.TELEGRAM_FETCH_MAX_PAGES = "2";
+    try {
+      const { adapter } = gramjsAdapterWithBacklog(backlog(130));
+      const result = await adapter.fetchRecentMessages("session", "dialog", 50, {
+        dateFrom: "2026-06-30T00:00:00.000Z",
+      });
+
+      expect(result.messages.map((message) => message.telegramMessageId)).toEqual(
+        Array.from({ length: 100 }, (_, index) => String(130 - index)),
+      );
+      expect(result.gap).toEqual({
+        fromIso: "2026-06-30T00:00:00.000Z",
+        toIso: "2026-07-01T00:00:31.000Z",
+        reason: "page-cap",
+        resumeOffsetId: "31",
+      });
+    } finally {
+      if (prior === undefined) delete process.env.TELEGRAM_FETCH_MAX_PAGES;
+      else process.env.TELEGRAM_FETCH_MAX_PAGES = prior;
+    }
+  });
+
+  test("a bulk import is not cut down to the poll's message cap", async () => {
+    // The historical import endpoint asks for up to 50,000 with a dateFrom.
+    // Before pagination it received its whole page; the caps exist to bound a
+    // 2-second poll, so they must not silently truncate a caller that asked
+    // for more than the poll's budget.
+    const { adapter } = gramjsAdapterWithBacklog(backlog(2_400));
+    const result = await adapter.fetchRecentMessages("session", "dialog", 5_000, {
+      dateFrom: "2026-06-01T00:00:00.000Z",
+    });
+
+    expect(result.messages).toHaveLength(2_400);
+    expect(result.gap).toBeUndefined();
+  });
+
+  test("reports a gap when a truncated drain captured no text at all", async () => {
+    // A budget spent entirely on media/empty messages still walked through the
+    // backlog. Without a gap the caller reads the pass as complete and clears
+    // the resume cursor, skipping every older message permanently.
+    const prior = process.env.TELEGRAM_FETCH_MAX_PAGES;
+    process.env.TELEGRAM_FETCH_MAX_PAGES = "2";
+    try {
+      const mediaOnly = backlog(130).map((message) => ({ ...message, message: "" }));
+      const { adapter } = gramjsAdapterWithBacklog(mediaOnly);
+      const result = await adapter.fetchRecentMessages("session", "dialog", 50, {
+        dateFrom: "2026-06-30T00:00:00.000Z",
+      });
+
+      expect(result.messages).toHaveLength(0);
+      expect(result.gap).toEqual({
+        fromIso: "2026-06-30T00:00:00.000Z",
+        toIso: "2026-06-30T00:00:00.000Z",
+        reason: "page-cap",
+        resumeOffsetId: "31",
+      });
+    } finally {
+      if (prior === undefined) delete process.env.TELEGRAM_FETCH_MAX_PAGES;
+      else process.env.TELEGRAM_FETCH_MAX_PAGES = prior;
+    }
+  });
+
+  test("returns a partial drain and resume cursor when its reply work exhausts the budget", async () => {
+    const { adapter } = gramjsAdapterWithBacklog(
+      backlog(50).map((message) => ({
+        ...message,
+        getReplyMessage: async () => await new Promise((resolve) => setTimeout(resolve, 5)),
+      })),
+    );
+    const result = await adapter.fetchRecentMessages("session", "dialog", 50, {
+      dateFrom: "2026-06-30T00:00:00.000Z",
+      budgetMs: 12,
+    });
+
+    expect(result.messages.length).toBeGreaterThan(0);
+    expect(result.messages.length).toBeLessThan(50);
+    expect(result.gap).toMatchObject({
+      reason: "time-cap",
+      resumeOffsetId: result.messages.at(-1)?.telegramMessageId,
+    });
   });
 });
 

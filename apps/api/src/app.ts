@@ -45,6 +45,7 @@ import {
   type TelegramAdapter,
   type TelegramCapturedMessage,
   type TelegramDialog,
+  type TelegramFetchGap,
   TelegramRpcTimeoutError,
   type TelegramSessionHealth,
   type TelegramSessionStatus,
@@ -589,7 +590,11 @@ export function createApi(options: ApiOptions = {}) {
     const sessionId = provider ? store.connectedSessionIdForProfile(provider.profileId) : undefined;
     if (provider && sessionId) {
       try {
-        const captured = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit);
+        const { messages: captured } = await telegram.fetchRecentMessages(
+          sessionId,
+          provider.dialogId,
+          limit,
+        );
         if (captured.length > 0) {
           store.captureMessages(provider.id, captured);
           return c.json({ messages: store.recentMessages(provider.id, limit, false) });
@@ -613,7 +618,7 @@ export function createApi(options: ApiOptions = {}) {
     if (sessionId) {
       try {
         await telegram.listDialogs(sessionId);
-        messages = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit);
+        ({ messages } = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit));
       } catch {
         messages = store.recentMessages(providerId, limit, false);
       }
@@ -635,7 +640,7 @@ export function createApi(options: ApiOptions = {}) {
       return c.json({ error: "Provider or connected Telegram session not found" }, 404);
     }
     await telegram.listDialogs(sessionId);
-    const captured = await telegram.fetchRecentMessages(
+    const { messages: captured } = await telegram.fetchRecentMessages(
       sessionId,
       provider.dialogId,
       Math.min(Math.max(Number(body.limit ?? 5000), 1), 50_000),
@@ -666,7 +671,11 @@ export function createApi(options: ApiOptions = {}) {
     let fetchError: string | undefined;
     if (provider && sessionId) {
       try {
-        const messages = await telegram.fetchRecentMessages(sessionId, provider.dialogId, limit);
+        const { messages } = await telegram.fetchRecentMessages(
+          sessionId,
+          provider.dialogId,
+          limit,
+        );
         captured = messages.length;
         if (messages.length > 0) {
           inserted = store.captureMessages(provider.id, messages).inserted;
@@ -1237,7 +1246,23 @@ type TelegramProvider = {
   title: string;
   enabled: boolean;
   lastMessageAt: string;
+  backfillCursorId?: string;
+  backfillFloorAt?: string;
 };
+
+function pickNewerOffsetId(a: unknown, b: unknown): string | undefined {
+  const left = a === null || a === undefined || a === "" ? undefined : Number(a);
+  const right = b === null || b === undefined || b === "" ? undefined : Number(b);
+  const valid = [left, right].filter((value): value is number => Number.isFinite(value));
+  return valid.length === 0 ? undefined : String(Math.max(...valid));
+}
+
+function pickOlderIso(a: unknown, b: unknown): string | undefined {
+  const valid = [a, b]
+    .filter((value): value is string => typeof value === "string" && value !== "")
+    .sort();
+  return valid[0];
+}
 
 function createTelegramIngestionLoop(
   store: AppStore,
@@ -1691,7 +1716,7 @@ class AppStore {
     return (
       this.db
         .query(
-          "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at FROM providers ORDER BY title",
+          "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at, backfill_cursor_id, backfill_floor_at FROM providers ORDER BY title",
         )
         .all() as Row[]
     )
@@ -1725,6 +1750,8 @@ class AppStore {
           workFromTpLeg: normalizeWorkFromTpLeg(config?.workFromTpLeg),
           runner: config?.runner,
           lastMessageAt: String(row.last_message_at),
+          backfillCursorId: row.backfill_cursor_id ? String(row.backfill_cursor_id) : undefined,
+          backfillFloorAt: row.backfill_floor_at ? String(row.backfill_floor_at) : undefined,
         };
       });
   }
@@ -2183,7 +2210,7 @@ class AppStore {
   private providerRowsForDialog(dialogId: string) {
     return this.db
       .query(
-        "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at FROM providers WHERE dialog_id = ? ORDER BY id",
+        "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at, backfill_cursor_id, backfill_floor_at FROM providers WHERE dialog_id = ? ORDER BY id",
       )
       .all(dialogId) as Row[];
   }
@@ -2191,7 +2218,7 @@ class AppStore {
   private providerRowById(providerId: string) {
     return this.db
       .query(
-        "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at FROM providers WHERE id = ?",
+        "SELECT id, profile_id, dialog_id, title, kind, enabled, parser_mode, risk_profile, lot_size, provider_config_json, last_message_at, backfill_cursor_id, backfill_floor_at FROM providers WHERE id = ?",
       )
       .get(providerId) as Row | null;
   }
@@ -2243,9 +2270,19 @@ class AppStore {
       String(duplicate.last_message_at) > String(canonical.last_message_at)
         ? String(duplicate.last_message_at)
         : String(canonical.last_message_at);
+    // Carry any unfinished backlog across the collapse. Dropping the duplicate
+    // row with a cursor still on it would strand the messages it was there to
+    // fetch. Keep the oldest floor and the newest resume point, so the surviving
+    // row drains the union of both outstanding windows.
+    const mergedCursor =
+      pickNewerOffsetId(canonical.backfill_cursor_id, duplicate.backfill_cursor_id) ?? null;
+    const mergedFloorAt =
+      pickOlderIso(canonical.backfill_floor_at, duplicate.backfill_floor_at) ?? null;
     this.db
-      .query("UPDATE providers SET enabled = ?, last_message_at = ? WHERE id = ?")
-      .run(mergedEnabled, mergedLastMessageAt, canonicalProviderId);
+      .query(
+        "UPDATE providers SET enabled = ?, last_message_at = ?, backfill_cursor_id = ?, backfill_floor_at = ? WHERE id = ?",
+      )
+      .run(mergedEnabled, mergedLastMessageAt, mergedCursor, mergedFloorAt, canonicalProviderId);
     if (isEmptyJsonObject(canonicalConfig) && !isEmptyJsonObject(duplicateConfig)) {
       this.db
         .query(
@@ -2673,6 +2710,17 @@ class AppStore {
     });
   }
 
+  private rawMessageAliasOwner(providerId: string, telegramMessageId: string) {
+    const row = this.db
+      .query(
+        "SELECT raw_message_id FROM raw_message_aliases WHERE provider_id = ? AND telegram_message_id = ?",
+      )
+      .get(providerId, telegramMessageId) as Row | null;
+    if (!row) return undefined;
+    const owner = String(row.raw_message_id);
+    return owner === `raw_${providerId}_${telegramMessageId}` ? undefined : owner;
+  }
+
   captureMessages(providerId: string, messages: TelegramCapturedMessage[]) {
     const before = this.rawMessageCount(providerId);
     // Correlate same-sender follow-up fragments into their directional anchor so
@@ -2690,6 +2738,13 @@ class AppStore {
             correlatedMessageIds: [message.telegramMessageId],
           }));
     for (const group of groups) {
+      // A message already folded into another group's anchor must not come back
+      // as a row of its own. Splitting one poll into a live and a backfill pass
+      // can put an anchor and its fragment in different batches, and the primary
+      // key only covers the anchor id, so a "TP1 HIT" fragment stored under its
+      // anchor would re-insert standalone and parse as an executable lifecycle
+      // command. The alias table is what records that folding.
+      if (this.rawMessageAliasOwner(providerId, group.telegramMessageId)) continue;
       const parserText = this.telegramParserText(providerId, group);
       const context = this.parserContext(providerId, this.defaultParserAccountId(providerId));
       const parsed = parseSignalText(parserText, context);
@@ -2731,8 +2786,8 @@ class AppStore {
         .at(-1);
       if (latest) {
         this.db
-          .query("UPDATE providers SET last_message_at = ? WHERE id = ?")
-          .run(latest, providerId);
+          .query("UPDATE providers SET last_message_at = ? WHERE id = ? AND last_message_at < ?")
+          .run(latest, providerId, latest);
       }
     }
     return { captured: messages.length, inserted: after - before, total: after };
@@ -2804,15 +2859,96 @@ class AppStore {
     this.providersWithoutSession.delete(provider.id);
     let recordedHealth = false;
     try {
-      const captured = await withTelegramRpcTimeout(
+      const startedAt = Date.now();
+      const originalLastMessageAt = provider.lastMessageAt;
+      const captured: TelegramCapturedMessage[] = [];
+      // The floor is the watermark as it stood when the outstanding backlog
+      // opened, and it is what the backfill drains down to. It cannot be the
+      // current watermark: the live pass advances that to the newest message it
+      // just captured, so a backfill resuming on a later poll would find its
+      // very first older message already past the cutoff, stop immediately,
+      // report no gap, and have its cursor cleared with the backlog untouched.
+      //
+      // An existing floor always predates a new one, so a second outage keeps
+      // the older floor and takes the newer resume point. Walking back from the
+      // newer cursor to the older floor covers both windows; the already
+      // captured middle re-inserts idempotently.
+      const recordGap = (gap: TelegramFetchGap, openedFrom: string) => {
+        const resumeOffsetId = gap.resumeOffsetId;
+        if (resumeOffsetId) {
+          this.db
+            .query(
+              "UPDATE providers SET backfill_cursor_id = ?, backfill_floor_at = COALESCE(backfill_floor_at, ?) WHERE id = ?",
+            )
+            .run(resumeOffsetId, openedFrom, provider.id);
+        }
+        this.audit(
+          "telegram.ingest.gap",
+          resumeOffsetId ? "warn" : "error",
+          "Telegram backlog drain was truncated",
+          {
+            providerId: provider.id,
+            fromIso: gap.fromIso,
+            toIso: gap.toIso,
+            reason: gap.reason,
+            resumeOffsetId,
+          },
+        );
+      };
+      const capturePass = (messages: TelegramCapturedMessage[]) => {
+        const captureResult = this.captureMessages(provider.id, messages);
+        result.captured += captureResult.captured;
+        result.inserted += captureResult.inserted;
+        captured.push(...messages);
+      };
+      // Each pass gets a share of the poll as its own drain budget, but the
+      // timeout wrapped around it stays the full configured value. The drain
+      // has to be what stops the drain: if the race fires first it rejects a
+      // pass that was about to return its partial batch, and everything
+      // captured is discarded because it only persists once the fetch resolves.
+      // The outer timeout is left as the backstop for a genuinely hung RPC.
+      const liveBudgetMs = Math.floor(rpcTimeoutMs / 2);
+      const live = await withTelegramRpcTimeout(
         telegram.fetchRecentMessages(sessionId, provider.dialogId, limit, {
-          dateFrom: provider.lastMessageAt,
+          dateFrom: originalLastMessageAt,
+          budgetMs: liveBudgetMs,
         }),
         rpcTimeoutMs,
       );
-      const captureResult = this.captureMessages(provider.id, captured);
-      result.captured += captureResult.captured;
-      result.inserted += captureResult.inserted;
+      capturePass(live.messages);
+      if (live.gap) recordGap(live.gap, originalLastMessageAt);
+
+      const cursor = live.gap?.resumeOffsetId ?? provider.backfillCursorId;
+      const floor = provider.backfillFloorAt ?? originalLastMessageAt;
+      const remainingBudgetMs = rpcTimeoutMs - (Date.now() - startedAt);
+      if (cursor && remainingBudgetMs > 0) {
+        const backfill = await withTelegramRpcTimeout(
+          telegram.fetchRecentMessages(sessionId, provider.dialogId, limit, {
+            dateFrom: floor,
+            offsetId: cursor,
+            budgetMs: remainingBudgetMs,
+          }),
+          rpcTimeoutMs,
+        );
+        capturePass(backfill.messages);
+        if (backfill.gap) {
+          recordGap(backfill.gap, floor);
+        } else {
+          this.db
+            .query(
+              "UPDATE providers SET backfill_cursor_id = NULL, backfill_floor_at = NULL WHERE id = ?",
+            )
+            .run(provider.id);
+          this.audit(
+            "telegram.ingest.backfill-complete",
+            "info",
+            "Telegram backlog drain completed",
+            {
+              providerId: provider.id,
+            },
+          );
+        }
+      }
       const parsed = this.parseUnparsedProviderMessages(
         provider.id,
         Math.max(limit, captured.length),
@@ -10048,12 +10184,16 @@ class AppStore {
         risk_profile TEXT NOT NULL DEFAULT 'balanced',
         lot_size REAL NOT NULL DEFAULT 0.1,
         provider_config_json TEXT NOT NULL DEFAULT '{}',
-        last_message_at TEXT NOT NULL
+        last_message_at TEXT NOT NULL,
+        backfill_cursor_id TEXT,
+        backfill_floor_at TEXT
       );
     `);
     this.ensureColumn("providers", "risk_profile", "TEXT NOT NULL DEFAULT 'balanced'");
     this.ensureColumn("providers", "lot_size", "REAL NOT NULL DEFAULT 0.1");
     this.ensureColumn("providers", "provider_config_json", "TEXT NOT NULL DEFAULT '{}'");
+    this.ensureColumn("providers", "backfill_cursor_id", "TEXT");
+    this.ensureColumn("providers", "backfill_floor_at", "TEXT");
     this.db.run(`
       CREATE TABLE IF NOT EXISTS provider_config_history (
         id TEXT PRIMARY KEY,

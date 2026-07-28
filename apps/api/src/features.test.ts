@@ -36,7 +36,7 @@ function mockAdapter(messages: TelegramCapturedMessage[]): TelegramAdapter {
       ];
     },
     async fetchRecentMessages() {
-      return messages;
+      return { messages, gap: undefined };
     },
   };
 }
