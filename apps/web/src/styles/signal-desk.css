@@ -639,6 +639,7 @@ h3,
 .panel > .setup-providers,
 .panel > .linked-section,
 .panel > .provider-health-strip,
+.panel > .settings-section,
 .panel > .history-export-row {
   margin-right: 16px;
   margin-left: 16px;
@@ -1522,6 +1523,7 @@ textarea {
   .panel > .linked-section,
   .panel > .provider-health-strip,
   .panel > .provider-monitoring,
+  .panel > .settings-section,
   .panel > .performance-mode-tabs,
   .panel > .history-export-row {
     margin-right: 12px;

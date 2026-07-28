@@ -1,4 +1,86 @@
-# Review: apps/web UI speed + repo dead code
+# UI consistency review — 2026-07-28
+
+Method: local instance on a copy of the live DB (2 accounts, 2 providers, 32 review-queue
+items), driven through the real sidebar and tab controls in Chrome. Findings come from
+measuring rendered boxes, not from judging screenshots.
+
+Checks per route: panel-child edge alignment, children overrunning their panel, rows
+holding a single control, repeated headings, document horizontal overflow, panel header
+height consistency, near-empty blocks over 80px tall.
+
+Routes swept: `/` · `/logs` · `/providers` · `/symbols` · `/telegram` · `/settings` ·
+`/history` · `/performance` · `/equity-guardian`.
+
+Clean on every structural check: `/` (Operations), `/symbols`, `/telegram`, `/history`,
+`/performance`.
+
+## F1 — Settings sections are full-bleed while their siblings are inset · CONFIRMED
+
+`/settings`, panel box `226 → 1582`:
+
+| child | left | right |
+|---|---|---|
+| `.panel-intro` | 243 | 1565 |
+| `.settings-form-layout` | 243 | 1565 |
+| `.settings-section` | **227** | **1581** |
+
+Same root cause as the Providers panel: `signal-desk.css` lists which panel children take
+`margin-inline: 16px`, and `.settings-section` is not a member.
+
+## F2 — "New manual ticket" sits alone in a 74px row · CONFIRMED
+
+`/logs`, `.panel-toolbar` is 74px tall and holds one button. Same pattern as the Providers
+Export button: `.panel > *:not(header)` applies `var(--space-5)` to every direct child, so
+a toolbar wrapping one control costs ~74px.
+
+## F3 — Panel header heights vary within one page · CONFIRMED
+
+`/logs` renders panel headers at `[51, 37, 37, 37, 37]`. One is 14px taller than the other
+four on the same screen.
+
+## F4 — Page title and panel title repeat the same word · CONFIRMED
+
+`/providers` "Providers" ×2, `/settings` "Settings" ×2, `/equity-guardian` "Equity
+Guardian" ×2. The workspace tab already names the section, so the panel header is the third
+statement of the same word. Needs a product call rather than a mechanical fix.
+
+## F5 — `/logs` is 26,214px tall · CONFIRMED
+
+Against 739px for Operations and 1,422px for Providers. This is why held signals sit
+thousands of pixels below the fold, which the handoff already flags as an operator problem.
+Needs a product call.
+
+## Fixes applied
+
+**F1** — `.settings-section` joined the `margin-inline` inset group in `signal-desk.css`,
+both at full width and at the narrow breakpoint. Only the instance rendered directly under
+the panel was affected; the ones nested inside the form were already inset.
+
+**F2 and F3 shared a root cause**: there was no standard home for panel-level actions, so
+each page invented its own row. `Panel` now takes an `actions` prop rendered right-aligned
+in the header. Providers' Export and the Signal Queue's "New manual ticket" both moved
+there, and the one-button toolbars are gone. `.panel > header` also gained a `min-height`
+so a header carrying actions or tabs matches one carrying only a title.
+
+This also replaced the earlier fix that embedded Export inside the intro block, so there is
+now a single pattern rather than two.
+
+Re-audited after the change: **zero structural findings on all ten routes.**
+
+## Status
+
+- [x] F1 · [x] F2 · [x] F3
+- [ ] F4 · [ ] F5 — need a product decision
+
+## Known flake, not caused by this work
+
+`AccountHeader > shows honest stale state and exposes account actions` times out at 10s in
+roughly 1 run in 5. Verified against a clean baseline with these changes stashed: it fails
+there at the same rate.
+
+---
+
+# Review: apps/web UI speed + repo dead code (2026-07-24, completed)
 
 Two independent passes (Fable + Codex sol xhigh), synthesized at the end.
 

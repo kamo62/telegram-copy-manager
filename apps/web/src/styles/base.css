@@ -787,6 +787,10 @@ h3 {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Held steady so a header carrying actions or tabs is the same height as a
+     header carrying only a title. Panels sit side by side on several routes and
+     the mismatch reads as misalignment. */
+  min-height: 51px;
   padding: 8px 10px;
   font-size: 11px;
   font-weight: 600;
@@ -799,6 +803,13 @@ h3 {
 
 .panel > header svg {
   color: var(--ink-faint);
+}
+
+.panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .panel > header h2 {
@@ -3493,25 +3504,9 @@ h3 {
   border-radius: var(--radius);
 }
 
-/* Export sits inside the intro block rather than on a row of its own. Every
-   direct panel child picks up var(--space-5) from `.panel > *:not(header)`, so
-   a toolbar holding a single button cost ~86px of empty height. */
-.provider-intro {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-
-.provider-intro p {
-  margin: 0;
-}
-
 .provider-export-btn {
   gap: 6px;
   flex-shrink: 0;
-  margin-left: auto;
 }
 
 .account-row {

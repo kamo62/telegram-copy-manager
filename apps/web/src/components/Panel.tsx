@@ -1,4 +1,5 @@
 export function Panel({
+  actions,
   activeTab,
   children,
   className = "",
@@ -7,6 +8,13 @@ export function Panel({
   testId,
   title,
 }: {
+  /**
+   * Panel-level controls, right-aligned in the header. Use this rather than a
+   * toolbar row: every direct panel child takes var(--space-5) from
+   * `.panel > *:not(header)`, so a row wrapping one button costs ~75px of
+   * height and reads as a gap.
+   */
+  actions?: React.ReactNode;
   activeTab?: string;
   children: React.ReactNode;
   className?: string;
@@ -40,6 +48,7 @@ export function Panel({
             ))}
           </div>
         ) : null}
+        {actions ? <div className="panel-header-actions">{actions}</div> : null}
       </header>
       {tabs && activeTab && onTabChange ? (
         <div

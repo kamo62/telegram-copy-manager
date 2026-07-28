@@ -194,9 +194,10 @@ export function LogsPage({
         </Panel>
       </section>
 
-      <Panel className="wide-panel" title="Signal Queue">
-        <div className="panel-toolbar">
+      <Panel
+        actions={
           <button
+            className="btn btn-ghost btn-small"
             onClick={() => onForcePush()}
             title="Compose a trade and force-push it to an account's MT5 queue"
             type="button"
@@ -204,7 +205,10 @@ export function LogsPage({
             <Send size={13} aria-hidden="true" />
             New manual ticket
           </button>
-        </div>
+        }
+        className="wide-panel"
+        title="Signal Queue"
+      >
         <div className="queue-board">
           {snapshot.signalQueue.length === 0 ? (
             <EmptyState
