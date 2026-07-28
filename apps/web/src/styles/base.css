@@ -3493,14 +3493,25 @@ h3 {
   border-radius: var(--radius);
 }
 
-.provider-panel-toolbar {
+/* Export sits inside the intro block rather than on a row of its own. Every
+   direct panel child picks up var(--space-5) from `.panel > *:not(header)`, so
+   a toolbar holding a single button cost ~86px of empty height. */
+.provider-intro {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.provider-intro p {
+  margin: 0;
 }
 
 .provider-export-btn {
   gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .account-row {

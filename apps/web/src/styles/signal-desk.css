@@ -644,6 +644,14 @@ h3,
   margin-left: 16px;
 }
 
+/* These carry side margins, so a declared `width: 100%` resolves against the
+   parent's full content box and overruns it by the margins. The panel clips
+   with `overflow: hidden`, so the symptom is a missing right border rather
+   than a scrollbar. */
+.panel > .data-table-wrap {
+  width: auto;
+}
+
 .panel > .performance-mode-tabs {
   margin: 16px 16px 12px;
 }
@@ -987,7 +995,10 @@ textarea {
 }
 
 .provider-monitoring {
-  margin: 16px 0;
+  /* Inset to match the intro and the table above and below it. Those get their
+     16px from the `.panel > *` group earlier in this file; this one sets it
+     directly so the group does not end up overriding a later, weaker rule. */
+  margin: 16px;
   overflow: hidden;
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -1510,6 +1521,7 @@ textarea {
   .panel > .setup-providers,
   .panel > .linked-section,
   .panel > .provider-health-strip,
+  .panel > .provider-monitoring,
   .panel > .performance-mode-tabs,
   .panel > .history-export-row {
     margin-right: 12px;

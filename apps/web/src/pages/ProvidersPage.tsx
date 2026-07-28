@@ -38,7 +38,20 @@ export function ProvidersPage({
   const isAccountMode = Boolean(accountId);
   return (
     <Panel className="wide-panel" title="Providers">
-      <div className="provider-panel-toolbar">
+      <div className="panel-intro provider-intro">
+        {isAccountMode ? (
+          <p>
+            Stats, copy status, and configuration shown for{" "}
+            <strong>{accountLabel ?? "this account"}</strong>. Use <strong>Copy</strong> to start or
+            stop copying a provider here, and <strong>Configure</strong> to set this account's lot
+            size, risk, and take-profit. Enable or remove a provider from this hub.
+          </p>
+        ) : (
+          <p>
+            Aggregated performance, health, and global provider monitoring. Select an account in the
+            sidebar for its copy settings.
+          </p>
+        )}
         <button
           aria-label="Export provider performance"
           className="btn btn-ghost btn-small provider-export-btn"
@@ -49,19 +62,6 @@ export function ProvidersPage({
           Export
         </button>
       </div>
-      {isAccountMode ? (
-        <p className="panel-intro">
-          Stats, copy status, and configuration shown for{" "}
-          <strong>{accountLabel ?? "this account"}</strong>. Use <strong>Copy</strong> to start or
-          stop copying a provider here, and <strong>Configure</strong> to set this account's lot
-          size, risk, and take-profit. Enable or remove a provider from this hub.
-        </p>
-      ) : (
-        <p className="panel-intro">
-          Aggregated performance, health, and global provider monitoring. Select an account in the
-          sidebar for its copy settings.
-        </p>
-      )}
       {!isAccountMode ? (
         <section className="provider-monitoring" aria-label="Provider monitoring">
           <header className="provider-monitoring-head">
