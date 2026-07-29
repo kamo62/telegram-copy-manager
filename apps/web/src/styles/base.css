@@ -22,6 +22,12 @@ body {
   background: var(--bg);
 }
 
+/* The UA default for <small> is 0.8em, which lands on ~10px against a 13px
+   parent and sits off the 12/13/14/24 scale. Parser Lab renders 16 of them. */
+small {
+  font-size: 12px;
+}
+
 button,
 input,
 select,
@@ -1508,7 +1514,7 @@ h3 {
   color: var(--ink-3);
 }
 
-.setup-form input {
+.setup-form > label > input {
   height: 34px;
   padding: 0 12px;
   font-size: 13px;
@@ -1522,7 +1528,7 @@ h3 {
     box-shadow var(--duration-1) var(--ease-out);
 }
 
-.setup-form input:focus {
+.setup-form > label > input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
@@ -2541,16 +2547,6 @@ h3 {
   align-items: center;
 }
 
-.guardian-actions input {
-  width: 90px;
-  padding: 6px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-1);
-  background: var(--bg-elevated);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
 .ticket-chip {
   display: inline-flex;
   align-items: center;
@@ -2643,6 +2639,24 @@ h3 {
 .account-chip.is-readonly:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+.account-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.account-switch.is-on {
+  color: var(--text-1);
+}
+
+.account-switch:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* Provider monitoring list on Telegram Setup (global enable/pause/remove). */
@@ -4492,79 +4506,6 @@ span.data-table-subtle {
   letter-spacing: var(--tracking-ui);
 }
 
-.config-stepper {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 28px;
-  height: 30px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  overflow: hidden;
-}
-
-.config-stepper button {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--ink-dim);
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: background 0.12s;
-}
-
-.config-stepper button:hover {
-  background: var(--panel-2);
-  color: var(--ink);
-}
-
-.config-stepper input {
-  min-width: 0;
-  text-align: center;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--ink);
-  background: transparent;
-  border: none;
-  outline: none;
-}
-
-.config-strategy-input {
-  width: 100%;
-  min-width: 0;
-  height: 30px;
-  padding: 0 10px;
-  font-family: var(--font-ui);
-  font-size: 12px;
-  color: var(--ink);
-  background: var(--bg-elevated);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  outline: none;
-  transition: border-color 0.12s;
-}
-
-select.config-strategy-input {
-  appearance: none;
-  padding-right: 28px;
-  background-image:
-    linear-gradient(45deg, transparent 50%, var(--ink-dim) 50%),
-    linear-gradient(135deg, var(--ink-dim) 50%, transparent 50%);
-  background-position:
-    calc(100% - 12px) 13px,
-    calc(100% - 8px) 13px;
-  background-size:
-    4px 4px,
-    4px 4px;
-  background-repeat: no-repeat;
-}
-
-.config-strategy-input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-
 .config-strategy-controls {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -4687,9 +4628,10 @@ select.config-strategy-input {
 /* Order summary card */
 .config-resume {
   padding: 14px 16px;
-  background: var(--panel-2);
+  background: var(--bg-panel);
   border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
 }
 
 .config-resume-title {
@@ -7583,6 +7525,7 @@ select.config-strategy-input {
   background: var(--panel);
   padding: var(--space-4);
   border-left: 3px solid var(--line);
+  box-shadow: var(--shadow-card);
 }
 .provider-health-green {
   border-left-color: var(--ink);

@@ -572,8 +572,13 @@ h3,
 .recent-activity-card,
 .statistics-card,
 .attribution-panel,
+.attribution-kpi,
+.attribution-breakdown,
 .linked-account-card,
 .linked-slot-list > li,
+.log-row,
+.parser-result,
+.queue-item,
 .row-item,
 .exposure-panel,
 .data-table-wrap {
@@ -709,6 +714,14 @@ h3,
 .panel > .linked-section,
 .panel > .provider-health-strip,
 .panel > .settings-section,
+.panel > .setup-help,
+.panel > .connected-state,
+.panel > .setup-next,
+.panel > .dialog-picker,
+.panel > .open-positions,
+.panel > .closed-positions,
+.panel > .out-of-sync-resolution,
+.panel > .empty-state,
 .panel > .panel-hint {
   margin-right: 16px;
   margin-left: 16px;
@@ -724,6 +737,38 @@ h3,
 
 .panel > .performance-mode-tabs {
   margin: 16px 16px 12px;
+}
+
+.setup-form-credentials {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.setup-form-credentials > .setup-form-error,
+.setup-form-credentials > label:last-of-type,
+.setup-form-credentials > .setup-form-actions {
+  grid-column: 1 / -1;
+}
+
+.setup-form .number-field {
+  width: 100%;
+  height: 34px;
+}
+
+.panel > :is(.setup-help, .connected-state, .dialog-picker) {
+  box-shadow: var(--shadow-card);
+}
+
+.panel > .dialog-picker {
+  min-width: 0;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+}
+
+.panel > :is(.open-positions, .closed-positions, .out-of-sync-resolution) {
+  min-width: 0;
 }
 
 .panel > :last-child {
@@ -1144,13 +1189,54 @@ textarea {
 .provider-monitoring-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
   gap: 5px;
 }
 
+.provider-monitoring-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.config-field > .number-field,
+.config-tp-number {
+  width: 100%;
+  height: 36px;
+}
+
+:is(.config-tp-row > .config-tp-number, .modal.modal-wide .config-field > .number-field) > input {
+  min-height: 0;
+  height: 100%;
+  padding: 0 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.config-strategy-controls .segmented-control {
+  width: 100%;
+}
+
+.config-strategy-controls .segmented-control button {
+  min-width: max-content;
+  flex: 1;
+  padding-inline: 8px;
+}
+
+.guardian-actions > .number-field {
+  width: 110px;
+  height: 36px;
+}
+
 .operations-primary-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(340px, 0.75fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 
@@ -1399,7 +1485,7 @@ textarea {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-1);
+  box-shadow: var(--shadow-card);
 }
 
 .performance-overview .attribution-panel {
@@ -1422,15 +1508,15 @@ textarea {
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-left-width: 2px;
-  border-radius: var(--radius-1);
+  border-radius: var(--radius-lg);
 }
 
 .performance-overview .chart-card {
   margin: 0 16px;
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-  box-shadow: none;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
 }
 
 .performance-overview .attribution-breakdown-grid,
@@ -1601,8 +1687,20 @@ textarea {
   .panel > .provider-monitoring,
   .panel > .settings-section,
   .panel > .performance-mode-tabs,
+  .panel > .setup-help,
+  .panel > .connected-state,
+  .panel > .setup-next,
+  .panel > .dialog-picker,
+  .panel > .open-positions,
+  .panel > .closed-positions,
+  .panel > .out-of-sync-resolution,
+  .panel > .empty-state,
   .panel > .panel-hint {
     margin-right: 12px;
     margin-left: 12px;
+  }
+
+  .setup-form-credentials {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

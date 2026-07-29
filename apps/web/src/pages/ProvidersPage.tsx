@@ -1,4 +1,5 @@
 import { Download } from "lucide-react";
+import { Switch } from "../components/FormControls";
 import { Panel } from "../components/Panel";
 import { ProviderHealthCard } from "../components/ProviderHealthCard";
 import {
@@ -93,14 +94,18 @@ export function ProvidersPage({
                   >
                     Configure
                   </button>
-                  <button
-                    aria-label={`${provider.enabled ? "Pause" : "Enable"} auto-copy for ${provider.title}`}
-                    className="btn btn-ghost btn-small"
-                    onClick={() => onToggleProvider?.(provider)}
-                    type="button"
+                  <label
+                    className="provider-monitoring-switch"
+                    htmlFor={`provider-enabled-${provider.id}`}
                   >
-                    {provider.enabled ? "Pause" : "Enable"}
-                  </button>
+                    <Switch
+                      aria-label={`${provider.enabled ? "Pause" : "Enable"} auto-copy for ${provider.title}`}
+                      checked={provider.enabled}
+                      id={`provider-enabled-${provider.id}`}
+                      onChange={() => onToggleProvider?.(provider)}
+                    />
+                    <span>{provider.enabled ? "Enabled" : "Paused"}</span>
+                  </label>
                   <button
                     aria-label={`Remove provider ${provider.title}`}
                     className="btn btn-ghost btn-small btn-destructive-subtle"

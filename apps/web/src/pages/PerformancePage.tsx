@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { SegmentedControl } from "../components/FormControls";
 import { GrowthChart, type GrowthSeries } from "../components/GrowthChart";
 import { Money } from "../components/Money";
 import { Stat } from "../components/Stat";
@@ -175,10 +176,10 @@ export function PerformancePage({
 
   return (
     <div aria-labelledby="tab-performance" id="tabpanel-performance" role="tabpanel">
-      <div
-        className="segmented-control performance-mode-tabs"
+      <SegmentedControl
+        ariaLabel="Performance view"
+        className="performance-mode-tabs"
         role="tablist"
-        aria-label="Performance view"
       >
         <button
           aria-selected={view === "overview"}
@@ -198,7 +199,7 @@ export function PerformancePage({
         >
           Statistics
         </button>
-      </div>
+      </SegmentedControl>
       {view === "overview" ? (
         <div className="performance-overview">
           <AttributionPanel
@@ -648,14 +649,24 @@ function StatisticsView({
             <option value="30d">30d</option>
             <option value="all">All</option>
           </select>
-          <select
-            aria-label="Statistics scope"
-            value={scope}
-            onChange={(event) => setScope(event.target.value as StatsScope)}
-          >
-            <option value="account">Account</option>
-            <option value="provider">Provider</option>
-          </select>
+          <SegmentedControl ariaLabel="Statistics scope">
+            <button
+              aria-pressed={scope === "account"}
+              className={scope === "account" ? "active" : ""}
+              onClick={() => setScope("account")}
+              type="button"
+            >
+              Account
+            </button>
+            <button
+              aria-pressed={scope === "provider"}
+              className={scope === "provider" ? "active" : ""}
+              onClick={() => setScope("provider")}
+              type="button"
+            >
+              Provider
+            </button>
+          </SegmentedControl>
           {scope === "provider" ? (
             <select
               aria-label="Statistics provider"

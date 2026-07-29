@@ -3,6 +3,7 @@ import { useLocale } from "../contexts/LocaleContext";
 import { useSortableTable } from "../hooks/useSortableTable";
 import { formatLot, formatPips, formatRelativeTime } from "../lib/format";
 import { winRateTone } from "../lib/thresholds";
+import { Switch } from "./FormControls";
 import { Money } from "./Money";
 import { SkeletonRow } from "./Skeleton";
 import { Stat } from "./Stat";
@@ -195,23 +196,26 @@ export function ProvidersTable({
                       const linked = isCopiedBy(provider, accountId);
                       const disabled = !provider.enabled || !onToggleAccountLink;
                       return (
-                        <button
-                          aria-label={`${linked ? "Stop copying" : "Copy"} ${provider.title} on this account`}
-                          aria-pressed={linked}
-                          className={`account-chip ${linked ? "is-on" : "is-off"}`}
-                          disabled={disabled}
-                          onClick={() => onToggleAccountLink?.(accountId, provider.id, !linked)}
+                        <label
+                          className={`account-switch ${linked ? "is-on" : "is-off"}`}
+                          htmlFor={`provider-copy-${accountId}-${provider.id}`}
                           title={
                             disabled
                               ? "Enable the provider before copying"
                               : linked
-                                ? "Copying — click to stop"
-                                : "Not copying — click to copy"
+                                ? "Copying — switch off to stop"
+                                : "Not copying — switch on to copy"
                           }
-                          type="button"
                         >
-                          {linked ? "Copying" : "Copy"}
-                        </button>
+                          <Switch
+                            aria-label={`${linked ? "Stop copying" : "Copy"} ${provider.title} on this account`}
+                            checked={linked}
+                            disabled={disabled}
+                            id={`provider-copy-${accountId}-${provider.id}`}
+                            onChange={() => onToggleAccountLink?.(accountId, provider.id, !linked)}
+                          />
+                          <span>{linked ? "Copying" : "Copy"}</span>
+                        </label>
                       );
                     })()
                   ) : (

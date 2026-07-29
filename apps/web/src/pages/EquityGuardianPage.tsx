@@ -2,6 +2,7 @@ import { ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
+import { NumberField, Switch } from "../components/FormControls";
 import { Panel } from "../components/Panel";
 import { useLocale } from "../contexts/LocaleContext";
 import { formatPercent } from "../lib/format";
@@ -115,18 +116,23 @@ export function EquityGuardianPage({
                 </span>
               </div>
               <div className="guardian-actions">
-                <label className="config-toggle">
-                  <input defaultChecked={guardian.enabled} name="enabled" type="checkbox" />
-                  <span>On</span>
+                <label className="config-toggle" htmlFor={`guardian-enabled-${guardian.accountId}`}>
+                  <Switch
+                    aria-label={`Enable guardian for ${guardian.accountNumber || guardian.accountId}`}
+                    defaultChecked={guardian.enabled}
+                    id={`guardian-enabled-${guardian.accountId}`}
+                    name="enabled"
+                  />
+                  <span>Enabled</span>
                 </label>
-                <input
+                <NumberField
                   aria-label="Threshold percent"
                   defaultValue={guardian.threshold || 10}
                   min="0"
                   name="threshold"
                   required={guardian.enabled}
                   step="0.1"
-                  type="number"
+                  unit="%"
                 />
                 <button className="btn btn-primary btn-small" type="submit">
                   Save

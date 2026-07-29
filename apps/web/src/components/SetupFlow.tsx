@@ -1,4 +1,5 @@
 import { ArrowRight, CheckCircle2, Link2, LogOut, ShieldCheck } from "lucide-react";
+import { NumberField } from "./FormControls";
 
 export interface SetupFormState {
   apiId: string;
@@ -136,18 +137,21 @@ export function SetupFlow({
   }
 
   return (
-    <form className="setup-form" onSubmit={startTelegramConnection}>
+    <form className="setup-form setup-form-credentials" onSubmit={startTelegramConnection}>
       {error ? (
         <span className="setup-form-error" role="alert">
           {error}
         </span>
       ) : null}
-      <label>
+      <label htmlFor="telegram-api-id">
         API ID
-        <input
+        <NumberField
           autoComplete="off"
+          id="telegram-api-id"
+          min="1"
           onChange={(event) => setForm((current) => ({ ...current, apiId: event.target.value }))}
           required
+          step="1"
           value={form.apiId}
         />
       </label>

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.64.2 - 2026-07-29 (Patch)
+
+Release impact: Patch because this standardises presentation and controls without changing API,
+execution, parser, database, or EA contracts.
+
+- Applied the Settings type, colour, spacing, card, and responsive containment system to
+  Operations, Logs, Providers, Symbols, Telegram, History, Performance, and Equity Guardian.
+- Replaced route-specific numeric, boolean, and two-or-three-way controls with the shared number
+  field, switch, and segmented control components.
+- Kept wide tables and ledgers inside their own horizontal scrollers and preserved direct panel
+  children so desktop and mobile insets remain intact.
+
 ## 1.64.1 - 2026-07-29 (Patch)
 
 Release impact: Patch because this changes only presentation, density, and responsive layout

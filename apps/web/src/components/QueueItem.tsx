@@ -32,7 +32,7 @@ export function QueueItem({
   return (
     <article className={`queue-item queue-item-${item.status.toLowerCase()}`} key={item.id}>
       <span className="queue-item-icon" aria-hidden="true">
-        <ArrowRightCircle size={14} />
+        <ArrowRightCircle size={20} />
       </span>
       <div className="queue-item-body">
         <strong>{item.commandType}</strong>

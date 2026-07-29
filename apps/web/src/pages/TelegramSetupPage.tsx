@@ -40,7 +40,7 @@ export function TelegramSetupPage({
   return (
     <Panel className="setup-panel wide-panel" title="Telegram Setup">
       <div className="setup-help">
-        <ShieldCheck aria-hidden="true" size={16} />
+        <ShieldCheck aria-hidden="true" size={20} />
         <div>
           <strong>How this works</strong>
           <p>

@@ -1215,7 +1215,7 @@ describe("App dashboard", () => {
 
     const view = render(<App initialSnapshot={snapshot} />);
     clickTab(view, "Providers");
-    fireEvent.click(view.getByRole("button", { name: "Enable auto-copy for Alpha FX Signals" }));
+    fireEvent.click(view.getByRole("switch", { name: "Enable auto-copy for Alpha FX Signals" }));
 
     expect((await view.findAllByText("Provider paused")).length).toBeGreaterThan(0);
     const toggleCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
@@ -1290,7 +1290,7 @@ describe("App dashboard", () => {
     expect(view.getByRole("heading", { name: "Provider monitoring" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Configure Alpha FX Signals" })).toBeTruthy();
     expect(
-      view.queryByRole("button", {
+      view.queryByRole("switch", {
         name: /Copy Alpha FX Signals|Stop copying Alpha FX Signals/,
       }),
     ).toBeNull();
@@ -1320,7 +1320,7 @@ describe("App dashboard", () => {
     expect(
       view.getByRole("button", { name: "Configure Alpha FX Signals for this account" }),
     ).toBeTruthy();
-    const toggle = view.getByRole("button", {
+    const toggle = view.getByRole("switch", {
       name: "Stop copying Alpha FX Signals on this account",
     });
     fireEvent.click(toggle);
@@ -1357,8 +1357,8 @@ describe("App dashboard", () => {
     fireEvent.click(
       view.getByRole("button", { name: "Configure Alpha FX Signals for this account" }),
     );
-    expect(view.queryByLabelText("Parser mode for Alpha FX Signals")).toBeNull();
-    fireEvent.change(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
+    expect(view.queryByRole("group", { name: "Parser mode for Alpha FX Signals" })).toBeNull();
+    fireEvent.input(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
       target: { value: "0.5" },
     });
     fireEvent.click(
@@ -1428,18 +1428,23 @@ describe("App dashboard", () => {
     const view = render(<App initialSnapshot={snapshot} />);
     clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
-    fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
-      target: { value: "aggressive" },
-    });
+    fireEvent.click(
+      within(view.getByRole("group", { name: "Parser mode for Alpha FX Signals" })).getByRole(
+        "button",
+        { name: "Aggressive" },
+      ),
+    );
     fireEvent.input(view.getByLabelText("Locked symbol for Alpha FX Signals"), {
       target: { value: "XAUUSD" },
     });
-    fireEvent.change(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
+    fireEvent.input(view.getByLabelText("Channel lot size for Alpha FX Signals"), {
       target: { value: "0.2" },
     });
-    fireEvent.change(view.getByLabelText("TP1 strategy action"), {
-      target: { value: "no-change" },
-    });
+    fireEvent.click(
+      within(view.getByRole("group", { name: "TP1 strategy action" })).getByRole("button", {
+        name: "No change",
+      }),
+    );
     fireEvent.click(
       view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
     );
@@ -1474,22 +1479,23 @@ describe("App dashboard", () => {
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
 
     const dialog = view.getByRole("dialog");
-    const tp1Action = within(dialog).getByLabelText("TP1 strategy action") as HTMLSelectElement;
-    const tp2Action = within(dialog).getByLabelText("TP2 strategy action") as HTMLSelectElement;
+    const tp1Action = within(dialog).getByRole("group", { name: "TP1 strategy action" });
+    const tp2Action = within(dialog).getByRole("group", { name: "TP2 strategy action" });
 
-    expect(Array.from(tp1Action.options).map((option) => option.textContent)).toEqual([
-      "Move SL to BE",
-      "Leave SL unchanged",
-    ]);
-    expect(Array.from(tp2Action.options).map((option) => option.textContent)).toEqual([
-      "Move SL to BE",
-      "Move SL to prior TP",
-      "Leave SL unchanged",
-    ]);
+    expect(
+      within(tp1Action)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["Break-even", "No change"]);
+    expect(
+      within(tp2Action)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["Break-even", "Prior TP", "No change"]);
     expect(within(dialog).queryByLabelText("TP2 strategy reference TP")).toBeNull();
     expect(within(dialog).queryByLabelText("TP2 strategy offset pips")).toBeNull();
 
-    fireEvent.change(tp2Action, { target: { value: "set-sl-to-tp" } });
+    fireEvent.click(within(tp2Action).getByRole("button", { name: "Prior TP" }));
     fireEvent.click(
       view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
     );
@@ -1667,9 +1673,12 @@ describe("App dashboard", () => {
     const view = render(<App initialSnapshot={snapshot} />);
     clickTab(view, "Providers");
     fireEvent.click(view.getByRole("button", { name: "Configure Alpha FX Signals" }));
-    fireEvent.change(view.getByLabelText("Parser mode for Alpha FX Signals"), {
-      target: { value: "aggressive" },
-    });
+    fireEvent.click(
+      within(view.getByRole("group", { name: "Parser mode for Alpha FX Signals" })).getByRole(
+        "button",
+        { name: "Aggressive" },
+      ),
+    );
     fireEvent.input(view.getByLabelText("Locked symbol for Alpha FX Signals"), {
       target: { value: "XAUUSD" },
     });

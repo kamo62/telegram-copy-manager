@@ -1,5 +1,6 @@
 import { ChevronDown } from "lucide-react";
 import { useState } from "react";
+import { SegmentedControl } from "./FormControls";
 
 export function Panel({
   actions,
@@ -78,7 +79,7 @@ export function Panel({
           ) : null}
           {hideTitle ? null : <h2>{title}</h2>}
           {tabs && activeTab && onTabChange ? (
-            <div className="segmented-control panel-tabs" role="tablist">
+            <SegmentedControl ariaLabel={`${title} view`} className="panel-tabs" role="tablist">
               {tabs.map((tab) => (
                 <button
                   aria-selected={activeTab === tab}
@@ -93,7 +94,7 @@ export function Panel({
                   {tab}
                 </button>
               ))}
-            </div>
+            </SegmentedControl>
           ) : null}
           {actions ? <div className="panel-header-actions">{actions}</div> : null}
         </header>

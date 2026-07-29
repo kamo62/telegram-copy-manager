@@ -151,7 +151,7 @@ export function OpenPositionsTable({
 
   if (positions.length === 0 && pendingOrders.length === 0) {
     return (
-      <div>
+      <div className="open-positions">
         <EmptyState
           body="Approved signals will appear here while they're running. Manual MT5 trades on this account will show up alongside them, marked external."
           glyph={<Activity aria-hidden="true" size={28} />}

@@ -1,6 +1,7 @@
 import { Play, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { NumberField, SegmentedControl, Switch } from "./FormControls";
 import type { ProviderRowData } from "./ProvidersTable";
 
 /**
@@ -315,6 +316,7 @@ export function ProviderConfigModal({
   accountLabel?: string;
 }) {
   const formRef = useRef<HTMLFormElement | null>(null);
+  const [parserMode, setParserMode] = useState("automatic");
   const [riskMode, setRiskMode] = useState<RiskMode>("fixed");
   const [riskAmount, setRiskAmount] = useState("0.10");
   const [tps, setTps] = useState<TpDraftLevel[]>(() => toDraftTpLevels(DEFAULT_TPS));
@@ -328,6 +330,7 @@ export function ProviderConfigModal({
   useEffect(() => {
     if (provider) {
       const nextRunner = provider.runner ?? DEFAULT_RUNNER;
+      setParserMode(provider.parserMode === "aggressive" ? "aggressive" : "automatic");
       setRiskMode(provider.riskMode ?? "fixed");
       setRiskAmount((provider.riskAmount ?? provider.lotSize).toFixed(2));
       setTps(
@@ -371,7 +374,7 @@ export function ProviderConfigModal({
       lotSize: runner.enabled ? runnerLotNumeric : (parseDecimal(runnerLotText) ?? runner.lotSize),
     };
     return {
-      parserMode: String(data.get("parserMode") ?? provider.parserMode),
+      parserMode,
       lockedSymbol: accountLabel ? undefined : normalizeSymbolLock(data.get("lockedSymbol")),
       lotSize: riskMode === "fixed" ? lotValue : provider.lotSize,
       riskMode,
@@ -512,18 +515,28 @@ export function ProviderConfigModal({
             <section className="config-section">
               <h3 className="config-section-title">Message template</h3>
               <div className="config-row">
-                <label className="config-field config-field-grow">
+                <div className="config-field config-field-grow">
                   <span className="config-label">Template</span>
-                  <select
-                    aria-label={`Parser mode for ${provider.title}`}
-                    defaultValue={provider.parserMode === "aggressive" ? "aggressive" : "automatic"}
-                    name="parserMode"
-                    title="Aggressive: signals missing a stop, target, or exact entry are still executed using this provider's default settings (for example a 60-pip SL). Lifecycle commands that cannot be tied to one specific open trade are still skipped for safety."
-                  >
-                    <option value="automatic">Automatic</option>
-                    <option value="aggressive">Aggressive</option>
-                  </select>
-                </label>
+                  <SegmentedControl ariaLabel={`Parser mode for ${provider.title}`}>
+                    <button
+                      aria-pressed={parserMode === "automatic"}
+                      className={parserMode === "automatic" ? "active" : ""}
+                      onClick={() => setParserMode("automatic")}
+                      type="button"
+                    >
+                      Automatic
+                    </button>
+                    <button
+                      aria-pressed={parserMode === "aggressive"}
+                      className={parserMode === "aggressive" ? "active" : ""}
+                      onClick={() => setParserMode("aggressive")}
+                      title="Signals missing a stop, target, or exact entry use this provider's defaults. Ambiguous lifecycle commands remain blocked."
+                      type="button"
+                    >
+                      Aggressive
+                    </button>
+                  </SegmentedControl>
+                </div>
                 <button
                   aria-label={`Test provider config for ${provider.title}`}
                   className="btn btn-ghost btn-small"
@@ -565,40 +578,39 @@ export function ProviderConfigModal({
           <section className="config-section">
             <h3 className="config-section-title">Risk management</h3>
             <div className="config-row">
-              <label className="config-field">
+              <label className="config-field" htmlFor="provider-risk-amount">
                 <span className="config-label">
                   {riskMode === "fixed" ? "Fixed lots" : "% of balance"}
                 </span>
-                <input
+                <NumberField
                   aria-label={`Channel lot size for ${provider.title}`}
-                  defaultValue={(provider.riskAmount ?? provider.lotSize).toFixed(2)}
-                  inputMode="decimal"
+                  id="provider-risk-amount"
+                  min="0.01"
                   name="lotSize"
                   onInput={(event) => setRiskAmount(event.currentTarget.value)}
-                  pattern="[0-9]*[.,]?[0-9]*"
-                  type="text"
+                  step="0.01"
+                  unit={riskMode === "fixed" ? "lots" : "%"}
+                  value={riskAmount}
                 />
               </label>
-              <div className="segmented-control" role="tablist" aria-label="Risk mode">
+              <SegmentedControl ariaLabel="Risk mode">
                 <button
-                  aria-selected={riskMode === "fixed"}
+                  aria-pressed={riskMode === "fixed"}
                   className={riskMode === "fixed" ? "active" : ""}
                   onClick={() => setRiskMode("fixed")}
-                  role="tab"
                   type="button"
                 >
                   Fixed lots
                 </button>
                 <button
-                  aria-selected={riskMode === "percent"}
+                  aria-pressed={riskMode === "percent"}
                   className={riskMode === "percent" ? "active" : ""}
                   onClick={() => setRiskMode("percent")}
-                  role="tab"
                   type="button"
                 >
                   % of balance
                 </button>
-              </div>
+              </SegmentedControl>
             </div>
           </section>
 
@@ -618,7 +630,6 @@ export function ProviderConfigModal({
                 <span aria-hidden="true" />
               </div>
               {tps.map((tp, index) => {
-                const enteredPercent = parseDecimal(tp.percentage) ?? 0;
                 const rowPreview = allocationPreview.rows[index];
                 const strategyValue =
                   tp.strategy.kind === "set-sl-to-tp" && tp.leg === 1
@@ -627,54 +638,47 @@ export function ProviderConfigModal({
                 return (
                   <div className="config-tp-row" key={tp.leg}>
                     <span className="config-tp-leg">TP{tp.leg}</span>
-                    <div className="config-stepper">
-                      <button
-                        aria-label={`Decrease TP${tp.leg} percentage`}
-                        onClick={() =>
-                          updateTp(index, {
-                            percentage: formatDraftNumber(Math.max(0, enteredPercent - 5)),
-                          })
-                        }
-                        type="button"
-                      >
-                        -
-                      </button>
-                      <input
-                        aria-label={`TP${tp.leg} percentage`}
-                        inputMode="decimal"
-                        onInput={(event) =>
-                          updateTp(index, { percentage: event.currentTarget.value })
-                        }
-                        type="text"
-                        value={tp.percentage}
-                      />
-                      <button
-                        aria-label={`Increase TP${tp.leg} percentage`}
-                        onClick={() =>
-                          updateTp(index, {
-                            percentage: formatDraftNumber(Math.min(100, enteredPercent + 5)),
-                          })
-                        }
-                        type="button"
-                      >
-                        +
-                      </button>
-                    </div>
+                    <NumberField
+                      className="config-tp-number"
+                      aria-label={`TP${tp.leg} percentage`}
+                      max="100"
+                      min="0"
+                      onInput={(event) =>
+                        updateTp(index, { percentage: event.currentTarget.value })
+                      }
+                      step="5"
+                      unit="%"
+                      value={tp.percentage}
+                    />
                     <div className="config-strategy-controls">
-                      <select
-                        aria-label={`TP${tp.leg} strategy action`}
-                        className="config-strategy-input"
-                        onChange={(event) =>
-                          updateStrategy(index, event.target.value as TpStrategy["kind"])
-                        }
-                        value={strategyValue}
-                      >
-                        <option value="set-sl-to-entry">Move SL to BE</option>
+                      <SegmentedControl ariaLabel={`TP${tp.leg} strategy action`}>
+                        <button
+                          aria-pressed={strategyValue === "set-sl-to-entry"}
+                          className={strategyValue === "set-sl-to-entry" ? "active" : ""}
+                          onClick={() => updateStrategy(index, "set-sl-to-entry")}
+                          type="button"
+                        >
+                          Break-even
+                        </button>
                         {tp.leg > 1 ? (
-                          <option value="set-sl-to-tp">Move SL to prior TP</option>
+                          <button
+                            aria-pressed={strategyValue === "set-sl-to-tp"}
+                            className={strategyValue === "set-sl-to-tp" ? "active" : ""}
+                            onClick={() => updateStrategy(index, "set-sl-to-tp")}
+                            type="button"
+                          >
+                            Prior TP
+                          </button>
                         ) : null}
-                        <option value="no-change">Leave SL unchanged</option>
-                      </select>
+                        <button
+                          aria-pressed={strategyValue === "no-change"}
+                          className={strategyValue === "no-change" ? "active" : ""}
+                          onClick={() => updateStrategy(index, "no-change")}
+                          type="button"
+                        >
+                          No change
+                        </button>
+                      </SegmentedControl>
                     </div>
                     <span className="config-tp-lots">
                       <strong>
@@ -742,23 +746,24 @@ export function ProviderConfigModal({
           <section className="config-section">
             <header className="config-section-head">
               <h3 className="config-section-title">Runner</h3>
-              <label className="config-toggle">
-                <input
+              <label className="config-toggle" htmlFor="provider-runner-enabled">
+                <Switch
                   aria-label="Keep runner open after TP sequence"
                   checked={runner.enabled}
+                  id="provider-runner-enabled"
                   onChange={(event) => setRunner({ ...runner, enabled: event.target.checked })}
-                  type="checkbox"
                 />
                 <span>Keep runner open after the TP sequence</span>
               </label>
             </header>
             {runner.enabled ? (
               <div className="config-row config-row-three">
-                <label className="config-field">
+                <label className="config-field" htmlFor="provider-runner-lots">
                   <span className="config-label">Lot size</span>
-                  <input
+                  <NumberField
                     aria-label="Runner lot size"
-                    inputMode="decimal"
+                    id="provider-runner-lots"
+                    min="0.01"
                     onInput={(event) => {
                       const nextValue = event.currentTarget.value;
                       const parsed = parseDecimal(nextValue);
@@ -767,40 +772,51 @@ export function ProviderConfigModal({
                         setRunner({ ...runner, lotSize: parsed });
                       }
                     }}
-                    type="text"
+                    step="0.01"
+                    unit="lots"
                     value={runnerLotText}
                   />
                 </label>
-                <label className="config-field config-field-grow">
+                <div className="config-field config-field-grow">
                   <span className="config-label">SL behaviour</span>
-                  <select
-                    aria-label="Runner SL behaviour"
-                    onChange={(event) =>
-                      setRunner({
-                        ...runner,
-                        slBehavior: event.target.value as RunnerSlBehavior,
-                      })
-                    }
-                    value={runner.slBehavior}
-                  >
-                    <option value="break-even">Move SL to break-even</option>
-                    <option value="last-tp">Move SL to last hit TP</option>
-                    <option value="trail">Trail by N pips</option>
-                  </select>
-                </label>
+                  <SegmentedControl ariaLabel="Runner SL behaviour">
+                    {(
+                      [
+                        ["break-even", "Break-even"],
+                        ["last-tp", "Last TP"],
+                        ["trail", "Trail"],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        aria-pressed={runner.slBehavior === value}
+                        className={runner.slBehavior === value ? "active" : ""}
+                        key={value}
+                        onClick={() => setRunner({ ...runner, slBehavior: value })}
+                        type="button"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </SegmentedControl>
+                </div>
                 {runner.slBehavior === "trail" ? (
-                  <label className="config-field config-field-narrow">
+                  <label
+                    className="config-field config-field-narrow"
+                    htmlFor="provider-runner-trail"
+                  >
                     <span className="config-label">Trail pips</span>
-                    <input
+                    <NumberField
                       aria-label="Runner trail pips"
-                      inputMode="numeric"
+                      id="provider-runner-trail"
                       onChange={(event) =>
                         setRunner({
                           ...runner,
                           trailPips: Number(event.target.value) || 0,
                         })
                       }
-                      type="text"
+                      min="0"
+                      step="1"
+                      unit="pips"
                       value={runner.trailPips}
                     />
                   </label>

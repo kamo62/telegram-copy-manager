@@ -1,5 +1,11 @@
 import { ChevronDown, ChevronUp } from "lucide-react";
-import { type InputHTMLAttributes, type ReactNode, useRef, useState } from "react";
+import {
+  type FieldsetHTMLAttributes,
+  type InputHTMLAttributes,
+  type ReactNode,
+  useRef,
+  useState,
+} from "react";
 
 export function Switch({
   checked,
@@ -142,12 +148,14 @@ export function SaveBar({
 export function SegmentedControl({
   ariaLabel,
   children,
+  className = "",
+  ...props
 }: {
   ariaLabel: string;
   children: ReactNode;
-}) {
+} & Omit<FieldsetHTMLAttributes<HTMLFieldSetElement>, "aria-label">) {
   return (
-    <fieldset aria-label={ariaLabel} className="segmented-control">
+    <fieldset {...props} aria-label={ariaLabel} className={`segmented-control ${className}`.trim()}>
       <legend className="visually-hidden">{ariaLabel}</legend>
       {children}
     </fieldset>

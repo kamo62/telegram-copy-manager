@@ -10,6 +10,7 @@ import { useLocale } from "../contexts/LocaleContext";
 import { chartDitherColor } from "../lib/chartPalette";
 import { downsampleIndices } from "../lib/downsample";
 import { formatMoney } from "../lib/format";
+import { SegmentedControl } from "./FormControls";
 import { Money } from "./Money";
 import { SkeletonChart } from "./Skeleton";
 
@@ -80,7 +81,7 @@ export function GrowthChart({
             ) : null}
           </span>
         </div>
-        <div className="segmented-control chart-toggle" role="tablist" aria-label="Chart view">
+        <SegmentedControl ariaLabel="Chart view" className="chart-toggle" role="tablist">
           <button
             aria-selected={view === "growth"}
             className={view === "growth" ? "active" : ""}
@@ -99,7 +100,7 @@ export function GrowthChart({
           >
             Drawdown
           </button>
-        </div>
+        </SegmentedControl>
       </header>
       {loading ? (
         <SkeletonChart />

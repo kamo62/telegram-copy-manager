@@ -1,6 +1,7 @@
 import { X } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { SegmentedControl, Switch } from "./FormControls";
 
 export interface GlobalAliasPayload {
   rawSymbol: string;
@@ -411,7 +412,7 @@ export function SymbolMappingModal({
           ref={formRef}
         >
           <section className="config-section">
-            <div className="segmented-control" role="tablist" aria-label="Mapping scope">
+            <SegmentedControl ariaLabel="Mapping scope">
               <button
                 aria-selected={tab === "global"}
                 className={tab === "global" ? "active" : ""}
@@ -431,7 +432,7 @@ export function SymbolMappingModal({
               >
                 Account
               </button>
-            </div>
+            </SegmentedControl>
             {!hasFocusedAccount ? (
               <p className="config-hint config-hint-soft">
                 Open Symbol Settings from an account to add an account mapping.
@@ -463,11 +464,12 @@ export function SymbolMappingModal({
                   />
                 </label>
               </div>
-              <label className="config-check">
-                <input
+              <label className="settings-checkbox" htmlFor="mapping-provider-only">
+                <Switch
+                  aria-label="Only for one provider"
                   checked={onlyProvider}
+                  id="mapping-provider-only"
                   onChange={(event) => setOnlyProvider(event.target.checked)}
-                  type="checkbox"
                 />
                 <span>Only for one provider</span>
               </label>
@@ -499,31 +501,29 @@ export function SymbolMappingModal({
               </section>
 
               <section className="config-section">
-                <fieldset className="config-fieldset">
-                  <legend className="config-label">Map from</legend>
-                  <label className="config-check">
-                    <input
+                <div className="config-field">
+                  <span className="config-label">Map from</span>
+                  <SegmentedControl ariaLabel="Map from">
+                    <button
                       aria-label="Map from provider symbol"
-                      checked={source === "provider"}
-                      name="mapSource"
+                      aria-pressed={source === "provider"}
+                      className={source === "provider" ? "active" : ""}
                       onClick={() => setSource("provider")}
-                      onChange={() => setSource("provider")}
-                      type="radio"
-                    />
-                    <span>Provider symbol</span>
-                  </label>
-                  <label className="config-check">
-                    <input
+                      type="button"
+                    >
+                      Provider symbol
+                    </button>
+                    <button
                       aria-label="Map from canonical symbol"
-                      checked={source === "canonical"}
-                      name="mapSource"
+                      aria-pressed={source === "canonical"}
+                      className={source === "canonical" ? "active" : ""}
                       onClick={() => setSource("canonical")}
-                      onChange={() => setSource("canonical")}
-                      type="radio"
-                    />
-                    <span>Canonical symbol</span>
-                  </label>
-                </fieldset>
+                      type="button"
+                    >
+                      Canonical symbol
+                    </button>
+                  </SegmentedControl>
+                </div>
                 <div className="config-row">
                   <label className="config-field config-field-grow">
                     <span className="config-label">
