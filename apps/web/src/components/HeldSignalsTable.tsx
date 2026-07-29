@@ -85,9 +85,9 @@ export function HeldSignalsTable({
 
   async function dismiss(item: HeldQueueItem) {
     const confirmed = await confirm({
-      title: "Dismiss held signal?",
+      title: item.actionable ? "Dismiss held signal?" : "Dismiss suppressed signal?",
       description: confirmationDescription(item, "Dismiss"),
-      confirmLabel: "Dismiss signal",
+      confirmLabel: item.actionable ? "Dismiss signal" : "Dismiss suppression",
     });
     if (confirmed) await onDismiss(item);
   }
@@ -117,6 +117,7 @@ export function HeldSignalsTable({
               <th scope="col">Account</th>
               <th scope="col">Command</th>
               <th scope="col">Symbol</th>
+              <th scope="col">State</th>
               <th scope="col">Reason</th>
               <th className="num" scope="col">
                 Price drift
@@ -144,6 +145,11 @@ export function HeldSignalsTable({
                 </td>
                 <td>
                   <strong>{item.symbol}</strong>
+                </td>
+                <td>
+                  <Tag tone={item.actionable ? "warn" : "muted"}>
+                    {item.actionable ? "Awaiting action" : "Suppressed"}
+                  </Tag>
                 </td>
                 <td>
                   <Tag tone={reasonTone(item.heldReason)}>{reasonLabel(item.heldReason)}</Tag>
@@ -183,47 +189,51 @@ export function HeldSignalsTable({
                 </td>
                 <td>
                   <div className="held-row-actions">
-                    {item.commandType !== "OPEN_TRADE" ? (
-                      <select
-                        aria-label={`Select active trade for ${item.symbol}`}
-                        onChange={(event) =>
-                          setSelectedTradeIds((current) => ({
-                            ...current,
-                            [item.id]: event.target.value,
-                          }))
-                        }
-                        value={selectedTradeIds[item.id] ?? ""}
-                      >
-                        <option value="">Select active trade</option>
-                        {(item.candidateLogicalTradeIds ?? []).map((tradeId) => (
-                          <option key={tradeId} value={tradeId}>
-                            {tradeId}
-                          </option>
-                        ))}
-                      </select>
+                    {item.actionable ? (
+                      <>
+                        {item.commandType !== "OPEN_TRADE" ? (
+                          <select
+                            aria-label={`Select active trade for ${item.symbol}`}
+                            onChange={(event) =>
+                              setSelectedTradeIds((current) => ({
+                                ...current,
+                                [item.id]: event.target.value,
+                              }))
+                            }
+                            value={selectedTradeIds[item.id] ?? ""}
+                          >
+                            <option value="">Select active trade</option>
+                            {(item.candidateLogicalTradeIds ?? []).map((tradeId) => (
+                              <option key={tradeId} value={tradeId}>
+                                {tradeId}
+                              </option>
+                            ))}
+                          </select>
+                        ) : null}
+                        <button
+                          className="btn btn-primary btn-small"
+                          disabled={item.commandType !== "OPEN_TRADE" && !selectedTradeIds[item.id]}
+                          onClick={() => void requeue(item, "market")}
+                          type="button"
+                        >
+                          <RotateCcw aria-hidden="true" size={12} />
+                          Market
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-small"
+                          disabled={item.commandType !== "OPEN_TRADE" && !selectedTradeIds[item.id]}
+                          onClick={() => void requeue(item, "original")}
+                          type="button"
+                        >
+                          Original
+                        </button>
+                      </>
                     ) : null}
-                    <button
-                      className="btn btn-primary btn-small"
-                      disabled={item.commandType !== "OPEN_TRADE" && !selectedTradeIds[item.id]}
-                      onClick={() => void requeue(item, "market")}
-                      type="button"
-                    >
-                      <RotateCcw aria-hidden="true" size={12} />
-                      Market
-                    </button>
-                    <button
-                      className="btn btn-ghost btn-small"
-                      disabled={item.commandType !== "OPEN_TRADE" && !selectedTradeIds[item.id]}
-                      onClick={() => void requeue(item, "original")}
-                      type="button"
-                    >
-                      Original
-                    </button>
                     <button
                       aria-label={`Dismiss ${item.symbol}`}
                       className="icon-btn"
                       onClick={() => void dismiss(item)}
-                      title="Dismiss held signal"
+                      title={item.actionable ? "Dismiss held signal" : "Dismiss suppressed signal"}
                       type="button"
                     >
                       <Trash2 aria-hidden="true" size={13} />

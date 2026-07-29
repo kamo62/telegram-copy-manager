@@ -37,8 +37,8 @@ export function ProvidersPage({
 }) {
   const isAccountMode = Boolean(accountId);
   return (
-    <Panel className="wide-panel" title="Providers">
-      <div className="provider-panel-toolbar">
+    <Panel
+      actions={
         <button
           aria-label="Export provider performance"
           className="btn btn-ghost btn-small provider-export-btn"
@@ -48,7 +48,11 @@ export function ProvidersPage({
           <Download size={14} aria-hidden="true" />
           Export
         </button>
-      </div>
+      }
+      className="wide-panel"
+      hideTitle
+      title="Providers"
+    >
       {isAccountMode ? (
         <p className="panel-intro">
           Stats, copy status, and configuration shown for{" "}

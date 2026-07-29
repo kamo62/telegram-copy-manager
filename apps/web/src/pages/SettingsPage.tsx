@@ -97,7 +97,7 @@ export function SettingsPage({
   const [backupRunning, setBackupRunning] = useState(false);
   const [backupFilename, setBackupFilename] = useState("");
   return (
-    <Panel className="wide-panel settings-panel" title="Settings">
+    <Panel className="wide-panel settings-panel" hideTitle title="Settings">
       <p className="panel-intro">
         Defaults applied when a parsed signal is missing fields, plus integration secrets and
         polling cadence. Per-provider overrides live in each Provider's configuration modal.

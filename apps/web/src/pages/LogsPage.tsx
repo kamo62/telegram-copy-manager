@@ -78,9 +78,28 @@ export function LogsPage({
 }) {
   return (
     <>
+      <section className="wide-panel" id="held">
+        <Panel testId="held-signals-panel" title="Held signals">
+          <HeldSignalsTable
+            accountLabel={(accountId) =>
+              snapshot.mt5Accounts.find((account) => account.id === accountId)?.accountNumber ??
+              (accountId || "Unassigned")
+            }
+            items={heldItems}
+            onDismiss={onHeldDismiss}
+            onRequeue={onHeldRequeue}
+            providerLabel={(providerId) =>
+              snapshot.providers.find((provider) => provider.id === providerId)?.title ??
+              (providerId || "Unassigned")
+            }
+          />
+        </Panel>
+      </section>
+
       <Panel
         activeTab={parserTab}
         className="wide-panel"
+        collapsible
         onTabChange={onParserTabChange}
         tabs={["Recent Parses", "Saved Fixtures"]}
         testId="parser-lab-panel"
@@ -176,27 +195,10 @@ export function LogsPage({
         )}
       </Panel>
 
-      <section className="wide-panel" id="held">
-        <Panel testId="held-signals-panel" title="Held signals">
-          <HeldSignalsTable
-            accountLabel={(accountId) =>
-              snapshot.mt5Accounts.find((account) => account.id === accountId)?.accountNumber ??
-              (accountId || "Unassigned")
-            }
-            items={heldItems}
-            onDismiss={onHeldDismiss}
-            onRequeue={onHeldRequeue}
-            providerLabel={(providerId) =>
-              snapshot.providers.find((provider) => provider.id === providerId)?.title ??
-              (providerId || "Unassigned")
-            }
-          />
-        </Panel>
-      </section>
-
-      <Panel className="wide-panel" title="Signal Queue">
-        <div className="panel-toolbar">
+      <Panel
+        actions={
           <button
+            className="btn btn-ghost btn-small"
             onClick={() => onForcePush()}
             title="Compose a trade and force-push it to an account's MT5 queue"
             type="button"
@@ -204,7 +206,12 @@ export function LogsPage({
             <Send size={13} aria-hidden="true" />
             New manual ticket
           </button>
-        </div>
+        }
+        className="wide-panel"
+        collapsible
+        defaultOpen={false}
+        title="Signal Queue"
+      >
         <div className="queue-board">
           {snapshot.signalQueue.length === 0 ? (
             <EmptyState
@@ -220,7 +227,7 @@ export function LogsPage({
         </div>
       </Panel>
 
-      <Panel className="wide-panel" title="Execution Logs">
+      <Panel className="wide-panel" collapsible defaultOpen={false} title="Execution Logs">
         <div className="log-list">
           {snapshot.executionLogs.length === 0 ? (
             <EmptyState
@@ -234,7 +241,7 @@ export function LogsPage({
         </div>
       </Panel>
 
-      <Panel className="wide-panel" title="Activity">
+      <Panel className="wide-panel" collapsible defaultOpen={false} title="Activity">
         <ActivityFeed />
       </Panel>
     </>

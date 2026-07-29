@@ -64,10 +64,12 @@ export function StatusBar({
 
   return (
     <header className="status-bar">
-      <h1 className="brand" title={`Version ${appVersion}`}>
+      {/* Not a heading: this names the app and mirrors the current page, so as
+          an <h1> it displaced the real page title in the outline. */}
+      <div className="brand" title={`Version ${appVersion}`}>
         <span className="visually-hidden">TG-TC · </span>
         {title}
-      </h1>
+      </div>
       <div className="status-cluster">
         <span
           aria-live={lastPollError ? "polite" : undefined}

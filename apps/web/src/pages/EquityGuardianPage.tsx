@@ -37,7 +37,7 @@ export function EquityGuardianPage({
   const { locale } = useLocale();
   const [unpauseChoice, setUnpauseChoice] = useState<Guardian | null>(null);
   return (
-    <Panel className="wide-panel" title="Equity Guardian">
+    <Panel className="wide-panel" hideTitle title="Equity Guardian">
       <p className="panel-intro">
         When the current drawdown reaches the threshold, the queue rejects new OPEN_TRADE commands
         for that account. Lifecycle commands (close, modify, BE) on already-open trades continue to

@@ -787,6 +787,10 @@ h3 {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* Held steady so a header carrying actions or tabs is the same height as a
+     header carrying only a title. Panels sit side by side on several routes and
+     the mismatch reads as misalignment. */
+  min-height: 51px;
   padding: 8px 10px;
   font-size: 11px;
   font-weight: 600;
@@ -799,6 +803,41 @@ h3 {
 
 .panel > header svg {
   color: var(--ink-faint);
+}
+
+.panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.panel-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-1);
+  cursor: pointer;
+}
+
+.panel-collapse-toggle:hover {
+  color: var(--ink);
+  background: var(--panel-3, var(--panel));
+}
+
+.panel-collapse-toggle svg {
+  transform: rotate(-90deg);
+  transition: transform 120ms ease;
+}
+
+.panel-collapse-toggle.is-open svg {
+  transform: rotate(0deg);
 }
 
 .panel > header h2 {
@@ -3493,14 +3532,9 @@ h3 {
   border-radius: var(--radius);
 }
 
-.provider-panel-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 10px;
-}
-
 .provider-export-btn {
   gap: 6px;
+  flex-shrink: 0;
 }
 
 .account-row {

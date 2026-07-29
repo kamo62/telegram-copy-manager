@@ -4920,7 +4920,7 @@ class AppStore {
          FROM queue_items
          LEFT JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
          LEFT JOIN providers ON providers.id = parsed_signals.provider_id
-         WHERE queue_items.status = 'HELD'
+         WHERE queue_items.status IN ('HELD', 'DUPLICATE')
          ORDER BY queue_items.created_at DESC`,
       )
       .all() as Row[];
@@ -4956,6 +4956,7 @@ class AppStore {
           : undefined;
       return {
         id: String(row.id),
+        actionable: String(row.status) === "HELD",
         heldReason: String(row.held_reason ?? ""),
         heldTier: row.held_tier ? String(row.held_tier) : undefined,
         suggestion: row.suggestion ? String(row.suggestion) : undefined,
@@ -5201,9 +5202,13 @@ class AppStore {
     if (!signal) {
       return { statusCode: 409 as const, error: "Held lifecycle has no parsed signal binding" };
     }
+    const signalContext = this.parserContext(providerId, accountId);
     const signalSymbol = [signal.brokerSymbol, signal.canonicalSymbol, signal.rawSymbol]
       .map((value) => normalizeLockedSymbol(value))
-      .find(Boolean);
+      .find(
+        (value) =>
+          value !== undefined && resolveSymbol(value, signalContext).mappingStatus === "mapped",
+      );
     const tradeSymbol = [
       trade?.symbol.brokerSymbol,
       trade?.symbol.canonicalSymbol,
@@ -5413,11 +5418,16 @@ class AppStore {
       .query("SELECT status, parsed_signal_id FROM queue_items WHERE id = ?")
       .get(id) as Row | null;
     if (!row) return { statusCode: 404 as const, error: "Held queue item not found" };
-    if (String(row.status) !== "HELD") {
-      return { statusCode: 409 as const, error: "Only HELD queue items can be dismissed" };
+    if (!["HELD", "DUPLICATE"].includes(String(row.status))) {
+      return {
+        statusCode: 409 as const,
+        error: "Only HELD or DUPLICATE queue items can be dismissed",
+      };
     }
     this.db
-      .query("UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status = 'HELD'")
+      .query(
+        "UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ? AND status IN ('HELD','DUPLICATE')",
+      )
       .run("DISMISSED", nowIso(), id);
     if (row.parsed_signal_id) {
       this.db
@@ -11601,9 +11611,9 @@ class AppStore {
          WHERE parsed_signals.provider_id = ?
            AND queue_items.account_id = ?
            AND json_extract(queue_items.payload_json, '$.commandType') = 'OPEN_TRADE'
-           AND queue_items.status IN ('PENDING','LEASED','EXECUTED','HELD')
+           AND queue_items.status IN ('PENDING','LEASED','EXECUTED')
            AND (
-             queue_items.status IN ('PENDING','LEASED','HELD')
+             queue_items.status IN ('PENDING','LEASED')
              OR logical_trades.status IN ('OPEN','PENDING','OUT_OF_SYNC')
              OR unixepoch(queue_items.created_at) >= unixepoch('now') - ?
            )`,
@@ -11623,7 +11633,7 @@ class AppStore {
         payload.entry !== undefined &&
         Number(payload.entry.from.toFixed(digits)) === entry &&
         (payload.stopLoss ?? null) === (signal.stopLoss ?? null) &&
-        (["PENDING", "LEASED", "HELD"].includes(String(row.status)) ||
+        (["PENDING", "LEASED"].includes(String(row.status)) ||
           (tradeStatus && ["OPEN", "PENDING", "PLANNED", "OUT_OF_SYNC"].includes(tradeStatus)))
       );
     });
