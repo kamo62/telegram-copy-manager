@@ -5202,13 +5202,15 @@ class AppStore {
     if (!signal) {
       return { statusCode: 409 as const, error: "Held lifecycle has no parsed signal binding" };
     }
-    const signalContext = this.parserContext(providerId, accountId);
+    // The question here is whether the parser invented this token, which is a
+    // global one. Resolving against the account would drop a real instrument
+    // that this account simply cannot trade, and a dropped symbol disables the
+    // mismatch guard below entirely — an operator could then release a gold
+    // cancel against a EURUSD trade. Only a token unknown as an instrument
+    // anywhere is treated as "no symbol stated".
     const signalSymbol = [signal.brokerSymbol, signal.canonicalSymbol, signal.rawSymbol]
       .map((value) => normalizeLockedSymbol(value))
-      .find(
-        (value) =>
-          value !== undefined && resolveSymbol(value, signalContext).mappingStatus === "mapped",
-      );
+      .find((value) => value !== undefined && resolveSymbol(value, {}).mappingStatus === "mapped");
     const tradeSymbol = [
       trade?.symbol.brokerSymbol,
       trade?.symbol.canonicalSymbol,
@@ -5430,9 +5432,19 @@ class AppStore {
       )
       .run("DISMISSED", nowIso(), id);
     if (row.parsed_signal_id) {
-      this.db
-        .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
-        .run("DISMISSED", String(row.parsed_signal_id));
+      // One signal fans out to a queue item per account, so dismissing one of
+      // them must not mark the whole signal dismissed while its siblings are
+      // still queued or awaiting a decision. Only the last one closes it.
+      const remaining = this.db
+        .query(
+          "SELECT count(*) AS pending FROM queue_items WHERE parsed_signal_id = ? AND status NOT IN ('DISMISSED','CANCELLED')",
+        )
+        .get(String(row.parsed_signal_id)) as Row | null;
+      if (Number(remaining?.pending ?? 0) === 0) {
+        this.db
+          .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+          .run("DISMISSED", String(row.parsed_signal_id));
+      }
     }
     this.audit(
       "queue.dismiss",

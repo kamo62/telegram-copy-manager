@@ -1,5 +1,5 @@
 import { ChevronDown } from "lucide-react";
-import { useId, useState } from "react";
+import { useState } from "react";
 
 export function Panel({
   actions,
@@ -46,7 +46,6 @@ export function Panel({
     : undefined;
   const hasTabs = Boolean(tabs && activeTab && onTabChange);
   const [open, setOpen] = useState(defaultOpen);
-  const bodyId = useId();
   const collapsed = collapsible && !open;
   const showHeader = !hideTitle || hasTabs || Boolean(actions) || collapsible;
   return (
@@ -59,7 +58,6 @@ export function Panel({
         <header>
           {collapsible ? (
             <button
-              aria-controls={bodyId}
               aria-expanded={open}
               className={`panel-collapse-toggle ${open ? "is-open" : ""}`}
               onClick={() => setOpen((value) => !value)}
@@ -101,8 +99,6 @@ export function Panel({
         >
           {children}
         </div>
-      ) : collapsible ? (
-        <div id={bodyId}>{children}</div>
       ) : (
         children
       )}
