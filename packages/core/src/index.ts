@@ -1634,11 +1634,46 @@ function hasOpenTradeIntent(upper: string): boolean {
   );
 }
 
+// A new order that prices out its targets ("TP1 @ 1.91832", "TP2 @ 1.92132")
+// is publishing a ladder, not reporting a fill. Two or more priced legs is the
+// tell: a result names the leg that hit, it does not restate the whole ladder.
+// The lookahead keeps distance-based plans out ("TP1: 400 pips" is a target
+// size, not a level, and those posts are not orders anyone can execute).
+// The (?![\d.]) matters: without it \d+ happily matches "40" of "400 pips" and
+// the unit lookahead never sees the unit it is there to reject.
+const PRICED_TARGET_LEG =
+  /\bTP\s*[1-9]\b\s*(?:[:@=]|-)\s*\d+(?:\.\d+)?(?![\d.])(?!\s*(?:PIPS?|POINTS?|PTS)\b)/gi;
+
+// Recaps restate the whole ladder too ("TP1: 4068 ✔️ / TP2: 4055 ✔️"), so the
+// ladder shape alone cannot decide. What a recap always carries and a fresh
+// order never does is the language of something having already happened.
+const TARGET_ALREADY_HIT =
+  /\bHITS?\b|\bCOMPLETED?\b|\bACHIEVED\b|\bREACHED\b|\bSMASHED\b|\bSECURED\b|\bPLAYED\s+OUT\b|\bRESULTS?\s*:/i;
+
+// A recap ticks each leg off after its price ("TP1: 4045 ✅"); a signal that
+// uses a tick as a bullet puts it before the label ("✅ Take Profit: 3980"), so
+// only a trailing tick counts as evidence the leg is already done.
+const TICKED_OFF_LEG = /\bTP\s*[1-9]\b[^\n]{0,24}[✔✅]/;
+
+function definesTargetLadder(upper: string): boolean {
+  if (TARGET_ALREADY_HIT.test(upper) || TICKED_OFF_LEG.test(upper)) return false;
+  return [...upper.matchAll(PRICED_TARGET_LEG)].length >= 2;
+}
+
 function isTakeProfitHitUpdate(upper: string): boolean {
+  if (definesTargetLadder(upper)) return false;
+  // Signals annotate each leg with the distance it represents — "TP1 @ 1.918
+  // (+20 Pips)", "SL @ 1.909 (-65 Pips)". Those parenthetical pip figures are
+  // geometry, not an outcome. The sign is what separates them from a genuine
+  // result in brackets ("TP 1 touched ( running 86 pips )"), which must survive.
+  const withoutLegAnnotations = upper.replace(
+    /\([^)]*[+\-−–]\s*\d+(?:\.\d+)?\s*PIPS?[^)]*\)/gi,
+    " ",
+  );
   return (
     /^\s*(?:DONE\s+)?TP\s*[1-4]?\b/.test(upper) ||
     /\bFULL\s+TP\b/.test(upper) ||
-    /\bTP\s*[1-4]\b.*(?:✅|PIPS?)/.test(upper) ||
+    /\bTP\s*[1-4]\b.*(?:✅|PIPS?)/.test(withoutLegAnnotations) ||
     /\b(BUY|SELL)\s+\d+(?:\.\d+)?\s+TP\s*[1-4]\b/.test(upper)
   );
 }
@@ -1971,13 +2006,19 @@ function expandShortLevel(levelText: string, referencePrice: number): number | u
   );
 }
 
+// A parenthesised restatement of the label sits between the label and its price
+// often enough to matter: "Stop Loss (SL): 4055.00", "Take Profit (TP): 3980.00".
+// Bounded to a short alias so it cannot swallow a sentence and drag in an
+// unrelated number.
+const LABEL_ALIAS = "(?:\\s*\\([^)]{0,15}\\))?";
+
 function extractStopLoss(text: string): { value?: number; conflict: boolean } {
   const labels = ["STOP[\\s-]*LOSS", "S\\s*[./]\\s*L", "SL"];
   const values = labels.flatMap((label) => {
     // No word boundary after the label: providers write "SL2286" and "STOPLOSS2286"
     // with no separator, and \b between a letter and a digit never matches.
     const regex = new RegExp(
-      `\\b${label}\\s*(?:[:@=]|TO|BELOW|ABOVE)?\\s*(\\d+(?:\\.\\d+)?)`,
+      `\\b${label}${LABEL_ALIAS}\\s*(?:[:@=]|TO|BELOW|ABOVE)?\\s*(\\d+(?:\\.\\d+)?)`,
       "gi",
     );
     return [...text.matchAll(regex)].map((match) => Number(match[1]));
@@ -2035,7 +2076,9 @@ function extractTakeProfits(text: string): TakeProfitTarget[] {
     match = unlabeledTpRegex.exec(text);
   }
 
-  const takeProfit = text.match(/\bTAKE\s+PROFIT\s*[:@]?\s*(\d+(?:\.\d+)?)/i);
+  const takeProfit = text.match(
+    new RegExp(`\\bTAKE\\s*-?\\s*PROFIT${LABEL_ALIAS}\\s*[:@=]?\\s*(\\d+(?:\\.\\d+)?)`, "i"),
+  );
   if (takeProfit?.[1] && targets.size === 0) {
     targets.set(1, Number(takeProfit[1]));
   }

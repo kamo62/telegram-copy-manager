@@ -1606,6 +1606,104 @@ describe("stop-loss label variations", () => {
   });
 });
 
+describe("label followed by a parenthesised alias", () => {
+  test("reads a stop and target written as 'Stop Loss (SL): 4055.00'", () => {
+    const result = parseSignalText(
+      "✅FXGOLDVISION VERIFIED SIGNAL\n✅ SELL  XAUUSD (GOLD) @ 4032.00\n❌ Stop Loss (SL): 4055.00\n✔️ Take Profit (TP): 3980.00",
+      context,
+    );
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "SELL",
+      canonicalSymbol: "XAUUSD",
+      stopLoss: 4055,
+    });
+    expect(result.takeProfits.map((target) => target.price)).toEqual([3980]);
+    expect(result.missingFields).toEqual([]);
+  });
+
+  test("still reads the plain spellings", () => {
+    expect(
+      parseSignalText("GOLD SELL 4032\nStop Loss: 4055\nTake Profit: 3980", context),
+    ).toMatchObject({ stopLoss: 4055 });
+    expect(
+      parseSignalText("GOLD SELL 4032\nStop-Loss 4055\nTake-Profit 3980", context),
+    ).toMatchObject({ stopLoss: 4055 });
+  });
+
+  test("a long parenthetical does not drag in an unrelated number", () => {
+    // The alias allowance is bounded, so prose in brackets cannot bridge the
+    // label to whatever number happens to come next.
+    expect(
+      parseSignalText("GOLD SELL 4032\nSL (only if the H1 candle closes below) 4055", context)
+        .stopLoss,
+    ).toBeUndefined();
+  });
+});
+
+describe("a priced target ladder is a new order, not a TP-hit update", () => {
+  const vipSignal = [
+    "🟢🟢🟢 29th July  VIP SIGNAL",
+    "",
+    "📈 GBPAUD BUY @ 1.91632",
+    "",
+    "🎯 TP1 @ 1.91832   (+20 Pips)",
+    "🎯 TP2 @ 1.92132   (+50 Pips)",
+    "🎯 TP3 @ 1.92632   (+100 Pips)",
+    "",
+    "🛑 SL  @ 1.90982   (-65 Pips)",
+  ].join("\n");
+
+  test("opens the trade instead of marking a target hit", () => {
+    const result = parseSignalText(vipSignal, context);
+    expect(result).toMatchObject({
+      commandType: "OPEN_TRADE",
+      direction: "BUY",
+      canonicalSymbol: "GBPAUD",
+      entry: { from: 1.91632 },
+      stopLoss: 1.90982,
+    });
+    expect(result.takeProfits.map((target) => target.price)).toEqual([1.91832, 1.92132, 1.92632]);
+  });
+
+  test("a recap that restates the ladder is still a TP hit", () => {
+    // Same ladder shape, but the targets have already been reached, so the
+    // ladder rule must yield to the outcome language.
+    expect(
+      parseSignalText(
+        "📈  Update: Scenario 1 Completed – All Targets Reached\nprice continued lower, reaching every projected downside target.\n\n🎯 TP1: 4045 ✅\n🎯 TP2: 4025 ✅",
+        context,
+      ).commandType,
+    ).toBe("MARK_TP_HIT");
+  });
+
+  test("a bracketed running-pips result is not mistaken for leg geometry", () => {
+    // Only signed annotations ("(+20 Pips)") are geometry; an unsigned figure
+    // in brackets is the result itself and has to survive.
+    expect(
+      parseSignalText("✅ GBPNZD 4H\n🔝TP 1 touched  ( running 270 pips )", context).commandType,
+    ).toBe("MARK_TP_HIT");
+  });
+
+  test("targets quoted as distances stay a lifecycle update, not an order", () => {
+    // "TP1: 400 pips" is a target size, not a level; treating it as a price
+    // would open a trade with a stop of 150 and a target of 400.
+    expect(
+      parseSignalText(
+        "Anyone interested in a swing Buy setup?\n➤ Stop Loss: 150 pips\n➤ TP1: 400 pips ( R:r 1:3 )\n➤ TP2: 700 pips ( R:r 1:5 )",
+        context,
+      ).commandType,
+    ).not.toBe("OPEN_TRADE");
+  });
+
+  test("the existing short-form TP results are untouched", () => {
+    expect(parseSignalText("Tp 1 ✅", context).commandType).toBe("MARK_TP_HIT");
+    expect(parseSignalText("Done tp 1", context).commandType).toBe("MARK_TP_HIT");
+    expect(parseSignalText("Buy 66 full Tp 400pips ✅", context).commandType).toBe("MARK_TP_HIT");
+    expect(parseSignalText("Tp 2 150pips", context).commandType).toBe("MARK_TP_HIT");
+  });
+});
+
 describe("currency-cross on its own line (Elliott Wave format)", () => {
   test("resolves an FX cross that is not adjacent to the direction", () => {
     const result = parseSignalText(
