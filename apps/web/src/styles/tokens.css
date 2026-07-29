@@ -1,69 +1,13 @@
-/* Telegram TC signal-desk design system.
-   Components consume semantic tokens only; theme changes stay in this file. */
+/* Telegram TC 2026-07-29 design tokens.
+   New names are canonical; legacy names below are compatibility aliases. */
 
 :root,
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --bg: hsl(220 27% 98%);
-  --bg-elevated: hsl(0 0% 100%);
-  --panel: hsl(0 0% 100%);
-  --panel-2: hsl(220 25% 97%);
-  --panel-hover: hsl(220 22% 94%);
-  --sidebar: hsl(0 0% 100%);
-  --sidebar-2: hsl(220 27% 98%);
-  --topbar: hsl(0 0% 100% / 0.96);
-  --overlay: hsl(220 24% 10% / 0.48);
-
-  --line: hsl(220 17% 89%);
-  --line-strong: hsl(220 15% 80%);
-  --line-subtle: hsl(220 22% 94%);
-  --grid-line: transparent;
-
-  --ink: hsl(222 32% 9%);
-  --ink-2: hsl(220 14% 27%);
-  --ink-dim: hsl(220 10% 42%);
-  --ink-3: hsl(220 9% 52%);
-  --ink-faint: hsl(220 8% 61%);
-  --inverse-ink: hsl(222 32% 9%);
-  --inverse-dim: hsl(220 10% 42%);
-  --sidebar-ink: hsl(222 32% 9%);
-  --sidebar-dim: hsl(220 10% 42%);
-  --sidebar-border: hsl(220 17% 89%);
-  --sidebar-active: hsl(220 60% 96%);
-
-  --accent: hsl(220 70% 52%);
-  --accent-9: hsl(220 70% 52%);
-  --accent-10: hsl(220 72% 44%);
-  --accent-dim: hsl(220 66% 42%);
-  --accent-soft: hsl(220 75% 94%);
-  --accent-ring: hsl(220 75% 56% / 0.38);
-  --accent-contrast: hsl(0 0% 100%);
-
-  --tg-blue: hsl(203 78% 40%);
-  --tg-blue-deep: hsl(203 83% 31%);
-  --tg-blue-dim: hsl(203 78% 40% / 0.16);
-
-  --up: hsl(155 65% 28%);
-  --up-9: hsl(155 65% 28%);
-  --up-dim: hsl(155 66% 22%);
-  --up-soft: hsl(155 48% 88%);
-  --down: hsl(3 70% 47%);
-  --down-9: hsl(3 70% 47%);
-  --down-dim: hsl(3 68% 38%);
-  --down-soft: hsl(3 75% 93%);
-  --warn: hsl(35 88% 42%);
-  --warn-9: hsl(35 88% 42%);
-  --warn-dim: hsl(35 86% 32%);
-  --warn-soft: hsl(36 85% 90%);
-  --info: hsl(208 66% 42%);
-  --info-soft: hsl(208 65% 91%);
-  --unknown: hsl(265 54% 50%);
-  --unknown-soft: hsl(265 58% 94%);
-
-  --font-display: "IBM Plex Sans Variable", "IBM Plex Sans", sans-serif;
-  --font-ui: "IBM Plex Sans Variable", "IBM Plex Sans", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-ui: "Inter", -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, monospace;
+  --font-display: var(--font-ui);
 
   --fs-1: 10px;
   --fs-2: 11px;
@@ -87,90 +31,121 @@
   --space-7: 48px;
   --space-8: 64px;
 
-  --radius-1: 6px;
-  --radius-2: 9px;
-  --radius-3: 12px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
   --radius-pill: 999px;
-  --radius: var(--radius-2);
-  --radius-sm: var(--radius-1);
 
+  --accent: #4f7cff;
+  --accent-strong: #3b63e8;
+  --accent-soft: rgba(79, 124, 255, 0.12);
+  --ok: #2fbf71;
+  --warn: #e8a13c;
+  --danger: #e5534b;
+  --ok-soft: rgba(47, 191, 113, 0.14);
+  --warn-soft: rgba(232, 161, 60, 0.16);
+  --danger-soft: rgba(229, 83, 75, 0.13);
+
+  --bg-app: #f4f6f9;
+  --bg-shell: #ffffff;
+  --bg-panel: #ffffff;
+  --bg-panel-raised: #f8fafc;
+  --bg-input: #ffffff;
+  --bg-hover: rgba(15, 23, 42, 0.045);
+  --border: rgba(15, 23, 42, 0.1);
+  --border-strong: rgba(15, 23, 42, 0.18);
+  --text-1: #131722;
+  --text-2: #5b6472;
+  --text-3: #8a93a3;
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.05), 0 4px 16px rgba(15, 23, 42, 0.05);
+  --topbar-blur: rgba(244, 246, 249, 0.85);
+
+  --dur: 160ms;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
   --duration-1: 110ms;
   --duration-2: 180ms;
   --duration-3: 280ms;
 
-  --shadow-1: 0 1px 2px hsl(220 24% 10% / 0.035);
-  --shadow-2: 0 10px 28px hsl(220 24% 10% / 0.07);
-  --shadow-3: 0 24px 60px hsl(220 24% 10% / 0.16);
-  --shadow-glass: 0 1px 0 hsl(220 17% 89% / 0.7);
-  --shadow-sm: var(--shadow-1);
-  --shadow-md: var(--shadow-2);
+  /* Compatibility aliases. */
+  --bg: var(--bg-app);
+  --bg-elevated: var(--bg-panel);
+  --panel: var(--bg-panel);
+  --panel-2: var(--bg-panel-raised);
+  --panel-hover: var(--bg-hover);
+  --sidebar: var(--bg-shell);
+  --sidebar-2: var(--bg-panel-raised);
+  --topbar: var(--topbar-blur);
+  --overlay: rgba(15, 23, 42, 0.48);
+  --line: var(--border);
+  --line-strong: var(--border-strong);
+  --line-subtle: var(--border);
+  --grid-line: transparent;
+  --ink: var(--text-1);
+  --ink-2: var(--text-2);
+  --ink-dim: var(--text-2);
+  --ink-3: var(--text-3);
+  --ink-faint: var(--text-3);
+  --inverse-ink: var(--text-1);
+  --inverse-dim: var(--text-2);
+  --sidebar-ink: var(--text-1);
+  --sidebar-dim: var(--text-2);
+  --sidebar-border: var(--border);
+  --sidebar-active: var(--accent-soft);
+  --accent-9: var(--accent);
+  --accent-10: var(--accent-strong);
+  --accent-dim: var(--accent-strong);
+  --accent-ring: var(--accent-soft);
+  --accent-contrast: #ffffff;
+  --tg-blue: var(--accent);
+  --tg-blue-deep: var(--accent-strong);
+  --tg-blue-dim: var(--accent-soft);
+  --up: var(--ok);
+  --up-9: var(--ok);
+  --up-dim: var(--ok);
+  --up-soft: var(--ok-soft);
+  --down: var(--danger);
+  --down-9: var(--danger);
+  --down-dim: var(--danger);
+  --down-soft: var(--danger-soft);
+  --warn-9: var(--warn);
+  --warn-dim: var(--warn);
+  --info: var(--accent);
+  --info-soft: var(--accent-soft);
+  --unknown: var(--text-2);
+  --unknown-soft: var(--bg-hover);
+  --radius-1: var(--radius-sm);
+  --radius-2: var(--radius-md);
+  --radius-3: var(--radius-lg);
+  --radius: var(--radius-md);
+  --shadow-1: var(--shadow-card);
+  --shadow-2: var(--shadow-card);
+  --shadow-3: var(--shadow-card);
+  --shadow-glass: 0 1px 0 var(--border);
+  --shadow-sm: var(--shadow-card);
+  --shadow-md: var(--shadow-card);
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg: hsl(222 28% 7%);
-  --bg-elevated: hsl(222 27% 9%);
-  --panel: hsl(222 25% 11%);
-  --panel-2: hsl(222 23% 14%);
-  --panel-hover: hsl(222 21% 17%);
-  --sidebar: hsl(222 31% 6%);
-  --sidebar-2: hsl(222 29% 8%);
-  --topbar: hsl(222 30% 8% / 0.96);
-  --overlay: hsl(222 38% 3% / 0.76);
-
-  --line: hsl(220 17% 21%);
-  --line-strong: hsl(220 15% 31%);
-  --line-subtle: hsl(220 18% 16%);
-  --grid-line: transparent;
-
-  --ink: hsl(220 24% 94%);
-  --ink-2: hsl(220 12% 76%);
-  --ink-dim: hsl(220 9% 61%);
-  --ink-3: hsl(220 8% 50%);
-  --ink-faint: hsl(220 7% 42%);
-  --inverse-ink: hsl(220 24% 94%);
-  --inverse-dim: hsl(220 9% 61%);
-  --sidebar-ink: hsl(220 24% 94%);
-  --sidebar-dim: hsl(220 9% 61%);
-  --sidebar-border: hsl(220 17% 18%);
-  --sidebar-active: hsl(220 19% 16%);
-
-  --accent: hsl(218 88% 72%);
-  --accent-9: hsl(218 88% 72%);
-  --accent-10: hsl(218 92% 78%);
-  --accent-dim: hsl(218 69% 61%);
-  --accent-soft: hsl(218 45% 17%);
-  --accent-ring: hsl(218 88% 72% / 0.42);
-  --accent-contrast: hsl(222 31% 8%);
-
-  --tg-blue: hsl(199 72% 58%);
-  --tg-blue-deep: hsl(199 78% 68%);
-  --tg-blue-dim: hsl(199 72% 52% / 0.18);
-
-  --up: hsl(154 62% 52%);
-  --up-9: hsl(154 62% 52%);
-  --up-dim: hsl(154 57% 42%);
-  --up-soft: hsl(154 48% 15%);
-  --down: hsl(4 78% 65%);
-  --down-9: hsl(4 78% 65%);
-  --down-dim: hsl(4 66% 54%);
-  --down-soft: hsl(4 46% 16%);
-  --warn: hsl(37 90% 60%);
-  --warn-9: hsl(37 90% 60%);
-  --warn-dim: hsl(37 78% 49%);
-  --warn-soft: hsl(37 52% 16%);
-  --info: hsl(204 72% 64%);
-  --info-soft: hsl(204 44% 17%);
-  --unknown: hsl(269 72% 73%);
-  --unknown-soft: hsl(269 38% 17%);
-
-  --shadow-1: 0 1px 0 hsl(0 0% 100% / 0.025);
-  --shadow-2: 0 14px 34px hsl(222 40% 2% / 0.32);
-  --shadow-3: 0 28px 70px hsl(222 40% 2% / 0.5);
-  --shadow-glass: 0 1px 0 hsl(0 0% 100% / 0.035);
+  --bg-app: #0c0e12;
+  --bg-shell: #101318;
+  --bg-panel: #14181f;
+  --bg-panel-raised: #1a1f28;
+  --bg-input: #0e1116;
+  --bg-hover: rgba(255, 255, 255, 0.045);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text-1: #eef1f6;
+  --text-2: #9aa3b2;
+  --text-3: #626b7a;
+  --ok-soft: rgba(47, 191, 113, 0.14);
+  --warn-soft: rgba(232, 161, 60, 0.14);
+  --danger-soft: rgba(229, 83, 75, 0.14);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px rgba(0, 0, 0, 0.28);
+  --topbar-blur: rgba(12, 14, 18, 0.82);
+  --overlay: rgba(0, 0, 0, 0.76);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -178,5 +153,6 @@
     --duration-1: 0ms;
     --duration-2: 0ms;
     --duration-3: 0ms;
+    --dur: 0ms;
   }
 }

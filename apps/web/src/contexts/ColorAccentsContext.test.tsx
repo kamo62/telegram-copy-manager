@@ -71,7 +71,7 @@ describe("Colour accents", () => {
       </ColorAccentsProvider>,
     );
 
-    const toggle = view.getByRole("checkbox", { name: "Colour accents" }) as HTMLInputElement;
+    const toggle = view.getByRole("switch", { name: "Colour accents" }) as HTMLInputElement;
     expect(toggle.checked).toBe(true);
     expect(document.documentElement.dataset.colorAccents).toBe("on");
     expect(

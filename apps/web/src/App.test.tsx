@@ -1753,6 +1753,29 @@ describe("App dashboard", () => {
     expect(JSON.parse(String(settingsCall?.init?.body))).not.toHaveProperty("alertBotToken");
   });
 
+  test("Settings dirty state drives SaveBar, threshold values, and discard", () => {
+    const view = render(
+      <SettingsPage
+        onSaveForm={() => undefined}
+        onSubmit={(event) => event.preventDefault()}
+        settings={snapshot.appSettings}
+      />,
+    );
+    const pageSave = view.getByRole("button", { name: "Save execution settings" });
+    expect(pageSave.hasAttribute("disabled")).toBe(true);
+
+    fireEvent.input(view.getByLabelText("Warn at (%)"), { target: { value: "12.5" } });
+    expect(view.getByRole("img", { name: "Warn at 12.5%, danger at 20%" })).toBeTruthy();
+    expect(pageSave.hasAttribute("disabled")).toBe(false);
+    expect(view.getByText("Unsaved execution changes").closest(".save-bar")?.classList).toContain(
+      "is-visible",
+    );
+
+    fireEvent.click(view.getByRole("button", { name: "Discard" }));
+    expect((view.getByLabelText("Warn at (%)") as HTMLInputElement).value).toBe("10");
+    expect(pageSave.hasAttribute("disabled")).toBe(true);
+  });
+
   test("per-account risk override fields resync after backend normalization", () => {
     const normalizedAccount = {
       id: "mt5-demo-1",
