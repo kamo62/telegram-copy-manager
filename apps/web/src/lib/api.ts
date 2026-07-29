@@ -19,6 +19,7 @@ interface ApiOptions extends Omit<RequestInit, "body"> {
 
 export interface HeldQueueItem {
   id: string;
+  actionable: boolean;
   heldReason: string;
   heldTier?: "action-required" | "fyi";
   accountId: string;

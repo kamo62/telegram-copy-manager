@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.63.0 - 2026-07-29 (Minor)
+
+Release impact: Minor because suppressed duplicate signals now appear in the held-queue API and UI
+with an explicit non-actionable state. The MT5 command contract is unchanged, so no EA recompile is
+required; its source version moves only to stay aligned with the app.
+
+- Stopped parked `HELD` opens from suppressing fresh provider posts while preserving in-flight and
+  live-trade duplicate protection.
+- Kept real Telegram re-ingestion idempotent through raw-message conflict handling and
+  parse-only-unparsed selection, without widening fingerprint dedup to suppress genuine reposts.
+- Rejected ordinary lifecycle prose such as `entries` as an instrument while preserving the
+  provider cancel command and configured symbol fallback.
+- Treated unmapped held lifecycle symbols as absent during release, while retaining genuine
+  cross-instrument mismatch rejection.
+- Surfaced `DUPLICATE` queue rows as suppressed, dismissible, and never releasable.
+- Added mutation-checked parser, API, re-ingestion, release-safety, and held-table regressions.
+
 ## 1.62.0 - 2026-07-28 (Minor)
 
 Release impact: Minor because Telegram ingestion now exposes a resumable backfill workflow. No EA

@@ -229,6 +229,15 @@ describe("deterministic signal parser", () => {
     }
   });
 
+  test("keeps the real KAL cancel command while rejecting its English noun as a symbol", () => {
+    const signal = parseSignalText("Cancel other entries\n\nWe done today");
+
+    expect(signal.commandType).toBe("CANCEL_PENDING");
+    expect(signal.rawSymbol).toBeUndefined();
+    expect(signal.canonicalSymbol).toBeUndefined();
+    expect(signal.brokerSymbol).toBeUndefined();
+  });
+
   test("does not treat SL/TP edits, partials, chatter, negation, or teaching as a cancel", () => {
     const negatives = [
       "remove your SL",

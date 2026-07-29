@@ -2620,6 +2620,7 @@ describe("App dashboard", () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const heldItem = {
       id: "held-1",
+      actionable: true,
       heldReason: "GUARDIAN",
       accountId: "mt5-demo-1",
       providerId: "provider-alpha",
@@ -2721,6 +2722,7 @@ describe("App dashboard", () => {
           items: [
             {
               id: "held-guardian",
+              actionable: true,
               heldReason: "GUARDIAN",
               accountId: "mt5-demo-1",
               providerId: "provider-alpha",

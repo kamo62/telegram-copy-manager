@@ -1701,6 +1701,17 @@ function detectOrderType(upper: string): OrderType {
 const FX_CURRENCY =
   "USD|EUR|GBP|JPY|CHF|CAD|AUD|NZD|XAU|XAG|ZAR|SGD|HKD|NOK|SEK|DKK|MXN|TRY|CNH|PLN|CZK";
 const FX_PAIR_RE = new RegExp(`\\b(?:${FX_CURRENCY})/?(?:${FX_CURRENCY})\\b`, "i");
+const FX_PAIR_EXACT_RE = new RegExp(`^(?:${FX_CURRENCY})/?(?:${FX_CURRENCY})$`, "i");
+
+function isKnownInstrumentToken(rawSymbol: string, context: ParserContext): boolean {
+  const resolution = resolveSymbol(rawSymbol, context);
+  return (
+    resolution.mappingStatus === "mapped" &&
+    (resolution.mappingSource !== "fallback" ||
+      DEFAULT_CANONICAL_SYMBOLS.has(resolution.canonicalSymbol ?? "") ||
+      FX_PAIR_EXACT_RE.test(rawSymbol))
+  );
+}
 
 function extractRawSymbol(
   text: string,
@@ -1733,7 +1744,11 @@ function extractRawSymbol(
     /\b(?:CANCEL|CLOSE|BE|MODIFY|UPDATE|SET|TRAIL(?:ING)?)\b.*?\b([A-Z]{3}\/?[A-Z]{3}|[A-Z]{6,12})\b|\b([A-Z]{3}\/?[A-Z]{3}|[A-Z]{6,12})\b.*?\b(?:CANCEL|CLOSE|BE|MODIFY|UPDATE|SET|TRAIL(?:ING)?)\b/i,
   );
   const lifecycleSymbol = lifecycle?.[1] ?? lifecycle?.[2];
-  if (lifecycleSymbol && !COMMAND_ALIASES.has(lifecycleSymbol.toUpperCase())) {
+  if (
+    lifecycleSymbol &&
+    !COMMAND_ALIASES.has(lifecycleSymbol.toUpperCase()) &&
+    isKnownInstrumentToken(lifecycleSymbol, context)
+  ) {
     return lifecycleSymbol;
   }
 
