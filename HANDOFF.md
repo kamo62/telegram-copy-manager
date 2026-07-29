@@ -2,11 +2,18 @@
 
 ## START HERE — 2026-07-29
 
-`main` @ `14164f6d`, pushed. **Production runs v1.64.0 and is live** on 192.168.0.100 — verified by
+`main` @ `16275191`, pushed. **Production runs v1.64.1 and is live** on 192.168.0.100 — verified by
 asset-hash match, both accounts online, Telegram connected. No EA recompile outstanding: EA versions
 have moved with the release line but no EA behaviour has changed since 1.60.0.
 
-Working branch `feat/ui-redesign-routes-2026-07-29` @ `14164f6d`, clean, created for the next step.
+### The design base (owner-specified, now in effect)
+
+SF Pro in regular and medium at **-0.15px** tracking. Type scale is **12 / 13 / 14 / 24px only**.
+Text hierarchy is **#292929 / #5D5D5D / #9E9E9E**. Icons are **14px in navigation, 20px on cards**.
+Radii are **8px navigation, 16px cards, pill CTAs**. Content canvas is 1180px.
+
+These are the base for all remaining route work. Verified live: `font-family` resolves to SF Pro Text,
+`letter-spacing` is -0.15px, `--text-1/2/3` are the three greys, `--radius-sm/md` are 8px/16px.
 
 ### DO THIS NEXT — the UI redesign, 7 routes remain
 
