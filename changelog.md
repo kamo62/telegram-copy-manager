@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.64.0 - 2026-07-29 (Minor)
+
+Release impact: Minor because this adds backward-compatible Settings controls and dirty-state
+workflow without changing API, execution, parser, database, or EA contracts.
+
+- Added the canonical light/dark token layer and mapped the legacy palette names onto it.
+- Rebuilt Settings with reusable switches, stepped number fields, live risk thresholds, segmented
+  choices, and a discardable dirty-state save bar.
+- Centred the application content in an 880px column with the new 264px shell and card treatment.
+- Added focused control and Settings dirty-state regression coverage.
+
 ## 1.63.1 - 2026-07-29 (Patch)
 
 Release impact: Patch because this only corrects console presentation and panel layout without

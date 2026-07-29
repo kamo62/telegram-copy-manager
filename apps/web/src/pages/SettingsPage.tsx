@@ -12,6 +12,13 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { DashboardSnapshot } from "../App";
+import {
+  NumberField,
+  SaveBar,
+  SegmentedControl,
+  Switch,
+  ThresholdBar,
+} from "../components/FormControls";
 import { Panel } from "../components/Panel";
 import { useColorAccents } from "../contexts/ColorAccentsContext";
 import { useTheme } from "../contexts/ThemeContext";
@@ -31,6 +38,12 @@ interface FieldProps {
   hint?: string;
   children: React.ReactNode;
   monoInput?: boolean;
+}
+
+function formSnapshot(form: HTMLFormElement) {
+  return JSON.stringify(
+    Array.from(new FormData(form).entries(), ([name, value]) => [name, String(value)]),
+  );
 }
 
 function Field({ label, htmlFor, hint, children }: FieldProps) {
@@ -81,7 +94,7 @@ export function SettingsPage({
 }: {
   settings: DashboardSnapshot["appSettings"];
   onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
-  onSaveForm: (form: HTMLFormElement) => void;
+  onSaveForm: (form: HTMLFormElement) => Promise<boolean | undefined> | boolean | undefined;
   accounts?: AccountThresholdsRow[];
   onAccountRiskThresholdsSave?: (
     accountId: string,
@@ -94,462 +107,529 @@ export function SettingsPage({
   const { colorAccents, setColorAccents } = useColorAccents();
   const { theme, setTheme } = useTheme();
   const formRef = useRef<HTMLFormElement>(null);
+  const loadedSnapshotRef = useRef("");
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [drawdownWarnPct, setDrawdownWarnPct] = useState(String(settings.drawdownWarnPct));
+  const [drawdownDangerPct, setDrawdownDangerPct] = useState(String(settings.drawdownDangerPct));
+  const [reportingCurrency, setReportingCurrency] = useState(settings.reportingCurrency);
   const [testSending, setTestSending] = useState(false);
   const [backupRunning, setBackupRunning] = useState(false);
   const [backupFilename, setBackupFilename] = useState("");
+  const updateDirty = () => {
+    if (formRef.current && loadedSnapshotRef.current) {
+      setDirty(formSnapshot(formRef.current) !== loadedSnapshotRef.current);
+    }
+  };
+  useEffect(() => {
+    setDrawdownWarnPct(String(settings.drawdownWarnPct));
+    setDrawdownDangerPct(String(settings.drawdownDangerPct));
+    setReportingCurrency(settings.reportingCurrency);
+    if (formRef.current) {
+      loadedSnapshotRef.current = formSnapshot(formRef.current);
+      setDirty(false);
+    }
+  }, [settings]);
+  useEffect(updateDirty, [reportingCurrency]);
+  const discard = () => {
+    formRef.current?.reset();
+    setDrawdownWarnPct(String(settings.drawdownWarnPct));
+    setDrawdownDangerPct(String(settings.drawdownDangerPct));
+    setReportingCurrency(settings.reportingCurrency);
+    setDirty(false);
+  };
+  const save = async () => {
+    if (!formRef.current || saving) return;
+    setSaving(true);
+    try {
+      const saved = await onSaveForm(formRef.current);
+      if (saved === false) return;
+      loadedSnapshotRef.current = formSnapshot(formRef.current);
+      setDirty(false);
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
-    <Panel
-      actions={
-        <button
-          className="btn btn-primary btn-small"
-          onClick={() => {
-            if (formRef.current) onSaveForm(formRef.current);
-          }}
-          type="button"
+    <>
+      <Panel
+        actions={
+          <button
+            className="btn btn-primary btn-small"
+            disabled={!dirty || saving}
+            onClick={() => void save()}
+            type="button"
+          >
+            Save execution settings
+          </button>
+        }
+        className="wide-panel settings-panel"
+        hideTitle
+        title="Settings"
+      >
+        <p className="panel-intro">
+          Defaults applied when a parsed signal is missing fields, plus integration secrets and
+          polling cadence. Per-provider overrides live in each Provider's configuration modal.
+        </p>
+        <form
+          className="settings-form-layout"
+          onChange={updateDirty}
+          onInput={updateDirty}
+          onSubmit={onSubmit}
+          ref={formRef}
         >
-          Save execution settings
-        </button>
-      }
-      className="wide-panel settings-panel"
-      hideTitle
-      title="Settings"
-    >
-      <p className="panel-intro">
-        Defaults applied when a parsed signal is missing fields, plus integration secrets and
-        polling cadence. Per-provider overrides live in each Provider's configuration modal.
-      </p>
-      <form className="settings-form-layout" onSubmit={onSubmit} ref={formRef}>
-        <SettingsSection
-          description="Show restrained colour only for charts and operational status. This preference stays in this browser."
-          icon={<Sparkles aria-hidden="true" size={18} />}
-          title="Display"
-        >
-          <fieldset className="segmented-control settings-theme-picker">
-            <legend className="visually-hidden">Colour theme</legend>
-            <button
-              aria-pressed={theme === "light"}
-              className={theme === "light" ? "active" : ""}
-              onClick={() => setTheme("light")}
-              type="button"
-            >
-              <Sun aria-hidden="true" size={14} />
-              Light
-            </button>
-            <button
-              aria-pressed={theme === "dark"}
-              className={theme === "dark" ? "active" : ""}
-              onClick={() => setTheme("dark")}
-              type="button"
-            >
-              <Moon aria-hidden="true" size={14} />
-              Dark
-            </button>
-          </fieldset>
-          <label className="settings-checkbox">
-            <input
-              aria-label="Colour accents"
-              checked={colorAccents}
-              onChange={(event) => setColorAccents(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Colour accents</span>
-          </label>
-        </SettingsSection>
-        <SettingsSection
-          description="Used when an approved signal does not specify lot size, risk, SL, or TP."
-          icon={<Sliders aria-hidden="true" size={18} />}
-          title="Execution defaults"
-        >
-          <div className="settings-grid">
-            <Field
-              hint="Per-trade volume in lots when no provider channel lot size is configured."
-              htmlFor="defaultLotSize"
-              label="Default lot size"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.defaultLotSize}
-                id="defaultLotSize"
-                inputMode="decimal"
-                min="0.01"
-                name="defaultLotSize"
-                pattern="[0-9]+([.,][0-9]+)?"
-                type="text"
-              />
-            </Field>
-            <Field
-              hint="Risk percent of balance for the percent-mode sizing."
-              htmlFor="defaultRiskPercent"
-              label="Default risk percent"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.defaultRiskPercent}
-                id="defaultRiskPercent"
-                min="0.01"
-                name="defaultRiskPercent"
-                step="0.01"
-                type="number"
-              />
-            </Field>
-            <Field
-              hint="Stop-loss distance in pips when the signal omits SL."
-              htmlFor="defaultStopLossPips"
-              label="Default SL pips"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.defaultStopLossPips}
-                id="defaultStopLossPips"
-                min="1"
-                name="defaultStopLossPips"
-                step="1"
-                type="number"
-              />
-            </Field>
-            <Field
-              hint="Take-profit distance in pips when the signal omits TP."
-              htmlFor="defaultTakeProfitPips"
-              label="Default TP pips"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.defaultTakeProfitPips}
-                id="defaultTakeProfitPips"
-                min="1"
-                name="defaultTakeProfitPips"
-                step="1"
-                type="number"
-              />
-            </Field>
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          description="When a drawdown crosses these percentages the dashboard tints the value amber (warn) or red (danger). Per-account overrides live alongside each connected account."
-          icon={<ShieldAlert aria-hidden="true" size={18} />}
-          title="Risk display thresholds"
-        >
-          <div className="settings-grid">
-            <Field
-              hint="Amber tone applied to drawdown values at or above this percent of peak equity."
-              htmlFor="drawdownWarnPct"
-              label="Warn at (%)"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.drawdownWarnPct}
-                id="drawdownWarnPct"
-                max="100"
-                min="0"
-                name="drawdownWarnPct"
-                step="0.5"
-                type="number"
-              />
-            </Field>
-            <Field
-              hint="Red tone applied to drawdown values at or above this percent. Should be higher than the warn threshold."
-              htmlFor="drawdownDangerPct"
-              label="Danger at (%)"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.drawdownDangerPct}
-                id="drawdownDangerPct"
-                max="100"
-                min="0"
-                name="drawdownDangerPct"
-                step="0.5"
-                type="number"
-              />
-            </Field>
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          description="Used for overview money summaries when linked MT5 accounts report different currencies."
-          icon={<DollarSign aria-hidden="true" size={18} />}
-          title="Reporting currency"
-        >
-          <div className="settings-grid">
-            <Field
-              hint="Mixed-currency account summaries are normalized into this currency."
-              htmlFor="reportingCurrency"
-              label="Reporting currency"
-            >
-              <select
-                className="settings-input mono"
-                defaultValue={settings.reportingCurrency}
-                id="reportingCurrency"
-                name="reportingCurrency"
+          <SettingsSection
+            description="Show restrained colour only for charts and operational status. This preference stays in this browser."
+            icon={<Sparkles aria-hidden="true" size={18} />}
+            title="Display"
+          >
+            <fieldset className="segmented-control settings-theme-picker">
+              <legend className="visually-hidden">Colour theme</legend>
+              <button
+                aria-pressed={theme === "light"}
+                className={theme === "light" ? "active" : ""}
+                onClick={() => setTheme("light")}
+                type="button"
               >
-                <option value="USD">USD</option>
-                <option value="ZAR">ZAR</option>
-              </select>
-            </Field>
-            <Field
-              hint="Conversion base for ZAR and USD account summaries."
-              htmlFor="usdZarRate"
-              label="USD/ZAR rate"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.usdZarRate}
-                id="usdZarRate"
-                min="0.01"
-                name="usdZarRate"
-                step="0.01"
-                type="number"
+                <Sun aria-hidden="true" size={14} />
+                Light
+              </button>
+              <button
+                aria-pressed={theme === "dark"}
+                className={theme === "dark" ? "active" : ""}
+                onClick={() => setTheme("dark")}
+                type="button"
+              >
+                <Moon aria-hidden="true" size={14} />
+                Dark
+              </button>
+            </fieldset>
+            <div className="settings-checkbox">
+              <Switch
+                aria-label="Colour accents"
+                checked={colorAccents}
+                id="colorAccents"
+                onChange={(event) => setColorAccents(event.target.checked)}
               />
-            </Field>
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          description="Order types the EA is allowed to place. Disabled types fall through to operator review."
-          icon={<TrendingUp aria-hidden="true" size={18} />}
-          title="Allowed order types"
-        >
-          <div className="settings-checkbox-row">
-            {(["MARKET", "LIMIT", "STOP"] as const).map((type) => (
-              <label className="settings-checkbox" key={type}>
-                <input
-                  defaultChecked={settings.allowedOrderTypes.includes(type)}
-                  name="allowedOrderTypes"
-                  type="checkbox"
-                  value={type}
-                />
-                <span>Allow {type.toLowerCase()} orders</span>
-              </label>
-            ))}
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          description="How often the dashboard polls for fresh provider, queue, and broker state, and how long an approved signal blocks an identical retry."
-          icon={<Timer aria-hidden="true" size={18} />}
-          title="Polling & dedup"
-        >
-          <div className="settings-grid">
-            <Field
-              hint="Minimum 1 second. Higher values reduce backend load but slow up live state."
-              htmlFor="pollingIntervalSeconds"
-              label="Polling interval (seconds)"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.pollingIntervalSeconds}
-                id="pollingIntervalSeconds"
-                min="1"
-                name="pollingIntervalSeconds"
-                step="1"
-                type="number"
-              />
-            </Field>
-            <Field
-              hint="How long an approved signal blocks an identical retry. Lower this when trading news, where the same provider re-issues quickly. Range 60–3600."
-              htmlFor="dedupWindowSeconds"
-              label="Signal dedup window (seconds)"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.dedupWindowSeconds}
-                id="dedupWindowSeconds"
-                max="3600"
-                min="60"
-                name="dedupWindowSeconds"
-                step="30"
-                type="number"
-              />
-            </Field>
-            <Field
-              hint="Open trades older than this are marked expired instead of being sent to MT5 after a reconnect. Use 0 to disable. Range 60–86400."
-              htmlFor="maxOpenTradeAgeSeconds"
-              label="Open trade expiry (seconds)"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.maxOpenTradeAgeSeconds}
-                id="maxOpenTradeAgeSeconds"
-                max="86400"
-                min="0"
-                name="maxOpenTradeAgeSeconds"
-                step="60"
-                type="number"
-              />
-            </Field>
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          description="Send operational alerts through a Telegram bot. Alerting is off until a bot token and chat ID are set; each alert type is then enabled independently."
-          icon={<Bell aria-hidden="true" size={18} />}
-          title="Alerting"
-        >
-          <details className="settings-help">
-            <summary>How to get a bot token and chat ID</summary>
-            <div className="settings-help-body">
-              <p>
-                <strong>Bot token.</strong> Open Telegram and message <code>@BotFather</code>. Send{" "}
-                <code>/newbot</code>, give it a name and a username ending in <code>bot</code>.
-                BotFather replies with a token shaped like <code>123456789:AAH...</code> — paste
-                that below. Treat it like a password: anyone holding it can post as your bot. Use{" "}
-                <code>/revoke</code> if it ever leaks.
-              </p>
-              <p>
-                <strong>Chat ID.</strong> Decide where alerts should land, then get its numeric ID:
-              </p>
-              <ul>
-                <li>
-                  <strong>Direct message to yourself</strong> — message your new bot once (bots
-                  cannot open a conversation first), then visit{" "}
-                  <code>https://api.telegram.org/bot&lt;token&gt;/getUpdates</code> and read{" "}
-                  <code>result[0].message.chat.id</code>. It is a positive number.
-                </li>
-                <li>
-                  <strong>Group or channel</strong> — add the bot as a member (for a channel, as an
-                  admin with post rights), send any message there, then call the same{" "}
-                  <code>getUpdates</code> URL. Group and channel IDs are negative and usually start{" "}
-                  <code>-100</code>.
-                </li>
-              </ul>
-              <p>
-                Save, then use <strong>Send test message</strong> to confirm delivery before relying
-                on it. A wrong chat ID fails silently.
-              </p>
+              <label htmlFor="colorAccents">Colour accents</label>
             </div>
-          </details>
-          <div className="settings-grid">
-            <Field
-              hint={
-                settings.alertBotConfigured
-                  ? "A bot token is configured. Enter a replacement token only to change it."
-                  : "Issued by @BotFather via /newbot. See the help above. Leave blank to keep alerting off."
-              }
-              htmlFor="alertBotToken"
-              label="Bot token"
-            >
-              <input
-                className="settings-input mono"
-                id="alertBotToken"
-                name="alertBotToken"
-                placeholder="123456789:AAH..."
-                title="Get this from @BotFather in Telegram with /newbot. Expand the help above for the full walkthrough."
-                type="password"
-              />
-            </Field>
-            <Field
-              hint="Where alerts are delivered. Positive for a direct message, negative (usually -100...) for a group or channel."
-              htmlFor="alertChatId"
-              label="Chat ID"
-            >
-              <input
-                className="settings-input mono"
-                defaultValue={settings.alertChatId ?? ""}
-                id="alertChatId"
-                name="alertChatId"
-                placeholder="-100..."
-                title="Message the bot, then read result[0].message.chat.id from https://api.telegram.org/bot<token>/getUpdates. Expand the help above for the full walkthrough."
-                type="text"
-              />
-            </Field>
-          </div>
-          <div className="settings-checkbox-row settings-alert-toggles">
-            {(
-              [
-                ["alertOnGuardianPause", "Equity Guardian pauses"],
-                ["alertOnEaOffline", "EA offline"],
-                ["alertOnExecFailed", "Execution failures"],
-                ["alertOnHeld", "Held signals"],
-                ["alertOnTelegramStall", "Telegram ingestion stalls"],
-              ] as const
-            ).map(([name, label]) => (
-              <label className="settings-checkbox" key={name}>
-                <input defaultChecked={settings[name] ?? false} name={name} type="checkbox" />
-                <span>{label}</span>
-              </label>
-            ))}
-          </div>
-          {onAlertTest ? (
+          </SettingsSection>
+          <SettingsSection
+            description="Used when an approved signal does not specify lot size, risk, SL, or TP."
+            icon={<Sliders aria-hidden="true" size={18} />}
+            title="Execution defaults"
+          >
+            <div className="settings-grid">
+              <Field
+                hint="Per-trade volume in lots when no provider channel lot size is configured."
+                htmlFor="defaultLotSize"
+                label="Default lot size"
+              >
+                <NumberField
+                  defaultValue={settings.defaultLotSize}
+                  id="defaultLotSize"
+                  min="0.01"
+                  name="defaultLotSize"
+                  step="0.01"
+                  unit="lots"
+                />
+              </Field>
+              <Field
+                hint="Risk percent of balance for the percent-mode sizing."
+                htmlFor="defaultRiskPercent"
+                label="Default risk percent"
+              >
+                <NumberField
+                  defaultValue={settings.defaultRiskPercent}
+                  id="defaultRiskPercent"
+                  min="0.01"
+                  name="defaultRiskPercent"
+                  step="0.01"
+                  unit="%"
+                />
+              </Field>
+              <Field
+                hint="Stop-loss distance in pips when the signal omits SL."
+                htmlFor="defaultStopLossPips"
+                label="Default SL pips"
+              >
+                <NumberField
+                  defaultValue={settings.defaultStopLossPips}
+                  id="defaultStopLossPips"
+                  min="1"
+                  name="defaultStopLossPips"
+                  step="1"
+                  unit="pips"
+                />
+              </Field>
+              <Field
+                hint="Take-profit distance in pips when the signal omits TP."
+                htmlFor="defaultTakeProfitPips"
+                label="Default TP pips"
+              >
+                <NumberField
+                  defaultValue={settings.defaultTakeProfitPips}
+                  id="defaultTakeProfitPips"
+                  min="1"
+                  name="defaultTakeProfitPips"
+                  step="1"
+                  unit="pips"
+                />
+              </Field>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            description="When a drawdown crosses these percentages the dashboard tints the value amber (warn) or red (danger). Per-account overrides live alongside each connected account."
+            icon={<ShieldAlert aria-hidden="true" size={18} />}
+            title="Risk display thresholds"
+          >
+            <div className="settings-grid">
+              <Field
+                hint="Amber tone applied to drawdown values at or above this percent of peak equity."
+                htmlFor="drawdownWarnPct"
+                label="Warn at (%)"
+              >
+                <NumberField
+                  id="drawdownWarnPct"
+                  max="100"
+                  min="0"
+                  name="drawdownWarnPct"
+                  onInput={(event) => setDrawdownWarnPct(event.currentTarget.value)}
+                  step="0.5"
+                  unit="%"
+                  value={drawdownWarnPct}
+                />
+              </Field>
+              <Field
+                hint="Red tone applied to drawdown values at or above this percent. Should be higher than the warn threshold."
+                htmlFor="drawdownDangerPct"
+                label="Danger at (%)"
+              >
+                <NumberField
+                  id="drawdownDangerPct"
+                  max="100"
+                  min="0"
+                  name="drawdownDangerPct"
+                  onInput={(event) => setDrawdownDangerPct(event.currentTarget.value)}
+                  step="0.5"
+                  unit="%"
+                  value={drawdownDangerPct}
+                />
+              </Field>
+            </div>
+            <ThresholdBar
+              danger={Number(drawdownDangerPct) || 0}
+              warn={Number(drawdownWarnPct) || 0}
+            />
+          </SettingsSection>
+
+          <SettingsSection
+            description="Used for overview money summaries when linked MT5 accounts report different currencies."
+            icon={<DollarSign aria-hidden="true" size={18} />}
+            title="Reporting currency"
+          >
+            <div className="settings-grid">
+              <Field
+                hint="Mixed-currency account summaries are normalized into this currency."
+                htmlFor="reportingCurrency"
+                label="Reporting currency"
+              >
+                <select
+                  className="visually-hidden"
+                  id="reportingCurrency"
+                  name="reportingCurrency"
+                  onChange={(event) =>
+                    setReportingCurrency(event.currentTarget.value as "USD" | "ZAR")
+                  }
+                  value={reportingCurrency}
+                >
+                  <option value="USD">USD</option>
+                  <option value="ZAR">ZAR</option>
+                </select>
+                <SegmentedControl ariaLabel="Reporting currency options">
+                  {(["USD", "ZAR"] as const).map((currency) => (
+                    <button
+                      aria-pressed={reportingCurrency === currency}
+                      className={reportingCurrency === currency ? "active" : ""}
+                      key={currency}
+                      onClick={() => setReportingCurrency(currency)}
+                      type="button"
+                    >
+                      {currency}
+                    </button>
+                  ))}
+                </SegmentedControl>
+              </Field>
+              <Field
+                hint="Conversion base for ZAR and USD account summaries."
+                htmlFor="usdZarRate"
+                label="USD/ZAR rate"
+              >
+                <NumberField
+                  defaultValue={settings.usdZarRate}
+                  id="usdZarRate"
+                  min="0.01"
+                  name="usdZarRate"
+                  step="0.01"
+                />
+              </Field>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            description="Order types the EA is allowed to place. Disabled types fall through to operator review."
+            icon={<TrendingUp aria-hidden="true" size={18} />}
+            title="Allowed order types"
+          >
+            <div className="settings-checkbox-row">
+              {(["MARKET", "LIMIT", "STOP"] as const).map((type) => (
+                <div className="settings-checkbox" key={type}>
+                  <Switch
+                    aria-label={`Allow ${type.toLowerCase()} orders`}
+                    defaultChecked={settings.allowedOrderTypes.includes(type)}
+                    id={`allowedOrderType-${type}`}
+                    name="allowedOrderTypes"
+                    value={type}
+                  />
+                  <label htmlFor={`allowedOrderType-${type}`}>
+                    Allow {type.toLowerCase()} orders
+                  </label>
+                </div>
+              ))}
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            description="How often the dashboard polls for fresh provider, queue, and broker state, and how long an approved signal blocks an identical retry."
+            icon={<Timer aria-hidden="true" size={18} />}
+            title="Polling & dedup"
+          >
+            <div className="settings-grid">
+              <Field
+                hint="Minimum 1 second. Higher values reduce backend load but slow up live state."
+                htmlFor="pollingIntervalSeconds"
+                label="Polling interval (seconds)"
+              >
+                <NumberField
+                  defaultValue={settings.pollingIntervalSeconds}
+                  id="pollingIntervalSeconds"
+                  min="1"
+                  name="pollingIntervalSeconds"
+                  step="1"
+                  unit="sec"
+                />
+              </Field>
+              <Field
+                hint="How long an approved signal blocks an identical retry. Lower this when trading news, where the same provider re-issues quickly. Range 60–3600."
+                htmlFor="dedupWindowSeconds"
+                label="Signal dedup window (seconds)"
+              >
+                <NumberField
+                  defaultValue={settings.dedupWindowSeconds}
+                  id="dedupWindowSeconds"
+                  max="3600"
+                  min="60"
+                  name="dedupWindowSeconds"
+                  step="30"
+                  unit="sec"
+                />
+              </Field>
+              <Field
+                hint="Open trades older than this are marked expired instead of being sent to MT5 after a reconnect. Use 0 to disable. Range 60–86400."
+                htmlFor="maxOpenTradeAgeSeconds"
+                label="Open trade expiry (seconds)"
+              >
+                <NumberField
+                  defaultValue={settings.maxOpenTradeAgeSeconds}
+                  id="maxOpenTradeAgeSeconds"
+                  max="86400"
+                  min="0"
+                  name="maxOpenTradeAgeSeconds"
+                  step="60"
+                  unit="sec"
+                />
+              </Field>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection
+            description="Send operational alerts through a Telegram bot. Alerting is off until a bot token and chat ID are set; each alert type is then enabled independently."
+            icon={<Bell aria-hidden="true" size={18} />}
+            title="Alerting"
+          >
+            <details className="settings-help">
+              <summary>How to get a bot token and chat ID</summary>
+              <div className="settings-help-body">
+                <p>
+                  <strong>Bot token.</strong> Open Telegram and message <code>@BotFather</code>.
+                  Send <code>/newbot</code>, give it a name and a username ending in{" "}
+                  <code>bot</code>. BotFather replies with a token shaped like{" "}
+                  <code>123456789:AAH...</code> — paste that below. Treat it like a password: anyone
+                  holding it can post as your bot. Use <code>/revoke</code> if it ever leaks.
+                </p>
+                <p>
+                  <strong>Chat ID.</strong> Decide where alerts should land, then get its numeric
+                  ID:
+                </p>
+                <ul>
+                  <li>
+                    <strong>Direct message to yourself</strong> — message your new bot once (bots
+                    cannot open a conversation first), then visit{" "}
+                    <code>https://api.telegram.org/bot&lt;token&gt;/getUpdates</code> and read{" "}
+                    <code>result[0].message.chat.id</code>. It is a positive number.
+                  </li>
+                  <li>
+                    <strong>Group or channel</strong> — add the bot as a member (for a channel, as
+                    an admin with post rights), send any message there, then call the same{" "}
+                    <code>getUpdates</code> URL. Group and channel IDs are negative and usually
+                    start <code>-100</code>.
+                  </li>
+                </ul>
+                <p>
+                  Save, then use <strong>Send test message</strong> to confirm delivery before
+                  relying on it. A wrong chat ID fails silently.
+                </p>
+              </div>
+            </details>
+            <div className="settings-grid">
+              <Field
+                hint={
+                  settings.alertBotConfigured
+                    ? "A bot token is configured. Enter a replacement token only to change it."
+                    : "Issued by @BotFather via /newbot. See the help above. Leave blank to keep alerting off."
+                }
+                htmlFor="alertBotToken"
+                label="Bot token"
+              >
+                <input
+                  className="settings-input mono"
+                  id="alertBotToken"
+                  name="alertBotToken"
+                  placeholder="123456789:AAH..."
+                  title="Get this from @BotFather in Telegram with /newbot. Expand the help above for the full walkthrough."
+                  type="password"
+                />
+              </Field>
+              <Field
+                hint="Where alerts are delivered. Positive for a direct message, negative (usually -100...) for a group or channel."
+                htmlFor="alertChatId"
+                label="Chat ID"
+              >
+                <input
+                  className="settings-input mono"
+                  defaultValue={settings.alertChatId ?? ""}
+                  id="alertChatId"
+                  name="alertChatId"
+                  placeholder="-100..."
+                  title="Message the bot, then read result[0].message.chat.id from https://api.telegram.org/bot<token>/getUpdates. Expand the help above for the full walkthrough."
+                  type="text"
+                />
+              </Field>
+            </div>
+            <div className="settings-checkbox-row settings-alert-toggles">
+              {(
+                [
+                  ["alertOnGuardianPause", "Equity Guardian pauses"],
+                  ["alertOnEaOffline", "EA offline"],
+                  ["alertOnExecFailed", "Execution failures"],
+                  ["alertOnHeld", "Held signals"],
+                  ["alertOnTelegramStall", "Telegram ingestion stalls"],
+                ] as const
+              ).map(([name, label]) => (
+                <div className="settings-checkbox" key={name}>
+                  <Switch
+                    aria-label={label}
+                    defaultChecked={settings[name] ?? false}
+                    id={name}
+                    name={name}
+                  />
+                  <label htmlFor={name}>{label}</label>
+                </div>
+              ))}
+            </div>
+            {onAlertTest ? (
+              <div className="settings-inline-actions">
+                <button
+                  className="btn btn-ghost btn-small"
+                  disabled={testSending}
+                  onClick={async () => {
+                    setTestSending(true);
+                    try {
+                      await onAlertTest();
+                    } finally {
+                      setTestSending(false);
+                    }
+                  }}
+                  type="button"
+                >
+                  {testSending ? "Sending..." : "Send test message"}
+                </button>
+              </div>
+            ) : null}
+          </SettingsSection>
+
+          <SettingsSection
+            description="Create an immediate SQLite backup on the server. The server retains the newest backup files."
+            icon={<DatabaseBackup aria-hidden="true" size={18} />}
+            title="Database backup"
+          >
             <div className="settings-inline-actions">
               <button
                 className="btn btn-ghost btn-small"
-                disabled={testSending}
+                disabled={backupRunning}
                 onClick={async () => {
-                  setTestSending(true);
+                  if (!onBackup) return;
+                  setBackupRunning(true);
                   try {
-                    await onAlertTest();
+                    setBackupFilename(await onBackup());
                   } finally {
-                    setTestSending(false);
+                    setBackupRunning(false);
                   }
                 }}
                 type="button"
               >
-                {testSending ? "Sending..." : "Send test message"}
+                {backupRunning ? "Backing up..." : "Back up database now"}
               </button>
+              {backupFilename ? (
+                <span className="settings-backup-filename">
+                  Created <code>{backupFilename}</code>
+                </span>
+              ) : null}
             </div>
-          ) : null}
-        </SettingsSection>
+          </SettingsSection>
 
-        <SettingsSection
-          description="Create an immediate SQLite backup on the server. The server retains the newest backup files."
-          icon={<DatabaseBackup aria-hidden="true" size={18} />}
-          title="Database backup"
-        >
-          <div className="settings-inline-actions">
-            <button
-              className="btn btn-ghost btn-small"
-              disabled={backupRunning}
-              onClick={async () => {
-                if (!onBackup) return;
-                setBackupRunning(true);
-                try {
-                  setBackupFilename(await onBackup());
-                } finally {
-                  setBackupRunning(false);
-                }
-              }}
-              type="button"
-            >
-              {backupRunning ? "Backing up..." : "Back up database now"}
-            </button>
-            {backupFilename ? (
-              <span className="settings-backup-filename">
-                Created <code>{backupFilename}</code>
-              </span>
-            ) : null}
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          description="Optional GPT extraction for parser signals that need additional normalization. The key is stored on the server."
-          icon={<Sparkles aria-hidden="true" size={18} />}
-          title="AI extraction"
-        >
-          <Field
-            hint={
-              settings.azureOpenAIKeyConfigured
-                ? "A key is currently configured. Paste a new value to replace it."
-                : "Leave blank to keep AI extraction disabled."
-            }
-            htmlFor="azureOpenAIApiKey"
-            label="Azure OpenAI API key"
+          <SettingsSection
+            description="Optional GPT extraction for parser signals that need additional normalization. The key is stored on the server."
+            icon={<Sparkles aria-hidden="true" size={18} />}
+            title="AI extraction"
           >
-            <input
-              className="settings-input"
-              id="azureOpenAIApiKey"
-              name="azureOpenAIApiKey"
-              placeholder={settings.azureOpenAIKeyConfigured ? "Configured" : "Paste API key"}
-              type="password"
-            />
-          </Field>
-        </SettingsSection>
-      </form>
+            <Field
+              hint={
+                settings.azureOpenAIKeyConfigured
+                  ? "A key is currently configured. Paste a new value to replace it."
+                  : "Leave blank to keep AI extraction disabled."
+              }
+              htmlFor="azureOpenAIApiKey"
+              label="Azure OpenAI API key"
+            >
+              <input
+                className="settings-input"
+                id="azureOpenAIApiKey"
+                name="azureOpenAIApiKey"
+                placeholder={settings.azureOpenAIKeyConfigured ? "Configured" : "Paste API key"}
+                type="password"
+              />
+            </Field>
+          </SettingsSection>
+        </form>
 
-      {accounts.length > 0 && onAccountRiskThresholdsSave ? (
-        <AccountRiskThresholdsSection accounts={accounts} onSave={onAccountRiskThresholdsSave} />
-      ) : null}
-    </Panel>
+        {accounts.length > 0 && onAccountRiskThresholdsSave ? (
+          <AccountRiskThresholdsSection accounts={accounts} onSave={onAccountRiskThresholdsSave} />
+        ) : null}
+      </Panel>
+      <SaveBar dirty={dirty} onDiscard={discard} onSave={() => void save()} saving={saving} />
+    </>
   );
 }
 
@@ -619,28 +699,26 @@ function AccountThresholdRow({
         <span className="data-table-subtle">{account.currency}</span>
       </th>
       <td className="num-cell">
-        <input
+        <NumberField
           aria-label={`Warn % override for ${account.accountNumber}`}
-          className="settings-input mono"
           max="100"
           min="0"
-          onChange={(event) => setWarn(event.target.value)}
+          onInput={(event) => setWarn(event.currentTarget.value)}
           placeholder="—"
           step="0.5"
-          type="number"
+          unit="%"
           value={warn}
         />
       </td>
       <td className="num-cell">
-        <input
+        <NumberField
           aria-label={`Danger % override for ${account.accountNumber}`}
-          className="settings-input mono"
           max="100"
           min="0"
-          onChange={(event) => setDanger(event.target.value)}
+          onInput={(event) => setDanger(event.currentTarget.value)}
           placeholder="—"
           step="0.5"
-          type="number"
+          unit="%"
           value={danger}
         />
       </td>

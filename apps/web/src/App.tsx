@@ -1803,7 +1803,7 @@ export function App({
     const defaultLotSize = Number(String(formData.get("defaultLotSize") ?? "").replace(",", "."));
     if (!Number.isFinite(defaultLotSize) || defaultLotSize <= 0) {
       toast.error("Default lot size must be a positive decimal");
-      return;
+      return false;
     }
     await apiPatch("/api/settings", {
       defaultLotSize,
@@ -1829,6 +1829,7 @@ export function App({
     });
     toast.success("Settings saved");
     await refreshDashboard();
+    return true;
   }
 
   async function sendAlertTest() {
@@ -2604,7 +2605,7 @@ export function App({
                     void saveAccountRiskThresholds(accountId, warnPct, dangerPct)
                   }
                   onSubmit={saveExecutionSettings}
-                  onSaveForm={(formElement) => void saveExecutionSettingsForm(formElement)}
+                  onSaveForm={saveExecutionSettingsForm}
                   onAlertTest={sendAlertTest}
                   onBackup={backupDatabase}
                   settings={snapshot.appSettings}
