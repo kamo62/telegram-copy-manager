@@ -322,7 +322,7 @@ async function renderEventSourceApp(initial: DashboardSnapshot, refreshed = init
     return fixtureResponse(url, initial);
   }) as typeof fetch;
   const view = render(<App />);
-  await view.findByRole("heading", { name: "TG-TC · Operations" });
+  await view.findByRole("heading", { level: 1, name: "Operations" });
   await waitFor(() => expect(eventSource.instances).toHaveLength(1));
   return { ...eventSource, view, dashboardLoads: () => dashboardLoads };
 }
@@ -375,7 +375,7 @@ describe("App dashboard", () => {
       expect(dashboardLoads).toBe(1);
 
       resolveDashboard(Response.json(snapshot));
-      await view.findByRole("heading", { name: "TG-TC · Operations" });
+      await view.findByRole("heading", { level: 1, name: "Operations" });
     } finally {
       restore();
     }
@@ -502,7 +502,10 @@ describe("App dashboard", () => {
   test("renders the usable operations dashboard as the first screen, not a marketing page", () => {
     const view = render(<App initialSnapshot={snapshot} />);
 
-    expect(view.getByRole("heading", { name: "TG-TC · Operations" })).toBeTruthy();
+    // The page title owns the outline; the status-bar brand is chrome and is
+    // deliberately not a heading.
+    expect(view.getByRole("heading", { level: 1, name: "Operations" })).toBeTruthy();
+    expect(view.container.querySelector(".brand")?.textContent).toContain("TG-TC · Operations");
     expect(view.getByRole("button", { name: "Operations" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Review queue" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Telegram" })).toBeTruthy();
@@ -673,7 +676,7 @@ describe("App dashboard", () => {
       expect(view.queryByRole("heading", { name: "Sign in to Telegram" })).toBeNull(),
     );
     resolveDashboard(Response.json(snapshot));
-    await view.findByRole("heading", { name: "TG-TC · Operations" });
+    await view.findByRole("heading", { level: 1, name: "Operations" });
   });
 
   test("account header renders MT5 balance and equity before trading P/L windows", () => {
@@ -2468,7 +2471,7 @@ describe("App dashboard", () => {
     try {
       const view = render(<App initialSnapshot={snapshot} />);
       expect(view.queryByText("Use a larger screen")).toBeNull();
-      expect(view.getByRole("heading", { name: /TG-TC/ })).toBeTruthy();
+      expect(view.container.querySelector(".brand")?.textContent).toContain("TG-TC");
       const menu = view.getByRole("button", { name: "Open command palette" });
       expect(menu.textContent).toContain("Menu");
     } finally {
@@ -2493,7 +2496,7 @@ describe("App dashboard", () => {
   test("StatusBar shows last sync and keeps the app version on the brand tooltip", () => {
     const view = render(<App initialSnapshot={snapshot} />);
     expect(view.getByText("Last sync:")).toBeTruthy();
-    expect(view.getByRole("heading", { name: "TG-TC · Operations" }).getAttribute("title")).toBe(
+    expect(view.container.querySelector(".brand")?.getAttribute("title")).toBe(
       `Version ${packageJson.version}`,
     );
   });

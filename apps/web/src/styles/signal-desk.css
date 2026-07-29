@@ -418,7 +418,7 @@ h3,
   text-transform: none;
 }
 
-.workspace-heading h2 {
+.workspace-heading h1 {
   order: 1;
   margin: 0;
   color: var(--ink);
