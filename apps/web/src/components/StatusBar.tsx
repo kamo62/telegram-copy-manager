@@ -1,4 +1,4 @@
-import { Moon, RefreshCw, Sun, TerminalSquare } from "lucide-react";
+import { Database, Moon, RefreshCw, Send, Sun, TerminalSquare } from "lucide-react";
 import { useTheme } from "../contexts/ThemeContext";
 import { useSyncStatus } from "../lib/syncStatus";
 
@@ -76,22 +76,21 @@ export function StatusBar({
           className="status-chip"
           role={lastPollError ? "status" : undefined}
         >
-          <span
-            aria-label={liveDotLabel}
-            className={liveDotClass}
-            role="img"
-            title={liveDotLabel}
-          />
+          <RefreshCw aria-label={liveDotLabel} className={liveDotClass} role="img" size={12} />
           <span className="sync-label">Last sync:</span>
           <span className="sync-value">{lastSyncLabel}</span>
         </span>
         <span className="status-chip">
-          <span className={`chip-dot ${database === "connected" ? "ok" : "warn"}`} />
+          <Database
+            aria-hidden="true"
+            className={`chip-dot database ${database === "connected" ? "ok" : "warn"}`}
+            size={12}
+          />
           <span className="sync-label">DB</span>
           <span className="sync-value">{database}</span>
         </span>
         <span className="status-chip">
-          <span className={`chip-dot ${telegramAdapterStatus}`} />
+          <Send aria-hidden="true" className={`chip-dot ${telegramAdapterStatus}`} size={12} />
           <span className="sync-label">TG</span>
           <span className="sync-value">{telegramAdapter}</span>
         </span>
@@ -102,7 +101,7 @@ export function StatusBar({
         <span className="status-chip status-version">v{appVersion}</span>
         {lastPollError ? (
           <span aria-live="polite" className="status-chip status-chip-error" role="status">
-            <span className="chip-dot error" />
+            <RefreshCw aria-hidden="true" className="chip-dot error" size={12} />
             <span className="sync-label">Poll failed</span>
           </span>
         ) : null}

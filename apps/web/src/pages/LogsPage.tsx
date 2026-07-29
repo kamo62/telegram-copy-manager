@@ -97,6 +97,20 @@ export function LogsPage({
       </section>
 
       <Panel
+        actions={
+          parserTab === "Recent Parses" ? (
+            <button
+              className="btn btn-ghost btn-small"
+              disabled={providersLength === 0 || parseRecentBusy}
+              onClick={onParseRecent}
+              title="Parse recent provider messages"
+              type="button"
+            >
+              <RefreshCw size={13} aria-hidden="true" />
+              {parseRecentBusy ? "Parsing…" : "Parse recent"}
+            </button>
+          ) : null
+        }
         activeTab={parserTab}
         className="wide-panel"
         collapsible
@@ -107,17 +121,6 @@ export function LogsPage({
       >
         {parserTab === "Recent Parses" ? (
           <>
-            <div className="panel-toolbar">
-              <button
-                disabled={providersLength === 0 || parseRecentBusy}
-                onClick={onParseRecent}
-                title="Parse recent provider messages"
-                type="button"
-              >
-                <RefreshCw size={13} aria-hidden="true" />
-                {parseRecentBusy ? "Parsing…" : "Parse recent"}
-              </button>
-            </div>
             {parseRecentResults.length ? (
               <div className="parse-recent-results">
                 {parseRecentResults.map((result) => (

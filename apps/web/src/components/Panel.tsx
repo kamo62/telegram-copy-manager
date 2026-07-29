@@ -51,8 +51,15 @@ export function Panel({
   return (
     <section
       aria-label={hideTitle ? title : undefined}
+      aria-labelledby={
+        hasTabs
+          ? `${tabPanelId}-${activeTab!.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+          : undefined
+      }
       className={`panel ${className}`}
       data-testid={testId}
+      id={hasTabs ? tabPanelId : undefined}
+      role={hasTabs ? "tabpanel" : undefined}
     >
       {showHeader ? (
         <header>
@@ -91,17 +98,7 @@ export function Panel({
           {actions ? <div className="panel-header-actions">{actions}</div> : null}
         </header>
       ) : null}
-      {collapsed ? null : tabs && activeTab && onTabChange ? (
-        <div
-          aria-labelledby={`${tabPanelId}-${activeTab.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
-          id={tabPanelId}
-          role="tabpanel"
-        >
-          {children}
-        </div>
-      ) : (
-        children
-      )}
+      {collapsed ? null : children}
     </section>
   );
 }

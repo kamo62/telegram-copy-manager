@@ -114,26 +114,40 @@ h3,
 
 .status-bar .live-dot,
 .status-bar .chip-dot {
-  width: 6px;
-  height: 6px;
+  width: 12px;
+  height: 12px;
   flex: 0 0 auto;
-  border-radius: 50%;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  animation: none;
 }
 
-.status-bar .live-dot,
+.status-bar .live-dot {
+  color: var(--up);
+}
+
 .status-bar .chip-dot.ok {
-  background: var(--up);
+  color: var(--up);
+}
+
+.status-bar .chip-dot.database.ok {
+  color: var(--accent);
 }
 
 .status-bar .chip-dot.warn {
-  background: var(--warn);
-  border: 0;
+  color: var(--warn);
 }
 
 .status-bar .chip-dot.error,
 .status-bar .live-dot.error {
-  background: var(--down);
-  border-radius: 50%;
+  color: var(--down);
+}
+
+.status-bar .live-dot.refreshing {
+  color: var(--accent);
+  opacity: 0.7;
 }
 
 .status-actions {
@@ -640,7 +654,7 @@ h3,
 .panel > .linked-section,
 .panel > .provider-health-strip,
 .panel > .settings-section,
-.panel > .history-export-row {
+.panel > .panel-hint {
   margin-right: 16px;
   margin-left: 16px;
 }
@@ -1525,7 +1539,7 @@ textarea {
   .panel > .provider-monitoring,
   .panel > .settings-section,
   .panel > .performance-mode-tabs,
-  .panel > .history-export-row {
+  .panel > .panel-hint {
     margin-right: 12px;
     margin-left: 12px;
   }
