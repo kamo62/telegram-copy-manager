@@ -91,10 +91,29 @@ now a single pattern rather than two.
 
 Re-audited after the change: **zero structural findings on all ten routes.**
 
+**F4** — `Panel` takes `hideTitle` for panels whose page heading already says the same
+word. The title still labels the section via `aria-label`, so it stays a named region, and
+the header renders only when it carries tabs or actions. Settings and Guardian drop their
+header entirely, 51px each.
+
+**F5** — `/logs` reordered so Held signals is the first panel, and `Panel` gained
+`collapsible` / `defaultOpen`. Signal Queue, Execution Logs and Activity start folded;
+Parser Lab stays open because it is a working tool rather than a reference list.
+
+| | before | after |
+|---|---|---|
+| page height | 26,214px | **5,213px** |
+| held signals starts at | 4,348px | **635px** |
+| Signal Queue | 18,469px | 69px folded |
+
+**F6** — page title promoted to `h1`, status-bar brand demoted to a `div`. Six tests queried
+the brand through `getByRole("heading")`; they now query it by class, and the ones that were
+really waiting for load wait on the page title.
+
 ## Status
 
-- [x] F1 · [x] F2 · [x] F3
-- [ ] F4 · [ ] F5 — need a product decision
+- [x] F1 · [x] F2 · [x] F3 · [x] F4 · [x] F5 · [x] F6
+- [ ] F7 — two h3 treatments, 13px/650 and 15px/500, left as-is
 
 ## Known flake, not caused by this work
 

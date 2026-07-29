@@ -812,6 +812,34 @@ h3 {
   margin-left: auto;
 }
 
+.panel-collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--ink-dim);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-1);
+  cursor: pointer;
+}
+
+.panel-collapse-toggle:hover {
+  color: var(--ink);
+  background: var(--panel-3, var(--panel));
+}
+
+.panel-collapse-toggle svg {
+  transform: rotate(-90deg);
+  transition: transform 120ms ease;
+}
+
+.panel-collapse-toggle.is-open svg {
+  transform: rotate(0deg);
+}
+
 .panel > header h2 {
   font-family: var(--font-display);
   font-size: var(--fs-6);

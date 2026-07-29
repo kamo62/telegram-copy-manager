@@ -78,9 +78,28 @@ export function LogsPage({
 }) {
   return (
     <>
+      <section className="wide-panel" id="held">
+        <Panel testId="held-signals-panel" title="Held signals">
+          <HeldSignalsTable
+            accountLabel={(accountId) =>
+              snapshot.mt5Accounts.find((account) => account.id === accountId)?.accountNumber ??
+              (accountId || "Unassigned")
+            }
+            items={heldItems}
+            onDismiss={onHeldDismiss}
+            onRequeue={onHeldRequeue}
+            providerLabel={(providerId) =>
+              snapshot.providers.find((provider) => provider.id === providerId)?.title ??
+              (providerId || "Unassigned")
+            }
+          />
+        </Panel>
+      </section>
+
       <Panel
         activeTab={parserTab}
         className="wide-panel"
+        collapsible
         onTabChange={onParserTabChange}
         tabs={["Recent Parses", "Saved Fixtures"]}
         testId="parser-lab-panel"
@@ -176,24 +195,6 @@ export function LogsPage({
         )}
       </Panel>
 
-      <section className="wide-panel" id="held">
-        <Panel testId="held-signals-panel" title="Held signals">
-          <HeldSignalsTable
-            accountLabel={(accountId) =>
-              snapshot.mt5Accounts.find((account) => account.id === accountId)?.accountNumber ??
-              (accountId || "Unassigned")
-            }
-            items={heldItems}
-            onDismiss={onHeldDismiss}
-            onRequeue={onHeldRequeue}
-            providerLabel={(providerId) =>
-              snapshot.providers.find((provider) => provider.id === providerId)?.title ??
-              (providerId || "Unassigned")
-            }
-          />
-        </Panel>
-      </section>
-
       <Panel
         actions={
           <button
@@ -207,6 +208,8 @@ export function LogsPage({
           </button>
         }
         className="wide-panel"
+        collapsible
+        defaultOpen={false}
         title="Signal Queue"
       >
         <div className="queue-board">
@@ -224,7 +227,7 @@ export function LogsPage({
         </div>
       </Panel>
 
-      <Panel className="wide-panel" title="Execution Logs">
+      <Panel className="wide-panel" collapsible defaultOpen={false} title="Execution Logs">
         <div className="log-list">
           {snapshot.executionLogs.length === 0 ? (
             <EmptyState
@@ -238,7 +241,7 @@ export function LogsPage({
         </div>
       </Panel>
 
-      <Panel className="wide-panel" title="Activity">
+      <Panel className="wide-panel" collapsible defaultOpen={false} title="Activity">
         <ActivityFeed />
       </Panel>
     </>

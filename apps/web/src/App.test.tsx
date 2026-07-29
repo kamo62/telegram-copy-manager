@@ -2458,6 +2458,10 @@ describe("App dashboard", () => {
       />,
     );
     clickTab(view, "Logs");
+    // Signal Queue and Execution Logs are reference panels and start folded, so
+    // held signals stay near the top of a very long page.
+    fireEvent.click(view.getByRole("button", { name: "Expand Signal Queue" }));
+    fireEvent.click(view.getByRole("button", { name: "Expand Execution Logs" }));
     expect(view.getByText("Queue is empty")).toBeTruthy();
     expect(view.getByText("No MT5 reports yet")).toBeTruthy();
   });

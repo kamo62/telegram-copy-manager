@@ -1,8 +1,13 @@
+import { ChevronDown } from "lucide-react";
+import { useId, useState } from "react";
+
 export function Panel({
   actions,
   activeTab,
   children,
   className = "",
+  collapsible = false,
+  defaultOpen = true,
   hideTitle = false,
   onTabChange,
   tabs,
@@ -20,6 +25,12 @@ export function Panel({
   children: React.ReactNode;
   className?: string;
   /**
+   * Lets the operator fold this panel away. Use on secondary or diagnostic
+   * panels that would otherwise push the primary work off screen.
+   */
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+  /**
    * Set when the page title already says this, so the panel would be the third
    * place the same word appears after the page heading and the workspace tab.
    * The title still labels the section for assistive tech.
@@ -34,7 +45,10 @@ export function Panel({
     ? `panel-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-content`
     : undefined;
   const hasTabs = Boolean(tabs && activeTab && onTabChange);
-  const showHeader = !hideTitle || hasTabs || Boolean(actions);
+  const [open, setOpen] = useState(defaultOpen);
+  const bodyId = useId();
+  const collapsed = collapsible && !open;
+  const showHeader = !hideTitle || hasTabs || Boolean(actions) || collapsible;
   return (
     <section
       aria-label={hideTitle ? title : undefined}
@@ -43,6 +57,20 @@ export function Panel({
     >
       {showHeader ? (
         <header>
+          {collapsible ? (
+            <button
+              aria-controls={bodyId}
+              aria-expanded={open}
+              className={`panel-collapse-toggle ${open ? "is-open" : ""}`}
+              onClick={() => setOpen((value) => !value)}
+              type="button"
+            >
+              <ChevronDown aria-hidden="true" size={15} />
+              <span className="visually-hidden">
+                {open ? `Collapse ${title}` : `Expand ${title}`}
+              </span>
+            </button>
+          ) : null}
           {hideTitle ? null : <h2>{title}</h2>}
           {tabs && activeTab && onTabChange ? (
             <div className="segmented-control panel-tabs" role="tablist">
@@ -65,7 +93,7 @@ export function Panel({
           {actions ? <div className="panel-header-actions">{actions}</div> : null}
         </header>
       ) : null}
-      {tabs && activeTab && onTabChange ? (
+      {collapsed ? null : tabs && activeTab && onTabChange ? (
         <div
           aria-labelledby={`${tabPanelId}-${activeTab.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
           id={tabPanelId}
@@ -73,6 +101,8 @@ export function Panel({
         >
           {children}
         </div>
+      ) : collapsible ? (
+        <div id={bodyId}>{children}</div>
       ) : (
         children
       )}
