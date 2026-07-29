@@ -41,7 +41,7 @@ h2,
 h3 {
   font-family: var(--font-display);
   font-optical-sizing: auto;
-  letter-spacing: -0.005em;
+  letter-spacing: var(--tracking-ui);
 }
 
 :where(input, select, textarea, button):focus-visible {
@@ -70,9 +70,9 @@ h3 {
   height: 32px;
   padding: 0 14px;
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.03em;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   background: hsl(0 0% 100% / 0.72);
   backdrop-filter: blur(10px);
@@ -90,7 +90,7 @@ h3 {
   font-optical-sizing: auto;
   font-size: 13px;
   font-weight: 500;
-  letter-spacing: 0.01em;
+  letter-spacing: var(--tracking-ui);
   text-transform: none;
   color: var(--ink);
 }
@@ -121,7 +121,7 @@ h3 {
   justify-self: start;
   overflow: hidden;
   font-size: 12px;
-  letter-spacing: 0;
+  letter-spacing: var(--tracking-ui);
   text-transform: none;
 }
 
@@ -135,7 +135,7 @@ h3 {
 
 .status-bar .sync-label {
   flex: 0 0 auto;
-  font-weight: 650;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -251,15 +251,15 @@ h3 {
 .brand-lockup strong {
   display: block;
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink);
   line-height: 1.2;
 }
 
 .brand-lockup span {
   display: block;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--ink-faint);
   line-height: 1.2;
 }
@@ -279,7 +279,7 @@ h3 {
   font-family: var(--font-ui);
   font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.005em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-dim);
   background: transparent;
   border: 1px solid transparent;
@@ -308,7 +308,7 @@ h3 {
   color: var(--accent);
   background: var(--accent-soft);
   border-color: transparent;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .sidebar-group {
@@ -326,7 +326,7 @@ h3 {
   height: 18px;
   padding: 0 6px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
   background: var(--panel-2);
   color: var(--ink-3);
@@ -352,7 +352,7 @@ h3 {
   width: 100%;
   padding: 6px 8px 6px 10px;
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--ink-3);
   background: transparent;
@@ -373,7 +373,7 @@ h3 {
 :where(.sidebar nav) .sidebar-child.active {
   background: var(--accent-soft);
   color: var(--ink);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 :where(.sidebar nav) .sidebar-child:focus-visible {
@@ -444,7 +444,7 @@ h3 {
 
 .sidebar-child-meta {
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 12px;
   color: var(--ink-3);
   padding: 1px 4px;
   background: var(--panel-2);
@@ -480,7 +480,7 @@ h3 {
 
 .live-empty-body strong {
   font-family: var(--font-display);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--ink);
 }
@@ -494,7 +494,7 @@ h3 {
 
 .live-empty-body code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   padding: 1px 5px;
   background: var(--panel-2);
   border-radius: 3px;
@@ -579,19 +579,19 @@ h3 {
 }
 
 .pending-slot-eyebrow {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--tracking-ui);
   color: hsl(28 80% 38%);
 }
 
 .pending-slot-title {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 22px;
+  font-size: 14px;
   font-weight: 500;
-  letter-spacing: -0.015em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink);
 }
 
@@ -612,10 +612,10 @@ h3 {
   border: 1px dashed var(--ink);
   color: var(--ink);
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   white-space: nowrap;
   height: fit-content;
 }
@@ -639,10 +639,10 @@ h3 {
 }
 
 .pending-slot-code-label {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-3);
 }
 
@@ -654,14 +654,14 @@ h3 {
 
 .pending-slot-code {
   font-family: var(--font-mono);
-  font-size: 18px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--ink);
   padding: 6px 14px;
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-1);
-  letter-spacing: 0.06em;
+  letter-spacing: var(--tracking-ui);
   user-select: all;
 }
 
@@ -722,7 +722,7 @@ h3 {
 .pending-slot-steps code,
 .pending-slot-inline-code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   padding: 1px 5px;
   background: var(--panel-2);
   border-radius: 3px;
@@ -748,7 +748,7 @@ h3 {
 
 .pending-slot-foot code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   padding: 1px 5px;
   background: var(--bg);
   border-radius: 3px;
@@ -792,9 +792,9 @@ h3 {
      the mismatch reads as misalignment. */
   min-height: 51px;
   padding: 8px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-dim);
   background: var(--panel-2);
@@ -843,8 +843,8 @@ h3 {
 .panel > header h2 {
   font-family: var(--font-display);
   font-size: var(--fs-6);
-  font-weight: 600;
-  letter-spacing: 0;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   line-height: var(--lh-tight);
   text-transform: none;
   color: var(--ink);
@@ -871,9 +871,9 @@ h3 {
   align-items: center;
   gap: 4px;
   padding: 1px 5px;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -956,7 +956,7 @@ h3 {
 
 .row-item span {
   display: block;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-dim);
 }
 
@@ -972,7 +972,7 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--ink-dim);
 }
@@ -999,9 +999,9 @@ h3 {
 .compact-form button:not([type]) {
   align-self: flex-start;
   padding: 5px 10px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink);
   background: var(--panel-2);
   border: 1px solid var(--line-strong);
@@ -1068,15 +1068,15 @@ h3 {
 
 .parser-source strong {
   display: block;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--ink-dim);
   margin-bottom: 2px;
 }
 
 .parser-source code {
   display: block;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink);
   white-space: pre-wrap;
   word-break: break-word;
@@ -1103,9 +1103,9 @@ h3 {
 }
 
 .field-pill span {
-  font-size: 9px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.05em;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-faint);
 }
@@ -1131,7 +1131,7 @@ h3 {
 .log-details {
   display: grid;
   gap: 4px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-2);
 }
 
@@ -1154,7 +1154,7 @@ h3 {
 
 .fixture-controls select {
   padding: 3px 5px;
-  font-size: 11px;
+  font-size: 12px;
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -1165,7 +1165,7 @@ h3 {
   flex: 1;
   min-width: 160px;
   padding: 4px 6px;
-  font-size: 11px;
+  font-size: 12px;
   background: var(--bg);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -1176,8 +1176,8 @@ h3 {
 
 .fixture-controls button {
   padding: 3px 8px;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--ink);
   background: var(--panel-2);
   border: 1px solid var(--line-strong);
@@ -1190,7 +1190,7 @@ h3 {
 }
 
 .fixture-controls small {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--up);
 }
 
@@ -1262,15 +1262,15 @@ h3 {
 
 .trade-head strong {
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
 }
 
 .trade-head span {
-  font-size: 10px;
+  font-size: 12px;
   color: var(--ink-faint);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
 }
 
 /* Mapping ------------------------------------------------------------------ */
@@ -1291,7 +1291,7 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--ink-dim);
 }
@@ -1314,8 +1314,8 @@ h3 {
   grid-column: 1 / -1;
   justify-self: start;
   padding: 5px 10px;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--ink);
   background: var(--panel-2);
   border: 1px solid var(--line-strong);
@@ -1339,7 +1339,7 @@ h3 {
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  font-size: 11px;
+  font-size: 12px;
   background: var(--panel-2);
   border: 1px solid var(--line-subtle);
   border-radius: var(--radius-sm);
@@ -1355,7 +1355,7 @@ h3 {
 
 .mapping-row strong {
   color: var(--up);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 /* Logs --------------------------------------------------------------------- */
@@ -1402,7 +1402,7 @@ h3 {
   padding: 2px 8px;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--ink);
   background: var(--panel-2);
@@ -1412,10 +1412,10 @@ h3 {
 
 .log-retcode-label {
   font-family: var(--font-ui);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-3);
   margin-left: 4px;
 }
@@ -1451,7 +1451,7 @@ h3 {
 
 .log-queue-id {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -1461,7 +1461,7 @@ h3 {
   gap: 4px;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
   margin-left: auto;
 }
@@ -1469,7 +1469,7 @@ h3 {
 .log-row time {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--ink-faint);
   white-space: nowrap;
 }
@@ -1501,10 +1501,10 @@ h3 {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-3);
 }
 
@@ -1613,14 +1613,14 @@ h3 {
   height: 60px;
   padding: 8px 10px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   resize: vertical;
   min-height: 60px;
 }
 
 .fixture-status {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -1638,7 +1638,7 @@ h3 {
   align-items: center;
   padding: 5px 14px;
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--ink-3);
   background: transparent;
@@ -1657,7 +1657,7 @@ h3 {
 .panel-tab.active {
   background: var(--ink);
   color: var(--panel);
-  font-weight: 600;
+  font-weight: 500;
   box-shadow: none;
 }
 
@@ -1674,7 +1674,7 @@ h3 {
   background: var(--accent-soft);
   border: 1px solid hsl(218 60% 88%);
   border-radius: var(--radius-1);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--ink);
 }
@@ -1698,9 +1698,9 @@ h3 {
 }
 
 .dialog-picker-head strong {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-dim);
 }
@@ -1817,10 +1817,10 @@ h3 {
   display: inline-flex;
   align-items: center;
   padding: 1px 7px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   border-radius: 999px;
   background: var(--panel-2);
   color: var(--ink-2);
@@ -1842,7 +1842,7 @@ h3 {
   align-items: center;
   padding: 1px 7px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
   border-radius: 999px;
   background: var(--accent);
@@ -1850,7 +1850,7 @@ h3 {
 }
 
 .dialog-row-muted-text {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -1859,7 +1859,7 @@ h3 {
   align-items: center;
   gap: 5px;
   padding: 5px 10px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--accent);
   border: 1px solid var(--accent);
@@ -1927,8 +1927,8 @@ h3 {
   align-items: center;
   gap: 5px;
   padding: 4px 8px;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--ink);
   background: var(--panel-2);
   border: 1px solid var(--line-strong);
@@ -1948,9 +1948,9 @@ h3 {
 /* Eyebrow (legacy, kept for test compatibility) ---------------------------- */
 
 .eyebrow {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-faint);
   margin: 0 0 2px;
@@ -1988,7 +1988,7 @@ h3 {
 }
 
 .workspace-tab.active {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .workspace-tab.active::after {
@@ -2002,9 +2002,9 @@ h3 {
 }
 
 .account-header-title {
-  font-size: clamp(22px, 2.6vw, 28px);
+  font-size: 24px;
   font-weight: 500;
-  letter-spacing: -0.015em;
+  letter-spacing: var(--tracking-ui);
 }
 
 .account-header-title-row {
@@ -2019,14 +2019,14 @@ h3 {
   margin-top: 3px;
   color: var(--ink-3);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .account-header-stale-note {
   margin: -4px 0 0;
   color: var(--warn);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .account-header-menu {
@@ -2050,7 +2050,7 @@ h3 {
 
 .account-rename-form label {
   color: var(--ink-3);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .account-platform-card {
@@ -2093,7 +2093,7 @@ h3 {
 
 .signin-title {
   font-weight: 500;
-  letter-spacing: -0.02em;
+  letter-spacing: var(--tracking-ui);
 }
 
 .signin-subtitle {
@@ -2119,7 +2119,7 @@ h3 {
 
 .empty-state-card strong {
   font-family: var(--font-display);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--ink-2);
 }
@@ -2185,10 +2185,10 @@ h3 {
   align-items: center;
   gap: 4px;
   padding: 2px 8px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   border-radius: 999px;
 }
 
@@ -2203,7 +2203,7 @@ h3 {
 
 .broker-trail-pnl {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   padding: 2px 8px;
   border-radius: 4px;
@@ -2230,7 +2230,7 @@ h3 {
   background: hsl(38 92% 95%);
   border: 1px solid hsl(35 85% 78%);
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .history-sync-warning code {
@@ -2268,9 +2268,9 @@ h3 {
 
 .error-boundary-title {
   font-family: var(--font-display);
-  font-size: 20px;
+  font-size: 14px;
   font-weight: 500;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--tracking-ui);
   margin: 0;
   color: var(--ink);
 }
@@ -2303,7 +2303,7 @@ h3 {
 .error-boundary-details pre {
   margin: 8px 0 0;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2395,7 +2395,7 @@ h3 {
   border-bottom-width: 2px;
   border-radius: 4px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--ink-2);
 }
@@ -2465,10 +2465,10 @@ h3 {
 }
 
 .guardian-status {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   padding: 2px 8px;
   border-radius: 999px;
 }
@@ -2598,7 +2598,7 @@ h3 {
   gap: 4px;
   padding: 3px 8px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   border-radius: 999px;
   cursor: pointer;
@@ -2671,7 +2671,7 @@ h3 {
 
 .setup-provider-name {
   flex: 1 1 auto;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .setup-provider-actions {
@@ -2740,11 +2740,11 @@ h3 {
 }
 
 .dialog-picker-count {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
   font-weight: 400;
   text-transform: none;
-  letter-spacing: 0;
+  letter-spacing: var(--tracking-ui);
 }
 
 .dialog-picker-filters {
@@ -2765,7 +2765,7 @@ h3 {
   align-items: center;
   padding: 4px 10px;
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: capitalize;
   background: transparent;
@@ -2829,8 +2829,8 @@ h3 {
   margin: 0;
   font-family: var(--font-display);
   font-size: 14px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   color: var(--text-1);
 }
 
@@ -2859,9 +2859,9 @@ h3 {
 }
 
 .settings-field label {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: none;
   color: var(--text-2);
 }
@@ -2892,7 +2892,7 @@ h3 {
 }
 
 .settings-field-hint {
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
   color: var(--ink-3);
 }
@@ -3005,7 +3005,7 @@ h3 {
   align-self: center;
   padding-inline: 5px 8px;
   color: var(--text-3);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .number-field-steppers {
@@ -3054,7 +3054,7 @@ h3 {
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 12px;
   white-space: nowrap;
   transform: translateX(-50%);
 }
@@ -3079,7 +3079,7 @@ h3 {
   justify-content: space-between;
   color: var(--text-3);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: 12px;
 }
 
 .save-bar {
@@ -3151,10 +3151,10 @@ h3 {
 }
 
 .linked-accounts-create-field label {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-3);
 }
 
@@ -3169,7 +3169,7 @@ h3 {
   font-family: var(--font-display);
   font-size: 13px;
   font-weight: 500;
-  letter-spacing: -0.005em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-2);
 }
 
@@ -3221,7 +3221,7 @@ h3 {
 
 .linked-slot-body code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   padding: 1px 5px;
   background: var(--panel-2);
   border-radius: 3px;
@@ -3270,9 +3270,9 @@ h3 {
 .external-positions-label {
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   color: var(--warn-dim);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .external-positions-meta {
@@ -3296,7 +3296,7 @@ h3 {
 
 .external-positions-hint {
   margin: 0;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--ink-3);
 }
@@ -3330,9 +3330,9 @@ h3 {
   align-items: center;
   padding: 1px 7px;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   border-radius: 3px;
 }
 
@@ -3380,7 +3380,7 @@ h3 {
 .external-position-source {
   flex-basis: 100%;
   color: var(--ink-3);
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .performance-mode-tabs {
@@ -3404,7 +3404,7 @@ h3 {
 .attribution-breakdown h4 {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--ink);
 }
@@ -3473,9 +3473,9 @@ h3 {
 }
 
 .attribution-kpi span {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-faint);
 }
@@ -3484,7 +3484,7 @@ h3 {
   justify-self: start;
   font-family: var(--font-mono);
   font-size: var(--fs-7);
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .attribution-kpi-value.money-up {
@@ -3526,14 +3526,14 @@ h3 {
 .attribution-bar-row strong {
   display: block;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
 }
 
 .attribution-bar-row span {
   display: block;
   margin-top: 2px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-faint);
 }
 
@@ -3613,8 +3613,8 @@ h3 {
   align-items: center;
   max-width: 100%;
   padding: 3px 7px;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   line-height: 1.2;
   color: var(--ink);
   background: var(--panel-2);
@@ -3692,7 +3692,7 @@ h3 {
   margin: 0;
   font-family: var(--font-display);
   font-size: var(--fs-6);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -3711,8 +3711,8 @@ h3 {
 
 .statistics-card dt {
   font-size: var(--fs-1);
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-3);
 }
@@ -3722,7 +3722,7 @@ h3 {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
   line-height: 1.2;
 }
@@ -3790,7 +3790,7 @@ h3 {
   display: inline-flex;
   align-items: center;
   gap: 14px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -3841,10 +3841,10 @@ h3 {
 }
 
 .provider-link-label {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-3);
 }
 
@@ -3875,7 +3875,7 @@ h3 {
   font-family: var(--font-ui);
   font-size: 13px;
   font-weight: 500;
-  letter-spacing: 0.01em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-dim);
   background: transparent;
   border: none;
@@ -3918,7 +3918,7 @@ h3 {
 
 .tab-empty-state strong {
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink-dim);
 }
 
@@ -3952,9 +3952,9 @@ h3 {
   font-family: var(--font-display);
   font-optical-sizing: auto;
   font-size: var(--fs-6);
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--tracking-ui);
 }
 
 .chart-card-meta {
@@ -3962,7 +3962,7 @@ h3 {
   margin-top: 2px;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-faint);
 }
 
@@ -3992,7 +3992,7 @@ h3 {
 .chart-toggle button.active {
   background: var(--ink);
   color: var(--panel);
-  font-weight: 600;
+  font-weight: 500;
   box-shadow: none;
 }
 
@@ -4003,10 +4003,10 @@ h3 {
 
 .chart-card-foot {
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-faint);
   text-align: center;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
 }
 
@@ -4033,8 +4033,8 @@ h3 {
   top: 0;
   padding: 12px 16px;
   font-size: var(--fs-1);
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   text-align: left;
   color: var(--ink-3);
@@ -4068,15 +4068,15 @@ h3 {
 .data-table-row-head strong {
   display: block;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
-  letter-spacing: -0.005em;
+  letter-spacing: var(--tracking-ui);
 }
 
 .data-table-subtle {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-faint);
 }
 
@@ -4137,8 +4137,8 @@ span.data-table-subtle {
   padding: 4px 12px;
   font-family: var(--font-ui);
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink);
   background: var(--panel-2);
   border: 1px solid var(--line-strong);
@@ -4185,8 +4185,8 @@ span.data-table-subtle {
   margin: 0;
   font-family: var(--font-ui);
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-faint);
 }
@@ -4197,7 +4197,7 @@ span.data-table-subtle {
   gap: 4px;
   padding: 0;
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--accent);
   background: transparent;
@@ -4242,9 +4242,9 @@ span.data-table-subtle {
 
 .config-label {
   font-family: var(--font-ui);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-faint);
 }
@@ -4332,8 +4332,8 @@ span.data-table-subtle {
 .symbol-combobox-options small {
   color: var(--ink-faint);
   font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  letter-spacing: var(--tracking-ui);
 }
 
 .symbol-combobox-empty {
@@ -4398,7 +4398,7 @@ span.data-table-subtle {
   background: var(--bg-panel-raised);
   color: var(--text-1);
   border: 1px solid var(--border);
-  font-weight: 600;
+  font-weight: 500;
   box-shadow: var(--shadow-card);
 }
 
@@ -4430,7 +4430,7 @@ span.data-table-subtle {
   color: var(--text-1);
   background: var(--bg-panel-raised);
   border: 1px solid var(--border);
-  font-weight: 600;
+  font-weight: 500;
   box-shadow: var(--shadow-card);
 }
 
@@ -4457,9 +4457,9 @@ span.data-table-subtle {
   gap: 10px;
   padding: 0 4px 6px;
   font-family: var(--font-ui);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-faint);
   border-bottom: 1px solid var(--line-subtle);
@@ -4487,9 +4487,9 @@ span.data-table-subtle {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
 }
 
 .config-stepper {
@@ -4504,7 +4504,7 @@ span.data-table-subtle {
 
 .config-stepper button {
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink-dim);
   background: transparent;
   border: none;
@@ -4583,14 +4583,14 @@ select.config-strategy-input {
 
 .config-tp-lots strong {
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 500;
   color: var(--ink);
   line-height: 1.15;
 }
 
 .config-tp-lots small {
   font-family: var(--font-ui);
-  font-size: 9px;
+  font-size: 12px;
   color: var(--ink-faint);
 }
 
@@ -4638,7 +4638,7 @@ select.config-strategy-input {
 .config-hint {
   margin: 4px 0 0;
   font-family: var(--font-ui);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--warn-dim);
 }
@@ -4696,8 +4696,8 @@ select.config-strategy-input {
   margin: 0 0 12px;
   font-family: var(--font-ui);
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-faint);
 }
@@ -4719,9 +4719,9 @@ select.config-strategy-input {
 
 .config-resume-stat span {
   font-family: var(--font-ui);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-faint);
 }
@@ -4729,15 +4729,15 @@ select.config-strategy-input {
 .config-resume-stat strong {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 500;
   color: var(--ink);
   line-height: 1.2;
 }
 
 .config-resume-stat small {
   font-family: var(--font-ui);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--ink-faint);
 }
 
@@ -4760,7 +4760,7 @@ select.config-strategy-input {
 .config-resume-list strong {
   font-family: var(--font-mono);
   color: var(--ink);
-  font-weight: 600;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
 
@@ -4768,7 +4768,7 @@ select.config-strategy-input {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   color: var(--ink);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .config-resume-strategy {
@@ -4793,9 +4793,9 @@ select.config-strategy-input {
 .history-side {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   padding: 2px 8px;
   border-radius: 4px;
 }
@@ -4813,8 +4813,8 @@ select.config-strategy-input {
 .history-mode {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-faint);
 }
@@ -4836,7 +4836,7 @@ select.config-strategy-input {
   padding: 2px 8px;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 10px;
+  font-size: 12px;
   background: var(--bg-elevated);
   border: 1px solid var(--line);
   border-radius: 4px;
@@ -4844,14 +4844,14 @@ select.config-strategy-input {
 }
 
 .tp-chip-label {
-  font-weight: 700;
-  letter-spacing: 0.05em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-faint);
   text-transform: uppercase;
 }
 
 .tp-chip-price {
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -4889,7 +4889,7 @@ select.config-strategy-input {
 }
 
 .mapping-broker {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 /* Modal --------------------------------------------------------------------- */
@@ -4927,8 +4927,8 @@ select.config-strategy-input {
 
 .modal-link.section-action {
   margin-left: auto;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .modal-link.section-action::before {
@@ -4975,7 +4975,7 @@ select.config-strategy-input {
   font-family: var(--font-ui);
   font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.01em;
+  letter-spacing: var(--tracking-ui);
   line-height: 1;
   color: var(--ink);
   background: transparent;
@@ -5007,9 +5007,9 @@ select.config-strategy-input {
 
 .btn-small {
   padding: 5px 11px;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.02em;
+  letter-spacing: var(--tracking-ui);
 }
 
 .risk-row {
@@ -5063,7 +5063,7 @@ select.config-strategy-input {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--up-dim);
   background: var(--up-soft);
   padding: 2px 10px;
@@ -5082,9 +5082,9 @@ select.config-strategy-input {
   gap: 12px;
   padding: 0 4px 4px;
   font-family: var(--font-ui);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-faint);
   text-transform: uppercase;
 }
@@ -5100,7 +5100,7 @@ select.config-strategy-input {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -5193,7 +5193,7 @@ select.config-strategy-input {
 
 .resume-line strong {
   color: var(--ink);
-  font-weight: 600;
+  font-weight: 500;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
@@ -5238,8 +5238,8 @@ select.config-strategy-input {
 
 .modal-head h2 {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -5248,9 +5248,9 @@ select.config-strategy-input {
   margin-top: 2px;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-faint);
-  letter-spacing: 0.02em;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
 }
 
@@ -5289,8 +5289,8 @@ select.config-strategy-input {
 .modal-section-title {
   margin: 0;
   font-size: var(--fs-1);
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-3);
 }
@@ -5316,7 +5316,7 @@ select.config-strategy-input {
   margin: 4px 0 0;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-dim);
 }
 
@@ -5489,8 +5489,8 @@ select.config-strategy-input {
   color: var(--panel);
   background: var(--accent);
   border: 1px solid var(--accent);
-  font-weight: 600;
-  letter-spacing: 0.015em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   box-shadow: none;
 }
 
@@ -5573,8 +5573,8 @@ select.config-strategy-input {
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
 }
 
 .signin-main {
@@ -5604,9 +5604,9 @@ select.config-strategy-input {
   margin: 0 0 12px;
   font-family: var(--font-display);
   font-optical-sizing: auto;
-  font-size: 34px;
+  font-size: 24px;
   font-weight: 500;
-  letter-spacing: -0.02em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink);
 }
 
@@ -5634,7 +5634,7 @@ select.config-strategy-input {
   min-height: 44px;
   padding: 0 14px;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 500;
   color: var(--tg-blue);
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -5670,8 +5670,8 @@ select.config-strategy-input {
   margin-top: 8px;
   font-family: var(--font-ui);
   font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--panel);
   background: var(--tg-blue);
@@ -5714,7 +5714,7 @@ select.config-strategy-input {
 
 .signin-meta code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   padding: 1px 5px;
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -5723,7 +5723,7 @@ select.config-strategy-input {
 
 .signin-footer {
   padding: 16px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-faint);
   text-align: center;
   border-top: 1px solid var(--line-subtle);
@@ -5741,7 +5741,7 @@ select.config-strategy-input {
   height: 56px;
   padding: 22px 14px 8px;
   font-family: var(--font-ui);
-  font-size: 15px;
+  font-size: 14px;
   color: var(--ink);
   background: var(--bg-elevated);
   border: 1px solid var(--line-strong);
@@ -5779,14 +5779,14 @@ select.config-strategy-input {
 .floating-field.has-value .floating-field-label,
 .floating-field input:not(:placeholder-shown) + .floating-field-label {
   top: -7px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--tg-blue);
 }
 
 /* Older-browser support: also lift label when the wrapping label has has-value */
 .floating-field.has-value .floating-field-label {
   top: -7px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--tg-blue);
 }
 
@@ -5795,7 +5795,7 @@ select.config-strategy-input {
   left: 10px;
   top: 4px;
   padding: 0 4px;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--ink-faint);
   background: var(--bg-elevated);
@@ -5826,9 +5826,9 @@ select.config-strategy-input {
   margin: 0;
   font-family: var(--font-display);
   font-optical-sizing: auto;
-  font-size: 28px;
+  font-size: 24px;
   font-weight: 500;
-  letter-spacing: -0.015em;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink);
 }
 
@@ -5872,10 +5872,10 @@ select.config-strategy-input {
 }
 
 .account-platform-card-grid dt {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--ink-faint);
-  letter-spacing: 0.02em;
+  letter-spacing: var(--tracking-ui);
 }
 
 .account-platform-card-grid dd {
@@ -5896,9 +5896,9 @@ select.config-strategy-input {
   gap: 5px;
   align-self: flex-start;
   padding: 3px 8px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   border-radius: 4px;
 }
@@ -5950,9 +5950,9 @@ select.config-strategy-input {
   align-items: baseline;
   gap: 4px;
   flex-wrap: wrap;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink-3);
   text-transform: uppercase;
 }
@@ -5973,8 +5973,8 @@ select.config-strategy-input {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: var(--fs-6);
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   color: var(--ink);
   line-height: 1.1;
   white-space: nowrap;
@@ -5983,7 +5983,7 @@ select.config-strategy-input {
 .kpi-primary .kpi-amount {
   color: var(--ink);
   font-size: var(--fs-7);
-  letter-spacing: -0.02em;
+  letter-spacing: var(--tracking-ui);
 }
 
 /* Reserve the P/L card's Today/Week/Month toggle height in the other KPI cards
@@ -6000,8 +6000,8 @@ select.config-strategy-input {
   align-self: flex-start;
   padding: 2px 7px;
   font-family: var(--font-ui);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   border-radius: 4px;
   white-space: nowrap;
 }
@@ -6066,18 +6066,18 @@ select.config-strategy-input {
 }
 .money-warn {
   color: var(--warn-dim);
-  font-weight: 600;
+  font-weight: 500;
 }
 .money-danger {
   color: var(--down);
-  font-weight: 600;
+  font-weight: 500;
 }
 .money-muted {
   color: var(--ink-faint);
 }
 .money-pair {
   color: var(--ink-faint);
-  font-size: 0.92em;
+  font-size: 12px;
   margin-left: 4px;
 }
 
@@ -6349,12 +6349,12 @@ select.config-strategy-input {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
 .open-positions-pending-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -6365,15 +6365,15 @@ select.config-strategy-input {
 }
 
 .open-positions-head-pnl-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--tracking-ui);
 }
 
 .open-positions-head-pnl-value {
   font-family: var(--font-mono);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
 }
 
@@ -6395,9 +6395,9 @@ select.config-strategy-input {
   gap: 4px;
   padding: 2px 7px;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   border-radius: 3px;
   white-space: nowrap;
 }
@@ -6427,9 +6427,9 @@ select.config-strategy-input {
   align-items: center;
   padding: 1px 7px;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   border-radius: 3px;
 }
 
@@ -6475,7 +6475,7 @@ select.config-strategy-input {
 
 .open-positions-ticket {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -6488,9 +6488,9 @@ select.config-strategy-input {
 
 .open-positions-pending-title {
   margin: 0;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
   color: var(--ink-3);
 }
@@ -6537,7 +6537,7 @@ select.config-strategy-input {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -6546,9 +6546,9 @@ select.config-strategy-input {
   align-items: center;
   padding: 2px 7px;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   border-radius: 3px;
 }
 
@@ -6569,15 +6569,15 @@ select.config-strategy-input {
 }
 
 .closed-positions-head-pnl-label {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--tracking-ui);
 }
 
 .closed-positions-head-pnl-value {
   font-family: var(--font-mono);
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
 }
 
@@ -6599,9 +6599,9 @@ select.config-strategy-input {
   gap: 4px;
   padding: 2px 7px;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   border-radius: 3px;
   white-space: nowrap;
 }
@@ -6662,7 +6662,7 @@ select.config-strategy-input {
 
 .closed-positions-ticket {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -6683,9 +6683,9 @@ select.config-strategy-input {
   align-items: center;
   padding: 1px 7px;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   border-radius: 3px;
 }
 
@@ -6723,7 +6723,7 @@ select.config-strategy-input {
 
 .closed-positions-tp-count {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--ink-3);
   margin-left: 4px;
 }
@@ -6753,9 +6753,9 @@ select.config-strategy-input {
   align-items: center;
   padding: 2px 8px;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   border-radius: 3px;
 }
 
@@ -6781,7 +6781,7 @@ select.config-strategy-input {
 
 .closed-positions-time {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-2);
   white-space: nowrap;
 }
@@ -6899,9 +6899,9 @@ select.config-strategy-input {
   align-items: center;
   padding: 1px 7px;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   border-radius: 3px;
 }
 
@@ -6922,13 +6922,13 @@ select.config-strategy-input {
 
 .closed-positions-detail-leg-time {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
 .closed-positions-detail-leg-ticket {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -7030,9 +7030,9 @@ select.config-strategy-input {
 
 .out-of-sync-banner-item-side {
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: var(--tracking-ui);
   padding: 1px 6px;
   background: var(--panel-2);
   border-radius: 3px;
@@ -7040,7 +7040,7 @@ select.config-strategy-input {
 }
 
 .out-of-sync-banner-item-state {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -7052,7 +7052,7 @@ select.config-strategy-input {
 
 .out-of-sync-banner-item-comment {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
   word-break: break-all;
 }
@@ -7086,7 +7086,7 @@ select.config-strategy-input {
 .alerts-banner-summary > span:last-child {
   margin-left: auto;
   color: var(--ink-3);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .alerts-banner-list {
@@ -7128,7 +7128,7 @@ select.config-strategy-input {
 
 .alerts-banner-message > span {
   color: var(--ink-2);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 400;
 }
 
@@ -7260,8 +7260,8 @@ select.config-strategy-input {
   border: 1px solid var(--ink);
   border-radius: 50%;
   font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .toast-success::before {
@@ -7287,7 +7287,7 @@ select.config-strategy-input {
   background: transparent;
   color: inherit;
   cursor: pointer;
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1;
   opacity: 0.6;
 }
@@ -7314,7 +7314,7 @@ select.config-strategy-input {
   margin-bottom: 16px;
 }
 .onboarding-head strong {
-  font-size: 15px;
+  font-size: 14px;
 }
 .onboarding-head p {
   margin: 4px 0 0;
@@ -7393,8 +7393,8 @@ select.config-strategy-input {
 }
 .activity-actor {
   text-transform: uppercase;
-  font-size: 10px;
-  letter-spacing: 0.04em;
+  font-size: 12px;
+  letter-spacing: var(--tracking-ui);
   padding: 1px 6px;
   border-radius: 999px;
   text-align: center;
@@ -7533,8 +7533,8 @@ select.config-strategy-input {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   color: var(--ink-dim);
-  font-size: 11px;
-  letter-spacing: 0;
+  font-size: 12px;
+  letter-spacing: var(--tracking-ui);
   text-transform: none;
 }
 
@@ -7603,15 +7603,15 @@ select.config-strategy-input {
 }
 .provider-health-title {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .provider-health-badge {
-  font-size: 10px;
+  font-size: 12px;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-ui);
   padding: 1px 6px;
   border-radius: 999px;
 }
@@ -7641,7 +7641,7 @@ select.config-strategy-input {
 .provider-health-learned {
   display: block;
   margin-top: 6px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-2);
 }
 
@@ -7681,9 +7681,9 @@ select.config-strategy-input {
 }
 .exposure-table thead th {
   color: var(--ink-3);
-  font-weight: 600;
+  font-weight: 500;
   font-size: var(--fs-1);
-  letter-spacing: 0.06em;
+  letter-spacing: var(--tracking-ui);
   text-transform: uppercase;
 }
 .exposure-table th:nth-child(n + 2),
@@ -7694,11 +7694,11 @@ select.config-strategy-input {
 }
 .exposure-note {
   margin: 8px 0 0;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-dim);
 }
 .queue-item-volume {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--accent);
   white-space: nowrap;
   margin-left: auto;
@@ -7736,8 +7736,8 @@ select.config-strategy-input {
   background: transparent;
   color: var(--ink);
   font: inherit;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
 }
 
@@ -7763,8 +7763,8 @@ select.config-strategy-input {
 }
 
 .queue-item-held-link {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -7783,7 +7783,7 @@ select.config-strategy-input {
   color: inherit;
   font: inherit;
   text-transform: inherit;
-  letter-spacing: inherit;
+  letter-spacing: var(--tracking-ui);
   cursor: pointer;
 }
 
@@ -7793,7 +7793,7 @@ select.config-strategy-input {
 }
 
 .held-price-cell small {
-  font-size: 10px;
+  font-size: 12px;
 }
 
 .held-dropped-badge {
@@ -7806,8 +7806,8 @@ select.config-strategy-input {
   background: var(--panel-2);
   color: var(--ink);
   border: 1px double var(--ink);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .held-row-stale td {
@@ -7846,7 +7846,7 @@ select.config-strategy-input {
 }
 
 .settings-backup-filename {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -7875,7 +7875,7 @@ select.config-strategy-input {
 }
 
 .out-of-sync-resolution > header span {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--ink-3);
 }
 
@@ -8032,7 +8032,7 @@ select.config-strategy-input {
 
   .status-action-label {
     display: inline;
-    font-size: 11px;
+    font-size: 12px;
   }
 
   .workspace {
@@ -8056,7 +8056,7 @@ select.config-strategy-input {
   }
 
   .account-header-title {
-    font-size: 22px;
+    font-size: 14px;
   }
 
   .account-kpis {
@@ -8278,7 +8278,7 @@ select.config-strategy-input {
 }
 
 .modal.modal-wide .config-resume-stat strong {
-  font-size: 16px;
+  font-size: 14px;
 }
 
 .modal.modal-wide .config-resume-list {

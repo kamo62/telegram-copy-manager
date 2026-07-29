@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.64.1 - 2026-07-29 (Patch)
+
+Release impact: Patch because this changes only presentation, density, and responsive layout
+without changing API, execution, parser, database, or EA contracts.
+
+- Expanded the centred desktop content canvas from 880px to 1180px while preserving the existing
+  compact and mobile layouts.
+- Standardised the interface on SF Pro regular and medium, a 12px/13px/14px/24px type scale,
+  -0.15px tracking, and the requested light-mode text hierarchy.
+- Restored 14px navigation icons and aligned card icons, card corners, navigation corners, and CTA
+  pills to the new sizing and radius system.
+
 ## 1.64.0 - 2026-07-29 (Minor)
 
 Release impact: Minor because this adds backward-compatible Settings controls and dirty-state
