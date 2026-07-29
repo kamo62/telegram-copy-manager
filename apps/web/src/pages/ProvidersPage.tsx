@@ -50,6 +50,7 @@ export function ProvidersPage({
         </button>
       }
       className="wide-panel"
+      hideTitle
       title="Providers"
     >
       {isAccountMode ? (

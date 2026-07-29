@@ -1410,9 +1410,9 @@ describe("App dashboard", () => {
         ),
       },
     );
-    const headings = view.getAllByRole("heading", { name: "Equity Guardian" });
-    const guardianPanel = headings.at(-1)?.closest("section");
-    if (!guardianPanel) throw new Error("Equity Guardian panel not found");
+    // The panel drops its title because the page heading already says it, and
+    // labels the section instead, which makes it a region.
+    const guardianPanel = view.getByRole("region", { name: "Equity Guardian" });
 
     expect(within(guardianPanel).getByText("100200300")).toBeTruthy();
     expect(within(guardianPanel).queryByText("200300400")).toBeNull();
