@@ -10,7 +10,7 @@ import {
   Timer,
   TrendingUp,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DashboardSnapshot } from "../App";
 import { Panel } from "../components/Panel";
 import { useColorAccents } from "../contexts/ColorAccentsContext";
@@ -93,27 +93,32 @@ export function SettingsPage({
 }) {
   const { colorAccents, setColorAccents } = useColorAccents();
   const { theme, setTheme } = useTheme();
+  const formRef = useRef<HTMLFormElement>(null);
   const [testSending, setTestSending] = useState(false);
   const [backupRunning, setBackupRunning] = useState(false);
   const [backupFilename, setBackupFilename] = useState("");
   return (
-    <Panel className="wide-panel settings-panel" hideTitle title="Settings">
+    <Panel
+      actions={
+        <button
+          className="btn btn-primary btn-small"
+          onClick={() => {
+            if (formRef.current) onSaveForm(formRef.current);
+          }}
+          type="button"
+        >
+          Save execution settings
+        </button>
+      }
+      className="wide-panel settings-panel"
+      hideTitle
+      title="Settings"
+    >
       <p className="panel-intro">
         Defaults applied when a parsed signal is missing fields, plus integration secrets and
         polling cadence. Per-provider overrides live in each Provider's configuration modal.
       </p>
-      <form className="settings-form-layout" onSubmit={onSubmit}>
-        <div className="settings-actions">
-          <button
-            className="btn btn-primary"
-            onClick={(event) => {
-              if (event.currentTarget.form) onSaveForm(event.currentTarget.form);
-            }}
-            type="button"
-          >
-            Save execution settings
-          </button>
-        </div>
+      <form className="settings-form-layout" onSubmit={onSubmit} ref={formRef}>
         <SettingsSection
           description="Show restrained colour only for charts and operational status. This preference stays in this browser."
           icon={<Sparkles aria-hidden="true" size={18} />}

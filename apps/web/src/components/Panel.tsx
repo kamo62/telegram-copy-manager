@@ -1,5 +1,5 @@
 import { ChevronDown } from "lucide-react";
-import { useId, useState } from "react";
+import { useState } from "react";
 
 export function Panel({
   actions,
@@ -46,20 +46,25 @@ export function Panel({
     : undefined;
   const hasTabs = Boolean(tabs && activeTab && onTabChange);
   const [open, setOpen] = useState(defaultOpen);
-  const bodyId = useId();
   const collapsed = collapsible && !open;
   const showHeader = !hideTitle || hasTabs || Boolean(actions) || collapsible;
   return (
     <section
       aria-label={hideTitle ? title : undefined}
+      aria-labelledby={
+        hasTabs
+          ? `${tabPanelId}-${activeTab!.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`
+          : undefined
+      }
       className={`panel ${className}`}
       data-testid={testId}
+      id={hasTabs ? tabPanelId : undefined}
+      role={hasTabs ? "tabpanel" : undefined}
     >
       {showHeader ? (
         <header>
           {collapsible ? (
             <button
-              aria-controls={bodyId}
               aria-expanded={open}
               className={`panel-collapse-toggle ${open ? "is-open" : ""}`}
               onClick={() => setOpen((value) => !value)}
@@ -93,19 +98,7 @@ export function Panel({
           {actions ? <div className="panel-header-actions">{actions}</div> : null}
         </header>
       ) : null}
-      {collapsed ? null : tabs && activeTab && onTabChange ? (
-        <div
-          aria-labelledby={`${tabPanelId}-${activeTab.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`}
-          id={tabPanelId}
-          role="tabpanel"
-        >
-          {children}
-        </div>
-      ) : collapsible ? (
-        <div id={bodyId}>{children}</div>
-      ) : (
-        children
-      )}
+      {collapsed ? null : children}
     </section>
   );
 }

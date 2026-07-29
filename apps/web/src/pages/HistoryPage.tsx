@@ -49,6 +49,13 @@ export function HistoryPage({
   const outOfSyncTrades = trades.filter((trade) => trade.status === "OUT_OF_SYNC");
   return (
     <Panel
+      actions={
+        activeTab === "Closed" && onExportJournal ? (
+          <button className="btn btn-ghost btn-small" onClick={onExportJournal} type="button">
+            Export journal (JSON)
+          </button>
+        ) : null
+      }
       activeTab={activeTab}
       className="wide-panel"
       onTabChange={(tab) => onTabChange(tab as HistoryTab)}
@@ -67,20 +74,11 @@ export function HistoryPage({
           />
         </>
       ) : (
-        <>
-          {onExportJournal ? (
-            <div className="history-export-row">
-              <button className="btn btn-ghost btn-small" onClick={onExportJournal} type="button">
-                Export journal (JSON)
-              </button>
-            </div>
-          ) : null}
-          <ClosedPositionsTable
-            accounts={accounts}
-            focusedAccountId={focusedAccountId}
-            currency={currency}
-          />
-        </>
+        <ClosedPositionsTable
+          accounts={accounts}
+          focusedAccountId={focusedAccountId}
+          currency={currency}
+        />
       )}
     </Panel>
   );

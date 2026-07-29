@@ -2412,14 +2412,6 @@ h3 {
   color: var(--ink-3);
 }
 
-.panel-toolbar-split {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
 .panel-search {
   display: inline-flex;
   align-items: center;
@@ -2919,12 +2911,6 @@ h3 {
   height: 16px;
   accent-color: var(--accent);
   cursor: pointer;
-}
-
-.settings-actions {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 4px;
 }
 
 .linked-accounts-create {
@@ -7156,12 +7142,6 @@ select.config-strategy-input {
   color: var(--ink-dim);
   font-size: 12px;
 }
-.history-export-row {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 8px;
-}
-
 /* Activity feed (Task 2) */
 .activity-feed {
   list-style: none;
@@ -7283,17 +7263,24 @@ select.config-strategy-input {
 
 :root[data-color-accents="on"] .status-bar .chip-dot.ok,
 :root[data-color-accents="on"] .status-bar .live-dot {
-  background: var(--up);
+  color: var(--up);
+  background: transparent;
+}
+
+:root[data-color-accents="on"] .status-bar .chip-dot.database.ok {
+  color: var(--accent);
 }
 
 :root[data-color-accents="on"] .status-bar .chip-dot.warn {
-  background: var(--warn);
+  color: var(--warn);
+  background: transparent;
   border: 0;
 }
 
 :root[data-color-accents="on"] .status-bar .chip-dot.error,
 :root[data-color-accents="on"] .status-bar .live-dot.error {
-  background: var(--down);
+  color: var(--down);
+  background: transparent;
 }
 
 /* One compact row: brand, live status, then actions. */
@@ -7888,20 +7875,6 @@ select.config-strategy-input {
 
   .providers-table .provider-account-cell {
     min-width: 104px;
-  }
-
-  .settings-actions {
-    position: sticky;
-    top: 44px;
-    z-index: 15;
-    padding: 8px 0 10px;
-    background: var(--panel);
-    border-bottom: 1px solid var(--line);
-  }
-
-  .settings-actions .btn {
-    width: 100%;
-    min-height: 42px;
   }
 
   .settings-section {

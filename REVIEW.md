@@ -89,7 +89,7 @@ so a header carrying actions or tabs matches one carrying only a title.
 This also replaced the earlier fix that embedded Export inside the intro block, so there is
 now a single pattern rather than two.
 
-Re-audited after the change: **zero structural findings on all ten routes.**
+Re-audited after the change: **zero structural findings on all nine routes.**
 
 **F4** — `Panel` takes `hideTitle` for panels whose page heading already says the same
 word. The title still labels the section via `aria-label`, so it stays a named region, and

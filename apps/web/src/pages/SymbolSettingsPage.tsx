@@ -77,8 +77,20 @@ export function SymbolSettingsPage({
 
   return (
     <>
-      <Panel className="wide-panel" title="Symbol Mapping">
-        <div className="panel-toolbar panel-toolbar-split">
+      <Panel
+        actions={
+          <button
+            className="btn btn-primary btn-small"
+            onClick={() => setMappingModalOpen(true)}
+            type="button"
+          >
+            Add mapping
+          </button>
+        }
+        className="wide-panel"
+        title="Symbol Mapping"
+      >
+        <div className="panel-toolbar">
           <label className="panel-search">
             <Search aria-hidden="true" size={13} />
             <input
@@ -89,13 +101,6 @@ export function SymbolSettingsPage({
               value={filter}
             />
           </label>
-          <button
-            className="btn btn-primary btn-small"
-            onClick={() => setMappingModalOpen(true)}
-            type="button"
-          >
-            Add mapping
-          </button>
         </div>
         <SymbolMappingsTable loading={loading} mappings={filtered} onDelete={onDelete} />
         {filter && filtered.length === 0 && mappings.length > 0 ? (

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.63.1 - 2026-07-29 (Patch)
+
+Release impact: Patch because this only corrects console presentation and panel layout without
+changing API, execution, parser, database, or EA contracts.
+
+- Replaced plain top-bar dots with green sync/Telegram and blue database icon treatments while
+  keeping mock, offline, and failure states amber or red.
+- Standardised panel-level controls in panel headers across Settings, History, Logs, Providers, and
+  Symbols.
+- Removed the tab-content wrapper that bypassed direct-child panel inset rules, with a regression
+  check for tabbed panel content.
+
 ## 1.63.0 - 2026-07-29 (Minor)
 
 Release impact: Minor because suppressed duplicate signals now appear in the held-queue API and UI
