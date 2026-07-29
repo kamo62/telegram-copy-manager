@@ -2,7 +2,7 @@
 
 ## START HERE — 2026-07-29
 
-`main` @ `16275191`, pushed. **Production runs v1.64.1 and is live** on 192.168.0.100 — verified by
+`main` @ `7e0f2ef0`, pushed. **Production runs v1.64.1 and is live** on 192.168.0.100 — verified by
 asset-hash match, both accounts online, Telegram connected. No EA recompile outstanding: EA versions
 have moved with the release line but no EA behaviour has changed since 1.60.0.
 
@@ -25,9 +25,18 @@ the authority — read it first. `REVIEW-ui-fidelity.md` describes the OLD targe
 rebuilt against them. New tokens are canonical; old names (`--ink*`, `--line`, `--panel`) alias onto
 them so the vocabulary converges rather than forking.
 
-**Remaining:** `/` `/logs` `/providers` `/symbols` `/telegram` `/history` `/performance`
-`/equity-guardian`. They inherit the new tokens and shell but their interiors are unchanged. Apply
-components by KIND, not by page. Owner is running Codex manually for this.
+**All nine routes are now on the design base and measured.** Swept at 1600px and 560px, in both
+themes, across the six workspace tabs and the three sidebar routes: zero off-scale type, zero
+misaligned panel children, zero horizontal document overflow.
+
+Two violations were found by measuring computed styles, neither visible in a grep:
+`<small>` had no size rule and fell to the UA default of 0.8em (10px) across 16 Parser Lab elements,
+and the dither-kit chart axes and tooltip used arbitrary Tailwind `text-[10px]` / `text-[11px]`.
+Both now sit at 12px. A repo-wide grep confirms `text-[Npx]` resolves to 12px in all four remaining
+places.
+
+Interiors still use their existing layouts — this pass made them *consistent* with the base, not
+redesigned to the mockup. Redesigning interiors route by route is the remaining work.
 
 ### Codex sandbox limits — both cost a full round trip each
 
