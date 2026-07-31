@@ -36,6 +36,7 @@ export function LogsPage({
   heldItems,
   onHeldRequeue,
   onHeldDismiss,
+  onHeldDismissAll,
 }: {
   parserTab: string;
   onParserTabChange: (tab: string) => void;
@@ -75,6 +76,7 @@ export function LogsPage({
     logicalTradeId?: string,
   ) => Promise<void> | void;
   onHeldDismiss: (item: HeldQueueItem) => Promise<void> | void;
+  onHeldDismissAll: (items: HeldQueueItem[]) => Promise<void> | void;
 }) {
   return (
     <>
@@ -87,6 +89,7 @@ export function LogsPage({
             }
             items={heldItems}
             onDismiss={onHeldDismiss}
+            onDismissAll={onHeldDismissAll}
             onRequeue={onHeldRequeue}
             providerLabel={(providerId) =>
               snapshot.providers.find((provider) => provider.id === providerId)?.title ??

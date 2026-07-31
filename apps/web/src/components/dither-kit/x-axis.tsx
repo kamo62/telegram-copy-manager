@@ -20,7 +20,7 @@ export function XAxis({
   const y = ctx.plot.height + tickMargin;
 
   return (
-    <g className="fill-current font-mono text-[12px] text-muted-foreground">
+    <g className="fill-current font-mono text-[12px] text-ink-faint">
       {ctx.data.map((row, i) => {
         if (i % step !== 0) return null;
         const raw = dataKey ? row[dataKey] : i;

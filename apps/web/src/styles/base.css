@@ -7716,7 +7716,62 @@ span.data-table-subtle {
 }
 
 .held-table {
-  min-width: 1050px;
+  min-width: 860px;
+  table-layout: fixed;
+}
+
+.held-table th:nth-child(1) {
+  width: 16%;
+}
+
+.held-table th:nth-child(2) {
+  width: 10%;
+}
+
+.held-table th:nth-child(3) {
+  width: 13%;
+}
+
+.held-table th:nth-child(4) {
+  width: 22%;
+}
+
+.held-table th:nth-child(5) {
+  width: 14%;
+}
+
+.held-table th:nth-child(6) {
+  width: 25%;
+}
+
+.held-table thead th,
+.held-table tbody td {
+  padding: 10px 12px;
+}
+
+.held-table-toolbar {
+  justify-content: space-between;
+  margin-top: 12px;
+  color: var(--ink-dim);
+  font-size: 12px;
+}
+
+.held-signal-cell > *,
+.held-intent-cell > *,
+.held-review-cell > * {
+  display: table;
+}
+
+.held-signal-cell > * + *,
+.held-intent-cell > * + *,
+.held-review-cell > * + * {
+  margin-top: 3px;
+}
+
+.held-signal-cell time,
+.held-intent-cell code {
+  color: var(--ink-faint);
+  font-size: 12px;
 }
 
 .table-sort {
@@ -7736,6 +7791,7 @@ span.data-table-subtle {
 }
 
 .held-price-cell small {
+  color: var(--ink-faint);
   font-size: 12px;
 }
 
@@ -7760,8 +7816,15 @@ span.data-table-subtle {
 .held-row-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 5px;
-  white-space: nowrap;
+}
+
+.held-row-actions select {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
 }
 
 .linked-slot-row {
@@ -7802,7 +7865,7 @@ span.data-table-subtle {
   gap: 10px;
   margin-bottom: 14px;
   padding: 12px;
-  border: 2px dashed var(--ink);
+  border: 1px solid var(--line);
   border-radius: var(--radius-2);
   background: var(--panel-2);
 }
@@ -8141,12 +8204,12 @@ span.data-table-subtle {
   width: 44px;
   padding-left: 4px;
   padding-right: 8px;
-  background: var(--surface-1, #101725);
-  box-shadow: -8px 0 8px -8px rgb(0 0 0 / 55%);
+  background: var(--panel);
+  box-shadow: -1px 0 var(--line);
 }
 
 .providers-table tbody tr:hover td.providers-table-actions {
-  background: var(--surface-2, #16203040);
+  background: var(--panel-2);
 }
 
 /* Data-table icon buttons are opacity:0 until the row is hovered. That suits a

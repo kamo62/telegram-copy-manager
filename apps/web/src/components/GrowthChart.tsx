@@ -33,6 +33,17 @@ export function formatGrowthChartValue(
   return isGrowth ? formatMoney(value, currency ?? "", locale) : `${value.toFixed(1)}%`;
 }
 
+export function formatGrowthChartTime(value: number, locale: string, detailed = false): string {
+  const date = new Date(value * 1_000);
+  if (!Number.isFinite(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat(
+    locale,
+    detailed
+      ? { dateStyle: "medium", timeStyle: "short" }
+      : { month: "short", day: "numeric", hour: "2-digit" },
+  ).format(date);
+}
+
 export function GrowthChart({
   data,
   loading = false,
@@ -112,11 +123,11 @@ export function GrowthChart({
         <div className="chart-canvas-wrap" data-color-accents={colorAccents ? "on" : "off"}>
           <AreaChart
             animate={false}
-            bloom="low"
-            className="h-80"
+            bloom="off"
+            className="h-64"
             config={{
               value: {
-                label: isGrowth ? "Account growth" : "Drawdown",
+                label: isGrowth ? "Equity" : "Drawdown",
                 color: chartDitherColor(colorAccents, isGrowth ? "growth" : "drawdown"),
               },
             }}
@@ -136,20 +147,19 @@ export function GrowthChart({
             <XAxis
               dataKey="x"
               tickFormatter={(value) =>
-                isTimeSeries
-                  ? new Date(Number(value) * 1_000).toLocaleDateString(undefined, {
-                      month: "short",
-                      day: "numeric",
-                    })
-                  : String(value)
+                isTimeSeries ? formatGrowthChartTime(Number(value), locale) : String(value)
               }
+              maxTicks={6}
             />
             <YAxis
               tickFormatter={(value) => formatGrowthChartValue(value, isGrowth, currency, locale)}
             />
-            <Area dataKey="value" variant="gradient" />
+            <Area dataKey="value" variant="dotted" />
             <Tooltip
               labelKey="x"
+              labelFormatter={(value) =>
+                isTimeSeries ? formatGrowthChartTime(Number(value), locale, true) : value
+              }
               valueFormatter={(value) => formatGrowthChartValue(value, isGrowth, currency, locale)}
             />
           </AreaChart>

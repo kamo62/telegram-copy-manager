@@ -38,42 +38,37 @@ export function ProvidersPage({
 }) {
   const isAccountMode = Boolean(accountId);
   return (
-    <Panel
-      actions={
-        <button
-          aria-label="Export provider performance"
-          className="btn btn-ghost btn-small provider-export-btn"
-          onClick={onExport}
-          type="button"
-        >
-          <Download size={14} aria-hidden="true" />
-          Export
-        </button>
-      }
-      className="wide-panel"
-      hideTitle
-      title="Providers"
-    >
-      {isAccountMode ? (
-        <p className="panel-intro">
-          Stats, copy status, and configuration shown for{" "}
-          <strong>{accountLabel ?? "this account"}</strong>. Use <strong>Copy</strong> to start or
-          stop copying a provider here, and <strong>Configure</strong> to set this account's lot
-          size, risk, and take-profit. Enable or remove a provider from this hub.
-        </p>
-      ) : (
-        <p className="panel-intro">
-          Aggregated performance, health, and global provider monitoring. Select an account in the
-          sidebar for its copy settings.
-        </p>
-      )}
-      {!isAccountMode ? (
+    <Panel className="wide-panel providers-panel" hideTitle title="Providers">
+      <div className="providers-intro-row">
+        {isAccountMode ? (
+          <p className="panel-intro">
+            Stats, copy status, and configuration shown for{" "}
+            <strong>{accountLabel ?? "this account"}</strong>. Use <strong>Copy</strong> to start or
+            stop copying a provider here, and <strong>Configure</strong> to set this account's lot
+            size, risk, and take-profit. Enable or remove a provider from this hub.
+          </p>
+        ) : (
+          <p className="panel-intro">
+            Aggregated performance, health, and global provider monitoring. Select an account in the
+            sidebar for its copy settings.
+          </p>
+        )}
+        {providers.length > 0 ? (
+          <button
+            aria-label="Export provider performance"
+            className="btn btn-ghost btn-small provider-export-btn"
+            onClick={onExport}
+            type="button"
+          >
+            <Download size={14} aria-hidden="true" />
+            Export
+          </button>
+        ) : null}
+      </div>
+      {!isAccountMode && providers.length > 0 ? (
         <section className="provider-monitoring" aria-label="Provider monitoring">
           <header className="provider-monitoring-head">
-            <div>
-              <span>Global lifecycle</span>
-              <h3>Provider monitoring</h3>
-            </div>
+            <h3>Provider monitoring</h3>
             <span>{providers.length} configured</span>
           </header>
           <ul className="provider-monitoring-list">
@@ -130,7 +125,7 @@ export function ProvidersPage({
         providerLinks={providerLinks}
         providers={providers}
       />
-      {providers.length > 0 ? (
+      {isAccountMode && providers.length > 0 ? (
         <div className="provider-health-strip">
           {providers.map((provider) => (
             <ProviderHealthCard key={provider.id} providerId={provider.id} title={provider.title} />

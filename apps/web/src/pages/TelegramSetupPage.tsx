@@ -38,7 +38,7 @@ export function TelegramSetupPage({
 }) {
   const isConnected = setupStep === "connected";
   return (
-    <Panel className="setup-panel wide-panel" title="Telegram Setup">
+    <Panel className="setup-panel wide-panel" hideTitle title="Telegram Setup">
       <div className="setup-help">
         <ShieldCheck aria-hidden="true" size={20} />
         <div>

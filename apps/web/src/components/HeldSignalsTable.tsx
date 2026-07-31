@@ -11,7 +11,8 @@ import { Tag } from "./Tag";
 const STALE_AFTER_MS = 24 * 60 * 60 * 1_000;
 
 function reasonLabel(reason: string): string {
-  return reason.replaceAll("_", " ");
+  const label = reason.replaceAll("_", " ").toLowerCase();
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
 function ageLabel(createdAt: string): string {
@@ -30,12 +31,6 @@ function isStale(createdAt: string): boolean {
   return Number.isFinite(createdAtMs) && Date.now() - createdAtMs >= STALE_AFTER_MS;
 }
 
-function reasonTone(reason: string): "warn" | "down" | "muted" {
-  if (reason === "EA_OFFLINE") return "warn";
-  if (reason.startsWith("SYMBOL_MAPPING_")) return "down";
-  return "muted";
-}
-
 function confirmationDescription(item: HeldQueueItem, action: string) {
   const warning =
     item.droppedLifecycleCount > 0
@@ -50,6 +45,7 @@ export function HeldSignalsTable({
   providerLabel,
   onRequeue,
   onDismiss,
+  onDismissAll,
 }: {
   items: HeldQueueItem[];
   accountLabel: (accountId: string) => string;
@@ -60,9 +56,11 @@ export function HeldSignalsTable({
     logicalTradeId?: string,
   ) => Promise<void> | void;
   onDismiss: (item: HeldQueueItem) => Promise<void> | void;
+  onDismissAll: (items: HeldQueueItem[]) => Promise<void> | void;
 }) {
   const { locale } = useLocale();
   const { confirm, dialog } = useConfirm();
+  const [dismissAllBusy, setDismissAllBusy] = useState(false);
   const [selectedTradeIds, setSelectedTradeIds] = useState<Record<string, string>>({});
   const { sortedRows, toggle, sortAria } = useSortableTable(items, "createdAt", "desc");
 
@@ -92,6 +90,22 @@ export function HeldSignalsTable({
     if (confirmed) await onDismiss(item);
   }
 
+  async function dismissAll() {
+    const confirmed = await confirm({
+      title: `Dismiss all ${items.length} signals?`,
+      description:
+        "This removes every held and suppressed signal from review. Nothing will be executed or requeued.",
+      confirmLabel: `Dismiss ${items.length} signals`,
+    });
+    if (!confirmed) return;
+    setDismissAllBusy(true);
+    try {
+      await onDismissAll(items);
+    } finally {
+      setDismissAllBusy(false);
+    }
+  }
+
   if (items.length === 0) {
     return (
       <EmptyState
@@ -104,30 +118,34 @@ export function HeldSignalsTable({
 
   return (
     <>
+      <div className="panel-toolbar held-table-toolbar">
+        <span>
+          {items.length} {items.length === 1 ? "signal" : "signals"} awaiting review
+        </span>
+        <button
+          className="btn btn-ghost btn-small"
+          disabled={dismissAllBusy}
+          onClick={() => void dismissAll()}
+          type="button"
+        >
+          <Trash2 aria-hidden="true" size={13} />
+          {dismissAllBusy ? "Dismissing…" : "Dismiss all"}
+        </button>
+      </div>
       <div className="data-table-wrap held-table-wrap">
         <table className="data-table held-table">
           <thead>
             <tr>
               <th aria-sort={sortAria("createdAt")} scope="col">
                 <button className="table-sort" onClick={() => toggle("createdAt")} type="button">
-                  Age
+                  Signal
                 </button>
               </th>
-              <th scope="col">Provider</th>
               <th scope="col">Account</th>
-              <th scope="col">Command</th>
-              <th scope="col">Symbol</th>
-              <th scope="col">State</th>
-              <th scope="col">Reason</th>
+              <th scope="col">Intent</th>
+              <th scope="col">Review</th>
               <th className="num" scope="col">
                 Price drift
-              </th>
-              <th
-                className="num"
-                scope="col"
-                title="Lifecycle commands received while this signal was held. 0 means none were dropped; — means the count was not reported."
-              >
-                Dropped
               </th>
               <th scope="col">Actions</th>
             </tr>
@@ -135,24 +153,20 @@ export function HeldSignalsTable({
           <tbody>
             {sortedRows.map((item) => (
               <tr className={isStale(item.createdAt) ? "held-row-stale" : undefined} key={item.id}>
-                <td>
-                  <time dateTime={item.createdAt}>{ageLabel(item.createdAt)}</time>
+                <td className="held-signal-cell">
+                  <strong>{providerLabel(item.providerId)}</strong>
+                  <time dateTime={item.createdAt}>{ageLabel(item.createdAt)} ago</time>
                 </td>
-                <td>{providerLabel(item.providerId)}</td>
-                <td>{accountLabel(item.accountId)}</td>
-                <td>
+                <td className="held-account-cell">{accountLabel(item.accountId)}</td>
+                <td className="held-intent-cell">
+                  <strong>{item.symbol}</strong>
                   <code>{item.commandType}</code>
                 </td>
-                <td>
-                  <strong>{item.symbol}</strong>
-                </td>
-                <td>
+                <td className="held-review-cell">
                   <Tag tone={item.actionable ? "warn" : "muted"}>
                     {item.actionable ? "Awaiting action" : "Suppressed"}
                   </Tag>
-                </td>
-                <td>
-                  <Tag tone={reasonTone(item.heldReason)}>{reasonLabel(item.heldReason)}</Tag>
+                  <span className="held-reason">{reasonLabel(item.heldReason)}</span>
                 </td>
                 <td className="num-cell held-price-cell">
                   <span>
@@ -171,21 +185,17 @@ export function HeldSignalsTable({
                       {formatPercent(item.driftPct, { locale, signDisplay: "always" })}
                     </small>
                   )}
-                </td>
-                <td className="num-cell">
-                  {typeof item.droppedLifecycleCount !== "number" ? (
-                    <span title="Dropped lifecycle count was not reported by this queue item">
-                      —
-                    </span>
-                  ) : item.droppedLifecycleCount > 0 ? (
-                    <span className="held-dropped-badge" title={item.droppedLifecycle.join(", ")}>
-                      {item.droppedLifecycleCount}
-                    </span>
-                  ) : (
-                    <span title="No lifecycle commands were dropped while this signal was held">
-                      0
-                    </span>
-                  )}
+                  <small
+                    title={
+                      item.droppedLifecycleCount
+                        ? item.droppedLifecycle.join(", ")
+                        : "No lifecycle commands were dropped while this signal was held"
+                    }
+                  >
+                    {typeof item.droppedLifecycleCount === "number"
+                      ? `${item.droppedLifecycleCount} dropped`
+                      : "Dropped unknown"}
+                  </small>
                 </td>
                 <td>
                   <div className="held-row-actions">
@@ -210,23 +220,25 @@ export function HeldSignalsTable({
                             ))}
                           </select>
                         ) : null}
-                        <button
-                          className="btn btn-primary btn-small"
-                          disabled={item.commandType !== "OPEN_TRADE" && !selectedTradeIds[item.id]}
-                          onClick={() => void requeue(item, "market")}
-                          type="button"
-                        >
-                          <RotateCcw aria-hidden="true" size={12} />
-                          Market
-                        </button>
-                        <button
-                          className="btn btn-ghost btn-small"
-                          disabled={item.commandType !== "OPEN_TRADE" && !selectedTradeIds[item.id]}
-                          onClick={() => void requeue(item, "original")}
-                          type="button"
-                        >
-                          Original
-                        </button>
+                        {item.commandType === "OPEN_TRADE" || selectedTradeIds[item.id] ? (
+                          <>
+                            <button
+                              className="btn btn-primary btn-small"
+                              onClick={() => void requeue(item, "market")}
+                              type="button"
+                            >
+                              <RotateCcw aria-hidden="true" size={12} />
+                              Market
+                            </button>
+                            <button
+                              className="btn btn-ghost btn-small"
+                              onClick={() => void requeue(item, "original")}
+                              type="button"
+                            >
+                              Original
+                            </button>
+                          </>
+                        ) : null}
                       </>
                     ) : null}
                     <button
