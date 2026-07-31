@@ -162,6 +162,11 @@ export interface LogicalTrade {
   matchedBrokerTickets?: string[];
   brokerComment?: string;
   lastSnapshotAt?: string;
+  virtualTpWatermark?: {
+    positionTicket: string;
+    favorablePrice: number;
+    observedAt: string;
+  };
   providerOrderId?: string;
 }
 

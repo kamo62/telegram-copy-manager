@@ -5683,12 +5683,40 @@ class AppStore {
     const rows = accountId
       ? (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items WHERE status = 'PENDING' AND account_id = ? ORDER BY created_at LIMIT 25",
+            `SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at
+             FROM queue_items
+             WHERE status = 'PENDING' AND account_id = ?
+             ORDER BY created_at,
+               CASE
+                 WHEN json_extract(payload_json, '$.commandType') = 'MODIFY_SL'
+                 THEN CASE
+                   WHEN json_extract(payload_json, '$.direction') = 'SELL'
+                   THEN -CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
+                   ELSE CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
+                 END
+                 ELSE 0
+               END,
+               rowid
+             LIMIT 25`,
           )
           .all(accountId) as Row[])
       : (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items WHERE status = 'PENDING' ORDER BY created_at LIMIT 25",
+            `SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at
+             FROM queue_items
+             WHERE status = 'PENDING'
+             ORDER BY created_at,
+               CASE
+                 WHEN json_extract(payload_json, '$.commandType') = 'MODIFY_SL'
+                 THEN CASE
+                   WHEN json_extract(payload_json, '$.direction') = 'SELL'
+                   THEN -CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
+                   ELSE CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
+                 END
+                 ELSE 0
+               END,
+               rowid
+             LIMIT 25`,
           )
           .all() as Row[]);
     const row = rows.find((candidate) => {
@@ -5738,6 +5766,45 @@ class AppStore {
           `EA_CAPABILITY_UNAVAILABLE:${PENDING_CLOSE_FLATTEN_CAPABILITY}`,
         );
         return false;
+      }
+      // Only app-managed stop strategies may be skipped as already-satisfied. A provider or
+      // operator MODIFY_SL is a deliberate instruction and can legitimately widen a stop to
+      // give a trade room. Swallowing those and reporting them EXECUTED would override a human
+      // decision and misreport it as delivered.
+      if (
+        item.payload.commandType === "MODIFY_SL" &&
+        item.logicalTradeId &&
+        item.payload.targetPositionTicket &&
+        isAppManagedStopPayload(item.payload)
+      ) {
+        const trade = this.logicalTrade(item.logicalTradeId);
+        const desired = Number(item.payload.newStopLoss ?? 0);
+        if (trade && Number.isFinite(desired) && desired > 0) {
+          const broker = this.latestPositionStop(trade, item.payload.targetPositionTicket);
+          if (broker.known && this.stopIsSatisfied(trade, broker.stopLoss, desired)) {
+            const now = nowIso();
+            this.db
+              .query(
+                `UPDATE queue_items
+                 SET status = 'EXECUTED', held_reason = NULL, leased_at = NULL, updated_at = ?
+                 WHERE id = ?`,
+              )
+              .run(now, item.id);
+            this.db
+              .query(
+                `UPDATE reference_stop_actions SET resolution = 'SATISFIED', updated_at = ?
+                 WHERE queue_item_id = ?`,
+              )
+              .run(now, item.id);
+            this.audit(
+              "virtual-tp.modify-sl-satisfied",
+              "info",
+              "Queued stop skipped because the live broker stop is already protective",
+              { queueItemId: item.id, brokerStopLoss: broker.stopLoss, desiredStopLoss: desired },
+            );
+            return false;
+          }
+        }
       }
       if (item.payload.commandType !== "OPEN_TRADE") return true;
       const safetyHoldReason = this.executionPayloadHoldReason(item.accountId, item.payload);
@@ -6424,6 +6491,246 @@ class AppStore {
     };
   }
 
+  private persistReferenceWatermark(
+    trade: LogicalTrade,
+    positionTicket: string,
+    price: number,
+  ): LogicalTrade {
+    const previous =
+      trade.virtualTpWatermark?.positionTicket === positionTicket
+        ? trade.virtualTpWatermark.favorablePrice
+        : undefined;
+    const favorablePrice =
+      previous === undefined
+        ? price
+        : trade.direction === "BUY"
+          ? Math.max(previous, price)
+          : Math.min(previous, price);
+    if (previous === favorablePrice) return trade;
+    const updated: LogicalTrade = {
+      ...trade,
+      virtualTpWatermark: {
+        positionTicket,
+        favorablePrice,
+        observedAt: nowIso(),
+      },
+    };
+    this.db
+      .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
+      .run(JSON.stringify(updated), updated.id);
+    return updated;
+  }
+
+  private backfillHitReferenceStopActions(trade: LogicalTrade, positionTicket: string) {
+    const missing = trade.legs.filter(
+      (leg) =>
+        leg.status === "HIT" &&
+        isReferenceVirtualTpLeg(leg) &&
+        !this.db
+          .query("SELECT 1 FROM reference_stop_actions WHERE logical_trade_id = ? AND leg = ?")
+          .get(trade.id, leg.leg),
+    );
+    if (!missing.length) return;
+    const prior = (
+      this.db
+        .query(
+          `SELECT id, payload_json FROM queue_items
+           WHERE logical_trade_id = ? ORDER BY created_at DESC, rowid DESC`,
+        )
+        .all(trade.id) as Row[]
+    ).find((row) => {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      return (
+        payload.commandType === "MODIFY_SL" &&
+        payload.targetPositionTicket === positionTicket &&
+        (payload.idempotencyKey?.startsWith("reference-stop:") ||
+          payload.originalText.includes("reference TP"))
+      );
+    });
+    const now = nowIso();
+    for (const leg of missing) {
+      const needsStop = Boolean(leg.strategy && leg.strategy.kind !== "no-change");
+      const desired = needsStop ? this.strategyStopPrice(trade, leg.strategy!) : undefined;
+      if (needsStop && !desired) continue;
+      this.db
+        .query(
+          `INSERT INTO reference_stop_actions
+             (logical_trade_id, leg, position_ticket, desired_stop_loss, resolution, queue_item_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(logical_trade_id, leg) DO NOTHING`,
+        )
+        .run(
+          trade.id,
+          leg.leg,
+          positionTicket,
+          desired ?? null,
+          desired ? "NEEDS_RECONCILE" : "NO_CHANGE",
+          prior ? String(prior.id) : null,
+          now,
+          now,
+        );
+    }
+  }
+
+  private reconcileDeliveryUnknownModifySl(input: {
+    trade: LogicalTrade;
+    positionTicket: string;
+    brokerStopLoss?: number;
+    marketPrice: number;
+  }) {
+    const rows = this.db
+      .query(
+        `SELECT id, status, held_reason, leased_at, payload_json FROM queue_items
+         WHERE logical_trade_id = ? AND status IN ('LEASED','HELD')
+         ORDER BY created_at, rowid`,
+      )
+      .all(input.trade.id) as Row[];
+    const cutoff = Date.now() - this.appSettings().leaseTimeoutSeconds * 1000;
+    for (const row of rows) {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      if (
+        payload.commandType !== "MODIFY_SL" ||
+        payload.targetPositionTicket !== input.positionTicket
+      ) {
+        continue;
+      }
+      const staleLease =
+        String(row.status) === "LEASED" && Date.parse(String(row.leased_at ?? "")) < cutoff;
+      const deliveryUnknown =
+        String(row.status) === "HELD" && String(row.held_reason) === "DELIVERY_UNKNOWN";
+      if (!staleLease && !deliveryUnknown) continue;
+      const desired = Number(payload.newStopLoss ?? 0);
+      if (!Number.isFinite(desired) || desired <= 0) continue;
+      const satisfied = this.stopIsSatisfied(input.trade, input.brokerStopLoss, desired);
+      if (!satisfied && !this.stopCanBePlaced(input.trade, desired, input.marketPrice)) continue;
+      const now = nowIso();
+      const status = satisfied ? "EXECUTED" : "PENDING";
+      this.db.transaction(() => {
+        this.db
+          .query(
+            `UPDATE queue_items
+             SET status = ?, held_reason = NULL, leased_at = NULL, updated_at = ? WHERE id = ?`,
+          )
+          .run(status, now, String(row.id));
+        this.db
+          .query(
+            `UPDATE reference_stop_actions SET resolution = ?, updated_at = ?
+             WHERE queue_item_id = ?`,
+          )
+          .run(satisfied ? "SATISFIED" : "QUEUED", now, String(row.id));
+      })();
+      this.audit(
+        satisfied ? "virtual-tp.modify-sl-satisfied" : "virtual-tp.modify-sl-replay",
+        satisfied ? "info" : "warn",
+        satisfied
+          ? "Delivery-unknown stop confirmed from live broker state"
+          : "Delivery-unknown stop replayed from live broker state",
+        { logicalTradeId: input.trade.id, queueItemId: String(row.id), desiredStopLoss: desired },
+      );
+    }
+  }
+
+  private reconcileReferenceStopActions(input: {
+    trade: LogicalTrade;
+    positionTicket: string;
+    brokerStopLoss?: number;
+    marketPrice: number;
+  }) {
+    const actions = this.db
+      .query(
+        `SELECT leg, desired_stop_loss, queue_item_id FROM reference_stop_actions
+         WHERE logical_trade_id = ? AND position_ticket = ? AND desired_stop_loss IS NOT NULL`,
+      )
+      .all(input.trade.id, input.positionTicket) as Row[];
+    if (!actions.length) return;
+    const desired = actions
+      .map((row) => Number(row.desired_stop_loss))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    if (!desired.length) return;
+    const best = desired.reduce((current, candidate) =>
+      this.improvesStop(input.trade, candidate, current) ? candidate : current,
+    );
+    const linkedIds = new Set(
+      actions.map((row) => String(row.queue_item_id ?? "")).filter(Boolean),
+    );
+
+    if (this.stopIsSatisfied(input.trade, input.brokerStopLoss, best)) {
+      this.db.transaction(() => {
+        const now = nowIso();
+        this.db
+          .query(
+            `UPDATE reference_stop_actions SET resolution = 'SATISFIED', updated_at = ?
+             WHERE logical_trade_id = ? AND position_ticket = ? AND desired_stop_loss IS NOT NULL`,
+          )
+          .run(now, input.trade.id, input.positionTicket);
+        for (const id of linkedIds) {
+          this.db
+            .query(
+              `UPDATE queue_items
+               SET status = 'EXECUTED', held_reason = NULL, leased_at = NULL, updated_at = ?
+               WHERE id = ? AND status IN ('PENDING','LEASED','HELD')`,
+            )
+            .run(now, id);
+        }
+      })();
+      return;
+    }
+
+    const queueRows = (
+      this.db
+        .query(
+          `SELECT id, status, held_reason, leased_at, payload_json FROM queue_items
+           WHERE logical_trade_id = ? ORDER BY created_at DESC, rowid DESC`,
+        )
+        .all(input.trade.id) as Row[]
+    ).filter((row) => linkedIds.has(String(row.id)));
+    const active = queueRows.find((row) => {
+      if (!["PENDING", "LEASED"].includes(String(row.status))) return false;
+      if (String(row.status) === "LEASED") {
+        const leasedAt = Date.parse(String(row.leased_at ?? ""));
+        const timeout = this.appSettings().leaseTimeoutSeconds * 1000;
+        if (Number.isFinite(leasedAt) && leasedAt < Date.now() - timeout) return false;
+      }
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      return this.stopIsSatisfied(input.trade, Number(payload.newStopLoss), best);
+    });
+    if (active) return;
+
+    const queued = this.activeModifySlFloor(input.trade, input.positionTicket);
+    if (this.stopIsSatisfied(input.trade, queued.stopLoss, best) && queued.queueItemId) {
+      this.db
+        .query(
+          `UPDATE reference_stop_actions
+           SET resolution = 'QUEUED', queue_item_id = ?, updated_at = ?
+           WHERE logical_trade_id = ? AND position_ticket = ? AND desired_stop_loss IS NOT NULL`,
+        )
+        .run(queued.queueItemId, nowIso(), input.trade.id, input.positionTicket);
+      return;
+    }
+    if (!this.stopCanBePlaced(input.trade, best, input.marketPrice)) return;
+    const open = this.originalOpenQueue(input.trade.id);
+    if (!open) return;
+    this.db.transaction(() => {
+      const legs = actions.map((row) => Number(row.leg)).sort((left, right) => left - right);
+      const queueItemId = this.queueModifySlAfterVirtualTp({
+        trade: input.trade,
+        positionTicket: input.positionTicket,
+        newStopLoss: best,
+        parsedSignalId: open.parsedSignalId,
+        idempotencyKey: `reference-stop:${input.trade.id}:${input.positionTicket}:${legs.join(",")}`,
+        originalText: "App-managed reference TP SL repair",
+        auditEvent: "virtual-tp.reference-sl-repair",
+        auditMessage: "Reference TP stop repaired from live broker state",
+      });
+      this.db
+        .query(
+          `UPDATE reference_stop_actions
+           SET resolution = 'QUEUED', queue_item_id = ?, updated_at = ?
+           WHERE logical_trade_id = ? AND position_ticket = ? AND desired_stop_loss IS NOT NULL`,
+        )
+        .run(queueItemId, nowIso(), input.trade.id, input.positionTicket);
+    })();
+  }
+
   private evaluateVirtualTakeProfits(input: {
     accountId: string;
     positions: unknown[];
@@ -6456,7 +6763,22 @@ class AppStore {
         trade.entry?.from;
       const payload = this.originalOpenQueue(trade.id)?.payload;
       const brokerManagedLeg = brokerManagedVirtualTpLeg(payload);
-      let current = trade;
+      let current = this.persistReferenceWatermark(trade, positionTicket, price);
+      const brokerStopLoss = brokerStopLossFromSnapshot(position);
+      this.backfillHitReferenceStopActions(current, positionTicket);
+      this.reconcileDeliveryUnknownModifySl({
+        trade: current,
+        positionTicket,
+        brokerStopLoss,
+        marketPrice: price,
+      });
+      this.reconcileReferenceStopActions({
+        trade: current,
+        positionTicket,
+        brokerStopLoss,
+        marketPrice: price,
+      });
+      const favorablePrice = current.virtualTpWatermark?.favorablePrice ?? price;
       // Resolve every crossed 0%-allocation leg first, as one batch. These legs close no
       // volume and exist only to move the stop, so a price gap through several of them must
       // settle on a single most-protective stop. Doing them before any closing leg also
@@ -6465,10 +6787,11 @@ class AppStore {
       current = this.applyCrossedReferenceLegs({
         trade: current,
         positionTicket,
-        price,
+        price: favorablePrice,
+        marketPrice: price,
         openPrice,
         point: quote.point,
-        brokerStopLoss: brokerStopLossFromSnapshot(position),
+        brokerStopLoss,
       });
       for (const leg of current.legs) {
         if (leg.status !== "OPEN" || isReferenceVirtualTpLeg(leg)) continue;
@@ -6841,7 +7164,8 @@ class AppStore {
       .query(
         `SELECT parsed_signal_id, payload_json FROM queue_items
          WHERE logical_trade_id = ?
-         ORDER BY created_at ASC LIMIT 1`,
+           AND json_extract(payload_json, '$.commandType') = 'OPEN_TRADE'
+         ORDER BY created_at ASC, rowid ASC LIMIT 1`,
       )
       .get(tradeId) as Row | null;
     if (!row) return undefined;
@@ -6928,37 +7252,82 @@ class AppStore {
     return true;
   }
 
-  // The most protective stop the app currently believes sits on the position: the broker's
-  // reported stop when a snapshot is in hand, every MODIFY_SL it has already asked for
-  // (pending, leased, or executed), and the original signal stop as a floor. Every path must
-  // compare against this before queueing a new stop, otherwise a later or out-of-order
-  // strategy widens risk on a live position.
-  //
-  // Not captured: a stop the operator moved by hand in the terminal. Treated as acceptable,
-  // because being conservative here can only ever skip a stop move, never widen one.
-  private effectiveStopFloor(trade: LogicalTrade, brokerStopLoss?: number) {
-    const candidates: number[] = [];
-    if (brokerStopLoss !== undefined) candidates.push(brokerStopLoss);
-    if (trade.stopLoss !== undefined && trade.stopLoss > 0) candidates.push(trade.stopLoss);
+  private latestPositionStop(trade: LogicalTrade, positionTicket: string) {
+    const snapshot = trade.accountId ? this.liveMt5Snapshots.get(trade.accountId) : undefined;
+    const position = snapshot?.positions.find(
+      (item) => brokerTicketFromSnapshot(item) === positionTicket,
+    );
+    return {
+      known: position !== undefined,
+      stopLoss: brokerStopLossFromSnapshot(position),
+    };
+  }
+
+  private activeModifySlFloor(trade: LogicalTrade, positionTicket: string) {
     const rows = this.db
       .query(
-        `SELECT payload_json FROM queue_items
-         WHERE logical_trade_id = ? AND status IN ('PENDING','LEASED','EXECUTED')`,
+        `SELECT id, payload_json FROM queue_items
+         WHERE logical_trade_id = ? AND status IN ('PENDING','LEASED')
+         ORDER BY created_at, rowid`,
       )
       .all(trade.id) as Row[];
+    let stopLoss: number | undefined;
+    let queueItemId: string | undefined;
     for (const row of rows) {
       const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
-      if (payload.commandType !== "MODIFY_SL") continue;
+      if (payload.commandType !== "MODIFY_SL" || payload.targetPositionTicket !== positionTicket) {
+        continue;
+      }
       const value = Number(payload.newStopLoss ?? 0);
-      if (Number.isFinite(value) && value > 0) candidates.push(value);
+      if (
+        Number.isFinite(value) &&
+        value > 0 &&
+        (stopLoss === undefined || this.improvesStop(trade, value, stopLoss))
+      ) {
+        stopLoss = value;
+        queueItemId = String(row.id);
+      }
     }
+    return { stopLoss, queueItemId };
+  }
+
+  private effectiveStopFloor(
+    trade: LogicalTrade,
+    input: {
+      positionTicket: string;
+      brokerStateKnown: boolean;
+      brokerStopLoss?: number;
+    },
+  ) {
+    const candidates: number[] = [];
+    if (input.brokerStopLoss !== undefined) candidates.push(input.brokerStopLoss);
+    if (!input.brokerStateKnown && trade.stopLoss !== undefined && trade.stopLoss > 0) {
+      candidates.push(trade.stopLoss);
+    }
+    const active = this.activeModifySlFloor(trade, input.positionTicket).stopLoss;
+    if (active !== undefined) candidates.push(active);
     if (!candidates.length) return undefined;
     return trade.direction === "BUY" ? Math.max(...candidates) : Math.min(...candidates);
   }
 
   private improvesStop(trade: LogicalTrade, candidate: number, incumbent?: number) {
+    if (!Number.isFinite(candidate) || candidate <= 0) return false;
     if (incumbent === undefined) return true;
     return trade.direction === "BUY" ? candidate > incumbent : candidate < incumbent;
+  }
+
+  private stopIsSatisfied(trade: LogicalTrade, incumbent: number | undefined, desired: number) {
+    return (
+      incumbent !== undefined &&
+      Number.isFinite(incumbent) &&
+      incumbent > 0 &&
+      !this.improvesStop(trade, desired, incumbent)
+    );
+  }
+
+  private stopCanBePlaced(trade: LogicalTrade, desired: number, marketPrice?: number) {
+    if (!marketPrice || !Number.isFinite(marketPrice)) return false;
+    return trade.direction === "BUY" ? desired < marketPrice : desired > marketPrice;
   }
 
   // Coalesces a set of reference legs into at most ONE MODIFY_SL at the most protective stop,
@@ -6969,49 +7338,98 @@ class AppStore {
     positionTicket: string;
     legs: Array<LogicalTrade["legs"][number]>;
     source: string;
+    brokerStateKnown: boolean;
     brokerStopLoss?: number;
-    targetPriceByLeg?: Map<number, number>;
+    marketPrice?: number;
   }): Set<number> {
     const resolved = new Set<number>();
     if (!input.legs.length) return resolved;
     const open = this.originalOpenQueue(input.trade.id);
     if (!open) return resolved;
 
-    let bestStop: number | undefined;
-    let bestLeg: number | undefined;
+    const existing = new Set(
+      (
+        this.db
+          .query("SELECT leg FROM reference_stop_actions WHERE logical_trade_id = ?")
+          .all(input.trade.id) as Row[]
+      ).map((row) => Number(row.leg)),
+    );
+    const noChange: Array<{ leg: number; desired?: number }> = [];
+    const computed: Array<{ leg: number; desired: number }> = [];
     for (const leg of input.legs) {
+      if (existing.has(leg.leg)) {
+        resolved.add(leg.leg);
+        continue;
+      }
       const strategy = leg.strategy;
       if (!strategy || strategy.kind === "no-change") {
-        // Nothing to queue and nothing to wait for: a deliberate no-op is real work done.
-        resolved.add(leg.leg);
+        noChange.push({ leg: leg.leg });
         continue;
       }
       const stop = this.strategyStopPrice(input.trade, strategy);
       if (!stop) continue; // not computable yet; leave OPEN and retry
-      resolved.add(leg.leg);
-      if (this.improvesStop(input.trade, stop, bestStop)) {
-        bestStop = stop;
-        bestLeg = leg.leg;
+      computed.push({ leg: leg.leg, desired: stop });
+    }
+
+    let resolution: "QUEUED" | "SATISFIED" | undefined;
+    let queueItemId: string | undefined;
+    if (computed.length && input.brokerStateKnown) {
+      const best = computed.reduce((current, candidate) =>
+        this.improvesStop(input.trade, candidate.desired, current.desired) ? candidate : current,
+      );
+      if (this.stopIsSatisfied(input.trade, input.brokerStopLoss, best.desired)) {
+        resolution = "SATISFIED";
+      } else {
+        const active = this.activeModifySlFloor(input.trade, input.positionTicket);
+        if (this.stopIsSatisfied(input.trade, active.stopLoss, best.desired)) {
+          resolution = "QUEUED";
+          queueItemId = active.queueItemId;
+        } else if (this.stopCanBePlaced(input.trade, best.desired, input.marketPrice)) {
+          const legs = computed.map((item) => item.leg).sort((left, right) => left - right);
+          queueItemId = this.queueModifySlAfterVirtualTp({
+            trade: input.trade,
+            positionTicket: input.positionTicket,
+            newStopLoss: best.desired,
+            parsedSignalId: open.parsedSignalId,
+            idempotencyKey: `reference-stop:${input.trade.id}:${input.positionTicket}:${legs.join(",")}`,
+            originalText: `App-managed reference TP${best.leg} SL strategy`,
+            auditEvent: "virtual-tp.reference-sl-strategy",
+            auditMessage: "Reference TP leg queued SL strategy",
+            auditFields: {
+              leg: best.leg,
+              source: input.source,
+              coalescedLegs: legs,
+              brokerStopLoss: input.brokerStopLoss ?? null,
+            },
+          });
+          resolution = "QUEUED";
+        }
       }
     }
 
-    const floor = this.effectiveStopFloor(input.trade, input.brokerStopLoss);
-    if (bestStop !== undefined && this.improvesStop(input.trade, bestStop, floor)) {
-      this.queueModifySlAfterVirtualTp({
-        trade: input.trade,
-        positionTicket: input.positionTicket,
-        newStopLoss: bestStop,
-        parsedSignalId: open.parsedSignalId,
-        originalText: `App-managed reference TP${bestLeg} SL strategy`,
-        auditEvent: "virtual-tp.reference-sl-strategy",
-        auditMessage: "Reference TP leg queued SL strategy",
-        auditFields: {
-          leg: bestLeg,
-          source: input.source,
-          coalescedLegs: [...resolved],
-          stopFloor: floor ?? null,
-        },
-      });
+    const actions = [
+      ...noChange.map((item) => ({ ...item, resolution: "NO_CHANGE" })),
+      ...(resolution ? computed.map((item) => ({ ...item, resolution })) : []),
+    ];
+    const now = nowIso();
+    for (const action of actions) {
+      this.db
+        .query(
+          `INSERT INTO reference_stop_actions
+             (logical_trade_id, leg, position_ticket, desired_stop_loss, resolution, queue_item_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(logical_trade_id, leg) DO NOTHING`,
+        )
+        .run(
+          input.trade.id,
+          action.leg,
+          input.positionTicket,
+          action.desired ?? null,
+          action.resolution,
+          queueItemId ?? null,
+          now,
+          now,
+        );
+      resolved.add(action.leg);
     }
     return resolved;
   }
@@ -7022,9 +7440,8 @@ class AppStore {
   // target. Three properties this must hold, each of which is a money bug if broken:
   //
   //  - Coalesce. If price gaps through several reference legs, queue ONE MODIFY_SL at the
-  //    most protective resulting stop. Queue reads order by created_at with no tiebreaker
-  //    (see leaseNextQueueItem), so two commands in the same millisecond could otherwise
-  //    execute worst-last and leave a less protective stop on a live position.
+  //    most protective resulting stop. The queue also orders same-time stop work from less
+  //    protective to more protective as a final execution-order safeguard.
   //  - Never regress. A strategy that computes a stop no better than the one the broker
   //    already holds is dropped, so a late or out-of-order leg cannot widen risk.
   //  - Only burn a leg once the work is real. A leg is marked HIT only when its strategy
@@ -7038,6 +7455,7 @@ class AppStore {
     trade: LogicalTrade;
     positionTicket: string;
     price: number;
+    marketPrice: number;
     openPrice?: number;
     point?: number;
     brokerStopLoss?: number;
@@ -7057,32 +7475,35 @@ class AppStore {
     }
     if (!crossedLegs.length) return trade;
 
-    const resolved = this.queueCoalescedReferenceStop({
-      trade,
-      positionTicket,
-      legs: crossedLegs,
-      source: "price-monitor",
-      brokerStopLoss: input.brokerStopLoss,
-      targetPriceByLeg,
-    });
-    if (!resolved.size) return trade;
+    return this.db.transaction(() => {
+      const resolved = this.queueCoalescedReferenceStop({
+        trade,
+        positionTicket,
+        legs: crossedLegs,
+        source: "price-monitor",
+        brokerStateKnown: true,
+        brokerStopLoss: input.brokerStopLoss,
+        marketPrice: input.marketPrice,
+      });
+      if (!resolved.size) return trade;
 
-    const updated: LogicalTrade = {
-      ...trade,
-      legs: trade.legs.map((leg) =>
-        resolved.has(leg.leg)
-          ? {
-              ...leg,
-              status: "HIT" as const,
-              brokerEvidence: `app price ${price} crossed reference TP${leg.leg} ${targetPriceByLeg.get(leg.leg)}`,
-            }
-          : leg,
-      ),
-    };
-    this.db
-      .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
-      .run(updated.status, JSON.stringify(updated), updated.id);
-    return updated;
+      const updated: LogicalTrade = {
+        ...trade,
+        legs: trade.legs.map((leg) =>
+          resolved.has(leg.leg)
+            ? {
+                ...leg,
+                status: "HIT" as const,
+                brokerEvidence: `app favorable price ${price} crossed reference TP${leg.leg} ${targetPriceByLeg.get(leg.leg)}`,
+              }
+            : leg,
+        ),
+      };
+      this.db
+        .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+        .run(updated.status, JSON.stringify(updated), updated.id);
+      return updated;
+    })();
   }
 
   private queueSlStrategyAfterTpClose(
@@ -7096,16 +7517,19 @@ class AppStore {
     const strategy = leg?.strategy;
     if (strategy && strategy.kind !== "no-change") {
       const newStopLoss = this.strategyStopPrice(trade, strategy);
-      // Compare against every stop already asked for. A closing leg firing after a reference
-      // leg in the same tick would otherwise undo the more protective reference stop: TP1
-      // closing 50% and requesting entry can land after reference TP2 requested TP1.
-      const floor = this.effectiveStopFloor(trade);
+      const broker = this.latestPositionStop(trade, positionTicket);
+      const floor = this.effectiveStopFloor(trade, {
+        positionTicket,
+        brokerStateKnown: broker.known,
+        brokerStopLoss: broker.stopLoss,
+      });
       if (newStopLoss && this.improvesStop(trade, newStopLoss, floor)) {
         this.queueModifySlAfterVirtualTp({
           trade,
           positionTicket,
           newStopLoss,
           parsedSignalId: open.parsedSignalId,
+          idempotencyKey: `virtual-tp-stop:${trade.id}:${positionTicket}:leg:${legNumber}`,
           originalText: `App-managed TP${legNumber} SL strategy`,
           auditEvent: "virtual-tp.sl-strategy",
           auditMessage: "App-managed virtual TP queued SL strategy",
@@ -7122,21 +7546,23 @@ class AppStore {
     positionTicket: string;
     newStopLoss: number;
     parsedSignalId: string;
+    idempotencyKey: string;
     originalText: string;
     auditEvent: string;
     auditMessage: string;
     auditFields?: Record<string, unknown>;
   }) {
-    if (
-      this.hasLifecycleQueue(
-        input.trade.id,
-        (payload) =>
-          payload.commandType === "MODIFY_SL" &&
-          payload.targetPositionTicket === input.positionTicket &&
-          payload.newStopLoss === input.newStopLoss,
+    const existing = this.db
+      .query(
+        `SELECT id FROM queue_items
+         WHERE logical_trade_id = ?
+           AND status IN ('PENDING','LEASED','HELD')
+           AND json_extract(payload_json, '$.idempotencyKey') = ?
+         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
       )
-    ) {
-      return;
+      .get(input.trade.id, input.idempotencyKey) as Row | null;
+    if (existing) {
+      return String(existing.id);
     }
     const item: ExecutionQueueItem = {
       id: `queue_${nanoid(10)}`,
@@ -7152,6 +7578,7 @@ class AppStore {
         takeProfits: [],
         executionMode: "VIRTUAL_TP",
         targetPositionTicket: input.positionTicket,
+        idempotencyKey: input.idempotencyKey,
         originalText: input.originalText,
       },
     };
@@ -7162,6 +7589,7 @@ class AppStore {
       positionTicket: input.positionTicket,
       ...(input.auditFields ?? {}),
     });
+    return item.id;
   }
 
   private queueRunnerManagementAfterFinalTp(
@@ -7236,11 +7664,19 @@ class AppStore {
         : (this.openPriceForTrade(trade.id) ??
           this.snapshotOpenPrice(trade.accountId, positionTicket));
     if (!newStopLoss) return;
+    const broker = this.latestPositionStop(trade, positionTicket);
+    const floor = this.effectiveStopFloor(trade, {
+      positionTicket,
+      brokerStateKnown: broker.known,
+      brokerStopLoss: broker.stopLoss,
+    });
+    if (!this.improvesStop(trade, newStopLoss, floor)) return;
     this.queueModifySlAfterVirtualTp({
       trade,
       positionTicket,
       newStopLoss,
       parsedSignalId,
+      idempotencyKey: `virtual-tp-runner-stop:${trade.id}:${positionTicket}`,
       originalText: "App-managed runner SL strategy",
       auditEvent: "virtual-tp.runner-sl",
       auditMessage: "App-managed runner queued SL strategy",
@@ -7283,7 +7719,14 @@ class AppStore {
     if (strategy.kind === "set-sl-to-entry") {
       basePrice = this.openPriceForTrade(trade.id) ?? trade.entry?.from ?? 0;
     } else if (strategy.kind === "set-sl-to-tp") {
-      basePrice = trade.legs.find((leg) => leg.leg === strategy.tpLeg)?.targetPrice ?? 0;
+      const leg = trade.legs.find((item) => item.leg === strategy.tpLeg);
+      basePrice = leg
+        ? (virtualTpTargetPrice(
+            trade,
+            leg,
+            this.openPriceForTrade(trade.id) ?? trade.entry?.from,
+          ) ?? 0)
+        : 0;
     }
     if (!basePrice) return undefined;
     const next = trade.direction === "BUY" ? basePrice + offset : basePrice - offset;
@@ -10496,6 +10939,22 @@ class AppStore {
       "CREATE INDEX IF NOT EXISTS idx_queue_items_parsed_signal_created ON queue_items(parsed_signal_id, created_at)",
     );
     this.db.run(`
+      CREATE TABLE IF NOT EXISTS reference_stop_actions (
+        logical_trade_id TEXT NOT NULL,
+        leg INTEGER NOT NULL,
+        position_ticket TEXT NOT NULL,
+        desired_stop_loss REAL,
+        resolution TEXT NOT NULL,
+        queue_item_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (logical_trade_id, leg)
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_reference_stop_actions_queue ON reference_stop_actions(queue_item_id)",
+    );
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS held_lifecycle_drops (
         id TEXT PRIMARY KEY,
         held_queue_item_id TEXT NOT NULL,
@@ -12205,41 +12664,81 @@ class AppStore {
     const pendingReference = trade.legs.filter(
       (leg) => announced(leg) && leg.status === "OPEN" && isReferenceVirtualTpLeg(leg),
     );
-    const resolvedReference = positionTicket
-      ? this.queueCoalescedReferenceStop({
-          trade,
-          positionTicket,
-          legs: pendingReference,
-          source: "provider-announced",
-        })
-      : new Set<number>();
+    const broker = positionTicket
+      ? this.latestPositionStop(trade, positionTicket)
+      : { known: false, stopLoss: undefined };
+    const quote = this.liveMt5Snapshots
+      .get(trade.accountId ?? "")
+      ?.symbols.find(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          String((item as Record<string, unknown>).symbol ?? "").toUpperCase() ===
+            (trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "").toUpperCase(),
+      ) as Record<string, unknown> | undefined;
+    const marketPrice = Number(trade.direction === "BUY" ? (quote?.bid ?? 0) : (quote?.ask ?? 0));
 
-    const updated: LogicalTrade = {
-      ...trade,
-      legs: trade.legs.map((leg) => {
-        if (!announced(leg)) return leg;
-        // Reference legs are only consumed once their stop work is real.
-        if (
-          isReferenceVirtualTpLeg(leg) &&
-          leg.status === "OPEN" &&
-          !resolvedReference.has(leg.leg)
-        ) {
-          return leg;
+    this.db.transaction(() => {
+      const resolvedReference =
+        positionTicket && broker.known
+          ? this.queueCoalescedReferenceStop({
+              trade,
+              positionTicket,
+              legs: pendingReference,
+              source: "provider-announced",
+              brokerStateKnown: true,
+              brokerStopLoss: broker.stopLoss,
+              marketPrice,
+            })
+          : new Set<number>();
+      // The provider telling us a target was reached is durable evidence of a crossing, even
+      // when the stop cannot be placed right now (price retraced past it while we were down, so
+      // the desired stop sits on the wrong side of market). Record the crossing on the watermark
+      // so the monitor retries it. Without this the announcement is discarded and break-even is
+      // never applied, which is the incident shape that motivated v1.65.4 in the first place.
+      const unresolved = pendingReference.filter((leg) => !resolvedReference.has(leg.leg));
+      const openPrice = this.openPriceForTrade(trade.id) ?? trade.entry?.from;
+      let watermark = trade.virtualTpWatermark;
+      if (positionTicket && unresolved.length) {
+        const reached = unresolved
+          .map((leg) => virtualTpTargetPrice(trade, leg, openPrice))
+          .filter((value): value is number => Number.isFinite(value) && (value ?? 0) > 0);
+        if (reached.length) {
+          const best = trade.direction === "BUY" ? Math.max(...reached) : Math.min(...reached);
+          const previous =
+            watermark?.positionTicket === positionTicket ? watermark.favorablePrice : undefined;
+          const favorablePrice =
+            previous === undefined
+              ? best
+              : trade.direction === "BUY"
+                ? Math.max(previous, best)
+                : Math.min(previous, best);
+          if (favorablePrice !== previous) {
+            watermark = { positionTicket, favorablePrice, observedAt: nowIso() };
+          }
         }
-        return { ...leg, status: "HIT", brokerEvidence: "provider-announced" };
-      }),
-      commandHistory: [
-        ...trade.commandHistory,
-        {
-          commandType: signal.commandType,
-          text: signal.originalText,
-          at: new Date().toISOString(),
-        },
-      ],
-    };
-    this.db
-      .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
-      .run(JSON.stringify(updated), tradeId);
+      }
+      const updated: LogicalTrade = {
+        ...trade,
+        virtualTpWatermark: watermark,
+        legs: trade.legs.map((leg) => {
+          if (!announced(leg)) return leg;
+          if (isReferenceVirtualTpLeg(leg) && !resolvedReference.has(leg.leg)) return leg;
+          return { ...leg, status: "HIT", brokerEvidence: "provider-announced" };
+        }),
+        commandHistory: [
+          ...trade.commandHistory,
+          {
+            commandType: signal.commandType,
+            text: signal.originalText,
+            at: new Date().toISOString(),
+          },
+        ],
+      };
+      this.db
+        .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
+        .run(JSON.stringify(updated), tradeId);
+    })();
   }
 
   private resizePartialOpen(
@@ -13317,6 +13816,20 @@ function brokerOpenPriceFromSnapshot(record: unknown) {
 
 // The stop the broker currently holds on a snapshotted position. MT5 reports 0 for "no
 // stop", which must read as absent rather than as a stop at price zero.
+// Stop modifications the app generated from a configured strategy, as opposed to a provider
+// instruction or an operator action. Only these may be skipped when the live broker stop is
+// already at least as protective; a human asking for a wider stop must always be delivered.
+const APP_MANAGED_STOP_KEY_PREFIXES = [
+  "reference-stop:",
+  "virtual-tp-stop:",
+  "virtual-tp-runner-stop:",
+];
+
+function isAppManagedStopPayload(payload: ExecutionQueueItem["payload"]) {
+  const key = payload.idempotencyKey ?? "";
+  return APP_MANAGED_STOP_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
 function brokerStopLossFromSnapshot(record: unknown) {
   if (!record || typeof record !== "object") return undefined;
   const value = Number((record as Record<string, unknown>).sl ?? 0);

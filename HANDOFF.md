@@ -361,6 +361,37 @@ Found 2026-07-30, separate from that audit:
    `/api/health` would show green through a total capture outage. Surface `connected` in
    `/api/health` before wiring up any alerting.
 
+### v1.65.5 - durable reference-leg stop recovery (FIXED 2026-07-31, not yet deployed)
+
+This follow-up closes the v1.65.4 review findings in the API and core packages:
+
+- `reference_stop_actions` durably identifies each reference leg independently of its computed stop
+  price. New queue work, the action row, and the leg `HIT` transition share one SQLite transaction.
+- Snapshot reconciliation uses the current position ticket and broker stop. An `EXECUTED` command is
+  repaired when the live stop is absent or weaker. A stale `LEASED` or delivery-unknown `HELD`
+  command is confirmed from the broker stop or moved back to `PENDING` using the same queue row.
+- Existing v1.65.4 `HIT` reference legs are backfilled into the action table on the first matching
+  snapshot, including links to old reference `MODIFY_SL` rows when present.
+- The favorable BUY high-water or SELL low-water quote is stored on the logical trade before stop
+  work begins. A crash or restart cannot erase a crossing the API already sampled. The remembered
+  crossing waits when the desired stop is on the invalid side of the current market.
+- Fixed-stop work from reference legs, volume-closing legs, and fixed runner strategies observes the
+  live broker stop and active work for the exact position ticket. `sl = 0` is treated as no stop.
+- Provider full-TP announcements share the coalescing path, unresolved reference legs remain in their
+  prior status, original-plan reads require `OPEN_TRADE`, and same-time stop commands lease from the
+  less protective level toward the more protective level.
+- `set-sl-to-tp` now resolves a referenced leg through the same target calculator used by the monitor,
+  including targets derived from configured default distances.
+
+Residual gap: the EA snapshot reports only current bid, ask, position fields, and deal history. It
+does not report an interval high or low. A target crossed entirely while the API and EA reporting path
+are unavailable can still be missed if price retraces before the next snapshot and no deal records the
+crossing. Closing that gap requires a new EA protocol field or broker price-history feed, both outside
+this API-only patch.
+
+No commit, push, deployment, or EA source change was made. Package version is 1.65.5; EA metadata
+remains 1.65.0.
+
 ### v1.65.4 — 0 percent TP legs never moved the stop (FIXED 2026-07-31, not yet deployed)
 
 Symptom: KAL VIP stops never moved to break-even. `trade_aq9UUlUXPQ` on `mt5-54945785` shows it:

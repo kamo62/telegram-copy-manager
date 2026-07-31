@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.65.5 - 2026-07-31 (Patch)
+
+Release impact: Patch because this hardens the existing virtual-TP stop workflow without changing
+the API or EA protocol. The SQLite action table is additive and created automatically on startup.
+
+- Added durable per-leg reference-stop actions. The queue insert and leg `HIT` transition now commit
+  together, and live snapshots repair an `EXECUTED` command whose stop is absent or replay the same
+  delivery-unknown `HELD` or stale `LEASED` command.
+- Persisted each trade's most favorable observed quote so a sampled crossing survives a crash or
+  restart. A remembered crossing waits until the desired stop is valid relative to the current bid or
+  ask before it queues work.
+- Made every virtual-TP fixed-stop path compare against the live broker stop and active stop work for
+  the same position ticket. MT5 `sl = 0` remains an absent stop for BUY and SELL positions.
+- Coalesced provider full-TP reference actions at the most protective stop, preserved unresolved
+  reference legs in every status, selected only the original `OPEN_TRADE` plan, and ordered
+  same-time stop work so the most protective command executes last.
+- Made `set-sl-to-tp` resolve referenced targets derived from default distances as well as explicit
+  Telegram prices, so those stop strategies no longer remain permanently uncomputable.
+- Added restart compatibility for v1.65.4 trades whose reference legs were already `HIT` before the
+  durable action table existed.
+- Restricted the already-satisfied stop skip to app-generated strategies. A provider or operator
+  `MODIFY_SL` can deliberately widen a stop to give a trade room, and the skip was swallowing those
+  and recording them as executed without ever sending them to the EA.
+- Recorded a provider-announced take-profit hit on the trade's favorable-price watermark when the
+  desired stop cannot be placed yet. The announcement is durable evidence that the target was
+  reached, and discarding it meant break-even was never applied after a crossing seen only while the
+  app was down.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
 ## 1.65.4 - 2026-07-31 (Patch)
 
 Release impact: Patch because this restores intended stop-management behaviour without changing API,
