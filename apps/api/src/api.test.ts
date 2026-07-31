@@ -10371,6 +10371,97 @@ describe("Telegram TC API", () => {
     expect(work).toContain("newStopLoss=1.084");
   });
 
+  test("a limit order that fills via snapshot still moves the stop on a reference leg", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+          { leg: 2, percentage: 100, strategy: { kind: "set-sl-to-tp", tpLeg: 1, offsetPips: 0 } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY LIMIT EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const shortId = approval.logicalTradeId.replace(/^trade[_-]/, "");
+    await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+
+    // The EA reports the PENDING order accepted: an order ticket, no position yet.
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approval.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request executed",
+        orderTicket: "70701",
+        positionTicket: "0",
+        dealTicket: "0",
+        requestedPrice: 1.086,
+        filledPrice: 0,
+        volume: 0.02,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const snap = async (bid: number, ask: number) =>
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          positions: [
+            {
+              ticket: "70701",
+              symbol: "EURUSD.raw",
+              type: 0,
+              volume: 0.02,
+              openPrice: 1.086,
+              sl: 1.081,
+              tp: 0,
+              profit: 10,
+              magic: 26050901,
+              isExternal: false,
+              comment: `ttc:${shortId}`,
+            },
+          ],
+          orders: [],
+          symbols: [{ symbol: "EURUSD.raw", bid, ask, point: 0.00001 }],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+
+    // The limit fills: the position appears in the snapshot, below TP1.
+    await snap(1.0865, 1.0867);
+    // Price then crosses TP1 (1.0910), the 0% reference leg.
+    await snap(1.0915, 1.0917);
+
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("commandType=MODIFY_SL");
+    expect(work).toContain("newStopLoss=1.086");
+  });
+
   test("uses an unconfigured single Telegram TP at 100 percent", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, {
