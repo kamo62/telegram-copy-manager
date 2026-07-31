@@ -10462,6 +10462,158 @@ describe("Telegram TC API", () => {
     expect(work).toContain("newStopLoss=1.086");
   });
 
+  // Production shape of trade_cZ3sYqqroA (2026-07-31): a long-lived pending order vanished
+  // from one snapshot, the app cancelled the trade and marked its legs SKIPPED, then the
+  // order genuinely filled at the broker and the history deal resurrected the trade to OPEN.
+  // The reference-leg monitor keys on leg.status === "OPEN", so the stop must still move
+  // when price crosses the 0% leg after that resurrection.
+  test("a pending order cancelled by a snapshot blip still moves the stop after its real fill", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-blip-"));
+    const databasePath = join(tempDir, "app.db");
+    const app = createApi({ databasePath, seedDemoData: false, telegramAdapter: "mock" });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+          { leg: 2, percentage: 100, strategy: { kind: "set-sl-to-tp", tpLeg: 1, offsetPips: 0 } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY LIMIT EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const shortId = approval.logicalTradeId.replace(/^trade[_-]/, "");
+    await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+
+    // The EA reports the PENDING order accepted: an order ticket, no position yet.
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approval.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: "Request executed",
+        orderTicket: "70701",
+        positionTicket: "0",
+        dealTicket: "0",
+        requestedPrice: 1.086,
+        filledPrice: 0,
+        volume: 0.02,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    // The order has been pending long enough that the missing-order grace has expired.
+    {
+      const db = new Database(databasePath);
+      db.query(
+        "UPDATE broker_orders SET created_at = ? WHERE logical_trade_id = ? AND action = 'PENDING_OPEN'",
+      ).run(new Date(Date.now() - 60_000).toISOString(), approval.logicalTradeId);
+      db.close();
+    }
+
+    const snap = async (input: { positions?: unknown[]; bid: number; ask: number }) =>
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          positions: input.positions ?? [
+            {
+              ticket: "70701",
+              symbol: "EURUSD.raw",
+              type: 0,
+              volume: 0.02,
+              openPrice: 1.086,
+              sl: 1.081,
+              tp: 0,
+              profit: 10,
+              magic: 26050901,
+              isExternal: false,
+              comment: `ttc:${shortId}`,
+            },
+          ],
+          orders: [],
+          symbols: [{ symbol: "EURUSD.raw", bid: input.bid, ask: input.ask, point: 0.00001 }],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+
+    // One flaky snapshot omits the pending order entirely: the app cancels the trade
+    // and marks its legs SKIPPED.
+    await snap({ positions: [], bid: 1.085, ask: 1.0852 });
+
+    // The broker then genuinely fills the limit; the fill deal arrives via history
+    // and resurrects the trade.
+    await app.request("/api/mt5/history", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        deals: [
+          {
+            dealTicket: "90001",
+            orderTicket: "70701",
+            positionTicket: "70701",
+            entry: "0",
+            reason: 3,
+            symbol: "EURUSD.raw",
+            price: 1.086,
+            volume: 0.02,
+            profit: 0,
+            commission: 0,
+            swap: 0,
+            comment: `ttc:${shortId}`,
+            time: "2026.07.31 16:43:20",
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    // The position appears below TP1, then price crosses the 0% reference leg (1.0910).
+    await snap({ bid: 1.0865, ask: 1.0867 });
+    await snap({ bid: 1.0915, ask: 1.0917 });
+
+    // The monitor demonstrably processed the trade: the favorable-price watermark advanced.
+    {
+      const db = new Database(databasePath);
+      const row = db
+        .query("SELECT status, data_json FROM logical_trades WHERE id = ?")
+        .get(approval.logicalTradeId) as { status: string; data_json: string };
+      db.close();
+      expect(row.status).toBe("OPEN");
+      const trade = JSON.parse(row.data_json) as {
+        virtualTpWatermark?: { favorablePrice: number };
+      };
+      expect(trade.virtualTpWatermark?.favorablePrice).toBe(1.0915);
+    }
+
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("commandType=MODIFY_SL");
+    expect(work).toContain("newStopLoss=1.086");
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
   test("uses an unconfigured single Telegram TP at 100 percent", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, {

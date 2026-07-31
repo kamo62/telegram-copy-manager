@@ -7892,6 +7892,12 @@ class AppStore {
     let closedLeg: number | undefined;
     if (action === "OPEN") {
       if (trade.status === "CLOSED" || this.hasRecordedRealFullClose(tradeId)) return;
+      // A pending order that vanished from a snapshot gets its trade CANCELLED and its
+      // legs SKIPPED. The broker can still fill that order, and this deal is the proof
+      // the cancellation was wrong. Reopen the legs the cancellation skipped, or the
+      // virtual-TP monitor (which keys on leg.status === "OPEN") ignores the resurrected
+      // trade for its whole life and no TP or stop strategy ever fires.
+      const revivesCancelled = trade.status === "CANCELLED";
       updated = {
         ...trade,
         status: "OPEN",
@@ -7901,7 +7907,9 @@ class AppStore {
         brokerComment: deal.comment,
         lastSnapshotAt: deal.time ?? new Date().toISOString(),
         legs: trade.legs.map((leg) =>
-          leg.status === "PLANNED" ? { ...leg, status: "OPEN", brokerEvidence: evidence } : leg,
+          leg.status === "PLANNED" || (revivesCancelled && leg.status === "SKIPPED")
+            ? { ...leg, status: "OPEN", brokerEvidence: evidence }
+            : leg,
         ),
       };
     } else if (action === "PARTIAL_CLOSE") {
@@ -12867,6 +12875,10 @@ class AppStore {
         ),
       };
     } else if (payload.commandType === "OPEN_TRADE") {
+      // Same revival rule as reconcileHistoryDeal: an executed open on a trade the
+      // snapshot sweep cancelled proves the cancellation wrong, so the legs that
+      // cancellation skipped must reopen or the virtual-TP monitor never sees them.
+      const revivesCancelled = trade.status === "CANCELLED";
       updated = {
         ...trade,
         status: "OPEN",
@@ -12876,7 +12888,9 @@ class AppStore {
         brokerComment: undefined,
         lastSnapshotAt: undefined,
         legs: trade.legs.map((leg) =>
-          leg.status === "PLANNED" ? { ...leg, status: "OPEN", brokerEvidence: evidence } : leg,
+          leg.status === "PLANNED" || (revivesCancelled && leg.status === "SKIPPED")
+            ? { ...leg, status: "OPEN", brokerEvidence: evidence }
+            : leg,
         ),
       };
     } else if (payload.commandType === "CLOSE_TRADE") {
