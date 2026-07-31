@@ -48,31 +48,42 @@ for the backend URL.
 
 ## Application Surfaces
 
-The web app is an operator dashboard, not a landing page. The main navigation is:
+The web app is an operator dashboard, not a landing page. The sidebar has three groups.
 
-- `Live`: account overview, account-specific live workspace, pending EA link slots, and the active
-  workspace tabs.
-- `Telegram Setup`: Telegram login, OTP/2FA flow, dialog refresh, provider selection, and provider
-  resync for the global provider-monitoring lifecycle.
-- `Linked Accounts`: MT5 link-slot creation, link-code workflow, connected account cards, provider
-  assignment summary, and read-only external broker activity.
-- `Settings`: execution defaults, allowed order types, polling/dedup settings, stale open-trade
-  expiry, risk display thresholds, reporting currency/USD-ZAR rate, and optional Azure OpenAI parser
-  extraction key storage.
+`Desk`:
 
-Inside the Live workspace:
+- `Operations` (`/`): live account posture, exposure, and the latest desk activity.
+- `Review queue` (`/logs`): Parser Lab, recent-message parsing, AI review, approve/ignore actions,
+  fixture classification/redaction, saved fixtures, signal queue, and EA execution reports. Carries
+  a badge when signals need review.
 
-- `Performance`: overview chart, statistics view, account/provider range metrics, and external
-  manual broker activity that affects equity.
-- `Providers`: aggregate provider overview, account-scoped copy chips, provider config, parser
-  template and symbol lock, lot/risk sizing, TP allocation, runner config, provider config dry-run
-  tests, parse-recent action, and CSV performance export.
-- `History`: open positions/orders, external positions/orders, closed trade rollups, and per-leg
-  close detail.
-- `Equity Guardian`: account drawdown thresholds and manual unpause controls.
-- `Symbol Settings`: global/provider aliases and per-account broker symbol mappings.
-- `Logs`: Parser Lab, recent-message parsing, AI review, approve/ignore actions, fixture
-  classification/redaction, saved fixtures, signal queue, and EA execution reports.
+`Accounts`: one entry per connected MT5 account, plus any pending EA link slots waiting for their
+link code to be claimed. Selecting an account opens its workspace. `Add account`
+(`/linked-accounts`) handles MT5 link-slot creation, the link-code workflow, connected account
+cards, provider assignment summary, and read-only external broker activity. It has no standing nav
+item and is reached through that button.
+
+`Setup`:
+
+- `Providers` (`/providers`): aggregate provider overview, account-scoped copy chips, provider
+  config, parser template and symbol lock, lot/risk sizing, TP allocation, runner config, provider
+  config dry-run tests, parse-recent action, and CSV performance export.
+- `Symbols` (`/symbols`): global and provider aliases, plus per-account broker symbol mappings.
+- `Telegram` (`/telegram`): Telegram login, OTP/2FA flow, dialog refresh, provider selection, and
+  provider resync for the global provider-monitoring lifecycle.
+- `Settings` (`/settings`): execution defaults, allowed order types, polling/dedup settings, stale
+  open-trade expiry, risk display thresholds, reporting currency/USD-ZAR rate, and optional Azure
+  OpenAI parser extraction key storage.
+
+An account workspace at `/accounts/:accountId/:tab` shows the account-scoped tab strip:
+`performance`, `providers`, `history`, `equity-guardian`, `symbols`, and `logs`. `Performance`
+covers the overview chart, statistics view, account/provider range metrics, and external manual
+broker activity that affects equity. `History` covers open positions and orders, external positions
+and orders, closed trade rollups, and per-leg close detail. `Equity Guardian` covers account
+drawdown thresholds and manual unpause controls.
+
+The top-level `/providers`, `/symbols`, and `/logs` routes are standalone views. They do not render
+the account workspace tab strip.
 
 ## Repository Structure
 
