@@ -90,6 +90,82 @@ function realFixtureMessages(ids: string[]): TelegramCapturedMessage[] {
   });
 }
 
+// Opens a VIRTUAL_TP trade end to end: parse, approve, drain the open command, report it
+// filled. Returns the approval so callers can post snapshots against the same position.
+async function openVirtualTpTrade(
+  app: ReturnType<typeof createApi>,
+  providerId: string,
+  input: { rawText: string; ticket: string; filledPrice: number; volume?: number },
+) {
+  const parsed = await json<{ parsedSignalId: string }>(
+    await app.request("/api/parser/parse", {
+      method: "POST",
+      body: JSON.stringify({
+        providerId,
+        accountId: "mt5-63442826",
+        rawText: input.rawText,
+      }),
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+  );
+  const shortId = approval.logicalTradeId.replace(/^trade[_-]/, "");
+  await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+  await app.request("/api/mt5/report", {
+    method: "POST",
+    body: JSON.stringify({
+      accountId: "mt5-63442826",
+      queueItemId: approval.queueItemId,
+      status: "EXECUTED",
+      retcode: 10009,
+      retcodeExternal: 0,
+      brokerComment: `ttc:${shortId}`,
+      orderTicket: input.ticket,
+      positionTicket: input.ticket,
+      dealTicket: `6${input.ticket}`,
+      requestedPrice: input.filledPrice,
+      filledPrice: input.filledPrice,
+      volume: input.volume ?? 0.02,
+      errorText: "",
+    }),
+    headers: { "content-type": "application/json" },
+  });
+  return { ...approval, shortId };
+}
+
+async function postVirtualTpSnapshot(
+  app: ReturnType<typeof createApi>,
+  approval: { shortId: string },
+  input: { ticket: string; bid: number; ask: number; sl: number; volume?: number },
+) {
+  await app.request("/api/mt5/snapshot", {
+    method: "POST",
+    body: JSON.stringify({
+      accountId: "mt5-63442826",
+      positions: [
+        {
+          ticket: input.ticket,
+          symbol: "EURUSD.raw",
+          type: 0,
+          volume: input.volume ?? 0.02,
+          openPrice: 1.086,
+          sl: input.sl,
+          tp: 0,
+          profit: 40,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approval.shortId}`,
+        },
+      ],
+      orders: [],
+      symbols: [{ symbol: "EURUSD.raw", bid: input.bid, ask: input.ask, point: 0.00001 }],
+    }),
+    headers: { "content-type": "application/json" },
+  });
+}
+
 async function configureProviderWithAccount(
   app: ReturnType<typeof createApi>,
   input: {
@@ -9315,6 +9391,271 @@ describe("Telegram TC API", () => {
     expect(closeWork).toContain("partialCloseValue=1");
     expect(closeWork).toContain("partialCloseVolume=0.01");
     expect(closeWork).toContain("targetPositionTicket=70001");
+  });
+
+  test("a 0 percent reference TP leg moves the stop without closing volume", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    // KAL VIP shape: leg 1 carries no volume and exists only to move the stop to
+    // entry when price reaches TP1. Leg 2 closes the whole position.
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+          { leg: 2, percentage: 100, strategy: { kind: "set-sl-to-tp", tpLeg: 1, offsetPips: 0 } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({
+          providerId,
+          accountId: "mt5-63442826",
+          rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const approval = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const shortId = approval.logicalTradeId.replace(/^trade[_-]/, "");
+    await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approval.queueItemId,
+        status: "EXECUTED",
+        retcode: 10009,
+        retcodeExternal: 0,
+        brokerComment: `ttc:${shortId}`,
+        orderTicket: "70101",
+        positionTicket: "70101",
+        dealTicket: "60101",
+        requestedPrice: 1.086,
+        filledPrice: 1.086,
+        volume: 0.02,
+        errorText: "",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    // Price crosses TP1 (1.0910) but not TP2 (1.0950).
+    await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        positions: [
+          {
+            ticket: "70101",
+            symbol: "EURUSD.raw",
+            type: 0,
+            volume: 0.02,
+            openPrice: 1.086,
+            sl: 1.081,
+            tp: 0,
+            profit: 40,
+            magic: 26050901,
+            isExternal: false,
+            comment: `ttc:${shortId}`,
+          },
+        ],
+        orders: [],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.0911, ask: 1.0913, point: 0.00001 }],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    // The reference leg must move the stop to the filled open price...
+    expect(work).toContain("commandType=MODIFY_SL");
+    expect(work).toContain("newStopLoss=1.086");
+    expect(work).toContain("targetPositionTicket=70101");
+    // ...and must never close volume, because it is allocated 0 percent.
+    expect(work).not.toContain("commandType=CLOSE_PARTIAL");
+  });
+
+  test("coalesces several crossed reference legs into one most-protective stop", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+          { leg: 2, percentage: 0, strategy: { kind: "set-sl-to-tp", tpLeg: 1, offsetPips: 0 } },
+          { leg: 3, percentage: 100, strategy: { kind: "no-change" } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0920\nTP3 1.0950",
+      ticket: "70201",
+      filledPrice: 1.086,
+    });
+    // Price gaps past TP1 (1.0910) and TP2 (1.0920), not TP3.
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70201",
+      bid: 1.093,
+      ask: 1.0932,
+      sl: 1.081,
+    });
+
+    const first = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    // Leg 2's set-sl-to-tp(1) yields 1.0910, which beats leg 1's entry of 1.0860 on a BUY.
+    expect(first).toContain("commandType=MODIFY_SL");
+    expect(first).toContain("newStopLoss=1.091");
+    // Exactly one stop command: a second poll must find no further reference work.
+    const second = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(second).not.toContain("commandType=MODIFY_SL");
+  });
+
+  test("never regresses a stop the broker already holds at a better level", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+          { leg: 2, percentage: 100, strategy: { kind: "no-change" } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70301",
+      filledPrice: 1.086,
+    });
+    // The broker stop is already at 1.0900, better than set-sl-to-entry's 1.0860 on a BUY.
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70301",
+      bid: 1.0911,
+      ask: 1.0913,
+      sl: 1.09,
+    });
+
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).not.toContain("commandType=MODIFY_SL");
+    expect(work).not.toContain("commandType=CLOSE_PARTIAL");
+  });
+
+  test("a provider-announced TP hit still moves the stop on a reference leg", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+          { leg: 2, percentage: 100, strategy: { kind: "no-change" } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70401",
+      filledPrice: 1.086,
+    });
+    // Price has NOT reached TP1, so the monitor cannot be the trigger.
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70401",
+      bid: 1.0875,
+      ask: 1.0877,
+      sl: 1.081,
+    });
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+    ).not.toContain("commandType=MODIFY_SL");
+
+    // The provider announces TP1 instead.
+    const hit = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId, accountId: "mt5-63442826", rawText: "TP 1" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/signals/${hit.parsedSignalId}/approve`, { method: "POST" });
+
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("commandType=MODIFY_SL");
+    expect(work).toContain("newStopLoss=1.086");
+  });
+
+  test("a provider TP hit before the first snapshot does not burn the reference leg", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureProviderWithAccount(app, {
+      availableSymbols: ["EURUSD.raw"],
+    });
+    await app.request(`/api/providers/${providerId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        riskMode: "fixed",
+        riskAmount: 0.02,
+        takeProfitLevels: [
+          { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+          { leg: 2, percentage: 100, strategy: { kind: "no-change" } },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    // The OPEN_TRADE report clears matchedBrokerTickets until the next matching snapshot, so
+    // an announcement landing in this window has no position to modify.
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70501",
+      filledPrice: 1.086,
+    });
+
+    const hit = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId, accountId: "mt5-63442826", rawText: "TP 1" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request(`/api/signals/${hit.parsedSignalId}/approve`, { method: "POST" });
+    // Nothing could be queued, so the leg must NOT have been consumed.
+    expect(
+      await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+    ).not.toContain("commandType=MODIFY_SL");
+
+    // The monitor must still be able to fire it once a snapshot arrives past TP1.
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70501",
+      bid: 1.0911,
+      ask: 1.0913,
+      sl: 1.081,
+    });
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("commandType=MODIFY_SL");
+    expect(work).toContain("newStopLoss=1.086");
   });
 
   test("uses an unconfigured single Telegram TP at 100 percent", async () => {

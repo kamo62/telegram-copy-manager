@@ -1,5 +1,112 @@
 # Changelog
 
+## 1.65.4 - 2026-07-31 (Patch)
+
+Release impact: Patch because this restores intended stop-management behaviour without changing API,
+parser, database, or EA contracts. `MODIFY_SL` is an existing command the EA already handles.
+
+- A take-profit leg allocated 0 percent now applies its own stop strategy when price reaches its
+  target, without closing any volume. This is how break-even is configured when the operator does not
+  want to give up a partial at TP1, and the virtual-TP monitor was skipping those legs entirely, so
+  the stop stayed at the provider's original level for the life of the trade.
+- Crossed reference legs are resolved as one batch before any volume-closing leg, so a price gap
+  through several of them queues a single stop modification at the most protective resulting level.
+  The queue is read in `created_at` order with no tiebreaker, so two commands in the same millisecond
+  could otherwise have executed worst-last and left a less protective stop on a live position.
+- A reference strategy is dropped when it would not improve on the stop the broker already reports,
+  so a late or out-of-order leg can no longer widen risk on an open position.
+- A reference leg is marked `HIT` only once its strategy was queued, was already satisfied, or is a
+  deliberate no-change. A leg whose stop price is not yet computable, such as a market entry with no
+  fill price recorded, stays open and is retried on the next snapshot instead of being consumed.
+- A provider-announced take-profit hit now also applies a reference leg's stop strategy. Marking the
+  leg hit had taken it out of the monitor's reach, so for providers that post "TP1 hit" the
+  announcement silently consumed the only trigger break-even had.
+- Runner hand-off no longer waits for reference legs to close, which they never do, and a late partial
+  opening report no longer reopens a reference leg that has already fired.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
+## 1.65.3 - 2026-07-30 (Patch)
+
+Release impact: Patch because this improves operator feedback and corrects reconciliation styling
+without changing API, execution, parser, database, or EA contracts.
+
+- Replaced the bright dashed out-of-sync resolution border with the standard card divider.
+- Added an explicit disabled `Dismissing…` state while bulk held-signal dismissal is completing.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
+## 1.65.2 - 2026-07-30 (Patch)
+
+Release impact: Patch because this corrects table density and clipping without changing API,
+execution, parser, database, or EA contracts.
+
+- Reduced shared data-table horizontal padding and aligned row headings to the 12px table scale so
+  dense provider and performance columns use the available desktop width.
+- Corrected the performance attribution table wrapper sizing so its 16px side margins no longer
+  push the rightmost realised P/L column behind the clipped panel edge.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
+## 1.65.1 - 2026-07-29 (Patch)
+
+Release impact: Patch because this corrects responsive presentation and removes redundant provider
+summary content without changing API, execution, parser, database, or EA contracts.
+
+- Reflowed held-signal rows into compact two-column cards on narrow screens, hid lifecycle release
+  buttons until a target trade is selected, and changed machine-style review reasons into readable
+  supporting text.
+- Kept the compact Symbol Mapping table inside the viewport by prioritising provider symbol, broker
+  symbol, status, and actions on narrow screens.
+- Removed the duplicate provider-health card strip from the all-account Providers page while
+  retaining health cards in account-specific Provider views.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
+## 1.65.0 - 2026-07-29 (Minor)
+
+Release impact: Minor because this adds a backward-compatible bulk review workflow while keeping
+the existing API, execution, parser, database, and EA contracts unchanged.
+
+- Added a confirmed Dismiss all action that uses the existing audited per-signal dismissal path and
+  reports partial failures instead of hiding them.
+- Made top-level Logs a standalone review view and condensed the held-signal table from ten columns
+  to six so row actions stay visible on desktop.
+- Replaced raw chart epochs and repeated day-only ticks with bounded date-and-time labels, and fixed
+  provider action cells to use theme tokens instead of a hard-coded dark fallback.
+- Kept the EA source version metadata aligned at 1.65.0; no EA behavior or protocol changed.
+
+## 1.64.5 - 2026-07-29 (Patch)
+
+Release impact: Patch because this corrects route presentation without changing API, execution,
+parser, database, or EA contracts.
+
+- Made top-level Providers and Symbols standalone Setup views without the unrelated dashboard tab
+  strip or operational alert banner.
+- Preserved account workspace navigation on account-specific Provider routes.
+
+## 1.64.4 - 2026-07-29 (Patch)
+
+Release impact: Patch because this removes redundant presentation and standardises existing controls
+without changing API, execution, parser, database, or EA contracts.
+
+- Removed the repeated account summary from secondary routes so Providers, Performance, Guardian,
+  Logs, and Symbols begin with their actual content.
+- Moved provider export beside its explanatory copy and flattened provider monitoring and Telegram
+  setup status into compact rows instead of one-purpose card sections.
+- Standardised segmented controls, compacted the statistics toolbar, simplified Symbol Mapping
+  framing, and replaced the glowing growth chart with a shorter monochrome plot.
+
+## 1.64.3 - 2026-07-29 (Patch)
+
+Release impact: Patch because this reduces presentation density and redundant framing without
+changing API, execution, parser, database, or EA contracts.
+
+- Compacted the shared account summary and workspace spacing so secondary-route content sits above
+  the fold on full-screen displays.
+- Removed redundant Settings, Providers, and Telegram panel headers and flattened nested page
+  shells while preserving their existing controls and accessible labels.
+- Reduced empty-state and panel padding, aligned Settings section icons with their headings, and
+  restored a single-column Settings layout on compact screens.
+- Shifted light mode to a warmer neutral canvas with quieter shadows while preserving the requested
+  SF Pro type, text hierarchy, icon sizes, and radii.
+
 ## 1.64.2 - 2026-07-29 (Patch)
 
 Release impact: Patch because this standardises presentation and controls without changing API,

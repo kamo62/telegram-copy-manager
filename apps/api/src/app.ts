@@ -6456,31 +6456,45 @@ class AppStore {
         trade.entry?.from;
       const payload = this.originalOpenQueue(trade.id)?.payload;
       const brokerManagedLeg = brokerManagedVirtualTpLeg(payload);
-      for (const leg of trade.legs) {
+      let current = trade;
+      // Resolve every crossed 0%-allocation leg first, as one batch. These legs close no
+      // volume and exist only to move the stop, so a price gap through several of them must
+      // settle on a single most-protective stop. Doing them before any closing leg also
+      // means the closing leg's `break` cannot strand a later reference leg for a tick, by
+      // which time price may have retraced past its target.
+      current = this.applyCrossedReferenceLegs({
+        trade: current,
+        positionTicket,
+        price,
+        openPrice,
+        point: quote.point,
+        brokerStopLoss: brokerStopLossFromSnapshot(position),
+      });
+      for (const leg of current.legs) {
         if (leg.status !== "OPEN" || isReferenceVirtualTpLeg(leg)) continue;
-        const targetPrice = virtualTpTargetPrice(trade, leg, openPrice, quote.point);
+        const targetPrice = virtualTpTargetPrice(current, leg, openPrice, quote.point);
         if (!targetPrice) continue;
         if (
           leg.leg === brokerManagedLeg &&
           brokerTakeProfitMatchesTarget(
             position,
             targetPrice,
-            trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "",
+            current.symbol.brokerSymbol ?? current.symbol.canonicalSymbol ?? "",
           )
         ) {
           continue;
         }
-        const hit = trade.direction === "BUY" ? price >= targetPrice : price <= targetPrice;
+        const hit = current.direction === "BUY" ? price >= targetPrice : price <= targetPrice;
         if (!hit) continue;
-        const queued = this.queueVirtualTpClose(trade, leg.leg, positionTicket, price);
+        const queued = this.queueVirtualTpClose(current, leg.leg, positionTicket, price);
         if (queued) {
-          const updated: LogicalTrade = {
-            ...trade,
-            legs: trade.legs.map((item) =>
+          current = {
+            ...current,
+            legs: current.legs.map((item) =>
               item.leg === leg.leg
                 ? {
                     ...item,
-                    status: "HIT",
+                    status: "HIT" as const,
                     brokerEvidence: `app price ${price} crossed TP${leg.leg} ${targetPrice}`,
                   }
                 : item,
@@ -6488,7 +6502,7 @@ class AppStore {
           };
           this.db
             .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
-            .run(updated.status, JSON.stringify(updated), trade.id);
+            .run(current.status, JSON.stringify(current), current.id);
         }
         break;
       }
@@ -6914,6 +6928,163 @@ class AppStore {
     return true;
   }
 
+  // The most protective stop the app currently believes sits on the position: the broker's
+  // reported stop when a snapshot is in hand, every MODIFY_SL it has already asked for
+  // (pending, leased, or executed), and the original signal stop as a floor. Every path must
+  // compare against this before queueing a new stop, otherwise a later or out-of-order
+  // strategy widens risk on a live position.
+  //
+  // Not captured: a stop the operator moved by hand in the terminal. Treated as acceptable,
+  // because being conservative here can only ever skip a stop move, never widen one.
+  private effectiveStopFloor(trade: LogicalTrade, brokerStopLoss?: number) {
+    const candidates: number[] = [];
+    if (brokerStopLoss !== undefined) candidates.push(brokerStopLoss);
+    if (trade.stopLoss !== undefined && trade.stopLoss > 0) candidates.push(trade.stopLoss);
+    const rows = this.db
+      .query(
+        `SELECT payload_json FROM queue_items
+         WHERE logical_trade_id = ? AND status IN ('PENDING','LEASED','EXECUTED')`,
+      )
+      .all(trade.id) as Row[];
+    for (const row of rows) {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      if (payload.commandType !== "MODIFY_SL") continue;
+      const value = Number(payload.newStopLoss ?? 0);
+      if (Number.isFinite(value) && value > 0) candidates.push(value);
+    }
+    if (!candidates.length) return undefined;
+    return trade.direction === "BUY" ? Math.max(...candidates) : Math.min(...candidates);
+  }
+
+  private improvesStop(trade: LogicalTrade, candidate: number, incumbent?: number) {
+    if (incumbent === undefined) return true;
+    return trade.direction === "BUY" ? candidate > incumbent : candidate < incumbent;
+  }
+
+  // Coalesces a set of reference legs into at most ONE MODIFY_SL at the most protective stop,
+  // and returns the legs whose work is now real and may therefore be marked HIT. Shared by the
+  // price-monitor path and the provider-announced path so both obey the same guarantees.
+  private queueCoalescedReferenceStop(input: {
+    trade: LogicalTrade;
+    positionTicket: string;
+    legs: Array<LogicalTrade["legs"][number]>;
+    source: string;
+    brokerStopLoss?: number;
+    targetPriceByLeg?: Map<number, number>;
+  }): Set<number> {
+    const resolved = new Set<number>();
+    if (!input.legs.length) return resolved;
+    const open = this.originalOpenQueue(input.trade.id);
+    if (!open) return resolved;
+
+    let bestStop: number | undefined;
+    let bestLeg: number | undefined;
+    for (const leg of input.legs) {
+      const strategy = leg.strategy;
+      if (!strategy || strategy.kind === "no-change") {
+        // Nothing to queue and nothing to wait for: a deliberate no-op is real work done.
+        resolved.add(leg.leg);
+        continue;
+      }
+      const stop = this.strategyStopPrice(input.trade, strategy);
+      if (!stop) continue; // not computable yet; leave OPEN and retry
+      resolved.add(leg.leg);
+      if (this.improvesStop(input.trade, stop, bestStop)) {
+        bestStop = stop;
+        bestLeg = leg.leg;
+      }
+    }
+
+    const floor = this.effectiveStopFloor(input.trade, input.brokerStopLoss);
+    if (bestStop !== undefined && this.improvesStop(input.trade, bestStop, floor)) {
+      this.queueModifySlAfterVirtualTp({
+        trade: input.trade,
+        positionTicket: input.positionTicket,
+        newStopLoss: bestStop,
+        parsedSignalId: open.parsedSignalId,
+        originalText: `App-managed reference TP${bestLeg} SL strategy`,
+        auditEvent: "virtual-tp.reference-sl-strategy",
+        auditMessage: "Reference TP leg queued SL strategy",
+        auditFields: {
+          leg: bestLeg,
+          source: input.source,
+          coalescedLegs: [...resolved],
+          stopFloor: floor ?? null,
+        },
+      });
+    }
+    return resolved;
+  }
+
+  // Resolves every crossed 0%-allocation reference leg in one pass.
+  //
+  // A reference leg closes no volume; it exists to move the stop when price reaches its
+  // target. Three properties this must hold, each of which is a money bug if broken:
+  //
+  //  - Coalesce. If price gaps through several reference legs, queue ONE MODIFY_SL at the
+  //    most protective resulting stop. Queue reads order by created_at with no tiebreaker
+  //    (see leaseNextQueueItem), so two commands in the same millisecond could otherwise
+  //    execute worst-last and leave a less protective stop on a live position.
+  //  - Never regress. A strategy that computes a stop no better than the one the broker
+  //    already holds is dropped, so a late or out-of-order leg cannot widen risk.
+  //  - Only burn a leg once the work is real. A leg is marked HIT only when its strategy
+  //    was queued, was already satisfied, or is a deliberate no-change. A leg whose stop
+  //    price is not yet computable (market entry with no fill price recorded) stays OPEN
+  //    and is retried on the next snapshot.
+  //
+  // Deliberately does not call queueRunnerManagementAfterFinalTp: a reference leg closes no
+  // volume so it is never the final TP that hands the remainder to the runner.
+  private applyCrossedReferenceLegs(input: {
+    trade: LogicalTrade;
+    positionTicket: string;
+    price: number;
+    openPrice?: number;
+    point?: number;
+    brokerStopLoss?: number;
+  }): LogicalTrade {
+    const { trade, positionTicket, price } = input;
+
+    const crossedLegs: Array<LogicalTrade["legs"][number]> = [];
+    const targetPriceByLeg = new Map<number, number>();
+    for (const leg of trade.legs) {
+      if (leg.status !== "OPEN" || !isReferenceVirtualTpLeg(leg)) continue;
+      const targetPrice = virtualTpTargetPrice(trade, leg, input.openPrice, input.point);
+      if (!targetPrice) continue;
+      const crossed = trade.direction === "BUY" ? price >= targetPrice : price <= targetPrice;
+      if (!crossed) continue;
+      crossedLegs.push(leg);
+      targetPriceByLeg.set(leg.leg, targetPrice);
+    }
+    if (!crossedLegs.length) return trade;
+
+    const resolved = this.queueCoalescedReferenceStop({
+      trade,
+      positionTicket,
+      legs: crossedLegs,
+      source: "price-monitor",
+      brokerStopLoss: input.brokerStopLoss,
+      targetPriceByLeg,
+    });
+    if (!resolved.size) return trade;
+
+    const updated: LogicalTrade = {
+      ...trade,
+      legs: trade.legs.map((leg) =>
+        resolved.has(leg.leg)
+          ? {
+              ...leg,
+              status: "HIT" as const,
+              brokerEvidence: `app price ${price} crossed reference TP${leg.leg} ${targetPriceByLeg.get(leg.leg)}`,
+            }
+          : leg,
+      ),
+    };
+    this.db
+      .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+      .run(updated.status, JSON.stringify(updated), updated.id);
+    return updated;
+  }
+
   private queueSlStrategyAfterTpClose(
     trade: LogicalTrade,
     legNumber: number,
@@ -6925,7 +7096,11 @@ class AppStore {
     const strategy = leg?.strategy;
     if (strategy && strategy.kind !== "no-change") {
       const newStopLoss = this.strategyStopPrice(trade, strategy);
-      if (newStopLoss) {
+      // Compare against every stop already asked for. A closing leg firing after a reference
+      // leg in the same tick would otherwise undo the more protective reference stop: TP1
+      // closing 50% and requesting entry can land after reference TP2 requested TP1.
+      const floor = this.effectiveStopFloor(trade);
+      if (newStopLoss && this.improvesStop(trade, newStopLoss, floor)) {
         this.queueModifySlAfterVirtualTp({
           trade,
           positionTicket,
@@ -6934,7 +7109,7 @@ class AppStore {
           originalText: `App-managed TP${legNumber} SL strategy`,
           auditEvent: "virtual-tp.sl-strategy",
           auditMessage: "App-managed virtual TP queued SL strategy",
-          auditFields: { leg: legNumber },
+          auditFields: { leg: legNumber, stopFloor: floor ?? null },
         });
       }
     }
@@ -7000,7 +7175,10 @@ class AppStore {
     const nextLegs = trade.legs.map((leg) =>
       leg.leg === legNumber ? { ...leg, status: "CLOSED" as const } : leg,
     );
-    if (!nextLegs.length || nextLegs.some((leg) => leg.status !== "CLOSED")) return;
+    // Reference legs close no volume, so they never reach CLOSED. Requiring them to would
+    // block runner hand-off forever on any trade that uses a 0%-allocation stop trigger.
+    const volumeLegs = nextLegs.filter((leg) => !isReferenceVirtualTpLeg(leg));
+    if (!volumeLegs.length || volumeLegs.some((leg) => leg.status !== "CLOSED")) return;
 
     this.queueRunnerSlStrategy(trade, positionTicket, runner, open.parsedSignalId, nextLegs);
   }
@@ -12011,11 +12189,44 @@ class AppStore {
     if (!trade) return;
 
     const hitLeg = tpHitLegFromText(signal.originalText, trade);
+    const announced = (leg: LogicalTrade["legs"][number]) =>
+      hitLeg === "all" || (typeof hitLeg === "number" && leg.leg === hitLeg);
+
+    // A provider-announced TP hit on a 0%-allocation leg must still move the stop. Marking the
+    // leg HIT takes it out of the virtual-TP monitor's reach, so the announcement would
+    // otherwise silently consume the only trigger the stop strategy had. Providers that post
+    // "TP1 hit" (KAL VIP does) would never get break-even applied.
+    //
+    // Resolve the stop BEFORE persisting any HIT. A normal OPEN_TRADE report clears
+    // matchedBrokerTickets until the next matching snapshot, so an announcement landing in that
+    // window has no ticket to modify. Burning the leg there would strand the original stop for
+    // the life of the trade, so those legs stay OPEN and the monitor picks them up instead.
+    const positionTicket = trade.matchedBrokerTickets?.find((ticket) => truthyBrokerTicket(ticket));
+    const pendingReference = trade.legs.filter(
+      (leg) => announced(leg) && leg.status === "OPEN" && isReferenceVirtualTpLeg(leg),
+    );
+    const resolvedReference = positionTicket
+      ? this.queueCoalescedReferenceStop({
+          trade,
+          positionTicket,
+          legs: pendingReference,
+          source: "provider-announced",
+        })
+      : new Set<number>();
+
     const updated: LogicalTrade = {
       ...trade,
       legs: trade.legs.map((leg) => {
-        const shouldMark = hitLeg === "all" || (typeof hitLeg === "number" && leg.leg === hitLeg);
-        return shouldMark ? { ...leg, status: "HIT", brokerEvidence: "provider-announced" } : leg;
+        if (!announced(leg)) return leg;
+        // Reference legs are only consumed once their stop work is real.
+        if (
+          isReferenceVirtualTpLeg(leg) &&
+          leg.status === "OPEN" &&
+          !resolvedReference.has(leg.leg)
+        ) {
+          return leg;
+        }
+        return { ...leg, status: "HIT", brokerEvidence: "provider-announced" };
       }),
       commandHistory: [
         ...trade.commandHistory,
@@ -12056,8 +12267,10 @@ class AppStore {
               ...leg,
               allocationPercent: target.allocationPercent,
               volume: target.volume,
-              status: "OPEN" as const,
-              brokerEvidence: executionEvidence(input),
+              // A reference leg that already fired must not be reopened by a late partial
+              // opening report, or the next snapshot evaluates it a second time.
+              status: leg.status === "HIT" ? ("HIT" as const) : ("OPEN" as const),
+              brokerEvidence: leg.status === "HIT" ? leg.brokerEvidence : executionEvidence(input),
             }
           : { ...leg, allocationPercent: 0, volume: undefined, status: "SKIPPED" as const };
       }),
@@ -13099,6 +13312,14 @@ function brokerCommentFromSnapshot(record: unknown) {
 function brokerOpenPriceFromSnapshot(record: unknown) {
   if (!record || typeof record !== "object") return undefined;
   const value = Number((record as Record<string, unknown>).openPrice ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+// The stop the broker currently holds on a snapshotted position. MT5 reports 0 for "no
+// stop", which must read as absent rather than as a stop at price zero.
+function brokerStopLossFromSnapshot(record: unknown) {
+  if (!record || typeof record !== "object") return undefined;
+  const value = Number((record as Record<string, unknown>).sl ?? 0);
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
