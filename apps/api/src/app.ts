@@ -42,6 +42,7 @@ import {
   createTelegramAdapter,
   demoDialogs,
   demoMessages,
+  TELEGRAM_STALL_SECONDS,
   type TelegramAdapter,
   type TelegramCapturedMessage,
   type TelegramDialog,
@@ -400,11 +401,36 @@ export function createApi(options: ApiOptions = {}) {
   const app = new Hono();
   app.use("/api/*", cors());
 
-  const healthPayload = () => ({
-    status: "ok",
-    database: "connected",
-    telegramAdapter: telegram.name,
-  });
+  // Must stay synchronous: no awaits, no gramjs calls, no IO. It reads only
+  // the in-memory session health the ingestion loop already recorded.
+  const healthPayload = () => {
+    const sessions = store.telegramSessionHealth().map((session) => {
+      // Age the last successful contact at read time. The recorded stalled
+      // flag freezes when the ingestion loop itself stops running, and a
+      // frozen loop is exactly the outage this endpoint exists to expose.
+      const contactAgeSeconds = session.lastContactAt
+        ? Math.floor((Date.now() - Date.parse(session.lastContactAt)) / 1000)
+        : undefined;
+      const stalled =
+        session.stalled ||
+        (contactAgeSeconds !== undefined && contactAgeSeconds > TELEGRAM_STALL_SECONDS);
+      return { connected: session.connected && !stalled, stalled };
+    });
+    const stalledSessions = sessions.filter((session) => session.stalled).length;
+    return {
+      // "degraded" while any tracked Telegram session is stalled. The HTTP
+      // code stays 200 so a container healthcheck added later cannot
+      // restart-loop the app over a stall; monitors should match on status.
+      status: stalledSessions > 0 ? "degraded" : "ok",
+      database: "connected",
+      telegramAdapter: telegram.name,
+      telegram: {
+        sessions: sessions.length,
+        connectedSessions: sessions.filter((session) => session.connected).length,
+        stalledSessions,
+      },
+    };
+  };
 
   app.get("/api/health", (c) => c.json(healthPayload()));
   app.get("/health", (c) => c.json(healthPayload()));
@@ -1584,6 +1610,10 @@ class AppStore {
   // Keep the latest full snapshot in memory while SQLite stores only structural changes.
   private readonly liveMt5Snapshots = new Map<string, Mt5SnapshotState>();
   private readonly persistedMt5SnapshotSignatures = new Map<string, string>();
+  // When the last snapshot POST arrived per account, whether or not its
+  // durable content changed. mt5_snapshots.updated_at moves only on structural
+  // change, so this map is what answers "are snapshots flowing".
+  private readonly mt5SnapshotReceivedAt = new Map<string, string>();
   // Tracks providers we've already warned about for the "no connected
   // Telegram session" state, so we log once per offline→online edge instead
   // of once per poll. Reset when a session connects.
@@ -1684,6 +1714,11 @@ class AppStore {
 
   updateTelegramSession(sessionId: string, status: TelegramSessionStatus) {
     const now = nowIso();
+    if (status === "DISCONNECTED") {
+      // Drop the recorded health so a deliberately disconnected session stops
+      // counting toward /api/health staleness forever.
+      this.telegramHealth.delete(sessionId);
+    }
     this.db
       .query("UPDATE telegram_sessions SET status = ?, updated_at = ? WHERE id = ?")
       .run(status, now, sessionId);
@@ -6353,6 +6388,9 @@ class AppStore {
       updatedAt: now,
     };
     this.liveMt5Snapshots.set(input.accountId, snapshot);
+    // Record arrival unconditionally: the durable write below is deduped by
+    // content signature and legitimately stands still on idle accounts.
+    this.mt5SnapshotReceivedAt.set(input.accountId, now);
 
     const signature = durableMt5SnapshotSignature(snapshot);
     let persistedSignature = this.persistedMt5SnapshotSignatures.get(input.accountId);
@@ -7981,6 +8019,7 @@ class AppStore {
       // "current price" for open positions (BUY closes at bid, SELL at ask).
       const symbols = (snap?.symbols ?? []) as Array<Record<string, unknown>>;
       const accountId = String(row.id);
+      const lastSnapshotReceivedAt = this.mt5SnapshotReceivedAt.get(accountId) ?? null;
       return {
         id: accountId,
         accountNumber: String(row.account_number),
@@ -8015,6 +8054,14 @@ class AppStore {
         closedTrades: this.closedTradesForAccount(accountId),
         externalCloses: this.externalClosesForAccount(accountId),
         lastSnapshotAt: snap?.updatedAt,
+        // Snapshot feed liveness for this process. lastSnapshotAt falls back
+        // to the DB watermark after a restart, and that column only moves on
+        // structural change, so it cannot answer "are snapshots flowing".
+        // Null until the first snapshot arrives, which is the honest cold state.
+        lastSnapshotReceivedAt,
+        snapshotAgeSeconds: lastSnapshotReceivedAt
+          ? Math.max(0, Math.floor((Date.now() - Date.parse(lastSnapshotReceivedAt)) / 1000))
+          : null,
         drawdownWarnPctOverride: nullableNumber(row.drawdown_warn_pct) ?? null,
         drawdownDangerPctOverride: nullableNumber(row.drawdown_danger_pct) ?? null,
       };

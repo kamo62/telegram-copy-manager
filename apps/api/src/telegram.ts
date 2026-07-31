@@ -183,7 +183,7 @@ export const GRAMJS_CLIENT_OPTIONS = {
 // How long without a successful Telegram RPC before the session is considered
 // stalled. Surfaced in the status snapshot so a silent capture outage is
 // visible instead of looking like "no new messages".
-const TELEGRAM_STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS ?? 180);
+export const TELEGRAM_STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS ?? 180);
 
 export function createTelegramAdapter(
   name = process.env.TELEGRAM_ADAPTER ?? "mock",

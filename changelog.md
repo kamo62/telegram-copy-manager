@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.65.6 - 2026-07-31 (Patch)
+
+Release impact: Patch. Restores stop management on a revived trade and adds snapshot liveness
+reporting. No API removals, no parser change, no EA protocol change.
+
+- A pending order that disappears from one snapshot has its trade cancelled and every unresolved
+  leg marked `SKIPPED`. When the broker later fills that order the trade revives to `OPEN`, but the
+  leg map only promoted `PLANNED` legs, so the skipped legs stayed skipped for the trade's whole
+  life. Every virtual-TP gate keys on a leg being `OPEN`, so the evaluator ran on every snapshot,
+  wrote its watermark, and silently discarded the legs. A live gold trade crossed its break-even
+  trigger by 7 points with the stop never moving. Legs skipped by a cancellation now reopen when a
+  real open deal proves the cancellation wrong.
+- Added `lastSnapshotReceivedAt` and `snapshotAgeSeconds` per account on `GET /api/mt5/accounts`.
+  `mt5_snapshots.updated_at` has been a structural-change watermark since v1.52.1 and stops moving
+  while the book is idle, which is not a liveness signal. The new fields are in-memory only and add
+  no write to the snapshot path.
+
+Known incomplete in this release: the Telegram section added to `/api/health` does not yet answer
+"can this system ingest signals". Review found it reports `ok` when no session has ever connected,
+when the only session is disconnected, and when a provider is failing its RPCs, and reports
+`degraded` for a deliberately paused provider. Do not rely on that field until it is reworked.
+
 ## 1.65.5 - 2026-07-31 (Patch)
 
 Release impact: Patch because this hardens the existing virtual-TP stop workflow without changing

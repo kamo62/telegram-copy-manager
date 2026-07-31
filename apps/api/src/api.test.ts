@@ -16,6 +16,47 @@ import type { TelegramAdapter, TelegramCapturedMessage, TelegramDialog } from ".
 
 const json = async <T>(response: Response) => (await response.json()) as T;
 
+type HealthBody = {
+  status: string;
+  database: string;
+  telegramAdapter: string;
+  telegram: { sessions: number; connectedSessions: number; stalledSessions: number };
+};
+
+// Connects a Telegram session and enables one provider on it so the ingestion
+// pass records session health. Returns the session id for disconnect flows.
+async function connectSessionWithEnabledProvider(app: ReturnType<typeof createApi>) {
+  const started = await json<{ profileId: string; sessionId: string }>(
+    await app.request("/api/telegram/start", {
+      method: "POST",
+      body: JSON.stringify({ apiId: "12345", apiHash: "hash", phone: "+27821234567" }),
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  await app.request("/api/telegram/verify-code", {
+    method: "POST",
+    body: JSON.stringify({ sessionId: started.sessionId, code: "11111" }),
+    headers: { "content-type": "application/json" },
+  });
+  const selected = await json<{ provider: { id: string } }>(
+    await app.request("/api/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        profileId: started.profileId,
+        dialogId: "dialog-btc",
+        title: "Test Forex Group",
+      }),
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  await app.request(`/api/providers/${selected.provider.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ enabled: true }),
+    headers: { "content-type": "application/json" },
+  });
+  return started.sessionId;
+}
+
 // Verbatim 2026-07-29 incident messages supplied by the operator. They are kept
 // outside the locked 1,945-message corpus so its command tallies remain unchanged.
 const realKalBuy4016Incident = "Gold buy limit\n\n4016-15\n\nSl 4010\n\nTp 4021\nTp 4028";
@@ -569,23 +610,135 @@ describe("Telegram TC API", () => {
   test("serves backend health from both API and root health routes", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
 
-    const apiHealth = await json<{
-      status: string;
-      database: string;
-      telegramAdapter: string;
-    }>(await app.request("/api/health"));
-    const rootHealth = await json<{
-      status: string;
-      database: string;
-      telegramAdapter: string;
-    }>(await app.request("/health"));
+    const apiHealth = await json<HealthBody>(await app.request("/api/health"));
+    const rootHealth = await json<HealthBody>(await app.request("/health"));
 
     expect(apiHealth).toEqual({
       status: "ok",
       database: "connected",
       telegramAdapter: "mock",
+      telegram: { sessions: 0, connectedSessions: 0, stalledSessions: 0 },
     });
     expect(rootHealth).toEqual(apiHealth);
+  });
+
+  test("degrades health while a Telegram session is stalled and recovers after disconnect", async () => {
+    const stalledTelegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      sessionHealth: (sessionId) => ({
+        sessionId,
+        connected: false,
+        stalled: true,
+        stalledSeconds: 181,
+      }),
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: stalledTelegram,
+      telegramPollingEnabled: false,
+    });
+    const sessionId = await connectSessionWithEnabledProvider(app);
+    await app.runTelegramIngestionOnce();
+
+    const degraded = await json<HealthBody>(await app.request("/api/health"));
+    expect(degraded.status).toBe("degraded");
+    expect(degraded.database).toBe("connected");
+    expect(degraded.telegramAdapter).toBe("mock");
+    expect(degraded.telegram).toEqual({ sessions: 1, connectedSessions: 0, stalledSessions: 1 });
+
+    await app.request("/api/telegram/disconnect", {
+      method: "POST",
+      body: JSON.stringify({ sessionId }),
+      headers: { "content-type": "application/json" },
+    });
+    const recovered = await json<HealthBody>(await app.request("/api/health"));
+    expect(recovered.status).toBe("ok");
+    expect(recovered.telegram).toEqual({ sessions: 0, connectedSessions: 0, stalledSessions: 0 });
+  });
+
+  test("degrades health when the recorded Telegram contact has aged past the stall threshold", async () => {
+    // Simulates the ingestion loop freezing: the map holds a healthy-looking
+    // record whose lastContactAt keeps aging because nothing re-records it.
+    const frozenTelegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      sessionHealth: (sessionId) => ({
+        sessionId,
+        connected: true,
+        stalled: false,
+        lastContactAt: new Date(Date.now() - 600_000).toISOString(),
+        stalledSeconds: 0,
+      }),
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: frozenTelegram,
+      telegramPollingEnabled: false,
+    });
+    await connectSessionWithEnabledProvider(app);
+    await app.runTelegramIngestionOnce();
+
+    const health = await json<HealthBody>(await app.request("/api/health"));
+    expect(health.status).toBe("degraded");
+    expect(health.telegram).toEqual({ sessions: 1, connectedSessions: 0, stalledSessions: 1 });
+  });
+
+  test("tracks snapshot arrival per account even when snapshot content is unchanged", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const registered = await json<{ accountId: string }>(
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "700800900",
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes Ltd",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    type AccountLiveness = {
+      accounts: Array<{
+        lastSnapshotReceivedAt: string | null;
+        snapshotAgeSeconds: number | null;
+      }>;
+    };
+    const before = await json<AccountLiveness>(await app.request("/api/mt5/accounts"));
+    expect(before.accounts[0]?.lastSnapshotReceivedAt).toBeNull();
+    expect(before.accounts[0]?.snapshotAgeSeconds).toBeNull();
+
+    // The same pending order both times, so the durable content signature is
+    // identical and the deduped DB write is skipped on the second POST.
+    const postIdenticalSnapshot = () =>
+      app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: registered.accountId,
+          positions: [],
+          orders: [{ ticket: "555001", symbol: "XAUUSD", type: 2, volume: 0.04, price: 4500 }],
+          symbols: [],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+
+    await postIdenticalSnapshot();
+    const first = await json<AccountLiveness>(await app.request("/api/mt5/accounts"));
+    const firstReceivedAt = first.accounts[0]?.lastSnapshotReceivedAt;
+    expect(typeof firstReceivedAt).toBe("string");
+    expect(first.accounts[0]?.snapshotAgeSeconds).toBeGreaterThanOrEqual(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await postIdenticalSnapshot();
+    const second = await json<AccountLiveness>(await app.request("/api/mt5/accounts"));
+    expect(Date.parse(String(second.accounts[0]?.lastSnapshotReceivedAt))).toBeGreaterThan(
+      Date.parse(String(firstReceivedAt)),
+    );
   });
 
   test("auto-ingests enabled provider messages, dedupes them, and queues clean trades", async () => {

@@ -513,6 +513,12 @@ From the rolling `REVIEW.md` scratch pad, since deleted (real, scoped, none safe
 - `base.css` consolidation, gated behind per-route screenshots.
 - A currency-passthrough guard.
 - Verify `AlertsBanner` dismissal-pruning covers all mount states.
+- **The chart animation loop never stops.** `cartesian-canvas.tsx:114` calls
+  `raf = requestAnimationFrame(draw)` as the first statement of `draw`, before the
+  `if (!s.ready) return` guard, so it reschedules forever whether or not anything needs
+  painting. Every mounted chart burns a frame budget continuously. Restored to this list on
+  2026-07-31 after a review caught that the 07-30 archive pass dropped it: it was recorded in
+  the deleted `REVIEW.md` and had not been carried across. Still present in current source.
 
 ### Useful commands
 
