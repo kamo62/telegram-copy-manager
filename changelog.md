@@ -17,10 +17,9 @@ reporting. No API removals, no parser change, no EA protocol change.
   while the book is idle, which is not a liveness signal. The new fields are in-memory only and add
   no write to the snapshot path.
 
-Known incomplete in this release: the Telegram section added to `/api/health` does not yet answer
-"can this system ingest signals". Review found it reports `ok` when no session has ever connected,
-when the only session is disconnected, and when a provider is failing its RPCs, and reports
-`degraded` for a deliberately paused provider. Do not rely on that field until it is reworked.
+The `/api/health` Telegram readiness contract is built: enabled providers define expected ingestion,
+status reads `degraded` when any expected provider is not ready, HTTP stays 200, and the `telegram`
+object reports `expectedProviders`, `readyProviders`, `unreadyProviders`, and `stalledProviders`.
 
 ## 1.65.5 - 2026-07-31 (Patch)
 

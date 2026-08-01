@@ -1,13 +1,27 @@
 # Handoff
 
-## START HERE — 2026-07-30
+## START HERE — 2026-07-31
 
-`main` @ `e63717e7`, matching `origin/main` before this work. The worktree contains the
-**uncommitted v1.65.3 review workflow and presentation patch** described below. It is deployed to
-192.168.0.100 but has not been committed or pushed. No EA recompile is required: the new bulk action
-reuses the existing per-signal dismissal endpoint and no EA or execution contract changed. EA source
-metadata remains at 1.65.0 because v1.65.3 is a web-only patch; the deployed terminals do not need
-an EA rebuild.
+Branch `fix/reference-leg-stop-strategy` @ `eaeba29e`, 3 commits ahead of
+`origin/fix/reference-leg-stop-strategy` (pushed as far as `84d87453`; the rest is local). Package
+version `1.65.6`. EA source metadata remains `1.65.0`, unchanged since that release, because each
+patch from 1.65.1 through 1.65.6 was web/API-only and left it as-is (see each entry in
+`changelog.md`). The deployed terminals run EA `v1.60.0` regardless; the source metadata string and
+the deployed binary are tracked separately, and only the binary needs a recompile.
+
+This branch carries the reference-leg stop-strategy work, each detailed under its own heading below:
+v1.65.4 (a take-profit leg allocated 0% now applies its own stop strategy, such as break-even,
+without closing volume), v1.65.5 (durable per-leg stop actions that survive a crash or restart), and
+v1.65.6 (reopens legs a spurious pending-order cancellation had left permanently `SKIPPED`, plus
+`lastSnapshotReceivedAt`/`snapshotAgeSeconds` on `GET /api/mt5/accounts`). The last production
+deployment confirmed in this file is v1.65.3 on 2026-07-30 (see that entry below); v1.65.4 through
+v1.65.6 have not been confirmed deployed here. Check the running container's version before assuming
+otherwise.
+
+`/api/health` gained a `telegram` readiness section in v1.65.6, but it is known-incomplete: it
+reports `ok` when no session has ever connected, when the only session is disconnected, and when a
+provider is failing its RPCs, and `degraded` only for a deliberately paused provider. Do not wire
+alerting to it yet; see open risk 8 below.
 
 ### The design base (owner-specified, now in effect)
 
@@ -340,26 +354,37 @@ execution, reconciliation, or guardian code.
    `mt5-${accountNumber}`. History deal and fallback ticket lookups omit `account_id`.
 3. **`SPLIT_ORDER` has no safe per-leg execution contract.** One successful close then closes the
    entire logical trade.
-4. **Virtual-TP legs latch into an irreversible `HIT` state before broker proof.** Independently
-   reconfirmed as still deferred in `REVIEW-item7-verify.md`.
+4. **Virtual-TP legs latch into an irreversible `HIT` state before broker proof.** Confirmed against
+   current source: `app.ts` still sets `status: "HIT"` on a quote crossing alone in the ordinary
+   (non-reference) virtual-TP path, with no broker-side confirmation gate. The v1.65.4/v1.65.5 work
+   added durable, once-only, non-regressing `HIT` semantics, but only for 0%-allocation reference
+   legs; the closing-leg path this item describes was explicitly left unchanged (see "Still open,
+   deliberately not fixed here" under v1.65.4 below). Correction: an earlier version of this note
+   cited `REVIEW-item7-verify.md` as independent confirmation; that file verifies a different finding
+   (pending-order MARKET/LIMIT inference, its own "item 7"), not this one, and the citation was wrong.
 5. **Trailing-stop protection is memory-only** and permanently exhausts its 100-slot array.
 
 Found 2026-07-30, separate from that audit:
 
 6. **The EA work and report endpoints are unauthenticated.** `/api/mt5/poll` and `/api/mt5/poll-line`
-   lease queue items on a bare `accountId` query parameter (`app.ts:1025-1035`), and
-   `/api/mt5/report` accepts an execution report with no auth at all (`app.ts:1037-1041`). `linkCode`
+   lease queue items on a bare `accountId` query parameter (`app.ts:1045-1055`), and
+   `/api/mt5/report` accepts an execution report with no auth at all (`app.ts:1057-1061`). `linkCode`
    is only checked on register and heartbeat. Account ids are `mt5-<accountNumber>`, which is low
    entropy. Contained today because the API is not internet-exposed. Anything that exposes the app
    publicly, including a tunnel with an `/api/mt5/*` exemption, lets a caller lease work items and
-   post fabricated execution reports. Fix before any public exposure.
+   post fabricated execution reports. Fix before any public exposure. Line numbers drift as `app.ts`
+   grows; re-grep before citing them again.
 7. **No FloodWait or ban handling.** Neither `telegram.ts` nor `app.ts` handles Telegram
    rate-limiting or banning the account mid-session. The failure mode is silent signal loss.
-8. **`/api/health` can report `ok` while Telegram is disconnected.** It returns
-   `telegramAdapter: "gramjs"`, which is the configured adapter name and not a connection state. The
-   real signal is the `connected` boolean on `/api/telegram/status`. Any uptime monitor pointed at
-   `/api/health` would show green through a total capture outage. Surface `connected` in
-   `/api/health` before wiring up any alerting.
+8. **`/api/health` cannot yet answer "can this system ingest signals".** v1.65.6 added a `telegram`
+   readiness section (`expectedProviders`/`readyProviders`/`unreadyProviders`/`stalledProviders`) and
+   an overall `status` that goes `degraded` when any enabled provider lacks a current readiness
+   observation, replacing the old bare `telegramAdapter` name. It is still not reliable: a review at
+   ship time found it reports `ok` when no session has ever connected, when the only session is
+   disconnected, and when a provider is failing its RPCs, and `degraded` only for a deliberately
+   paused provider. The real signal for now remains the `connected` boolean on
+   `/api/telegram/status`. Do not point uptime monitoring or alerting at `/api/health` until this is
+   reworked (tracked as known-incomplete in the v1.65.6 changelog entry).
 
 ### v1.65.5 - durable reference-leg stop recovery (FIXED 2026-07-31, not yet deployed)
 
@@ -389,8 +414,9 @@ are unavailable can still be missed if price retraces before the next snapshot a
 crossing. Closing that gap requires a new EA protocol field or broker price-history feed, both outside
 this API-only patch.
 
-No commit, push, deployment, or EA source change was made. Package version is 1.65.5; EA metadata
-remains 1.65.0.
+Committed as `84d87453` and pushed to `origin/fix/reference-leg-stop-strategy`, then followed locally
+by `68b6460f` (limit-order fill path coverage) and v1.65.6 above. No deployment or EA source change
+was made. Package version is 1.65.5; EA metadata remains 1.65.0.
 
 ### v1.65.4 — 0 percent TP legs never moved the stop (FIXED 2026-07-31, not yet deployed)
 

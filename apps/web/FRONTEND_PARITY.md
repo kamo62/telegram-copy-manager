@@ -3,6 +3,12 @@
 The replacement console is allowed to reorganise a workflow, but it must not remove a capability.
 This checklist is the release gate for future frontend changes.
 
+**Stale as of 2026-08-01.** This predates the v1.64.4/v1.64.5/v1.65.0 route restructuring: `/providers`,
+`/symbols`, and `/logs` are now standalone top-level views, and the account workspace tab strip no
+longer shows `summary` or `symbols` as tabs (see `README.md`'s Application Surfaces section for the
+current structure). The capability list below stays useful as a checklist of things a redesign must
+not drop; the route and tab structure it describes is out of date.
+
 ## Global routes
 
 - `/`: all-account operations overview, account selection, exposure, activity and onboarding.

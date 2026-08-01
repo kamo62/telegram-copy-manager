@@ -39,6 +39,9 @@ for the backend URL.
   recent Telegram history after a relaunch does not queue duplicate trades.
 - Supports app-managed virtual TP handling, TP1-TP4 allocation, runner lots, break-even/last-TP/trail
   runner behaviour, split-order execution mode, and app-owned default SL/TP distances.
+- Lets a take-profit leg configured at 0% allocation apply its own stop-loss strategy, such as
+  break-even, once price reaches its target without closing any volume, so an operator can protect a
+  trade without giving up a partial at TP1.
 - Reconciles MT5 reports, snapshots, and broker history into open/closed trade history, execution
   logs, pending-order cancellation, out-of-sync diagnostics, and account/provider performance.
 - Normalizes mixed-currency account performance into a configured reporting currency and leaves
@@ -71,16 +74,19 @@ item and is reached through that button.
 - `Symbols` (`/symbols`): global and provider aliases, plus per-account broker symbol mappings.
 - `Telegram` (`/telegram`): Telegram login, OTP/2FA flow, dialog refresh, provider selection, and
   provider resync for the global provider-monitoring lifecycle.
-- `Settings` (`/settings`): execution defaults, allowed order types, polling/dedup settings, stale
-  open-trade expiry, risk display thresholds, reporting currency/USD-ZAR rate, and optional Azure
+- `Settings` (`/settings`): display theme and colour accents, execution defaults, allowed order
+  types, polling/dedup settings, stale open-trade expiry, risk display thresholds, reporting
+  currency/USD-ZAR rate, Telegram bot alerting, on-demand database backup, and optional Azure
   OpenAI parser extraction key storage.
 
 An account workspace at `/accounts/:accountId/:tab` shows the account-scoped tab strip:
-`performance`, `providers`, `history`, `equity-guardian`, `symbols`, and `logs`. `Performance`
+`performance`, `providers`, `history`, `equity-guardian`, and `logs`. `Performance`
 covers the overview chart, statistics view, account/provider range metrics, and external manual
 broker activity that affects equity. `History` covers open positions and orders, external positions
 and orders, closed trade rollups, and per-leg close detail. `Equity Guardian` covers account
-drawdown thresholds and manual unpause controls.
+drawdown thresholds and manual unpause controls. A per-account `symbols` view exists at the same URL
+scheme so an unmapped-symbol alert can jump straight into that account's context, but it has no tab
+of its own; routine alias and mapping work happens on the top-level `Symbols` page.
 
 The top-level `/providers`, `/symbols`, and `/logs` routes are standalone views. They do not render
 the account workspace tab strip.
@@ -95,6 +101,8 @@ the account workspace tab strip.
 - `mt5`: MetaTrader 5 Expert Advisor source that registers, heartbeats, posts snapshots/history,
   polls line-oriented work, executes commands, and reports broker results.
 - `migrations`: SQLite schema used by the app and kept portable for a future D1-style backend.
+- `docs`: archived planning, audit, and incident records with lasting reference value;
+  `docs/archive/README.md` explains what remains and what was deleted.
 - `scripts`: local Telegram import/backtest helper and MT5 smoke-test helper.
 - `data`: runtime-only local databases, Telegram session files, backtest output, and other generated
   state. This path is ignored by git and Docker build context.
@@ -133,6 +141,7 @@ Common environment variables:
 | `PORT` | API/server port | `8787` |
 | `DATABASE_PATH` | SQLite database path | `data/telegram-tc.db` |
 | `WEB_STATIC_ROOT` | Static web build path for the API to serve | auto-detects `apps/web/dist` |
+| `ASSET_ARCHIVE_ROOT` | Where the API archives previous web asset bundles, so a client still on an older build keeps working through a deploy | `<DATABASE_PATH dir>/asset-archive` |
 | `SEED_DEMO_DATA` | Seed local mock/demo rows | `false` |
 | `DEFAULT_MT5_ACCOUNT_ID` | Fallback parser account context | demo account id |
 | `TELEGRAM_ADAPTER` | Telegram adapter: `mock` or `gramjs` | `mock` unless real runtime is used |
@@ -173,8 +182,8 @@ bun run telegram:backtest
 ```
 
 Optional script knobs include `TELEGRAM_TC_API_URL`, `TELEGRAM_TARGET_DIALOG`,
-`TELEGRAM_HISTORY_DAYS`, `TELEGRAM_CHUNKED`, `TELEGRAM_CHUNK_DAYS`, `TELEGRAM_DATE_FROM`, and
-`TELEGRAM_DATE_TO`.
+`TELEGRAM_HISTORY_DAYS`, `TELEGRAM_CHUNKED`, `TELEGRAM_CHUNK_DAYS`, `TELEGRAM_DATE_FROM`,
+`TELEGRAM_DATE_TO`, and `TELEGRAM_IMPORT_LIMIT` (message cap for the import step, default 50,000).
 
 ## MT5 Workflow
 
@@ -304,10 +313,11 @@ values, symbol metadata, and live order handling.
 ## Versioning
 
 The root `package.json` `version` field is the canonical application version. The MT5 EA version in
-`mt5/TelegramTC_EA.mq5` must stay aligned with it:
+`mt5/TelegramTC_EA.mq5` only needs to move when the EA's own behaviour or protocol changes; a
+web-only or API-only patch bumps the app version and leaves the EA metadata as it was:
 
 ```mql5
-#property version   "1.15.0"
+#property version   "1.65.0"
 ```
 
 Classify every change with SemVer before final verification:

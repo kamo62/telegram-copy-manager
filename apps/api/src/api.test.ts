@@ -20,7 +20,12 @@ type HealthBody = {
   status: string;
   database: string;
   telegramAdapter: string;
-  telegram: { sessions: number; connectedSessions: number; stalledSessions: number };
+  telegram: {
+    expectedProviders: number;
+    readyProviders: number;
+    unreadyProviders: number;
+    stalledProviders: number;
+  };
 };
 
 // Connects a Telegram session and enables one provider on it so the ingestion
@@ -617,7 +622,12 @@ describe("Telegram TC API", () => {
       status: "ok",
       database: "connected",
       telegramAdapter: "mock",
-      telegram: { sessions: 0, connectedSessions: 0, stalledSessions: 0 },
+      telegram: {
+        expectedProviders: 0,
+        readyProviders: 0,
+        unreadyProviders: 0,
+        stalledProviders: 0,
+      },
     });
     expect(rootHealth).toEqual(apiHealth);
   });
@@ -645,7 +655,12 @@ describe("Telegram TC API", () => {
     expect(degraded.status).toBe("degraded");
     expect(degraded.database).toBe("connected");
     expect(degraded.telegramAdapter).toBe("mock");
-    expect(degraded.telegram).toEqual({ sessions: 1, connectedSessions: 0, stalledSessions: 1 });
+    expect(degraded.telegram).toEqual({
+      expectedProviders: 1,
+      readyProviders: 0,
+      unreadyProviders: 1,
+      stalledProviders: 1,
+    });
 
     await app.request("/api/telegram/disconnect", {
       method: "POST",
@@ -653,8 +668,77 @@ describe("Telegram TC API", () => {
       headers: { "content-type": "application/json" },
     });
     const recovered = await json<HealthBody>(await app.request("/api/health"));
-    expect(recovered.status).toBe("ok");
-    expect(recovered.telegram).toEqual({ sessions: 0, connectedSessions: 0, stalledSessions: 0 });
+    expect(recovered.status).toBe("degraded");
+    expect(recovered.telegram).toEqual({
+      expectedProviders: 1,
+      readyProviders: 0,
+      unreadyProviders: 1,
+      stalledProviders: 0,
+    });
+  });
+
+  test("degrades health before the first successful Telegram provider contact", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter([]),
+      telegramPollingEnabled: false,
+    });
+    await connectSessionWithEnabledProvider(app);
+
+    const starting = await json<HealthBody>(await app.request("/api/health"));
+    expect(starting).toMatchObject({
+      status: "degraded",
+      telegram: {
+        expectedProviders: 1,
+        readyProviders: 0,
+        unreadyProviders: 1,
+        stalledProviders: 0,
+      },
+    });
+
+    await app.runTelegramIngestionOnce();
+    const ready = await json<HealthBody>(await app.request("/api/health"));
+    expect(ready).toMatchObject({
+      status: "ok",
+      telegram: {
+        expectedProviders: 1,
+        readyProviders: 1,
+        unreadyProviders: 0,
+        stalledProviders: 0,
+      },
+    });
+  });
+
+  test("degrades health after consecutive Telegram provider RPC timeouts", async () => {
+    const telegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      async fetchRecentMessages() {
+        return await new Promise<never>(() => {});
+      },
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram,
+      telegramPollingEnabled: false,
+      telegramRpcTimeoutMs: 5,
+    });
+    await connectSessionWithEnabledProvider(app);
+
+    await app.runTelegramIngestionOnce();
+    await app.runTelegramIngestionOnce();
+
+    const health = await json<HealthBody>(await app.request("/api/health"));
+    expect(health).toMatchObject({
+      status: "degraded",
+      telegram: {
+        expectedProviders: 1,
+        readyProviders: 0,
+        unreadyProviders: 1,
+        stalledProviders: 1,
+      },
+    });
   });
 
   test("degrades health when the recorded Telegram contact has aged past the stall threshold", async () => {
@@ -681,7 +765,267 @@ describe("Telegram TC API", () => {
 
     const health = await json<HealthBody>(await app.request("/api/health"));
     expect(health.status).toBe("degraded");
-    expect(health.telegram).toEqual({ sessions: 1, connectedSessions: 0, stalledSessions: 1 });
+    expect(health.telegram).toEqual({
+      expectedProviders: 1,
+      readyProviders: 0,
+      unreadyProviders: 1,
+      stalledProviders: 1,
+    });
+  });
+
+  test("uses the configured Telegram polling interval when aging readiness", async () => {
+    const agedTelegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      sessionHealth: (sessionId) => ({
+        sessionId,
+        connected: true,
+        stalled: false,
+        lastContactAt: new Date(Date.now() - 181_000).toISOString(),
+        stalledSeconds: 181,
+      }),
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: agedTelegram,
+      telegramPollingEnabled: false,
+    });
+    await connectSessionWithEnabledProvider(app);
+    await app.runTelegramIngestionOnce();
+    expect((await json<HealthBody>(await app.request("/api/health"))).status).toBe("degraded");
+
+    await app.request("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify({ pollingIntervalSeconds: 300 }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(await json<HealthBody>(await app.request("/api/health"))).toMatchObject({
+      status: "ok",
+      telegram: {
+        expectedProviders: 1,
+        readyProviders: 1,
+        unreadyProviders: 0,
+        stalledProviders: 0,
+      },
+    });
+  });
+
+  test("removes a disabled provider from Telegram health expectations", async () => {
+    const agedTelegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      sessionHealth: (sessionId) => ({
+        sessionId,
+        connected: true,
+        stalled: false,
+        lastContactAt: new Date(Date.now() - 600_000).toISOString(),
+        stalledSeconds: 0,
+      }),
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: agedTelegram,
+      telegramPollingEnabled: false,
+    });
+    await connectSessionWithEnabledProvider(app);
+    await app.runTelegramIngestionOnce();
+
+    expect((await json<HealthBody>(await app.request("/api/health"))).status).toBe("degraded");
+    const before = await json<{
+      telegramHealth: Array<{ sessionId: string }>;
+      telegramProviderHealth: Array<{ providerId: string }>;
+    }>(await app.request("/api/dashboard"));
+    expect(before.telegramHealth).toHaveLength(1);
+    expect(before.telegramProviderHealth).toHaveLength(1);
+    const providers = await json<{ providers: Array<{ id: string }> }>(
+      await app.request("/api/providers"),
+    );
+    await app.request(`/api/providers/${providers.providers[0]!.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled: false }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(await json<HealthBody>(await app.request("/api/health"))).toMatchObject({
+      status: "ok",
+      telegram: {
+        expectedProviders: 0,
+        readyProviders: 0,
+        unreadyProviders: 0,
+        stalledProviders: 0,
+      },
+    });
+    const after = await json<{
+      telegramHealth: Array<{ sessionId: string }>;
+      telegramProviderHealth: Array<{ providerId: string }>;
+    }>(await app.request("/api/dashboard"));
+    expect(after.telegramHealth).toEqual([]);
+    expect(after.telegramProviderHealth).toEqual([]);
+  });
+
+  test("allows a recreated offline provider to emit its missing-session warning again", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter([]),
+      telegramPollingEnabled: false,
+    });
+    const started = await json<{ profileId: string }>(
+      await app.request("/api/telegram/start", {
+        method: "POST",
+        body: JSON.stringify({ apiId: "12345", apiHash: "hash", phone: "+27821234567" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const selectProvider = async () => {
+      const selected = await json<{ provider: { id: string } }>(
+        await app.request("/api/providers", {
+          method: "POST",
+          body: JSON.stringify({
+            profileId: started.profileId,
+            dialogId: "dialog-btc",
+            title: "Test Forex Group",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      await app.request(`/api/providers/${selected.provider.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      return selected.provider.id;
+    };
+
+    const providerId = await selectProvider();
+    await app.runTelegramIngestionOnce();
+    const first = await json<{ logs: Array<unknown> }>(
+      await app.request("/api/audit-logs?event=telegram.ingest.skip"),
+    );
+    expect(first.logs).toHaveLength(1);
+
+    await app.request(`/api/providers/${providerId}`, { method: "DELETE" });
+    await selectProvider();
+    await app.runTelegramIngestionOnce();
+
+    const second = await json<{ logs: Array<unknown> }>(
+      await app.request("/api/audit-logs?event=telegram.ingest.skip"),
+    );
+    expect(second.logs).toHaveLength(2);
+  });
+
+  test("removes a deleted provider from Telegram health expectations", async () => {
+    const stalledTelegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      sessionHealth: (sessionId) => ({
+        sessionId,
+        connected: false,
+        stalled: true,
+        stalledSeconds: 181,
+      }),
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: stalledTelegram,
+      telegramPollingEnabled: false,
+    });
+    await connectSessionWithEnabledProvider(app);
+    await app.runTelegramIngestionOnce();
+    const providers = await json<{ providers: Array<{ id: string }> }>(
+      await app.request("/api/providers"),
+    );
+    await app.request(`/api/providers/${providers.providers[0]!.id}`, { method: "DELETE" });
+
+    expect(await json<HealthBody>(await app.request("/api/health"))).toMatchObject({
+      status: "ok",
+      telegram: {
+        expectedProviders: 0,
+        readyProviders: 0,
+        unreadyProviders: 0,
+        stalledProviders: 0,
+      },
+    });
+  });
+
+  test("clears old Telegram health when a provider is rebound to another session", async () => {
+    const telegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      sessionHealth: (sessionId) => ({
+        sessionId,
+        connected: true,
+        stalled: false,
+        lastContactAt: new Date().toISOString(),
+        stalledSeconds: 0,
+      }),
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram,
+      telegramPollingEnabled: false,
+    });
+    await connectSessionWithEnabledProvider(app);
+    await app.runTelegramIngestionOnce();
+    const before = await json<{
+      telegramHealth: Array<{ sessionId: string }>;
+      telegramProviderHealth: Array<{ providerId: string; sessionId: string }>;
+    }>(await app.request("/api/dashboard"));
+    expect(before.telegramHealth).toHaveLength(1);
+    expect(before.telegramProviderHealth).toHaveLength(1);
+    const oldSessionId = before.telegramHealth[0]!.sessionId;
+
+    const second = await json<{ profileId: string; sessionId: string }>(
+      await app.request("/api/telegram/start", {
+        method: "POST",
+        body: JSON.stringify({ apiId: "12345", apiHash: "hash", phone: "+27821234567" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await app.request("/api/telegram/verify-code", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: second.sessionId, code: "11111" }),
+      headers: { "content-type": "application/json" },
+    });
+    await app.request("/api/providers", {
+      method: "POST",
+      body: JSON.stringify({
+        profileId: second.profileId,
+        dialogId: "dialog-btc",
+        title: "Test Forex Group",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    const rebound = await json<{
+      telegramHealth: Array<{ sessionId: string }>;
+      telegramProviderHealth: Array<{ providerId: string; sessionId: string }>;
+    }>(await app.request("/api/dashboard"));
+    expect(rebound.telegramHealth).toEqual([]);
+    expect(rebound.telegramProviderHealth).toEqual([]);
+    expect(rebound.telegramHealth.map((health) => health.sessionId)).not.toContain(oldSessionId);
+
+    expect(await json<HealthBody>(await app.request("/api/health"))).toMatchObject({
+      status: "degraded",
+      telegram: {
+        expectedProviders: 1,
+        readyProviders: 0,
+        unreadyProviders: 1,
+        stalledProviders: 0,
+      },
+    });
+
+    await app.runTelegramIngestionOnce();
+    expect(await json<HealthBody>(await app.request("/api/health"))).toMatchObject({
+      status: "ok",
+      telegram: {
+        expectedProviders: 1,
+        readyProviders: 1,
+        unreadyProviders: 0,
+        stalledProviders: 0,
+      },
+    });
   });
 
   test("tracks snapshot arrival per account even when snapshot content is unchanged", async () => {

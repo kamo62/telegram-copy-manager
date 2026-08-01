@@ -320,8 +320,8 @@ with a monetary claim attached. Close them before the first external tenant. Add
 global kill switch owned by the control plane.
 
 **3. Unauthenticated EA endpoints.** `/api/mt5/poll` and `/api/mt5/poll-line` lease queue items on a
-bare `accountId` query parameter (`app.ts:1025-1035`). `/api/mt5/report` accepts an execution report
-with no auth at all (`app.ts:1037-1041`). `linkCode` is checked on register and heartbeat only.
+bare `accountId` query parameter (`app.ts:1045-1055`). `/api/mt5/report` accepts an execution report
+with no auth at all (`app.ts:1057-1061`). `linkCode` is checked on register and heartbeat only.
 Account ids are `mt5-<accountNumber>`, which is low entropy. Today this is contained by a private
 network. The moment a tunnel exposes the app with an `/api/mt5/*` exemption for Access, anyone can
 lease another tenant's work items and post fabricated execution reports. Fix by keeping EA-to-engine

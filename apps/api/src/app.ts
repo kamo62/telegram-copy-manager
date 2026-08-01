@@ -42,7 +42,6 @@ import {
   createTelegramAdapter,
   demoDialogs,
   demoMessages,
-  TELEGRAM_STALL_SECONDS,
   type TelegramAdapter,
   type TelegramCapturedMessage,
   type TelegramDialog,
@@ -385,9 +384,11 @@ export function archiveStaticAssets(
 
 export function createApi(options: ApiOptions = {}) {
   const shouldSeedDemoData = options.seedDemoData ?? process.env.SEED_DEMO_DATA === "true";
+  const effectiveTelegramRpcTimeoutMs = telegramRpcTimeoutMs(options.telegramRpcTimeoutMs);
   const store = new AppStore(
     options.databasePath ?? process.env.DATABASE_PATH ?? "data/telegram-tc.db",
     shouldSeedDemoData,
+    effectiveTelegramRpcTimeoutMs,
   );
   const telegram =
     options.telegram ??
@@ -397,37 +398,31 @@ export function createApi(options: ApiOptions = {}) {
   if (shouldSeedDemoData) {
     store.seedDemoData();
   }
+  store.refreshTelegramIngestionExpectations();
 
   const app = new Hono();
   app.use("/api/*", cors());
 
   // Must stay synchronous: no awaits, no gramjs calls, no IO. It reads only
-  // the in-memory session health the ingestion loop already recorded.
+  // the in-memory provider readiness the ingestion loop already recorded.
   const healthPayload = () => {
-    const sessions = store.telegramSessionHealth().map((session) => {
-      // Age the last successful contact at read time. The recorded stalled
-      // flag freezes when the ingestion loop itself stops running, and a
-      // frozen loop is exactly the outage this endpoint exists to expose.
-      const contactAgeSeconds = session.lastContactAt
-        ? Math.floor((Date.now() - Date.parse(session.lastContactAt)) / 1000)
-        : undefined;
-      const stalled =
-        session.stalled ||
-        (contactAgeSeconds !== undefined && contactAgeSeconds > TELEGRAM_STALL_SECONDS);
-      return { connected: session.connected && !stalled, stalled };
-    });
-    const stalledSessions = sessions.filter((session) => session.stalled).length;
+    const providers = store.telegramIngestionReadinessSnapshot();
+    const expectedProviders = providers.length;
+    const readyProviders = providers.filter((provider) => provider.ready).length;
+    const unreadyProviders = expectedProviders - readyProviders;
+    const stalledProviders = providers.filter((provider) => provider.stalled).length;
     return {
-      // "degraded" while any tracked Telegram session is stalled. The HTTP
-      // code stays 200 so a container healthcheck added later cannot
-      // restart-loop the app over a stall; monitors should match on status.
-      status: stalledSessions > 0 ? "degraded" : "ok",
+      // "degraded" while any enabled provider lacks a current readiness
+      // observation. The HTTP code stays 200 so a container healthcheck added
+      // later cannot restart-loop the app over a stall.
+      status: unreadyProviders > 0 ? "degraded" : "ok",
       database: "connected",
       telegramAdapter: telegram.name,
       telegram: {
-        sessions: sessions.length,
-        connectedSessions: sessions.filter((session) => session.connected).length,
-        stalledSessions,
+        expectedProviders,
+        readyProviders,
+        unreadyProviders,
+        stalledProviders,
       },
     };
   };
@@ -1238,7 +1233,7 @@ export function createApi(options: ApiOptions = {}) {
       options.telegramPollingEnabled ??
       (process.env.NODE_ENV !== "test" && options.databasePath !== ":memory:"),
     intervalMs: options.telegramPollingIntervalMs,
-    rpcTimeoutMs: options.telegramRpcTimeoutMs,
+    rpcTimeoutMs: effectiveTelegramRpcTimeoutMs,
   });
 
   return Object.assign(app, ingestion);
@@ -1263,6 +1258,12 @@ interface TelegramProviderHealth {
   consecutiveFailures: number;
   checkedAt: string;
   error?: string;
+}
+
+interface TelegramIngestionExpectation {
+  providerId: string;
+  profileId: string;
+  sessionId?: string;
 }
 
 type TelegramProvider = {
@@ -1318,6 +1319,7 @@ function createTelegramIngestionLoop(
   };
   const intervalMs =
     options.intervalMs ?? Math.max(1000, store.appSettings().pollingIntervalSeconds * 1000);
+  if (options.intervalMs !== undefined) store.setTelegramPollingIntervalMs(intervalMs);
   const timer = options.enabled
     ? setInterval(() => {
         void runTelegramIngestionOnce();
@@ -1624,6 +1626,11 @@ class AppStore {
   // Per-provider state is kept separately because one stalled dialog RPC must
   // not wait for another provider before becoming visible to the operator.
   private readonly telegramProviderHealth = new Map<string, TelegramProviderHealth>();
+  // Enabled providers define the ingestion work the process is expected to do.
+  // This stays in memory so /api/health never needs to query SQLite.
+  private readonly telegramIngestionExpectations = new Map<string, TelegramIngestionExpectation>();
+  private readonly telegramRpcAllowanceSeconds: number;
+  private telegramFreshnessBudgetSeconds = 1;
   // In-memory pub/sub for the SSE stream. Subscribers are SSE connections that
   // forward typed deltas to the dashboard so it stops polling on a timer.
   // ponytail: single-process in-memory bus. Ceiling — events do not survive a
@@ -1654,9 +1661,14 @@ class AppStore {
     }
   >();
 
-  constructor(databasePath: string, allowDemoData = false) {
+  constructor(
+    databasePath: string,
+    allowDemoData = false,
+    telegramRpcTimeoutMs = DEFAULT_TELEGRAM_RPC_TIMEOUT_MS,
+  ) {
     this.databasePath = databasePath;
     this.allowDemoData = allowDemoData;
+    this.telegramRpcAllowanceSeconds = Math.max(1, Math.ceil(telegramRpcTimeoutMs / 1000));
     if (databasePath !== ":memory:") {
       const dir = databasePath.split("/").slice(0, -1).join("/");
       if (dir) {
@@ -1666,6 +1678,8 @@ class AppStore {
     this.db = new Database(databasePath);
     this.db.run("PRAGMA journal_mode = WAL");
     this.migrate();
+    this.updateTelegramFreshnessBudget(this.appSettings().pollingIntervalSeconds);
+    this.refreshTelegramIngestionExpectations();
   }
 
   // Thrown when the HELD source row does not transition exactly once. Escapes the transaction so
@@ -1731,6 +1745,7 @@ class AppStore {
     if (status === "CONNECTED") {
       if (this.allowDemoData) this.ensureMockProvider(String(session.profile_id));
     }
+    this.refreshTelegramIngestionExpectations();
     this.audit("telegram.status", "info", `Telegram session moved to ${status}`, {
       sessionId,
       status,
@@ -1820,6 +1835,7 @@ class AppStore {
       this.db
         .query("UPDATE providers SET profile_id = ?, title = ?, kind = ? WHERE id = ?")
         .run(input.profileId, title, kind, String(existing.id));
+      this.refreshTelegramIngestionExpectations();
       this.audit("provider.rebind", "info", "Provider bound to Telegram session profile", {
         providerId: String(existing.id),
         dialogId: input.dialogId,
@@ -1849,6 +1865,7 @@ class AppStore {
         defaultAppSettings.defaultLotSize,
         now,
       );
+    this.refreshTelegramIngestionExpectations();
     return { provider: this.providers().find((provider) => provider.id === id) };
   }
 
@@ -1892,6 +1909,7 @@ class AppStore {
       alreadyCurrent,
       stillOffline: stillOffline.length,
     });
+    this.refreshTelegramIngestionExpectations();
     return {
       profileId: input.profileId,
       dialogsSeen: input.dialogs.length,
@@ -1976,6 +1994,7 @@ class AppStore {
       providerId: id,
       ...input,
     });
+    this.refreshTelegramIngestionExpectations();
     return { provider: this.providers().find((provider) => provider.id === id) };
   }
 
@@ -2194,6 +2213,7 @@ class AppStore {
       providerId,
       title: provider.title,
     });
+    this.refreshTelegramIngestionExpectations();
     return { providerId, status: "DELETED" };
   }
 
@@ -3171,7 +3191,8 @@ class AppStore {
   private recordTelegramHealth(telegram: TelegramAdapter, sessionIds: Set<string>) {
     if (!telegram.sessionHealth) return;
     for (const sessionId of sessionIds) {
-      const health = telegram.sessionHealth(sessionId);
+      const observedHealth = telegram.sessionHealth(sessionId);
+      const health = this.normalizeTelegramSessionHealth(observedHealth);
       const previous = this.telegramHealth.get(sessionId);
       this.telegramHealth.set(sessionId, health);
       // Log the healthy->stalled and stalled->recovered edges once each so the
@@ -3203,13 +3224,13 @@ class AppStore {
     error?: unknown,
   ) {
     const sessionHealth = telegram.sessionHealth?.(sessionId);
+    const sessionStalled = this.telegramSessionIsStalled(sessionHealth);
     const timeout = error instanceof TelegramRpcTimeoutError;
     const previous = this.telegramProviderHealth.get(provider.id);
     const consecutiveFailures = error ? (previous?.consecutiveFailures ?? 0) + 1 : 0;
     const stalled =
-      Boolean(sessionHealth?.stalled) ||
-      (timeout && consecutiveFailures >= TELEGRAM_PROVIDER_STALL_FAILURES);
-    const healthy = !error && !sessionHealth?.stalled;
+      sessionStalled || (timeout && consecutiveFailures >= TELEGRAM_PROVIDER_STALL_FAILURES);
+    const healthy = !error && !sessionStalled;
     const health: TelegramProviderHealth = {
       providerId: provider.id,
       sessionId,
@@ -3242,11 +3263,123 @@ class AppStore {
   }
 
   telegramSessionHealth(): TelegramSessionHealth[] {
-    return [...this.telegramHealth.values()];
+    return [...this.telegramHealth.values()].map((health) =>
+      this.normalizeTelegramSessionHealth(health),
+    );
   }
 
   telegramProviderHealthSnapshot(): TelegramProviderHealth[] {
-    return [...this.telegramProviderHealth.values()];
+    return [...this.telegramProviderHealth.values()].map((health) => {
+      const sessionStalled = this.telegramSessionIsStalled(
+        this.telegramHealth.get(health.sessionId),
+      );
+      return {
+        ...health,
+        healthy: !health.error && !sessionStalled,
+        stalled: sessionStalled || Boolean(health.error && health.stalled),
+      };
+    });
+  }
+
+  refreshTelegramIngestionExpectations() {
+    const expectations = new Map<string, TelegramIngestionExpectation>();
+    for (const provider of this.providers()) {
+      if (!provider.enabled) continue;
+      expectations.set(provider.id, {
+        providerId: provider.id,
+        profileId: provider.profileId,
+        sessionId: this.connectedSessionIdForProfile(provider.profileId),
+      });
+    }
+
+    for (const providerId of this.providersWithoutSession) {
+      const expectation = expectations.get(providerId);
+      if (!expectation || expectation.sessionId) this.providersWithoutSession.delete(providerId);
+    }
+    for (const [providerId, health] of this.telegramProviderHealth) {
+      const expectation = expectations.get(providerId);
+      if (!expectation || expectation.sessionId !== health.sessionId) {
+        this.telegramProviderHealth.delete(providerId);
+      }
+    }
+    const expectedSessionIds = new Set(
+      [...expectations.values()]
+        .map((expectation) => expectation.sessionId)
+        .filter((sessionId): sessionId is string => Boolean(sessionId)),
+    );
+    for (const sessionId of this.telegramHealth.keys()) {
+      if (!expectedSessionIds.has(sessionId)) this.telegramHealth.delete(sessionId);
+    }
+
+    this.telegramIngestionExpectations.clear();
+    for (const [providerId, expectation] of expectations) {
+      this.telegramIngestionExpectations.set(providerId, expectation);
+    }
+  }
+
+  telegramIngestionReadinessSnapshot() {
+    return [...this.telegramIngestionExpectations.values()].map((expectation) => {
+      const health = this.telegramProviderHealth.get(expectation.providerId);
+      const sessionHealth = expectation.sessionId
+        ? this.telegramHealth.get(expectation.sessionId)
+        : undefined;
+      const providerAgeSeconds = health
+        ? Math.floor((Date.now() - Date.parse(health.checkedAt)) / 1000)
+        : undefined;
+      const providerStalled = Boolean(health?.stalled && health.error);
+      const stalled = Boolean(
+        providerStalled ||
+          (providerAgeSeconds !== undefined &&
+            providerAgeSeconds > this.telegramFreshnessBudgetSeconds) ||
+          this.telegramSessionIsStalled(sessionHealth),
+      );
+      const sessionReady = sessionHealth
+        ? sessionHealth.lastContactAt
+          ? !this.telegramSessionIsStalled(sessionHealth)
+          : sessionHealth.connected
+        : true;
+      const ready = Boolean(
+        expectation.sessionId &&
+          health?.sessionId === expectation.sessionId &&
+          !health?.error &&
+          sessionReady &&
+          !stalled,
+      );
+      return {
+        providerId: expectation.providerId,
+        ready,
+        stalled,
+      };
+    });
+  }
+
+  setTelegramPollingIntervalMs(intervalMs: number) {
+    this.updateTelegramFreshnessBudget(Math.max(1, Math.ceil(intervalMs / 1000)));
+  }
+
+  private updateTelegramFreshnessBudget(pollingIntervalSeconds: number) {
+    this.telegramFreshnessBudgetSeconds =
+      Math.max(1, Math.ceil(pollingIntervalSeconds)) + this.telegramRpcAllowanceSeconds;
+  }
+
+  private telegramSessionIsStalled(health?: TelegramSessionHealth) {
+    if (!health) return false;
+    if (health.lastContactAt) {
+      const lastContactAt = Date.parse(health.lastContactAt);
+      if (Number.isFinite(lastContactAt)) {
+        return Date.now() - lastContactAt > this.telegramFreshnessBudgetSeconds * 1000;
+      }
+    }
+    return health.stalled;
+  }
+
+  private normalizeTelegramSessionHealth(health: TelegramSessionHealth): TelegramSessionHealth {
+    const stalled = this.telegramSessionIsStalled(health);
+    return {
+      ...health,
+      connected: health.lastContactAt ? !stalled : health.connected,
+      stalled,
+    };
   }
 
   // Operational conditions that silently block trading and should be shown
@@ -10428,6 +10561,7 @@ class AppStore {
       this.saveSecret("azureOpenAIApiKey", input.azureOpenAIApiKey.trim());
     }
     const settings = normalizeAppSettings({ ...this.appSettings(), ...input });
+    this.updateTelegramFreshnessBudget(settings.pollingIntervalSeconds);
     this.db
       .query("INSERT OR REPLACE INTO app_settings (id, settings_json, updated_at) VALUES (?, ?, ?)")
       .run("default", JSON.stringify(settings), new Date().toISOString());
