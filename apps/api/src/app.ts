@@ -284,10 +284,13 @@ const defaultAppSettings: AppSettings = {
 };
 const pendingOpenMissingGraceSeconds = 10;
 const pendingOpenMissingDebounceSeconds = 10;
-// Upper bound on the DERIVED pending-order absence threshold. The polling interval
-// itself stays an operator choice; only the delay before recognising a genuinely
-// cancelled order is bounded here.
-const MAX_PENDING_OPEN_MISSING_DEBOUNCE_SECONDS = 90;
+// Operational maximum for the MT5 poll interval. This single setting drives the EA's
+// only timer, and that timer runs heartbeat, snapshot, ManageTrailingStops,
+// PollAndExecute and history backfill. Raising it delays live stop management and
+// command execution, and past EA_HEARTBEAT_SECONDS * 3 it also marks the account
+// offline, which holds subsequent opens. Bookkeeping delays are the lesser risk, so
+// this stays capped.
+const MAX_POLLING_INTERVAL_SECONDS = 30;
 const EA_HEARTBEAT_SECONDS = 5;
 const EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS = 30;
 const GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS = 60 * 60;
@@ -1228,11 +1231,7 @@ export function createApi(options: ApiOptions = {}) {
     rpcTimeoutMs: effectiveTelegramRpcTimeoutMs,
   });
 
-  return Object.assign(app, ingestion, {
-    // Test seam. The threshold is derived from a mutable setting and then capped, so a
-    // test asserting the cap needs to read the resolved value rather than infer it.
-    pendingOpenMissingThresholdSeconds: () => store.pendingOpenMissingThresholdSeconds(),
-  });
+  return Object.assign(app, ingestion);
 }
 
 interface TelegramIngestionResult {
@@ -12683,19 +12682,6 @@ class AppStore {
     }
   }
 
-  // Scale with the poll rate so a slow poller does not cancel on one miss, but cap the
-  // result. Without the cap a long polling interval delays recognising a genuinely
-  // cancelled order for as long as the operator's interval allows, and the order stays
-  // live in the app's model the whole time. Capping the DERIVED threshold keeps that
-  // bounded while leaving the polling interval an operator choice, which the Telegram
-  // readiness budget also scales from.
-  pendingOpenMissingThresholdSeconds() {
-    return Math.min(
-      MAX_PENDING_OPEN_MISSING_DEBOUNCE_SECONDS,
-      Math.max(pendingOpenMissingDebounceSeconds, this.appSettings().pollingIntervalSeconds * 3),
-    );
-  }
-
   private pendingOpenMissingStateKey(accountId: string, orderTicket: string) {
     return `${accountId}:${orderTicket}`;
   }
@@ -12734,7 +12720,11 @@ class AppStore {
     // live in the app's model the whole time. Capping the derived threshold keeps that
     // bounded while leaving the polling interval itself an operator choice, which the
     // Telegram readiness budget also scales from.
-    return Date.now() - current.missingSince > this.pendingOpenMissingThresholdSeconds() * 1000;
+    const thresholdSeconds = Math.max(
+      pendingOpenMissingDebounceSeconds,
+      this.appSettings().pollingIntervalSeconds * 3,
+    );
+    return Date.now() - current.missingSince > thresholdSeconds * 1000;
   }
 
   private pendingOpenOrder(tradeId: string) {
@@ -15624,8 +15614,11 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     ),
     pollingIntervalSeconds: Math.max(
       1,
-      Math.round(
-        positiveNumber(input.pollingIntervalSeconds, defaultAppSettings.pollingIntervalSeconds),
+      Math.min(
+        MAX_POLLING_INTERVAL_SECONDS,
+        Math.round(
+          positiveNumber(input.pollingIntervalSeconds, defaultAppSettings.pollingIntervalSeconds),
+        ),
       ),
     ),
     allowedOrderTypes,

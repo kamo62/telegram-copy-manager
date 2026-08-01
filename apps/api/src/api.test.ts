@@ -823,8 +823,8 @@ describe("Telegram TC API", () => {
         sessionId,
         connected: true,
         stalled: false,
-        lastContactAt: new Date(Date.now() - 181_000).toISOString(),
-        stalledSeconds: 181,
+        lastContactAt: new Date(Date.now() - 40_000).toISOString(),
+        stalledSeconds: 40,
       }),
     };
     const app = createApi({
@@ -839,7 +839,9 @@ describe("Telegram TC API", () => {
 
     await app.request("/api/settings", {
       method: "PATCH",
-      body: JSON.stringify({ pollingIntervalSeconds: 300 }),
+      // 30 is the operational maximum; the budget becomes 30 + 20 = 50s,
+      // which now covers the 40s-old contact that was stale at the 22s default.
+      body: JSON.stringify({ pollingIntervalSeconds: 30 }),
       headers: { "content-type": "application/json" },
     });
 
@@ -5956,11 +5958,10 @@ describe("Telegram TC API", () => {
     }
   });
 
-  test("caps the pending-order absence threshold without capping the polling interval", async () => {
-    // The polling interval stays an operator choice: the Telegram readiness budget
-    // scales from it, so clamping the setting would break that. Only the DERIVED
-    // cancellation delay is bounded, so a slow poller cannot leave a genuinely
-    // cancelled order live in the model for as long as its interval allows.
+  test("caps an absurd server polling interval before it reaches the EA", async () => {
+    // This one setting drives the EA's only timer, which also runs trailing-stop
+    // management and command execution. An unbounded value delays live stop management,
+    // which is a worse risk than a bookkeeping delay recognising a cancelled order.
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
     const updated = await json<{ settings: { pollingIntervalSeconds: number } }>(
       await app.request("/api/settings", {
@@ -5969,15 +5970,12 @@ describe("Telegram TC API", () => {
         headers: { "content-type": "application/json" },
       }),
     );
-    expect(updated.settings.pollingIntervalSeconds).toBe(600);
+    expect(updated.settings.pollingIntervalSeconds).toBe(30);
 
     const noWorkPayload = await (
       await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
     ).text();
-    expect(noWorkPayload).toContain("pollSeconds=600");
-
-    // 600 * 3 would be 1800 seconds; the cap holds it at 90.
-    expect(app.pendingOpenMissingThresholdSeconds()).toBe(90);
+    expect(noWorkPayload).toContain("pollSeconds=30");
   });
 
   test("holds stale open-trade Telegram replays as EXPIRED_LATE", async () => {
