@@ -15624,11 +15624,8 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     ),
     pollingIntervalSeconds: Math.max(
       1,
-      Math.min(
-        Number.MAX_SAFE_INTEGER,
-        Math.round(
-          positiveNumber(input.pollingIntervalSeconds, defaultAppSettings.pollingIntervalSeconds),
-        ),
+      Math.round(
+        positiveNumber(input.pollingIntervalSeconds, defaultAppSettings.pollingIntervalSeconds),
       ),
     ),
     allowedOrderTypes,
