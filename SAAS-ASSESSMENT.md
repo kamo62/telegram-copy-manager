@@ -4,6 +4,11 @@ Date: 2026-07-30. Status: recommendation, nothing implemented.
 Revision 2, after an independent adversarial review and two owner questions (Fly.io as host, whether
 Telegram sells a commercial ingestion product).
 
+Note added 2026-08-01: the app's Telegram client library moved from GramJS to teleproto in v1.65.7,
+after this document was written. References below to "gramjs" describe the MTProto client that filled
+this role at the time; teleproto is a maintained fork of the same client, so the hosting, licensing,
+and reconnect-behaviour analysis is understood to carry over unless noted otherwise.
+
 Question asked: does the productionalised SaaS need a new folder/repo, given it integrates with
 `linux-mt5`, and is `boxyhq/saas-starter-kit` a useful base if Cloudflare is preferred?
 
@@ -48,7 +53,7 @@ Current state, measured:
 
 | Fact | Value |
 | --- | --- |
-| Auth on `/api/*` | none. Only `cors()` at `app.ts:401` |
+| Auth on `/api/*` | none. Only `cors()` at `app.ts:419` |
 | Tenancy key | none. `accountId` (715 references) is an MT5 account, not a customer |
 | `apps/api/src/app.ts` | 555 KB, single file |
 | `apps/api/src/api.test.ts` | 552 KB |
@@ -69,7 +74,8 @@ from config and is otherwise unchanged. Why this is right and not just easier:
    structure. The engine process alongside it is nearly free.
 3. SQLite stays SQLite. No D1 migration for trading data, no store-layer rewrite, and the existing
    552 KB test suite keeps passing as-is.
-4. Blast radius. The known gramjs reconnect freeze becomes one tenant's outage.
+4. Blast radius. The known Telegram-client reconnect freeze (gramjs originally, teleproto since the
+   2026-08-01 migration) becomes one tenant's outage.
 5. Schema drift across tenants is handled, because the engine self-migrates in code on boot.
 6. `app.ts` stops being a launch blocker. It stays a velocity problem, fixed on its own schedule.
 
@@ -177,7 +183,7 @@ totals about 1,991 MB, which is 6.6x the entire MT5 plus engine footprint. MT5 i
 best-behaved things on the machine at 1.4% of RAM.
 
 The exhausted swap is the likely explanation for the "reboots often" note in the deployment memory,
-and a plausible contributor to the gramjs reconnect freezes. This box is a media server first, by the
+and a plausible contributor to the Telegram-client reconnect freezes. This box is a media server first, by the
 owner's explicit priority, so the trading stack is the thing that moves.
 
 ### Orchestration: not Kubernetes yet
@@ -223,11 +229,12 @@ disk is ephemeral. Every wake gets a fresh disk, so the Wine prefix and the brok
 Snapshots are listed as coming. Always-on container pricing also loses badly to Hetzner. Revisit only
 when persistent volumes ship.
 
-**gramjs on Workers or Durable Objects.** Workers have TCP `connect()` and maturing `node:net` and
-`node:crypto` compatibility, and people do proxy MTProto through Durable Objects. So this is possible
-and experimental. It is still the wrong call: DO eviction and redeploys restart the session, always-on
-duration billing per tenant is unattractive, and gramjs reconnect fragility is a known problem in
-this codebase already. The ingester stays on a real Bun host, which is where it runs today.
+**teleproto (formerly gramjs) on Workers or Durable Objects.** Workers have TCP `connect()` and
+maturing `node:net` and `node:crypto` compatibility, and people do proxy MTProto through Durable
+Objects. So this is possible and experimental. It is still the wrong call: DO eviction and redeploys
+restart the session, always-on duration billing per tenant is unattractive, and reconnect fragility in
+this Telegram client is a known problem in this codebase already. The ingester stays on a real Bun
+host, which is where it runs today.
 
 D1 for the control plane checks out as originally stated.
 
@@ -237,7 +244,7 @@ Boundary:
 Cloudflare (control plane)          Tenant machine (Fly, later Hetzner)
 --------------------------          -----------------------------------
 marketing + signup (Pages)          tc-engine container
-console + billing (Workers)           - Hono API, local SQLite, gramjs ingester
+console + billing (Workers)           - Hono API, local SQLite, teleproto ingester
 control-plane API (Workers)         linux-mt5 container
 control-plane DB (D1)                 - MT5 under Wine, persistent Wine prefix
 provisioner (Queues + Cron)
@@ -257,7 +264,8 @@ own. There is no paid data or ingestion tier.
 The Bot API is official and free, and a bot added to a channel as admin does receive posts. The
 blocker is that only that channel's owner can add it, and signal providers are third parties.
 
-The MTProto client API that gramjs uses is also official and documented. It is how every third-party
+The MTProto client API that the app's Telegram client (teleproto, formerly gramjs) uses is also
+official and documented. It is how every third-party
 Telegram client works and using it is permitted. What you do not get is a commercial tier, an SLA, or
 immunity from anti-spam heuristics. Automated reading across many accounts from one API ID is exactly
 what those heuristics target.
@@ -267,7 +275,7 @@ it also does not do this. It is for a business messaging its own customers, not 
 groups, and Meta bans the unofficial libraries aggressively. Even the platform with a real commercial
 API does not sell this capability.
 
-So the options are: the tenant's own account via gramjs (what you do today, and the reason per-tenant
+So the options are: the tenant's own account via teleproto (what you do today, and the reason per-tenant
 `api_id` matters, because it makes the "the tenant is reading channels they subscribed to" framing
 true rather than decorative), or getting providers to add your bot as a channel admin. The second
 will never cover the long tail, but for your top providers it is worth asking. It gives a more
@@ -320,8 +328,8 @@ with a monetary claim attached. Close them before the first external tenant. Add
 global kill switch owned by the control plane.
 
 **3. Unauthenticated EA endpoints.** `/api/mt5/poll` and `/api/mt5/poll-line` lease queue items on a
-bare `accountId` query parameter (`app.ts:1045-1055`). `/api/mt5/report` accepts an execution report
-with no auth at all (`app.ts:1057-1061`). `linkCode` is checked on register and heartbeat only.
+bare `accountId` query parameter (`app.ts:1041-1051`). `/api/mt5/report` accepts an execution report
+with no auth at all (`app.ts:1053-1057`). `linkCode` is checked on register and heartbeat only.
 Account ids are `mt5-<accountNumber>`, which is low entropy. Today this is contained by a private
 network. The moment a tunnel exposes the app with an `/api/mt5/*` exemption for Access, anyone can
 lease another tenant's work items and post fabricated execution reports. Fix by keeping EA-to-engine
@@ -330,8 +338,8 @@ This is a pre-launch blocker either way.
 
 **4. Version skew across three moving parts.** Engine, EA `.ex5`, and MT5 image versions must be
 mutually compatible. Note the correction here: `eaVersion` is already sent in both the register and
-heartbeat payloads (`TelegramTC_EA.mq5:158` and `:1832`) and stored server-side (`app.ts:5570`) with
-no gate. Gating at register would enforce nothing, because `RegisterAccount()` is fire-and-forget in
+heartbeat payloads (`TelegramTC_EA.mq5:158` and `:1832`) and stored server-side (`app.ts:5718` in
+`registerMt5Account`, `app.ts:5796` in `heartbeat`) with no gate. Gating at register would enforce nothing, because `RegisterAccount()` is fire-and-forget in
 `OnInit` and the EA polls regardless while carrying only `accountId`. The enforcement point is the
 lease: have `leaseNextQueueItem` refuse work when the stored `ea_version` is below minimum. That works
 against today's EAs with no EA change, because heartbeat keeps the stored version fresh.
@@ -353,7 +361,7 @@ Before the first external paying tenant:
 - EA endpoint authentication fixed (risk 3).
 - EA version gate enforced at lease (risk 4).
 - FloodWait and ban detection with tenant notification (risk 5).
-- Engine takes tenant identity and all secrets from config. Verify `SEED_DEMO_DATA` (`app.ts:386`)
+- Engine takes tenant identity and all secrets from config. Verify `SEED_DEMO_DATA` (`app.ts:401`)
   and `DEFAULT_MT5_ACCOUNT_ID` cannot bleed into a real tenant.
 - Auth in front of the dashboard. Cloudflare Access is the fastest honest answer.
 - Provisioning is one idempotent command; deprovisioning genuinely deletes the Wine prefix and the

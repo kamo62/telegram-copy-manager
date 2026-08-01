@@ -3,15 +3,22 @@
 The replacement console is allowed to reorganise a workflow, but it must not remove a capability.
 This checklist is the release gate for future frontend changes.
 
-**Stale as of 2026-08-01.** This predates the v1.64.4/v1.64.5/v1.65.0 route restructuring: `/providers`,
-`/symbols`, and `/logs` are now standalone top-level views, and the account workspace tab strip no
-longer shows `summary` or `symbols` as tabs (see `README.md`'s Application Surfaces section for the
-current structure). The capability list below stays useful as a checklist of things a redesign must
-not drop; the route and tab structure it describes is out of date.
+**Route and tab structure corrected 2026-08-01** to match the v1.64.4/v1.64.5/v1.65.0 restructuring,
+verified directly against `apps/web/src/App.tsx`'s route parsing and tab-strip rendering (see
+`README.md`'s Application Surfaces section for the narrative version). The capability list stays the
+release-gate checklist: a redesign may relocate a capability but must not drop it.
 
 ## Global routes
 
 - `/`: all-account operations overview, account selection, exposure, activity and onboarding.
+- `/logs`: standalone Review queue, with recent-message parsing, AI review, approve/ignore,
+  fixture classification/redaction, saved fixtures, signal queue and EA execution reports. No
+  account workspace tab strip.
+- `/providers`: standalone global provider hub, with aggregate provider overview, account-scoped copy
+  chips, provider config, parser template and symbol lock, lot/risk sizing, TP allocation, runner
+  config, dry-run tests, parse-recent and CSV export. No account workspace tab strip.
+- `/symbols`: standalone Symbol Mapping, with global and provider aliases, plus per-account broker
+  symbol mappings. No account workspace tab strip.
 - `/telegram`: Telegram authentication, OTP/2FA continuation, dialog refresh, provider selection,
   and provider addition. Provider monitoring, resync, enable/disable, configuration, and removal
   live on the Providers page.
@@ -22,16 +29,22 @@ not drop; the route and tab structure it describes is out of date.
 
 ## Account workspace
 
-- `summary`: live account posture, performance strip, exposure and recent activity.
+`/accounts/:accountId/:tab` renders the account-scoped tab strip: `performance`, `providers`,
+`history`, `equity-guardian`, `logs` (five tab-strip buttons, confirmed against `WorkspaceTabs.tsx`).
+`summary` is not a distinct tab in this scope; it resolves to `performance`. `symbols` is reachable at
+the same URL scheme, for example from an unmapped-symbol alert, but has no tab-strip button of its
+own; routine alias and mapping work happens on the top-level `/symbols` page above.
+
 - `performance`: growth/equity chart, range statistics, provider attribution and sampled history.
 - `providers`: aggregate or account-scoped results, copy toggle, execution configuration, TP/runner
   validation, configuration dry run, recent-message parse and CSV export.
 - `history`: open EA/external positions, pending orders, grouped closed trades, partial-close legs,
   trade-journal export and out-of-sync resolution.
 - `equity-guardian`: explicitly opt-in protection, threshold, paused state and safe unpause/requeue.
-- `symbols`: global/provider aliases, account rules, direct broker mappings and deletion.
 - `logs`: recent parses, fixture classification/redaction, AI review, approve/ignore/correct-and-push,
   held-signal requeue/dismiss, queue visibility and execution-report detail.
+- `symbols` (no tab-strip button, direct-link only): global/provider aliases, account rules, direct
+  broker mappings and deletion.
 
 ## Persistent controls
 

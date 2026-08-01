@@ -1,27 +1,39 @@
 # Handoff
 
-## START HERE — 2026-07-31
+## START HERE — 2026-08-01
 
-Branch `fix/reference-leg-stop-strategy` @ `eaeba29e`, 3 commits ahead of
+Branch `fix/reference-leg-stop-strategy` @ `62177477`, 10 commits ahead of
 `origin/fix/reference-leg-stop-strategy` (pushed as far as `84d87453`; the rest is local). Package
-version `1.65.6`. EA source metadata remains `1.65.0`, unchanged since that release, because each
-patch from 1.65.1 through 1.65.6 was web/API-only and left it as-is (see each entry in
+version `1.65.7`. EA source metadata remains `1.65.0`, unchanged since that release, because every
+patch from 1.65.1 through 1.65.7 was web/API-only and left it as-is (see each entry in
 `changelog.md`). The deployed terminals run EA `v1.60.0` regardless; the source metadata string and
 the deployed binary are tracked separately, and only the binary needs a recompile.
 
+**Production runs 1.65.5.** Nothing from v1.65.6, v1.65.7, or this branch is live, including the
+teleproto migration below and the `/api/health` readiness work. Check the running container's version
+before assuming otherwise.
+
 This branch carries the reference-leg stop-strategy work, each detailed under its own heading below:
 v1.65.4 (a take-profit leg allocated 0% now applies its own stop strategy, such as break-even,
-without closing volume), v1.65.5 (durable per-leg stop actions that survive a crash or restart), and
+without closing volume), v1.65.5 (durable per-leg stop actions that survive a crash or restart),
 v1.65.6 (reopens legs a spurious pending-order cancellation had left permanently `SKIPPED`, plus
-`lastSnapshotReceivedAt`/`snapshotAgeSeconds` on `GET /api/mt5/accounts`). The last production
-deployment confirmed in this file is v1.65.3 on 2026-07-30 (see that entry below); v1.65.4 through
-v1.65.6 have not been confirmed deployed here. Check the running container's version before assuming
-otherwise.
+`lastSnapshotReceivedAt`/`snapshotAgeSeconds` on `GET /api/mt5/accounts`), and v1.65.7 (rekeys
+`reference_stop_actions` when a broker position ticket transition is accepted, propagates broker
+point metadata into default-distance TP targets, debounces pending-order cancellation on continuous
+absence rather than order age, and replaces the Telegram client library).
 
-`/api/health` gained a `telegram` readiness section in v1.65.6, but it is known-incomplete: it
-reports `ok` when no session has ever connected, when the only session is disconnected, and when a
-provider is failing its RPCs, and `degraded` only for a deliberately paused provider. Do not wire
-alerting to it yet; see open risk 8 below.
+**Telegram client migrated from GramJS to teleproto (commit `62177477`, part of v1.65.7).** The npm
+dependency is now `teleproto` (`^1.228.4`) instead of `telegram` (GramJS), which was archived upstream
+on 2026-07-14 with `2.26.22` as its final release. The `gramjs` adapter name and the
+`TELEGRAM_ADAPTER=gramjs` setting are unchanged and now mean "the real adapter, backed by teleproto";
+see README's What It Does section. Saved `StringSession` values load unchanged. This is a dependency
+swap, not an API/DB/EA protocol change, so it stayed a patch within v1.65.7.
+
+`/api/health` gained a `telegram` readiness section in v1.65.6
+(`expectedProviders`/`readyProviders`/`unreadyProviders`/`stalledProviders`, overall `status`
+`degraded` when any enabled provider lacks a current readiness observation). See open risk 8 below:
+an earlier version of this note wrongly described known bugs here as still open after the same commit
+that introduced the feature had already fixed them.
 
 ### The design base (owner-specified, now in effect)
 
@@ -367,8 +379,8 @@ execution, reconciliation, or guardian code.
 Found 2026-07-30, separate from that audit:
 
 6. **The EA work and report endpoints are unauthenticated.** `/api/mt5/poll` and `/api/mt5/poll-line`
-   lease queue items on a bare `accountId` query parameter (`app.ts:1045-1055`), and
-   `/api/mt5/report` accepts an execution report with no auth at all (`app.ts:1057-1061`). `linkCode`
+   lease queue items on a bare `accountId` query parameter (`app.ts:1041-1051`), and
+   `/api/mt5/report` accepts an execution report with no auth at all (`app.ts:1053-1057`). `linkCode`
    is only checked on register and heartbeat. Account ids are `mt5-<accountNumber>`, which is low
    entropy. Contained today because the API is not internet-exposed. Anything that exposes the app
    publicly, including a tunnel with an `/api/mt5/*` exemption, lets a caller lease work items and
@@ -376,15 +388,23 @@ Found 2026-07-30, separate from that audit:
    grows; re-grep before citing them again.
 7. **No FloodWait or ban handling.** Neither `telegram.ts` nor `app.ts` handles Telegram
    rate-limiting or banning the account mid-session. The failure mode is silent signal loss.
-8. **`/api/health` cannot yet answer "can this system ingest signals".** v1.65.6 added a `telegram`
-   readiness section (`expectedProviders`/`readyProviders`/`unreadyProviders`/`stalledProviders`) and
-   an overall `status` that goes `degraded` when any enabled provider lacks a current readiness
-   observation, replacing the old bare `telegramAdapter` name. It is still not reliable: a review at
-   ship time found it reports `ok` when no session has ever connected, when the only session is
+8. **`/api/health` Telegram readiness, corrected 2026-08-01: the previous version of this note was wrong.** v1.65.6
+   added a `telegram` readiness section (`expectedProviders`/`readyProviders`/`unreadyProviders`/
+   `stalledProviders`) and an overall `status` that goes `degraded` when any enabled provider lacks a
+   current readiness observation, replacing the old bare `telegramAdapter` name. An earlier version of
+   this note said it still reads `ok` when no session has ever connected, when the only session is
    disconnected, and when a provider is failing its RPCs, and `degraded` only for a deliberately
-   paused provider. The real signal for now remains the `connected` boolean on
-   `/api/telegram/status`. Do not point uptime monitoring or alerting at `/api/health` until this is
-   reworked (tracked as known-incomplete in the v1.65.6 changelog entry).
+   paused provider. Those were review findings against a first draft. The fix for all of them shipped
+   the same day, in the same commit that introduced the feature (`3b992fd8`), before it was ever
+   released. Verified against current source and against the regression tests that commit added:
+   `degrades health before the first successful Telegram provider contact`, `degrades health while a
+   Telegram session is stalled and recovers after disconnect`, `degrades health after consecutive
+   Telegram provider RPC timeouts`, and `removes a disabled provider from Telegram health
+   expectations` (all in `apps/api/src/api.test.ts`) each assert the corrected behaviour. The
+   changelog's v1.65.6 entry never called this known-incomplete; that citation in the earlier version
+   of this note did not point at anything real. Still genuinely open: this has not been exercised
+   against a live FloodWait or account ban (risk 7), and `/api/telegram/status`'s `connected` boolean
+   remains a useful independent cross-check.
 
 ### v1.65.5 - durable reference-leg stop recovery (FIXED 2026-07-31, not yet deployed)
 
@@ -426,7 +446,7 @@ leg 1 `targetPrice 4068`, `allocationPercent 0`, `strategy set-sl-to-entry`, `st
 still in place.
 
 Cause: `monitorVirtualTps` had `if (leg.status !== "OPEN" || isReferenceVirtualTpLeg(leg)) continue`.
-A 0 percent leg reaches `status: "OPEN"` normally (`app.ts:12167`), so the reference-leg test was the
+A 0 percent leg reaches `status: "OPEN"` normally (line number since drifted; not re-verified here), so the reference-leg test was the
 only gate, and it skipped the leg before the price-crossed check. The stop strategy is only applied by
 `queueSlStrategyAfterTpClose`, which runs after a leg closes volume. A 0 percent leg closes nothing,
 so its strategy was unreachable by any path.

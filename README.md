@@ -218,7 +218,12 @@ Important EA inputs:
 The API is intentionally simple HTTP/JSON plus a line-oriented MT5 polling endpoint:
 
 - Health and dashboard: `GET /health`, `GET /api/health`, `GET /api/dashboard`,
-  `GET /api/telegram/status`.
+  `GET /api/telegram/status`. `/api/health` (and the identical `/health`) report an overall `status`
+  of `ok` or `degraded` plus a `telegram` object with `expectedProviders`, `readyProviders`,
+  `unreadyProviders`, and `stalledProviders`, so Telegram ingestion readiness is visible without a
+  separate call to `/api/telegram/status`. `status` goes `degraded` when any enabled provider lacks a
+  current readiness observation; the HTTP code stays 200 either way. The dashboard's health block
+  reads the same payload.
 - Telegram: `/api/telegram/start`, `/api/telegram/verify-code`, `/api/telegram/submit-password`,
   `/api/telegram/dialogs`, `/api/telegram/disconnect`.
 - Providers and parser lab: `/api/providers`, `/api/providers/:id/*`, `/api/parser/*`,
@@ -254,6 +259,11 @@ Docker daemon restarts.
 
 Use `docker compose`, not the old `docker-compose` v1 binary. The v1 binary can fail during
 container recreation with `KeyError: 'ContainerConfig'` on newer image metadata.
+
+The image carries a `HEALTHCHECK` that polls `/api/health` and only checks that the server responds,
+which makes it a liveness check. It does not fail on a `degraded` Telegram status: restarting the
+container would not fix a Telegram-side stall and would drop in-memory readiness state. The
+`degraded` signal is for the operator and the dashboard to act on.
 
 ## Backups and restore
 
