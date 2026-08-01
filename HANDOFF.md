@@ -1,5 +1,41 @@
 # Handoff
 
+## Milestone log — 2026-08-01
+
+### Parallel-lane batch: seven of eight findings closed
+
+**Done.** Eleven commits, `68b6460f` through `80cc7edd`, all pushed to
+`origin/fix/reference-leg-stop-strategy`. Reference-leg revival `cc144aec`. Snapshot liveness
+`eaeba29e`. Health readiness `3b992fd8`. Dashboard health plus container HEALTHCHECK `9baf52a9`.
+Pending-order debounce `144a9eb4`, with my bad integration design reverted in `4064f84b`.
+Reference-stop ticket rekeying `f77da8a2`. GramJS to teleproto `62177477`. Documentation `80cc7edd`.
+
+**Verified.** `bun test` 692 pass 0 fail, `bun run typecheck` clean, `bun run lint` clean, all run in
+the main checkout at `80cc7edd`. Every behavioural change is mutation-checked; the observed failure
+output is quoted in each commit message. Teleproto verified by deleting `node_modules/telegram`
+outright and re-running the suite green, which proves nothing still resolves GramJS.
+
+**Unverified, needs a human at cutover.** Whether the live Telegram session is still
+server-authorised under teleproto, the real phone-code and 2FA flow, real dialog and message values
+including server iteration order, and reconnection after an outage. None is checkable offline. If
+the session does not load, ingestion stops and recovery needs phone-code and 2FA on an account the
+operator owns.
+
+**Resume from.**
+```
+cd /Users/kamogelo/Code/telegram-tc && git checkout fix/reference-leg-stop-strategy && bun test
+```
+
+**Open blockers.** One finding remains, the Telegram RPC orphan and client replacement, in lane
+`/private/tmp/claude-501/-Users-kamogelo-Code-telegram-tc/0dcc3daa-4e96-48c4-9b5e-dceefbfce274/scratchpad/lanes/tg-rpc2`
+based on `62177477`. Green at 699 pass with zero private-internals references, awaiting Sol review.
+It carries one previously unclosed HIGH: `startLogin()` did its slow preparatory work before
+registering intent and capturing its generation, so a concurrent disconnect in that window could be
+undone and the deleted session file recreated.
+
+**Not deployed, deliberately.** Production runs 1.65.5. The batch is not deployed because the
+teleproto cutover needs the four human checks above. Everything else in it would deploy safely.
+
 ## START HERE — 2026-08-01
 
 Branch `fix/reference-leg-stop-strategy` @ `62177477`, 10 commits ahead of
