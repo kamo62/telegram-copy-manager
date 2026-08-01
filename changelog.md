@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.65.8 - 2026-08-01 (Patch)
+
+Release impact: Patch. A dashboard rendering lifecycle fix only. No API change, no database schema
+change, and no EA protocol change, so the EA stays on 1.65.0 and no live terminal needs a recompile
+and reattach.
+
+- Parked the chart paint loop when there is nothing to paint. `startCartesianLoop` called
+  `requestAnimationFrame(draw)` as the first statement of `draw`, ahead of the `if (!s.ready) return`
+  guard, so every mounted chart held a frame at the display refresh rate for its whole life whether or
+  not a pixel changed. The loop now schedules the next frame only while something is genuinely in
+  motion (the entrance reveal, a surface easing toward new data, the hover lift settling, winking
+  stars) and otherwise waits to be woken. Every other paint input reaches the canvas through a React
+  commit, and the commit effect that refreshes the loop's refs now also wakes it, so late readiness,
+  resize, data changes, accent changes, hover and selection all repaint as before. The account growth
+  chart passes `animate={false}`, so it now costs nothing once settled instead of burning a frame
+  budget continuously.
+- Repaint the dither fill when a series colour or kind changes. The paint signature only tracked the
+  stack type and area variant, so a settled chart that switched accent colour or swapped between area
+  and line kept the old fill. Previously masked by the loop repainting unconditionally.
+- Cancel the outstanding animation frame on teardown rather than a stale handle, and ignore wake
+  requests after the loop has stopped.
+
 ## 1.65.7 - 2026-08-01 (Patch)
 
 Release impact: Patch. The Telegram client dependency moves to the maintained teleproto fork and
