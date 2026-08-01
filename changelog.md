@@ -2,16 +2,26 @@
 
 ## 1.65.7 - 2026-08-01 (Patch)
 
-Release impact: Patch because this prevents transient MT5 snapshot omissions from cancelling
-long-lived pending orders without changing the API, database schema, or EA protocol.
+Release impact: Patch. Prevents transient MT5 snapshot omissions from cancelling long-lived
+pending orders, and corrects reference-stop price resolution and queue ordering. No API removals,
+no database schema change, no EA protocol change.
 
 - Debounced missing pending-order cancellation from the first observed absence for each account and
   broker order ticket. The in-memory clock resets when the order reappears and is cleared on fills,
-  cancellations, terminal trade states, and account deletion.
-- Kept the existing order-creation grace and added a continuous-absence threshold of
-  `max(10 seconds, polling interval × 3)` before cancellation.
-- Added regression coverage for one omitted snapshot, sustained absence, reappearance reset, and a
-  real fill followed by virtual stop management.
+  cancellations, terminal trade states, and account deletion. The existing order-creation grace is
+  kept, and cancellation now requires continuous absence past `max(10 seconds, polling interval x 3)`.
+  Previously the grace measured age since order creation, so any order older than it was cancelled by
+  a single omitted snapshot. That is how a 35-hour-old limit order lost its stop management.
+- Passed broker point metadata through reference-stop strategy resolution for default-distance TP
+  targets, including the post-close and runner `last-tp` paths. Instruments whose broker point
+  differs from the pip fallback, such as index CFDs, previously resolved those stops to roughly entry.
+- Made same-time stop ordering fall back to the logical trade direction when a payload omits it, so a
+  SELL tie can no longer execute protective-first.
+- Rekeyed `reference_stop_actions` rows when a position ticket transition is accepted. Nine sites can
+  replace a matched ticket, and without rekeying a reference leg that had already fired left the
+  replacement ticket holding a less protective stop, permanently and silently.
+- Labelled the SQL migration file as a historical bootstrap snapshot; the runtime schema in
+  `apps/api/src/app.ts` remains the source of truth.
 
 ## 1.65.6 - 2026-07-31 (Patch)
 

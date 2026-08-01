@@ -184,7 +184,17 @@ async function openVirtualTpTrade(
 async function postVirtualTpSnapshot(
   app: ReturnType<typeof createApi>,
   approval: { shortId: string },
-  input: { ticket: string; bid: number; ask: number; sl: number; volume?: number },
+  input: {
+    ticket: string;
+    bid: number;
+    ask: number;
+    sl: number;
+    volume?: number;
+    symbol?: string;
+    point?: number;
+    openPrice?: number;
+    type?: number;
+  },
 ) {
   return app.request("/api/mt5/snapshot", {
     method: "POST",
@@ -193,10 +203,10 @@ async function postVirtualTpSnapshot(
       positions: [
         {
           ticket: input.ticket,
-          symbol: "EURUSD.raw",
-          type: 0,
+          symbol: input.symbol ?? "EURUSD.raw",
+          type: input.type ?? 0,
           volume: input.volume ?? 0.02,
-          openPrice: 1.086,
+          openPrice: input.openPrice ?? 1.086,
           sl: input.sl,
           tp: 0,
           profit: 40,
@@ -206,7 +216,14 @@ async function postVirtualTpSnapshot(
         },
       ],
       orders: [],
-      symbols: [{ symbol: "EURUSD.raw", bid: input.bid, ask: input.ask, point: 0.00001 }],
+      symbols: [
+        {
+          symbol: input.symbol ?? "EURUSD.raw",
+          bid: input.bid,
+          ask: input.ask,
+          point: input.point ?? 0.00001,
+        },
+      ],
     }),
     headers: { "content-type": "application/json" },
   });
@@ -229,7 +246,13 @@ async function configureVirtualTpProvider(
 
 async function reportExecutedQueue(
   app: ReturnType<typeof createApi>,
-  input: { queueItemId: string; ticket: string; price: number; volume?: number },
+  input: {
+    queueItemId: string;
+    ticket: string;
+    price: number;
+    volume?: number;
+    remainingVolume?: number;
+  },
 ) {
   await app.request("/api/mt5/report", {
     method: "POST",
@@ -246,6 +269,7 @@ async function reportExecutedQueue(
       requestedPrice: input.price,
       filledPrice: input.price,
       volume: input.volume ?? 0.02,
+      remainingVolume: input.remainingVolume,
       errorText: "",
     }),
     headers: { "content-type": "application/json" },
@@ -10102,6 +10126,71 @@ describe("Telegram TC API", () => {
     expect(work).not.toContain("commandType=CLOSE_PARTIAL");
   });
 
+  test("rekeys a fired reference stop when snapshot reconciliation replaces its ticket", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-reference-ticket-rekey-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureVirtualTpProvider(app, {
+        takeProfitLevels: [
+          { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+          { leg: 2, percentage: 100, strategy: { kind: "no-change" } },
+        ],
+      });
+      const approval = await openVirtualTpTrade(app, providerId, {
+        rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+        ticket: "rekey-A",
+        filledPrice: 1.086,
+      });
+
+      await postVirtualTpSnapshot(app, approval, {
+        ticket: "rekey-A",
+        bid: 1.092,
+        ask: 1.0922,
+        sl: 1.081,
+      });
+      const first = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+      expect(first).toContain("commandType=MODIFY_SL");
+      expect(first).toContain("targetPositionTicket=rekey-A");
+      const firstQueueItemId = first.match(/queueItemId=([^\n]+)/)?.[1];
+      expect(firstQueueItemId).toBeTruthy();
+      await reportExecutedQueue(app, {
+        queueItemId: firstQueueItemId!,
+        ticket: "rekey-A",
+        price: 1.086,
+      });
+
+      await postVirtualTpSnapshot(app, approval, {
+        ticket: "rekey-B",
+        bid: 1.0875,
+        ask: 1.0877,
+        sl: 1.081,
+      });
+      const repaired = await (
+        await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+      ).text();
+      expect(repaired).toContain("commandType=MODIFY_SL");
+      expect(repaired).toContain("targetPositionTicket=rekey-B");
+      expect(repaired).toContain("newStopLoss=1.086");
+
+      const verify = new Database(databasePath, { readonly: true });
+      const action = verify
+        .query(
+          "SELECT position_ticket FROM reference_stop_actions WHERE logical_trade_id = ? AND leg = 1",
+        )
+        .get(approval.logicalTradeId) as { position_ticket: string };
+      verify.close();
+      expect(action.position_ticket).toBe("rekey-B");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test("coalesces several crossed reference legs into one most-protective stop", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const providerId = await configureProviderWithAccount(app, {
@@ -10583,13 +10672,322 @@ describe("Telegram TC API", () => {
 
       await postVirtualTpSnapshot(app, approval, {
         ticket: "70902",
-        bid: 1.093,
-        ask: 1.0932,
+        bid: 1.099,
+        ask: 1.0992,
         sl: 1.081,
+        point: 0.00002,
       });
       const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
       expect(work).toContain("commandType=MODIFY_SL");
-      expect(work).toContain("newStopLoss=1.092");
+      expect(work).toContain("newStopLoss=1.098");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("uses the broker point for set-sl-to-tp default-distance references", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-reference-broker-point-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["US30.raw"],
+      });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          riskMode: "fixed",
+          riskAmount: 0.02,
+          takeProfitLevels: [
+            {
+              leg: 1,
+              percentage: 0,
+              strategy: { kind: "set-sl-to-tp", tpLeg: 2, offsetPips: 0 },
+            },
+            { leg: 2, percentage: 0, strategy: { kind: "no-change" } },
+            { leg: 3, percentage: 100, strategy: { kind: "no-change" } },
+          ],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const approval = await openVirtualTpTrade(app, providerId, {
+        rawText: "BUY US30 @ 39000\nSL 38900\nTP1 39050\nTP2 39100\nTP3 39200",
+        ticket: "70903",
+        filledPrice: 39000,
+      });
+
+      const setup = new Database(databasePath);
+      const row = setup
+        .query("SELECT data_json FROM logical_trades WHERE id = ?")
+        .get(approval.logicalTradeId) as { data_json: string };
+      const stored = JSON.parse(row.data_json) as {
+        legs: Array<{ targetPrice?: number; defaultDistance?: { value: number; unit: string } }>;
+      };
+      delete stored.legs[1]!.targetPrice;
+      stored.legs[1]!.defaultDistance = { value: 60, unit: "PIPS" };
+      setup
+        .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
+        .run(JSON.stringify(stored), approval.logicalTradeId);
+      setup.close();
+
+      await postVirtualTpSnapshot(app, approval, {
+        ticket: "70903",
+        bid: 39070,
+        ask: 39070.2,
+        sl: 38900,
+        symbol: "US30.raw",
+        point: 0.1,
+        openPrice: 39000,
+      });
+      const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+      expect(work).toContain("commandType=MODIFY_SL");
+      expect(work).toContain("newStopLoss=39060");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("passes a non-fallback broker point through a gold post-close stop strategy", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-gold-post-close-point-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD.raw"],
+      });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          riskMode: "fixed",
+          riskAmount: 0.02,
+          takeProfitLevels: [
+            {
+              leg: 1,
+              percentage: 100,
+              strategy: { kind: "set-sl-to-tp", tpLeg: 2, offsetPips: 0 },
+            },
+            { leg: 2, percentage: 0, strategy: { kind: "no-change" } },
+          ],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const approval = await openVirtualTpTrade(app, providerId, {
+        rawText: "BUY XAUUSD @ 4500\nSL 4490\nTP1 4510\nTP2 4520",
+        ticket: "gold-close-A",
+        filledPrice: 4500,
+      });
+
+      const setup = new Database(databasePath);
+      const row = setup
+        .query("SELECT data_json FROM logical_trades WHERE id = ?")
+        .get(approval.logicalTradeId) as { data_json: string };
+      const stored = JSON.parse(row.data_json) as {
+        legs: Array<{ targetPrice?: number; defaultDistance?: { value: number; unit: string } }>;
+      };
+      delete stored.legs[1]!.targetPrice;
+      stored.legs[1]!.defaultDistance = { value: 60, unit: "PIPS" };
+      setup
+        .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
+        .run(JSON.stringify(stored), approval.logicalTradeId);
+      setup.close();
+
+      await postVirtualTpSnapshot(app, approval, {
+        ticket: "gold-close-A",
+        bid: 4513,
+        ask: 4513.2,
+        sl: 4490,
+        symbol: "XAUUSD.raw",
+        point: 0.02,
+        openPrice: 4500,
+      });
+      const closeWork = await (
+        await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+      ).text();
+      expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
+      const closeQueueItemId = closeWork.match(/queueItemId=([^\n]+)/)?.[1];
+      expect(closeQueueItemId).toBeTruthy();
+
+      await reportExecutedQueue(app, {
+        queueItemId: closeQueueItemId!,
+        ticket: "gold-close-A",
+        price: 4513,
+        volume: 0.02,
+      });
+      const stopWork = await (
+        await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+      ).text();
+      expect(stopWork).toContain("commandType=MODIFY_SL");
+      expect(stopWork).toContain("newStopLoss=4512");
+      expect(stopWork).toContain("targetPositionTicket=gold-close-A");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("passes the broker point through a US30 post-close stop strategy", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-us30-post-close-point-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["US30.raw"],
+      });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          riskMode: "fixed",
+          riskAmount: 0.02,
+          takeProfitLevels: [
+            {
+              leg: 1,
+              percentage: 100,
+              strategy: { kind: "set-sl-to-tp", tpLeg: 2, offsetPips: 0 },
+            },
+            { leg: 2, percentage: 0, strategy: { kind: "no-change" } },
+          ],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const approval = await openVirtualTpTrade(app, providerId, {
+        rawText: "BUY US30 @ 39000\nSL 38900\nTP1 39050\nTP2 39060",
+        ticket: "us30-close-A",
+        filledPrice: 39000,
+      });
+
+      const setup = new Database(databasePath);
+      const row = setup
+        .query("SELECT data_json FROM logical_trades WHERE id = ?")
+        .get(approval.logicalTradeId) as { data_json: string };
+      const stored = JSON.parse(row.data_json) as {
+        legs: Array<{ targetPrice?: number; defaultDistance?: { value: number; unit: string } }>;
+      };
+      delete stored.legs[1]!.targetPrice;
+      stored.legs[1]!.defaultDistance = { value: 60, unit: "PIPS" };
+      setup
+        .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
+        .run(JSON.stringify(stored), approval.logicalTradeId);
+      setup.close();
+
+      await postVirtualTpSnapshot(app, approval, {
+        ticket: "us30-close-A",
+        bid: 39051,
+        ask: 39051.2,
+        sl: 38900,
+        symbol: "US30.raw",
+        point: 0.1,
+        openPrice: 39000,
+      });
+      const closeWork = await (
+        await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+      ).text();
+      expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
+      const closeQueueItemId = closeWork.match(/queueItemId=([^\n]+)/)?.[1];
+      expect(closeQueueItemId).toBeTruthy();
+
+      await reportExecutedQueue(app, {
+        queueItemId: closeQueueItemId!,
+        ticket: "us30-close-A",
+        price: 39051,
+        volume: 0.02,
+      });
+      const stopWork = await (
+        await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+      ).text();
+      expect(stopWork).toContain("commandType=MODIFY_SL");
+      expect(stopWork).toContain("newStopLoss=39060");
+      expect(stopWork).toContain("targetPositionTicket=us30-close-A");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("uses broker point for a US30 runner last-tp stop", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-runner-last-tp-point-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["US30.raw"],
+      });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          riskMode: "fixed",
+          riskAmount: 0.02,
+          runner: { enabled: true, lotSize: 0.01, slBehavior: "last-tp", trailPips: 10 },
+          takeProfitLevels: [{ leg: 1, percentage: 100, strategy: { kind: "no-change" } }],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const approval = await openVirtualTpTrade(app, providerId, {
+        rawText: "BUY US30 @ 39000\nSL 38900\nTP1 39060",
+        ticket: "runner-last-tp-A",
+        filledPrice: 39000,
+      });
+
+      const setup = new Database(databasePath);
+      const row = setup
+        .query("SELECT data_json FROM logical_trades WHERE id = ?")
+        .get(approval.logicalTradeId) as { data_json: string };
+      const stored = JSON.parse(row.data_json) as {
+        legs: Array<{ targetPrice?: number; defaultDistance?: { value: number; unit: string } }>;
+      };
+      delete stored.legs[0]!.targetPrice;
+      stored.legs[0]!.defaultDistance = { value: 60, unit: "PIPS" };
+      setup
+        .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
+        .run(JSON.stringify(stored), approval.logicalTradeId);
+      setup.close();
+
+      await postVirtualTpSnapshot(app, approval, {
+        ticket: "runner-last-tp-A",
+        bid: 39070,
+        ask: 39070.2,
+        sl: 38900,
+        symbol: "US30.raw",
+        point: 0.1,
+        openPrice: 39000,
+      });
+      const closeWork = await (
+        await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+      ).text();
+      expect(closeWork).toContain("commandType=CLOSE_PARTIAL");
+      const closeQueueItemId = closeWork.match(/queueItemId=([^\n]+)/)?.[1];
+      expect(closeQueueItemId).toBeTruthy();
+
+      await reportExecutedQueue(app, {
+        queueItemId: closeQueueItemId!,
+        ticket: "runner-last-tp-A",
+        price: 39070,
+        volume: 0.01,
+        remainingVolume: 0.01,
+      });
+      const stopWork = await (
+        await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+      ).text();
+      expect(stopWork).toContain("commandType=MODIFY_SL");
+      expect(stopWork).toContain("newStopLoss=39060");
+      expect(stopWork).toContain("targetPositionTicket=runner-last-tp-A");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
@@ -10890,6 +11288,78 @@ describe("Telegram TC API", () => {
       const first = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
       expect(first).toContain("queueItemId=queue_less_protective");
       expect(first).toContain("newStopLoss=1.086");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("uses the logical trade direction when a stop payload omits direction", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-stop-order-missing-direction-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureVirtualTpProvider(app, {
+        takeProfitLevels: [
+          { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+          { leg: 2, percentage: 0, strategy: { kind: "set-sl-to-tp", tpLeg: 1, offsetPips: 0 } },
+          { leg: 3, percentage: 100, strategy: { kind: "no-change" } },
+        ],
+      });
+      const approval = await openVirtualTpTrade(app, providerId, {
+        rawText: "SELL EURUSD @ 1.1000\nSL 1.1050\nTP1 1.0950\nTP2 1.0920\nTP3 1.0850",
+        ticket: "71302",
+        filledPrice: 1.1,
+      });
+      await postVirtualTpSnapshot(app, approval, {
+        ticket: "71302",
+        bid: 1.0896,
+        ask: 1.0898,
+        sl: 1.105,
+        type: 1,
+      });
+
+      const setup = new Database(databasePath);
+      const original = setup
+        .query(
+          `SELECT parsed_signal_id, logical_trade_id, account_id, payload_json, created_at
+           FROM queue_items
+           WHERE json_extract(payload_json, '$.commandType') = 'MODIFY_SL'`,
+        )
+        .get() as {
+        parsed_signal_id: string;
+        logical_trade_id: string;
+        account_id: string;
+        payload_json: string;
+        created_at: string;
+      };
+      const lessProtective = JSON.parse(original.payload_json) as Record<string, unknown>;
+      delete lessProtective.direction;
+      lessProtective.newStopLoss = 1.1;
+      lessProtective.idempotencyKey = "same-time-less-protective-missing-direction";
+      setup
+        .query(
+          `INSERT INTO queue_items
+             (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, lease_count, created_at, updated_at)
+           VALUES ('queue_less_protective_missing_direction', ?, ?, ?, 'PENDING', ?, 0, ?, ?)`,
+        )
+        .run(
+          original.parsed_signal_id,
+          original.logical_trade_id,
+          original.account_id,
+          JSON.stringify(lessProtective),
+          original.created_at,
+          original.created_at,
+        );
+      setup.close();
+
+      const first = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+      expect(first).toContain("queueItemId=queue_less_protective_missing_direction");
+      expect(first).toContain("newStopLoss=1.1");
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

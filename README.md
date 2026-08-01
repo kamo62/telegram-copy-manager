@@ -100,7 +100,8 @@ the account workspace tab strip.
   and queue payload builder.
 - `mt5`: MetaTrader 5 Expert Advisor source that registers, heartbeats, posts snapshots/history,
   polls line-oriented work, executes commands, and reports broker results.
-- `migrations`: SQLite schema used by the app and kept portable for a future D1-style backend.
+- `migrations`: historical SQLite bootstrap snapshots. The runtime schema in `apps/api/src/app.ts`
+  is current; refresh the migration set before using it for a future D1-style backend.
 - `docs`: archived planning, audit, and incident records with lasting reference value;
   `docs/archive/README.md` explains what remains and what was deleted.
 - `scripts`: local Telegram import/backtest helper and MT5 smoke-test helper.

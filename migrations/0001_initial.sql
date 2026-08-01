@@ -1,3 +1,8 @@
+-- Historical bootstrap snapshot, not the current runtime schema.
+-- The runtime schema is created by AppStore in apps/api/src/app.ts and includes
+-- newer tables and columns. Keep this file labelled stale until a complete D1 migration is generated.
+-- A partial refresh would falsely present an incomplete schema as deployable.
+
 CREATE TABLE IF NOT EXISTS profiles (
   id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,

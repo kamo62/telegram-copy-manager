@@ -5888,7 +5888,14 @@ class AppStore {
                CASE
                  WHEN json_extract(payload_json, '$.commandType') = 'MODIFY_SL'
                  THEN CASE
-                   WHEN json_extract(payload_json, '$.direction') = 'SELL'
+                   WHEN COALESCE(
+                     json_extract(payload_json, '$.direction'),
+                     json_extract(
+                       (SELECT data_json FROM logical_trades AS trade
+                        WHERE trade.id = queue_items.logical_trade_id),
+                       '$.direction'
+                     )
+                   ) = 'SELL'
                    THEN -CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
                    ELSE CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
                  END
@@ -5907,7 +5914,14 @@ class AppStore {
                CASE
                  WHEN json_extract(payload_json, '$.commandType') = 'MODIFY_SL'
                  THEN CASE
-                   WHEN json_extract(payload_json, '$.direction') = 'SELL'
+                   WHEN COALESCE(
+                     json_extract(payload_json, '$.direction'),
+                     json_extract(
+                       (SELECT data_json FROM logical_trades AS trade
+                        WHERE trade.id = queue_items.logical_trade_id),
+                       '$.direction'
+                     )
+                   ) = 'SELL'
                    THEN -CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
                    ELSE CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
                  END
@@ -6722,7 +6736,23 @@ class AppStore {
     return updated;
   }
 
-  private backfillHitReferenceStopActions(trade: LogicalTrade, positionTicket: string) {
+  private rekeyReferenceStopActions(trade: LogicalTrade) {
+    const positionTicket = trade.matchedBrokerTickets?.find((ticket) => truthyBrokerTicket(ticket));
+    if (!positionTicket) return;
+    this.db
+      .query(
+        `UPDATE reference_stop_actions
+         SET position_ticket = ?, updated_at = ?
+         WHERE logical_trade_id = ? AND position_ticket <> ?`,
+      )
+      .run(positionTicket, nowIso(), trade.id, positionTicket);
+  }
+
+  private backfillHitReferenceStopActions(
+    trade: LogicalTrade,
+    positionTicket: string,
+    point?: number,
+  ) {
     const missing = trade.legs.filter(
       (leg) =>
         leg.status === "HIT" &&
@@ -6751,7 +6781,7 @@ class AppStore {
     const now = nowIso();
     for (const leg of missing) {
       const needsStop = Boolean(leg.strategy && leg.strategy.kind !== "no-change");
-      const desired = needsStop ? this.strategyStopPrice(trade, leg.strategy!) : undefined;
+      const desired = needsStop ? this.strategyStopPrice(trade, leg.strategy!, point) : undefined;
       if (needsStop && !desired) continue;
       this.db
         .query(
@@ -6966,7 +6996,7 @@ class AppStore {
       const brokerManagedLeg = brokerManagedVirtualTpLeg(payload);
       let current = this.persistReferenceWatermark(trade, positionTicket, price);
       const brokerStopLoss = brokerStopLossFromSnapshot(position);
-      this.backfillHitReferenceStopActions(current, positionTicket);
+      this.backfillHitReferenceStopActions(current, positionTicket, quote.point);
       this.reconcileDeliveryUnknownModifySl({
         trade: current,
         positionTicket,
@@ -7465,6 +7495,11 @@ class AppStore {
     };
   }
 
+  private brokerPointForTrade(trade: LogicalTrade) {
+    const symbol = trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "";
+    return this.latestQuote(trade.accountId ?? "", symbol).quote?.point;
+  }
+
   private activeModifySlFloor(trade: LogicalTrade, positionTicket: string) {
     const rows = this.db
       .query(
@@ -7543,6 +7578,7 @@ class AppStore {
     brokerStateKnown: boolean;
     brokerStopLoss?: number;
     marketPrice?: number;
+    point?: number;
   }): Set<number> {
     const resolved = new Set<number>();
     if (!input.legs.length) return resolved;
@@ -7568,7 +7604,7 @@ class AppStore {
         noChange.push({ leg: leg.leg });
         continue;
       }
-      const stop = this.strategyStopPrice(input.trade, strategy);
+      const stop = this.strategyStopPrice(input.trade, strategy, input.point);
       if (!stop) continue; // not computable yet; leave OPEN and retry
       computed.push({ leg: leg.leg, desired: stop });
     }
@@ -7686,6 +7722,7 @@ class AppStore {
         brokerStateKnown: true,
         brokerStopLoss: input.brokerStopLoss,
         marketPrice: input.marketPrice,
+        point: input.point,
       });
       if (!resolved.size) return trade;
 
@@ -7717,8 +7754,9 @@ class AppStore {
     if (!open) return;
     const leg = trade.legs.find((item) => item.leg === legNumber);
     const strategy = leg?.strategy;
+    const point = this.brokerPointForTrade(trade);
     if (strategy && strategy.kind !== "no-change") {
-      const newStopLoss = this.strategyStopPrice(trade, strategy);
+      const newStopLoss = this.strategyStopPrice(trade, strategy, point);
       const broker = this.latestPositionStop(trade, positionTicket);
       const floor = this.effectiveStopFloor(trade, {
         positionTicket,
@@ -7740,7 +7778,7 @@ class AppStore {
       }
     }
 
-    this.queueRunnerManagementAfterFinalTp(trade, legNumber, positionTicket, open);
+    this.queueRunnerManagementAfterFinalTp(trade, legNumber, positionTicket, open, point);
   }
 
   private queueModifySlAfterVirtualTp(input: {
@@ -7799,6 +7837,7 @@ class AppStore {
     legNumber: number,
     positionTicket: string,
     open: { parsedSignalId: string; payload: ExecutionQueueItem["payload"] },
+    point?: number,
   ) {
     const runner = open.payload.runner;
     if (!runner?.enabled || runner.lotSize <= 0) return;
@@ -7810,7 +7849,7 @@ class AppStore {
     const volumeLegs = nextLegs.filter((leg) => !isReferenceVirtualTpLeg(leg));
     if (!volumeLegs.length || volumeLegs.some((leg) => leg.status !== "CLOSED")) return;
 
-    this.queueRunnerSlStrategy(trade, positionTicket, runner, open.parsedSignalId, nextLegs);
+    this.queueRunnerSlStrategy(trade, positionTicket, runner, open.parsedSignalId, nextLegs, point);
   }
 
   private queueRunnerSlStrategy(
@@ -7819,6 +7858,7 @@ class AppStore {
     runner: NonNullable<ExecutionQueueItem["payload"]["runner"]>,
     parsedSignalId: string,
     legs = trade.legs,
+    point?: number,
   ) {
     if (runner.slBehavior === "trail") {
       if (!runner.trailPips || runner.trailPips <= 0) return;
@@ -7862,7 +7902,7 @@ class AppStore {
 
     const newStopLoss =
       runner.slBehavior === "last-tp"
-        ? this.lastClosedVirtualTpPrice({ ...trade, legs })
+        ? this.lastClosedVirtualTpPrice({ ...trade, legs }, point)
         : (this.openPriceForTrade(trade.id) ??
           this.snapshotOpenPrice(trade.accountId, positionTicket));
     if (!newStopLoss) return;
@@ -7885,11 +7925,11 @@ class AppStore {
     });
   }
 
-  private lastClosedVirtualTpPrice(trade: LogicalTrade) {
+  private lastClosedVirtualTpPrice(trade: LogicalTrade, point?: number) {
     const openPrice = this.openPriceForTrade(trade.id) ?? trade.entry?.from;
     for (const leg of trade.legs.slice().sort((left, right) => right.leg - left.leg)) {
       if (leg.status !== "CLOSED") continue;
-      const price = virtualTpTargetPrice(trade, leg, openPrice);
+      const price = virtualTpTargetPrice(trade, leg, openPrice, point);
       if (price) return price;
     }
     return undefined;
@@ -7913,7 +7953,7 @@ class AppStore {
     });
   }
 
-  private strategyStopPrice(trade: LogicalTrade, strategy: TakeProfitStrategy) {
+  private strategyStopPrice(trade: LogicalTrade, strategy: TakeProfitStrategy, point?: number) {
     const symbol = trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "";
     const pipSize = brokerPipSize(symbol);
     const offset = strategy.kind === "no-change" ? 0 : strategy.offsetPips * pipSize;
@@ -7927,6 +7967,7 @@ class AppStore {
             trade,
             leg,
             this.openPriceForTrade(trade.id) ?? trade.entry?.from,
+            point,
           ) ?? 0)
         : 0;
     }
@@ -8147,6 +8188,7 @@ class AppStore {
       };
     }
     if (JSON.stringify(updated) !== JSON.stringify(trade)) {
+      this.rekeyReferenceStopActions(updated);
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run(updated.status, JSON.stringify(updated), trade.id);
@@ -8763,6 +8805,7 @@ class AppStore {
         ),
       };
     }
+    this.rekeyReferenceStopActions(updated);
     this.db
       .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
       .run(updated.status, JSON.stringify(updated), tradeId);
@@ -11706,6 +11749,7 @@ class AppStore {
             : { ...leg, status: "SKIPPED" as const, brokerEvidence: evidence },
         ),
       };
+      this.rekeyReferenceStopActions(updated);
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run("CLOSED", JSON.stringify(updated), tradeId);
@@ -11757,6 +11801,7 @@ class AppStore {
           : { ...leg, status: nextLegStatus, brokerEvidence: evidence },
       ),
     };
+    if (updated.livePositionExists) this.rekeyReferenceStopActions(updated);
     this.db
       .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
       .run(updated.status, JSON.stringify(updated), tradeId);
@@ -12641,6 +12686,7 @@ class AppStore {
       if (missingPendingOpen) {
         this.clearPendingOpenMissingForTrade(accountId, trade.id);
       }
+      if (updated.livePositionExists) this.rekeyReferenceStopActions(updated);
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run(updated.status, JSON.stringify(updated), trade.id);
@@ -12956,6 +13002,8 @@ class AppStore {
             (trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "").toUpperCase(),
       ) as Record<string, unknown> | undefined;
     const marketPrice = Number(trade.direction === "BUY" ? (quote?.bid ?? 0) : (quote?.ask ?? 0));
+    const brokerPoint = Number(quote?.point ?? 0);
+    const point = brokerPoint > 0 ? brokerPoint : undefined;
 
     this.db.transaction(() => {
       const resolvedReference =
@@ -12968,6 +13016,7 @@ class AppStore {
               brokerStateKnown: true,
               brokerStopLoss: broker.stopLoss,
               marketPrice,
+              point,
             })
           : new Set<number>();
       // The provider telling us a target was reached is durable evidence of a crossing, even
@@ -12980,7 +13029,7 @@ class AppStore {
       let watermark = trade.virtualTpWatermark;
       if (positionTicket && unresolved.length) {
         const reached = unresolved
-          .map((leg) => virtualTpTargetPrice(trade, leg, openPrice))
+          .map((leg) => virtualTpTargetPrice(trade, leg, openPrice, point))
           .filter((value): value is number => Number.isFinite(value) && (value ?? 0) > 0);
         if (reached.length) {
           const best = trade.direction === "BUY" ? Math.max(...reached) : Math.min(...reached);
@@ -13207,6 +13256,8 @@ class AppStore {
             input.positionTicket,
             payload.runner,
             String(row.parsed_signal_id ?? ""),
+            updated.legs,
+            this.brokerPointForTrade(updated),
           );
         }
       }
@@ -13232,6 +13283,7 @@ class AppStore {
     }
 
     if (updated === trade) return;
+    if (updated.livePositionExists) this.rekeyReferenceStopActions(updated);
     this.db
       .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
       .run(updated.status, JSON.stringify(updated), trade.id);
