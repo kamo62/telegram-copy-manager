@@ -405,27 +405,7 @@ export function createApi(options: ApiOptions = {}) {
 
   // Must stay synchronous: no awaits, no gramjs calls, no IO. It reads only
   // the in-memory provider readiness the ingestion loop already recorded.
-  const healthPayload = () => {
-    const providers = store.telegramIngestionReadinessSnapshot();
-    const expectedProviders = providers.length;
-    const readyProviders = providers.filter((provider) => provider.ready).length;
-    const unreadyProviders = expectedProviders - readyProviders;
-    const stalledProviders = providers.filter((provider) => provider.stalled).length;
-    return {
-      // "degraded" while any enabled provider lacks a current readiness
-      // observation. The HTTP code stays 200 so a container healthcheck added
-      // later cannot restart-loop the app over a stall.
-      status: unreadyProviders > 0 ? "degraded" : "ok",
-      database: "connected",
-      telegramAdapter: telegram.name,
-      telegram: {
-        expectedProviders,
-        readyProviders,
-        unreadyProviders,
-        stalledProviders,
-      },
-    };
-  };
+  const healthPayload = () => store.ingestionHealth(telegram.name);
 
   app.get("/api/health", (c) => c.json(healthPayload()));
   app.get("/health", (c) => c.json(healthPayload()));
@@ -3315,6 +3295,36 @@ class AppStore {
     for (const [providerId, expectation] of expectations) {
       this.telegramIngestionExpectations.set(providerId, expectation);
     }
+  }
+
+  // The single source of truth for "can this system ingest Telegram signals".
+  // Both `/api/health` and the dashboard payload read it, so the operator sees
+  // the same answer wherever they look. The dashboard previously hardcoded
+  // status "ok", which meant the surface an operator actually watches during an
+  // incident was structurally incapable of showing a problem.
+  //
+  // Must stay synchronous: no awaits, no gramjs calls, no IO, no DB query. It
+  // reads only the in-memory readiness the ingestion loop already recorded.
+  ingestionHealth(telegramAdapter: string) {
+    const providers = this.telegramIngestionReadinessSnapshot();
+    const expectedProviders = providers.length;
+    const readyProviders = providers.filter((provider) => provider.ready).length;
+    const unreadyProviders = expectedProviders - readyProviders;
+    const stalledProviders = providers.filter((provider) => provider.stalled).length;
+    return {
+      // "degraded" while any enabled provider lacks a current readiness
+      // observation. The HTTP code stays 200 so a container healthcheck added
+      // later cannot restart-loop the app over a stall.
+      status: unreadyProviders > 0 ? "degraded" : "ok",
+      database: "connected",
+      telegramAdapter,
+      telegram: {
+        expectedProviders,
+        readyProviders,
+        unreadyProviders,
+        stalledProviders,
+      },
+    };
   }
 
   telegramIngestionReadinessSnapshot() {
@@ -10743,11 +10753,7 @@ class AppStore {
     const accounts = this.mt5Accounts();
     const performance = this.dashboardPerformance(accounts);
     return {
-      health: {
-        status: "ok",
-        database: "connected",
-        telegramAdapter,
-      },
+      health: this.ingestionHealth(telegramAdapter),
       appSettings: this.settingsProjection(),
       accountPerformance: performance.accountPerformance,
       accountPerformanceByAccount: performance.accountPerformanceByAccount,

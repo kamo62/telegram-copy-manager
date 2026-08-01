@@ -741,6 +741,36 @@ describe("Telegram TC API", () => {
     });
   });
 
+  test("the dashboard health block reports the same degraded state as /api/health", async () => {
+    // The dashboard used to hardcode status "ok", so the surface an operator
+    // actually watches during an incident could never show a problem.
+    const stalledTelegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      sessionHealth: (sessionId) => ({
+        sessionId,
+        connected: false,
+        stalled: true,
+        stalledSeconds: 181,
+      }),
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: stalledTelegram,
+      telegramPollingEnabled: false,
+    });
+    await connectSessionWithEnabledProvider(app);
+    await app.runTelegramIngestionOnce();
+
+    const health = await json<HealthBody>(await app.request("/api/health"));
+    expect(health.status).toBe("degraded");
+
+    const dashboard = await json<{ health: HealthBody }>(await app.request("/api/dashboard"));
+    expect(dashboard.health.status).toBe("degraded");
+    expect(dashboard.health.telegram).toEqual(health.telegram);
+    expect(dashboard.health.database).toBe("connected");
+  });
+
   test("degrades health when the recorded Telegram contact has aged past the stall threshold", async () => {
     // Simulates the ingestion loop freezing: the map holds a healthy-looking
     // record whose lastContactAt keeps aging because nothing re-records it.
