@@ -84,9 +84,9 @@ describe("telegram reconnect resilience helpers", () => {
     expect(parseConnectionRetries("abc")).toBe(Number.POSITIVE_INFINITY);
   });
 
-  test("parseConnectionRetries honours an explicit positive override", () => {
-    expect(parseConnectionRetries("20")).toBe(20);
-    expect(parseConnectionRetries("2")).toBe(2);
+  test("parseConnectionRetries ignores finite overrides", () => {
+    expect(parseConnectionRetries("20")).toBe(Number.POSITIVE_INFINITY);
+    expect(parseConnectionRetries("2")).toBe(Number.POSITIVE_INFINITY);
   });
 
   test("reconnect delay has a ceiling", () => {

@@ -13,8 +13,8 @@ for the backend URL.
 
 ## What It Does
 
-- Connects a Telegram account through a deterministic mock adapter (for testing) or the real GramJS
-  adapter.
+- Connects a Telegram account through a deterministic mock adapter (for testing) or the real
+  teleproto adapter. The existing `gramjs` adapter setting remains as a compatibility label.
 - Turns any Telegram channel or group into a provider that can be enabled, disabled, tested against
   its own message history, configured, and assigned to one or more MT5 accounts.
 - Parses open-trade and lifecycle messages across the formats channels actually use: market, limit,
@@ -146,10 +146,10 @@ Common environment variables:
 | `SEED_DEMO_DATA` | Seed local mock/demo rows | `false` |
 | `DEFAULT_MT5_ACCOUNT_ID` | Fallback parser account context | demo account id |
 | `TELEGRAM_ADAPTER` | Telegram adapter: `mock` or `gramjs` | `mock` unless real runtime is used |
-| `TELEGRAM_API_ID` | Telegram API id for GramJS login | unset |
-| `TELEGRAM_API_HASH` | Telegram API hash for GramJS login | unset |
-| `TELEGRAM_SESSION_DIR` | Server-side GramJS session storage | `data/telegram-sessions` |
-| `TELEGRAM_SESSION_FILE` | Explicit saved GramJS session file to import | unset |
+| `TELEGRAM_API_ID` | Telegram API id for teleproto login | unset |
+| `TELEGRAM_API_HASH` | Telegram API hash for teleproto login | unset |
+| `TELEGRAM_SESSION_DIR` | Server-side teleproto session storage | `data/telegram-sessions` |
+| `TELEGRAM_SESSION_FILE` | Explicit saved teleproto session file to import | unset |
 | `TELEGRAM_IMPORT_EXISTING_SESSION` | Import the only JSON session in `TELEGRAM_SESSION_DIR` | `false` |
 | `AZURE_OPENAI_API_KEY` | Optional parser extraction key | unset |
 | `AZURE_OPENAI_ENDPOINT` | Optional Azure OpenAI endpoint override | code fallback if unset |
@@ -160,14 +160,14 @@ For Docker Compose, put deployment secrets and runtime values in `.env.productio
 
 ## Telegram Workflow
 
-Local tests use the mock Telegram adapter. For a real Telegram account, run the API with GramJS:
+Local tests use the mock Telegram adapter. For a real Telegram account, run the API with teleproto:
 
 ```bash
 TELEGRAM_ADAPTER=gramjs bun run dev:api
 ```
 
 The UI collects `api_id`, `api_hash`, phone, OTP code, and optional 2FA password, but only safe
-profile/session identifiers are kept in browser state. GramJS session strings are stored on the
+profile/session identifiers are kept in browser state. Teleproto session strings are stored on the
 server under `data/telegram-sessions`.
 
 The helper script can drive a command-line import/backtest flow against a running API:

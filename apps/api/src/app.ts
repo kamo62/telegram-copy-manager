@@ -418,7 +418,7 @@ export function createApi(options: ApiOptions = {}) {
   const app = new Hono();
   app.use("/api/*", cors());
 
-  // Must stay synchronous: no awaits, no gramjs calls, no IO. It reads only
+  // Must stay synchronous: no awaits, no teleproto calls, no IO. It reads only
   // the in-memory provider readiness the ingestion loop already recorded.
   const healthPayload = () => store.ingestionHealth(telegram.name);
 
@@ -1559,7 +1559,12 @@ const TELEGRAM_DEAD_SESSION_ERROR_CODES = [
 ];
 
 export function isTelegramDeadSessionError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toUpperCase();
+  const parts = [error instanceof Error ? error.message : String(error)];
+  if (typeof error === "object" && error !== null) {
+    const errorMessage = (error as { errorMessage?: unknown }).errorMessage;
+    if (typeof errorMessage === "string") parts.push(errorMessage);
+  }
+  const message = parts.join(" ").toUpperCase();
   return TELEGRAM_DEAD_SESSION_ERROR_CODES.some((code) => message.includes(code));
 }
 
@@ -3098,8 +3103,8 @@ class AppStore {
       );
       this.recordProviderHealth(telegram, provider, sessionId, error);
       recordedHealth = true;
-      // A revoked/expired GramJS auth key keeps the DB row CONNECTED forever
-      // (gramjs just retries the dead key), so reconcile it without letting a
+      // A revoked/expired teleproto auth key keeps the DB row CONNECTED forever
+      // (teleproto retries the dead key), so reconcile it without letting a
       // stuck disconnect hold the provider health record or the ingestion pass.
       if (isTelegramDeadSessionError(error)) {
         await this.reconcileDeadTelegramSession(telegram, sessionId, error, rpcTimeoutMs);
@@ -3158,10 +3163,10 @@ class AppStore {
     return linked;
   }
 
-  // A GramJS session's auth key can be revoked server-side (logged out from
-  // another device, session expired, account deactivated). GramJS surfaces it
+  // A teleproto session's auth key can be revoked server-side (logged out from
+  // another device, session expired, account deactivated). teleproto surfaces it
   // as AUTH_KEY_UNREGISTERED on the next RPC and then retries the dead key
-  // forever, but nothing flips the DB row off CONNECTED — so telegramStatus()
+  // forever, but nothing flips the DB row off CONNECTED, so telegramStatus()
   // keeps reporting connected:true and the login form stays hidden. Drop the
   // dead client and mark the row DISCONNECTED so re-login becomes possible.
   private async reconcileDeadTelegramSession(
@@ -3323,7 +3328,7 @@ class AppStore {
   // status "ok", which meant the surface an operator actually watches during an
   // incident was structurally incapable of showing a problem.
   //
-  // Must stay synchronous: no awaits, no gramjs calls, no IO, no DB query. It
+  // Must stay synchronous: no awaits, no teleproto calls, no IO, no DB query. It
   // reads only the in-memory readiness the ingestion loop already recorded.
   ingestionHealth(telegramAdapter: string) {
     const providers = this.telegramIngestionReadinessSnapshot();
