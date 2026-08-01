@@ -526,6 +526,19 @@ async function sendGoldSnapshot(
   });
 }
 
+async function sendGoldPendingSnapshot(
+  app: ReturnType<typeof createApi>,
+  shortId: string,
+  orders: unknown[] = [],
+) {
+  return sendGoldSnapshot(app, {
+    shortId,
+    bid: 4540.5,
+    positions: [],
+    orders,
+  });
+}
+
 describe("Telegram TC API", () => {
   test("flags real remove vocabulary for the first-week drop audit", () => {
     const message = realFixtureMessages(["15496"])[0]!;
@@ -5852,80 +5865,119 @@ describe("Telegram TC API", () => {
     });
   });
 
-  test("cancels accepted pending orders that disappear from broker snapshots", async () => {
+  test("a single omitted snapshot does not cancel an old pending order", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, { queueItemId: approved.queueItemId, orderTicket: "70001" });
     const originalDateNow = Date.now;
-    await app.request("/api/mt5/report", {
-      method: "POST",
-      body: JSON.stringify({
-        accountId: "mt5-63442826",
-        queueItemId: approved.queueItemId,
-        status: "EXECUTED",
-        retcode: 10009,
-        retcodeExternal: 0,
-        brokerComment: "Request executed",
-        orderTicket: "70001",
-        positionTicket: "0",
-        dealTicket: "0",
-        requestedPrice: 4541,
-        filledPrice: 0,
-        volume: 0.04,
-        errorText: "",
-      }),
-      headers: { "content-type": "application/json" },
-    });
-
     try {
-      await app.request("/api/mt5/snapshot", {
-        method: "POST",
-        body: JSON.stringify({
-          accountId: "mt5-63442826",
-          positions: [],
-          orders: [],
-          symbols: [],
-        }),
-        headers: { "content-type": "application/json" },
-      });
-
-      const immediate = await json<{
-        logicalTrades: Array<{ id: string; status: string; legs: Array<{ status: string }> }>;
-      }>(await app.request("/api/dashboard"));
-      expect(
-        immediate.logicalTrades.find((item) => item.id === approved.logicalTradeId)?.status,
-      ).not.toBe("CANCELLED");
-
-      Date.now = () => originalDateNow() + 60_000;
-      await app.request("/api/mt5/snapshot", {
-        method: "POST",
-        body: JSON.stringify({
-          accountId: "mt5-63442826",
-          positions: [],
-          orders: [],
-          symbols: [],
-        }),
-        headers: { "content-type": "application/json" },
-      });
-
+      const baseNow = originalDateNow();
+      Date.now = () => baseNow + 60_000;
+      await sendGoldPendingSnapshot(app, approved.shortId);
       const dashboard = await json<{
         logicalTrades: Array<{
           id: string;
           status: string;
-          outOfSyncReason?: string;
-          livePositionExists?: boolean;
           legs: Array<{ status: string }>;
         }>;
       }>(await app.request("/api/dashboard"));
+      expect(
+        dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId)?.status,
+      ).toBe("PENDING");
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("sustained pending-order absence across the threshold cancels", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, { queueItemId: approved.queueItemId, orderTicket: "70002" });
+    const originalDateNow = Date.now;
+    try {
+      const baseNow = originalDateNow();
+      Date.now = () => baseNow + 60_000;
+      await sendGoldPendingSnapshot(app, approved.shortId);
+      let dashboard = await json<{
+        logicalTrades: Array<{ id: string; status: string; legs: Array<{ status: string }> }>;
+      }>(await app.request("/api/dashboard"));
+      expect(
+        dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId)?.status,
+      ).toBe("PENDING");
+
+      Date.now = () => baseNow + 71_000;
+      await sendGoldPendingSnapshot(app, approved.shortId);
+      dashboard = await json<{
+        logicalTrades: Array<{ id: string; status: string; legs: Array<{ status: string }> }>;
+      }>(await app.request("/api/dashboard"));
       const trade = dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId);
-      expect(trade).toMatchObject({
-        status: "CANCELLED",
-        livePositionExists: false,
-      });
-      expect(trade?.outOfSyncReason).toBeUndefined();
+      expect(trade?.status).toBe("CANCELLED");
       expect(trade?.legs.every((leg) => leg.status === "SKIPPED")).toBe(true);
     } finally {
       Date.now = originalDateNow;
     }
+  });
+
+  test("a reappearing pending order resets the missing clock past the old threshold", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, { queueItemId: approved.queueItemId, orderTicket: "70003" });
+    const originalDateNow = Date.now;
+    try {
+      const baseNow = originalDateNow();
+      Date.now = () => baseNow + 60_000;
+      await sendGoldPendingSnapshot(app, approved.shortId);
+
+      // The original absence clock is now 11 seconds old, past the default
+      // ten-second debounce threshold. The reappearance must reset it.
+      Date.now = () => baseNow + 71_000;
+      await sendGoldPendingSnapshot(app, approved.shortId, [
+        {
+          ticket: "70003",
+          symbol: "XAUUSD",
+          type: 2,
+          volume: 0.04,
+          price: 4541,
+          comment: `ttc:${approved.shortId}`,
+        },
+      ]);
+
+      // This new absence is only one second old, inside a fresh threshold.
+      Date.now = () => baseNow + 72_000;
+      await sendGoldPendingSnapshot(app, approved.shortId);
+      const dashboard = await json<{
+        logicalTrades: Array<{ id: string; status: string }>;
+      }>(await app.request("/api/dashboard"));
+      expect(
+        dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId)?.status,
+      ).toBe("PENDING");
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
+
+  test("caps the pending-order absence threshold without capping the polling interval", async () => {
+    // The polling interval stays an operator choice: the Telegram readiness budget
+    // scales from it, so clamping the setting would break that. Only the DERIVED
+    // cancellation delay is bounded, so a slow poller cannot leave a genuinely
+    // cancelled order live in the model for as long as its interval allows.
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const updated = await json<{ settings: { pollingIntervalSeconds: number } }>(
+      await app.request("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ pollingIntervalSeconds: 600 }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect(updated.settings.pollingIntervalSeconds).toBe(600);
+
+    const noWorkPayload = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-100200300")
+    ).text();
+    expect(noWorkPayload).toContain("pollSeconds=600");
+
+    // 600 * 3 would be 1800 seconds; the cap holds it at 90.
+    expect(app.pendingOpenMissingThresholdSeconds()).toBe(90);
   });
 
   test("holds stale open-trade Telegram replays as EXPIRED_LATE", async () => {
@@ -10994,7 +11046,7 @@ describe("Telegram TC API", () => {
   // order genuinely filled at the broker and the history deal resurrected the trade to OPEN.
   // The reference-leg monitor keys on leg.status === "OPEN", so the stop must still move
   // when price crosses the 0% leg after that resurrection.
-  test("a pending order cancelled by a snapshot blip still moves the stop after its real fill", async () => {
+  test("a pending order snapshot blip does not delay stop management after its real fill", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-blip-"));
     const databasePath = join(tempDir, "app.db");
     const app = createApi({ databasePath, seedDemoData: false, telegramAdapter: "mock" });
@@ -11086,9 +11138,17 @@ describe("Telegram TC API", () => {
         headers: { "content-type": "application/json" },
       });
 
-    // One flaky snapshot omits the pending order entirely: the app cancels the trade
-    // and marks its legs SKIPPED.
+    // One flaky snapshot omits the pending order entirely: the app starts the
+    // absence clock and leaves the pending trade live.
     await snap({ positions: [], bid: 1.085, ask: 1.0852 });
+    {
+      const db = new Database(databasePath);
+      const row = db
+        .query("SELECT status FROM logical_trades WHERE id = ?")
+        .get(approval.logicalTradeId) as { status: string };
+      db.close();
+      expect(row.status).toBe("PENDING");
+    }
 
     // The broker then genuinely fills the limit; the fill deal arrives via history
     // and resurrects the trade.

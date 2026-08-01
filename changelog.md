@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.65.7 - 2026-08-01 (Patch)
+
+Release impact: Patch because this prevents transient MT5 snapshot omissions from cancelling
+long-lived pending orders without changing the API, database schema, or EA protocol.
+
+- Debounced missing pending-order cancellation from the first observed absence for each account and
+  broker order ticket. The in-memory clock resets when the order reappears and is cleared on fills,
+  cancellations, terminal trade states, and account deletion.
+- Kept the existing order-creation grace and added a continuous-absence threshold of
+  `max(10 seconds, polling interval × 3)` before cancellation.
+- Added regression coverage for one omitted snapshot, sustained absence, reappearance reset, and a
+  real fill followed by virtual stop management.
+
 ## 1.65.6 - 2026-07-31 (Patch)
 
 Release impact: Patch. Restores stop management on a revived trade and adds snapshot liveness

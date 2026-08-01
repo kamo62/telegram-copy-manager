@@ -211,6 +211,13 @@ interface AppSettings {
   alertOnTelegramStall: boolean;
 }
 
+type PendingOpenMissingState = {
+  accountId: string;
+  tradeId: string;
+  orderTicket: string;
+  missingSince: number;
+};
+
 interface AccountSlotInput {
   name: string;
 }
@@ -276,6 +283,11 @@ const defaultAppSettings: AppSettings = {
   alertOnTelegramStall: false,
 };
 const pendingOpenMissingGraceSeconds = 10;
+const pendingOpenMissingDebounceSeconds = 10;
+// Upper bound on the DERIVED pending-order absence threshold. The polling interval
+// itself stays an operator choice; only the delay before recognising a genuinely
+// cancelled order is bounded here.
+const MAX_PENDING_OPEN_MISSING_DEBOUNCE_SECONDS = 90;
 const EA_HEARTBEAT_SECONDS = 5;
 const EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS = 30;
 const GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS = 60 * 60;
@@ -1216,7 +1228,11 @@ export function createApi(options: ApiOptions = {}) {
     rpcTimeoutMs: effectiveTelegramRpcTimeoutMs,
   });
 
-  return Object.assign(app, ingestion);
+  return Object.assign(app, ingestion, {
+    // Test seam. The threshold is derived from a mutable setting and then capped, so a
+    // test asserting the cap needs to read the resolved value rather than infer it.
+    pendingOpenMissingThresholdSeconds: () => store.pendingOpenMissingThresholdSeconds(),
+  });
 }
 
 interface TelegramIngestionResult {
@@ -1596,6 +1612,10 @@ class AppStore {
   // durable content changed. mt5_snapshots.updated_at moves only on structural
   // change, so this map is what answers "are snapshots flowing".
   private readonly mt5SnapshotReceivedAt = new Map<string, string>();
+  // A pending order can be absent from one broker snapshot while remaining live.
+  // This state is deliberately in memory so snapshot polling does not create a
+  // durable write for every absence or reset the snapshot content deduplication.
+  private readonly pendingOpenMissingStates = new Map<string, PendingOpenMissingState>();
   // Tracks providers we've already warned about for the "no connected
   // Telegram session" state, so we log once per offline→online edge instead
   // of once per poll. Reset when a session connects.
@@ -2230,6 +2250,7 @@ class AppStore {
       this.db.query("DELETE FROM mt5_accounts WHERE id = ?").run(accountId);
     });
     removeAll();
+    this.clearPendingOpenMissingForAccount(accountId);
     this.audit("mt5-account.delete", "warn", "MT5 account hard-deleted", {
       accountId,
       accountNumber: account.accountNumber,
@@ -7045,6 +7066,7 @@ class AppStore {
           )
         : historyDealAction(deal, positionStillOpen);
       const action = brokerHistoryAction(String(exists?.action ?? ""), inferredAction);
+      if (trade) this.clearPendingOpenMissingForTrade(input.accountId, tradeId);
       const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
       const signedPips =
         trade && openPrice && deal.price
@@ -12577,9 +12599,14 @@ class AppStore {
         trade.status === "CLOSED" ||
         trade.status === "CANCELLED" ||
         trade.status === "ARCHIVED"
-      )
+      ) {
+        this.clearPendingOpenMissingForTrade(accountId, trade.id);
         continue;
-      if (this.hasRecordedRealFullClose(trade.id)) continue;
+      }
+      if (this.hasRecordedRealFullClose(trade.id)) {
+        this.clearPendingOpenMissingForTrade(accountId, trade.id);
+        continue;
+      }
 
       const match = snapshotMatchForTrade(
         positions,
@@ -12588,7 +12615,17 @@ class AppStore {
         this.brokerOrderTicketsForTrade(trade.id),
       );
       const pendingOpen = match.status === "missing" ? this.pendingOpenOrder(trade.id) : null;
-      if (match.status === "missing" && this.pendingOpenMissingGraceActive(pendingOpen)) continue;
+      if (match.status !== "missing" || !pendingOpen) {
+        this.clearPendingOpenMissingForTrade(accountId, trade.id);
+      }
+      if (match.status === "missing" && pendingOpen) {
+        const absenceExceeded = this.pendingOpenMissingDebounceExpired(
+          accountId,
+          trade.id,
+          pendingOpen,
+        );
+        if (!absenceExceeded || this.pendingOpenMissingGraceActive(pendingOpen)) continue;
+      }
       const missingPendingOpen = pendingOpen ? this.missingPendingOpenOrder(pendingOpen) : null;
       const updated = missingPendingOpen
         ? cancelLogicalTrade(trade, {
@@ -12602,6 +12639,9 @@ class AppStore {
           })
         : snapshotSyncTradeState(trade, match);
       if (JSON.stringify(updated) === JSON.stringify(trade)) continue;
+      if (missingPendingOpen) {
+        this.clearPendingOpenMissingForTrade(accountId, trade.id);
+      }
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run(updated.status, JSON.stringify(updated), trade.id);
@@ -12641,6 +12681,60 @@ class AppStore {
         );
       }
     }
+  }
+
+  // Scale with the poll rate so a slow poller does not cancel on one miss, but cap the
+  // result. Without the cap a long polling interval delays recognising a genuinely
+  // cancelled order for as long as the operator's interval allows, and the order stays
+  // live in the app's model the whole time. Capping the DERIVED threshold keeps that
+  // bounded while leaving the polling interval an operator choice, which the Telegram
+  // readiness budget also scales from.
+  pendingOpenMissingThresholdSeconds() {
+    return Math.min(
+      MAX_PENDING_OPEN_MISSING_DEBOUNCE_SECONDS,
+      Math.max(pendingOpenMissingDebounceSeconds, this.appSettings().pollingIntervalSeconds * 3),
+    );
+  }
+
+  private pendingOpenMissingStateKey(accountId: string, orderTicket: string) {
+    return `${accountId}:${orderTicket}`;
+  }
+
+  private clearPendingOpenMissingForTrade(accountId: string, tradeId: string) {
+    for (const [key, state] of this.pendingOpenMissingStates) {
+      if (state.accountId === accountId && state.tradeId === tradeId) {
+        this.pendingOpenMissingStates.delete(key);
+      }
+    }
+  }
+
+  private clearPendingOpenMissingForAccount(accountId: string) {
+    for (const [key, state] of this.pendingOpenMissingStates) {
+      if (state.accountId === accountId) this.pendingOpenMissingStates.delete(key);
+    }
+  }
+
+  private pendingOpenMissingDebounceExpired(accountId: string, tradeId: string, row: Row) {
+    const orderTicket = String(row.order_ticket ?? "");
+    if (!orderTicket) return false;
+    const key = this.pendingOpenMissingStateKey(accountId, orderTicket);
+    const current = this.pendingOpenMissingStates.get(key);
+    if (!current || current.tradeId !== tradeId) {
+      this.pendingOpenMissingStates.set(key, {
+        accountId,
+        tradeId,
+        orderTicket,
+        missingSince: Date.now(),
+      });
+      return false;
+    }
+    // Scale with the poll rate so a slow poller does not cancel on one miss, but cap the
+    // result. Without the cap a long polling interval delays recognising a genuinely
+    // cancelled order for as long as the operator's interval allows, and the order stays
+    // live in the app's model the whole time. Capping the derived threshold keeps that
+    // bounded while leaving the polling interval itself an operator choice, which the
+    // Telegram readiness budget also scales from.
+    return Date.now() - current.missingSince > this.pendingOpenMissingThresholdSeconds() * 1000;
   }
 
   private pendingOpenOrder(tradeId: string) {
@@ -12986,6 +13080,9 @@ class AppStore {
     if (!trade || trade.status === "ARCHIVED") return;
 
     const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+    if (payload.commandType === "OPEN_TRADE" || payload.commandType === "CANCEL_PENDING") {
+      this.clearPendingOpenMissingForTrade(input.accountId, tradeId);
+    }
     const evidence = executionEvidence(input);
     const virtualTpLeg = virtualTpLegFromExecutionReport(payload, input);
     let updated: LogicalTrade = trade;
@@ -15527,8 +15624,11 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     ),
     pollingIntervalSeconds: Math.max(
       1,
-      Math.round(
-        positiveNumber(input.pollingIntervalSeconds, defaultAppSettings.pollingIntervalSeconds),
+      Math.min(
+        Number.MAX_SAFE_INTEGER,
+        Math.round(
+          positiveNumber(input.pollingIntervalSeconds, defaultAppSettings.pollingIntervalSeconds),
+        ),
       ),
     ),
     allowedOrderTypes,
