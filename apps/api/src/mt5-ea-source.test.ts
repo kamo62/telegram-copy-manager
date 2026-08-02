@@ -385,25 +385,27 @@ describe("MT5 Expert Advisor source", () => {
       source.indexOf("void ExecutePartialClose("),
     );
     expect(executeClose).toContain(
-      "int remainingPositionMatches = CollectPositionTickets(command, remainingPositionTickets);",
+      "int remainingPositionMatches = CollectPositionTargets(command, remainingPositionTickets, remainingPositionIdentifiers);",
     );
     expect(executeClose).toContain(
-      "if(!LifecycleAlreadyExecuted(command, remainingPositionTickets[index]))",
+      "if(!LifecycleAlreadyExecuted(command, remainingPositionIdentifiers[index], remainingPositionTickets[index]))",
     );
     expect(executeClose).toContain("remainingVolume");
   });
 
-  test("reports actual open and close volumes, pending zero fills, and ticket-scoped lifecycle markers", () => {
+  test("reports actual open and close volumes, pending zero fills, and position-scoped lifecycle markers", () => {
     expect(source).toContain('\\"requestedVolume\\":%.8f');
     expect(source).toContain('\\"filledVolume\\":%.8f');
     expect(source).toContain('\\"remainingVolume\\":%.8f');
     expect(source).toContain('result.retcode == TRADE_RETCODE_DONE_PARTIAL ? "PARTIAL"');
     expect(source).toContain("request.action == TRADE_ACTION_PENDING ? 0.0 : result.volume");
     expect(source).toContain("request.action == TRADE_ACTION_PENDING\n      ? request.volume");
-    expect(source).toContain("GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket))");
-    expect(source).toContain("MarkLifecycleExecuted(command, ticket)");
+    expect(source).toContain(
+      "GlobalVariableCheck(LifecycleIdempotencyVariable(command, identifier))",
+    );
+    expect(source).toContain("MarkLifecycleExecuted(command, identifier)");
     expect(source).toMatch(
-      /for\(int index = 0; index < positionFound; index\+\+\)[\s\S]*?LifecycleAlreadyExecuted\(command, ticket\)[\s\S]*?ClosePositionTicket\(command, ticket, result, requested, filled, remaining\)/,
+      /for\(int index = 0; index < positionFound; index\+\+\)[\s\S]*?LifecycleAlreadyExecuted\(command, positionIdentifiers\[index\], ticket\)[\s\S]*?ClosePositionTicket\(command, ticket, result, requested, filled, remaining\)/,
     );
     expect(source).toContain(
       'command.targetRemainingVolume = StringToDouble(ValueFor(body, "targetRemainingVolume"))',
@@ -542,11 +544,12 @@ describe("MT5 Expert Advisor source", () => {
   test("builds lifecycle idempotency names that MQL5 cannot truncate", () => {
     // MQL5 caps a global variable name at 63 characters and keeps only the first 63.
     // The old name pasted the backend's idempotency key in plaintext and cut the
-    // result to 63, so a longer key would have pushed the ticket out of the name and
-    // made two tickets share one mark - a close silently skipped on a live account.
+    // result to 63, so a longer key would have pushed the position number out of the
+    // name and made two positions share one mark - a close silently skipped on a live
+    // account.
     const variable =
       source.match(
-        /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+        /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong positionId = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
     expect(variable).toContain("LifecycleKeyHash(scopedKey)");
     expect(variable).toContain("LIFECYCLE_MARK_PREFIX");
@@ -563,9 +566,12 @@ describe("MT5 Expert Advisor source", () => {
     expect(hash).toContain("ulong prime = 1099511628211;");
     expect(hash).toContain("hash = (hash ^ (ulong)(code & 0xFF)) * prime;");
 
-    // 14 prefix + 8 tag + 1 + 16 hash + 1 + at most 20 ticket digits = 60. Only the
-    // ticket varies, and a ulong bounds it at 20.
+    // 14 prefix + 8 tag + 1 + 16 hash + 1 + at most 20 digits = 60. Only the trailing
+    // number varies. It is POSITION_IDENTIFIER as of 1.68.0 and was POSITION_TICKET
+    // before; both are ulong, whose largest value 18446744073709551615 is 20 digits,
+    // so the worst case is the same 60 and the bound did not move.
     expect(source).toContain('#define LIFECYCLE_MARK_PREFIX "TelegramTC.lc."');
+    expect(String(2n ** 64n - 1n)).toHaveLength(20);
     expect("TelegramTC.lc.".length + 8 + 1 + 16 + 1 + 20).toBe(60);
     expect("TelegramTC.lc.".length + 8 + 1 + 16 + 1 + 20).toBeLessThan(64);
   });
@@ -589,16 +595,16 @@ describe("MT5 Expert Advisor source", () => {
         /void MarkLifecycleExecuted\(SignalCommand &command, ulong identifier = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
     expect(mark).toContain(
-      "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal())",
+      "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), identifier, true, TimeLocal())",
     );
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
-    expect(rehydrate).toContain("if(RegisterLifecycleMark(name, identity, ticket, false, 0))");
+    expect(rehydrate).toContain("if(RegisterLifecycleMark(name, identity, identifier, false, 0))");
     expect(rehydrate).not.toContain("GlobalVariableDel");
     // Ownership ratchets up only, so an adopted entry this session writes to becomes
     // deletable, and nothing can strip the right once granted.
     const register =
       source.match(
-        /bool RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
+        /bool RegisterLifecycleMark\(string variable, string identity, ulong identifier, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(register).toContain(
       "lifecycleMarks[index].owned = lifecycleMarks[index].owned || owned;",
@@ -615,7 +621,7 @@ describe("MT5 Expert Advisor source", () => {
     // The full identity, not the lossy fold, is what scopes reads.
     const variable =
       source.match(
-        /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+        /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong positionId = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
     expect(variable).toContain(
       'string scopedKey = LifecycleAccountIdentity() + "|" + LifecycleCommandKey(command);',
@@ -734,7 +740,7 @@ describe("MT5 Expert Advisor source", () => {
     // four weeks with the position still open.
     const register =
       source.match(
-        /bool RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
+        /bool RegisterLifecycleMark\(string variable, string identity, ulong identifier, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(register).toContain("return false;");
     expect(register).toContain("is not tracked and will not be refreshed");
@@ -754,7 +760,7 @@ describe("MT5 Expert Advisor source", () => {
     // A failed adoption must not be counted as adopted, and must leave a retry open.
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(rehydrate).toMatch(
-      /if\(RegisterLifecycleMark\(name, identity, ticket, false, 0\)\)\s*\n\s*adopted\+\+;\s*\n\s*else\s*\n\s*untracked\+\+;/,
+      /if\(RegisterLifecycleMark\(name, identity, identifier, false, 0\)\)\s*\n\s*adopted\+\+;\s*\n\s*else\s*\n\s*untracked\+\+;/,
     );
     expect(rehydrate).toContain("LifecycleMarksAdopted = untracked == 0;");
     // The completion flag is set from the result, after the loop, not asserted up front.
@@ -788,20 +794,20 @@ describe("MT5 Expert Advisor source", () => {
     // delete anything, because an adopted mark is never deletable.
     const parse =
       source.match(
-        /bool ParseLifecycleMarkName\(string variable, string &accountTagText, ulong &ticket\)[\s\S]*?\n}\n/,
+        /bool ParseLifecycleMarkName\(string variable, string &accountTagText, ulong &identifier\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(parse).toBeTruthy();
     expect(parse).toContain("if(tagEnd != prefixLength + 8)");
     expect(parse).toContain("if(hashEnd != tagEnd + 17)");
     expect(parse).toContain('if(!IsHexRun(tagText, 8) || !IsHexRun(hashText, 16) || digits == "")');
-    expect(parse).toContain("if(IntegerToString((long)ticket) != digits)");
+    expect(parse).toContain("if(IntegerToString((long)identifier) != digits)");
     const isHex = source.match(/bool IsHexRun\(string text, int length\)[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(isHex).toContain("if(StringLen(text) != length)");
     expect(isHex).toContain("code >= '0' && code <= '9'");
     expect(isHex).toContain("code >= 'A' && code <= 'F'");
     // Recognising the ranges is not enough; anything outside them must be rejected.
     expect(isHex).toMatch(/if\(!digit && !upper\)\s*\n\s*return false;/);
-    expect(source).toContain("if(!ParseLifecycleMarkName(name, tagText, ticket))");
+    expect(source).toContain("if(!ParseLifecycleMarkName(name, tagText, identifier))");
   });
 
   test("keeps reading marks written under the pre-1.67 name and never writes that name again", () => {
@@ -810,9 +816,9 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain('#define LEGACY_LIFECYCLE_MARK_PREFIX "TelegramTC.lifecycle."');
     const already =
       source.match(
-        /bool LifecycleAlreadyExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+        /bool LifecycleAlreadyExecuted\(SignalCommand &command, ulong identifier = 0, ulong ticket = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
-    expect(already).toContain("GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket))");
+    // The plaintext name was only ever keyed by the ticket, so that is what reads it.
     expect(already).toContain(
       "GlobalVariableCheck(LegacyLifecycleIdempotencyVariable(command, ticket))",
     );
@@ -821,7 +827,7 @@ describe("MT5 Expert Advisor source", () => {
       source.match(
         /void MarkLifecycleExecuted\(SignalCommand &command, ulong identifier = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
-    expect(mark).toContain("string variable = LifecycleIdempotencyVariable(command, ticket);");
+    expect(mark).toContain("string variable = LifecycleIdempotencyVariable(command, identifier);");
     expect(mark).not.toContain("Legacy");
     // A legacy mark's ticket may have been truncated out of its name, so the EA cannot
     // tell whether its position is still open and must leave it to the terminal.
@@ -829,6 +835,110 @@ describe("MT5 Expert Advisor source", () => {
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}/)?.[0] ?? "";
     expect(rehydrate).toContain("StringFind(name, LIFECYCLE_MARK_PREFIX) != 0");
     expect(rehydrate).not.toContain("LEGACY_LIFECYCLE_MARK_PREFIX");
+  });
+
+  test("keys lifecycle marks by POSITION_IDENTIFIER, which a ticket replacement cannot move", () => {
+    // MQL5 documents POSITION_TICKET as replaceable by a server service operation,
+    // "for example, when charging swaps with position re-opening", while
+    // POSITION_IDENTIFIER "does not change throughout its life cycle". Keying a mark by
+    // the ticket meant the successor position carried a ticket no mark was written
+    // against, so a redelivered close read as never executed and closed it a second
+    // time. Matching already survived a replacement; only the mark did not.
+    const key = source.match(/ulong PositionMarkKey\(ulong ticket\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(key).toContain("PositionGetInteger(POSITION_IDENTIFIER)");
+    // Zero is the command-scoped name CANCEL_PENDING writes. A position resolving to it
+    // would put two positions under one command on a single mark, and the second close
+    // would be recorded as already done and silently skipped.
+    expect(key).toContain("return identifier == 0 ? ticket : identifier;");
+
+    // One rule, used by the side that writes a mark and the side that reclaims it, so
+    // the two cannot drift into keying by different numbers.
+    expect(source.match(/PositionGetInteger\(POSITION_IDENTIFIER\)/g)).toHaveLength(1);
+    const collect =
+      source.match(
+        /int CollectPositionTargets\(SignalCommand &command, ulong &tickets\[\], ulong &identifiers\[\]\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(collect).toContain("identifiers[next] = PositionMarkKey(ticket);");
+    expect(collect).toContain("identifiers[0] = PositionMarkKey(command.targetPositionTicket);");
+    // The ticket-only callers share the one matching rule rather than a second copy.
+    const ticketsOnly =
+      source.match(/int CollectPositionTickets\(SignalCommand &command, ulong &tickets\[\]\)[\s\S]*?\n}\n/)?.[0] ??
+      "";
+    expect(ticketsOnly).toContain("return CollectPositionTargets(command, tickets, identifiers);");
+    expect(ticketsOnly).not.toContain("PositionsTotal()");
+
+    // A full close removes the position, so the identifier must be read while the
+    // position is still selected, before anything closes anything, and not at the
+    // bottom of the function where the mark is written.
+    const close =
+      source.match(/bool ClosePositionTicket\([\s\S]*?\n\)\n\{[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(close).toContain("ulong identifier = PositionMarkKey(ticket);");
+    expect(close.indexOf("ulong identifier = PositionMarkKey(ticket);")).toBeLessThan(
+      close.indexOf("OrderSend"),
+    );
+    expect(close.indexOf("ulong identifier = PositionMarkKey(ticket);")).toBeLessThan(
+      close.indexOf("MarkLifecycleExecuted(command, identifier);"),
+    );
+
+    // Liveness during reclamation can no longer be a PositionSelectByTicket lookup:
+    // that is exactly what a replaced ticket defeats. It is answered from a list of
+    // the identifiers the terminal currently holds open.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).not.toContain("PositionSelectByTicket");
+    expect(reclaim).toContain(
+      "HoldsPositionIdentifier(openIdentifiers, openIdentifierCount, lifecycleMarks[index].positionIdentifier)",
+    );
+    // Collected once per sweep, not once per mark: 512 marks driving their own scans
+    // would re-select every open position 512 times for the same answer.
+    expect(reclaim.match(/CollectOpenPositionIdentifiers/g)).toHaveLength(1);
+    // The scan is a removal-arm input, so it must not run while disconnected.
+    expect(reclaim).toMatch(
+      /if\(connected\)\s*\n\s*openIdentifierCount = CollectOpenPositionIdentifiers\(openIdentifiers\);/,
+    );
+    const scan =
+      source.match(/int CollectOpenPositionIdentifiers\(ulong &identifiers\[\]\)[\s\S]*?\n}\n/)?.[0] ??
+      "";
+    expect(scan).toContain("identifiers[next] = PositionMarkKey(ticket);");
+    // The registry holds the identifier and nothing else, so no code path can reach a
+    // stored ticket and quietly key off it again. Other structures keep their own
+    // positionTicket fields; this one must not.
+    const markStruct = source.match(/struct LifecycleMark[\s\S]*?\n\s*\};/)?.[0] ?? "";
+    expect(markStruct).toContain("ulong positionIdentifier;");
+    expect(markStruct).not.toContain("positionTicket");
+  });
+
+  test("keeps a 1.67 ticket-keyed mark protecting its position through the upgrade", () => {
+    // Two name formats, not three. The second read is the same format keyed by the
+    // position's current ticket, which is what 1.67 wrote, and it is skipped whenever
+    // the two numbers agree - which is every position the server never re-opened.
+    const already =
+      source.match(
+        /bool LifecycleAlreadyExecuted\(SignalCommand &command, ulong identifier = 0, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(already).toBeTruthy();
+    expect(already).toMatch(
+      /if\(GlobalVariableCheck\(LifecycleIdempotencyVariable\(command, identifier\)\)\)\s*\n\s*return true;/,
+    );
+    expect(already).toMatch(
+      /if\(ticket != identifier && GlobalVariableCheck\(LifecycleIdempotencyVariable\(command, ticket\)\)\)\s*\n\s*return true;/,
+    );
+    // The identifier is read first, so the ordinary case costs one lookup as before.
+    expect(already.indexOf("command, identifier")).toBeLessThan(
+      already.indexOf("ticket != identifier"),
+    );
+
+    // Reading an old key must never write one. Only the identifier is ever stored, so
+    // the ticket-keyed layer drains as positions close rather than being topped up.
+    const mark =
+      source.match(
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong identifier = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(mark).not.toContain("ticket");
+    // CANCEL_PENDING still keys on zero, and its read must not be diverted by the
+    // ticket layer: identifier and ticket are both zero there, so the second read is
+    // skipped and the behaviour is exactly 1.67's.
+    expect(source).toContain("if(LifecycleAlreadyExecuted(command))");
+    expect(source).toContain("MarkLifecycleExecuted(command);");
   });
 
   test("reclaims a lifecycle mark only once its position is gone for good", () => {
@@ -842,7 +952,7 @@ describe("MT5 Expert Advisor source", () => {
 
     // A live position keeps its mark and resets the absence clock.
     expect(reclaim).toMatch(
-      /PositionSelectByTicket\(lifecycleMarks\[index\]\.positionTicket\)[\s\S]*?absentPasses = 0;/,
+      /HoldsPositionIdentifier\(openIdentifiers, openIdentifierCount, lifecycleMarks\[index\]\.positionIdentifier\)[\s\S]*?absentPasses = 0;/,
     );
     // A single absent reading is never enough: a reconnect can hide an open position,
     // and no removal happens at all without a connection to confirm it.
@@ -861,7 +971,7 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("does not reclaim command-scoped marks on a timer", () => {
-    // A CANCEL_PENDING mark has no ticket to watch, and no age at which the EA can
+    // A CANCEL_PENDING mark has no position to watch, and no age at which the EA can
     // prove the server will not ask again, so any number would be a guess. Untracked
     // means never deleted here: the terminal's expiry applies, and MQL5 renews that on
     // every read, so a mark still being consulted survives.
@@ -869,15 +979,15 @@ describe("MT5 Expert Advisor source", () => {
       source.match(
         /void MarkLifecycleExecuted\(SignalCommand &command, ulong identifier = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
-    expect(mark).toMatch(/if\(ticket == 0\)\s*\n\s*return;/);
+    expect(mark).toMatch(/if\(identifier == 0\)\s*\n\s*return;/);
     expect(source).not.toContain("LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS");
     // Rehydration must not pull them back in either.
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
-    expect(rehydrate).toContain("if(tagText != currentTag || ticket == 0)");
-    // Every tracked entry therefore has a real ticket, so the sweep has no ticket-zero
-    // branch left to get wrong.
+    expect(rehydrate).toContain("if(tagText != currentTag || identifier == 0)");
+    // Every tracked entry therefore has a real position number, so the sweep has no
+    // zero branch left to get wrong.
     const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
-    expect(reclaim).not.toContain("positionTicket > 0");
+    expect(reclaim).not.toContain("positionIdentifier > 0");
   });
 
   test("never lets mark bookkeeping stop a mark being recorded, and survives a restart", () => {
@@ -891,7 +1001,7 @@ describe("MT5 Expert Advisor source", () => {
     expect(mark).toMatch(/GlobalVariableSet\(variable[\s\S]*RegisterLifecycleMark\(variable/);
     const register =
       source.match(
-        /bool RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
+        /bool RegisterLifecycleMark\(string variable, string identity, ulong identifier, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(register).toContain(
       "if(freeSlot < 0 && lifecycleMarkCount < ArraySize(lifecycleMarks))",
@@ -914,7 +1024,7 @@ describe("MT5 Expert Advisor source", () => {
       'variable = ""',
       "owned = false",
       'identity = ""',
-      "positionTicket = 0",
+      "positionIdentifier = 0",
       "refreshedAt = 0",
       "absentPasses = 0",
     ]) {
