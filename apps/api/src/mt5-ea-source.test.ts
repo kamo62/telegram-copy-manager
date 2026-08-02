@@ -592,13 +592,13 @@ describe("MT5 Expert Advisor source", () => {
       "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal())",
     );
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
-    expect(rehydrate).toContain("RegisterLifecycleMark(name, identity, ticket, false, 0);");
+    expect(rehydrate).toContain("if(RegisterLifecycleMark(name, identity, ticket, false, 0))");
     expect(rehydrate).not.toContain("GlobalVariableDel");
     // Ownership ratchets up only, so an adopted entry this session writes to becomes
     // deletable, and nothing can strip the right once granted.
     const register =
       source.match(
-        /void RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
+        /bool RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(register).toContain(
       "lifecycleMarks[index].owned = lifecycleMarks[index].owned || owned;",
@@ -656,7 +656,7 @@ describe("MT5 Expert Advisor source", () => {
     expect(rehydrate.indexOf("ACCOUNT_LOGIN) == 0")).toBeLessThan(
       rehydrate.indexOf("GlobalVariablesTotal()"),
     );
-    expect(rehydrate).toContain("LifecycleMarksAdopted = true;");
+    expect(rehydrate).toContain("LifecycleMarksAdopted = untracked == 0;");
     // The timer retries while adoption has not happened.
     expect(source).toMatch(
       /void\s+OnTimer\(\)[\s\S]*if\(!LifecycleMarksAdopted\)\s*\n\s*RehydrateLifecycleMarks\(\);/,
@@ -694,6 +694,73 @@ describe("MT5 Expert Advisor source", () => {
     // An adopted mark may already be near its expiry, so it refreshes on sight rather
     // than a full interval after adoption.
     expect(reclaim).toContain("lifecycleMarks[index].refreshedAt == 0");
+  });
+
+  test("keeps every clock out of the path that deletes a mark", () => {
+    // Refresh needs an advancing clock so it survives a disconnection, but the same
+    // clock must not reach the destructive path: a backward NTP step or a manual
+    // correction would collapse the grace and delete a mark guarding a live position.
+    // A three-week refresh window absorbs a jump; a five-minute grace does not.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    const destructive = reclaim.slice(reclaim.indexOf("if(!connected || !sameAccount)"));
+    expect(destructive).toContain("GlobalVariableDel");
+    for (const clock of ["TimeLocal", "TimeCurrent", "now", "SECONDS"]) {
+      expect(destructive).not.toContain(clock);
+    }
+    // The grace is a count of consecutive sweeps, which the clamped timer makes a
+    // duration the EA controls without trusting any clock.
+    expect(source).toContain("#define LIFECYCLE_MARK_ABSENT_PASSES 10");
+    expect(source).toContain("int absentPasses;");
+    expect(destructive).toContain("lifecycleMarks[index].absentPasses++;");
+    expect(destructive).toContain(
+      "if(lifecycleMarks[index].absentPasses < LIFECYCLE_MARK_ABSENT_PASSES)",
+    );
+    // A sighting must reset the run, or ten scattered absences across a month would
+    // add up to a deletion.
+    expect(reclaim).toMatch(
+      /if\(live\)\s*\n\s*\{\s*\n\s*lifecycleMarks\[index\]\.absentPasses = 0;/,
+    );
+
+    // Where a clock does remain, a backward jump reads as due rather than not-yet.
+    expect(reclaim).toContain("|| now < lifecycleMarks[index].refreshedAt");
+    expect(source).toMatch(
+      /\|\| now < LastLifecycleReclaimAt\s*\n\s*\|\| now - LastLifecycleReclaimAt >=/,
+    );
+  });
+
+  test("reports a full registry instead of silently dropping a mark", () => {
+    // A dropped registration is invisible otherwise: the variable is still written so
+    // the first duplicate is still refused, but nothing refreshes it and it expires at
+    // four weeks with the position still open.
+    const register =
+      source.match(
+        /bool RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(register).toContain("return false;");
+    expect(register).toContain("is not tracked and will not be refreshed");
+    // Adoption fills the registry with previous sessions' marks; live positions never
+    // will. So a mark this session wrote outranks an adopted one for the last slot.
+    expect(register).toContain("if(freeSlot < 0 && owned && adoptedSlot >= 0)");
+    expect(register).toMatch(
+      /ReleaseLifecycleMarkSlot\(adoptedSlot\);\s*\n\s*freeSlot = adoptedSlot;/,
+    );
+    // Evicting an adopted entry drops tracking only; its variable is never deleted.
+    const eviction = register.slice(
+      register.indexOf("if(freeSlot < 0 && owned && adoptedSlot >= 0)"),
+      register.indexOf("if(freeSlot < 0)\n   {"),
+    );
+    expect(eviction).not.toContain("GlobalVariableDel");
+
+    // A failed adoption must not be counted as adopted, and must leave a retry open.
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(rehydrate).toMatch(
+      /if\(RegisterLifecycleMark\(name, identity, ticket, false, 0\)\)\s*\n\s*adopted\+\+;\s*\n\s*else\s*\n\s*untracked\+\+;/,
+    );
+    expect(rehydrate).toContain("LifecycleMarksAdopted = untracked == 0;");
+    // The completion flag is set from the result, after the loop, not asserted up front.
+    expect(rehydrate.indexOf("LifecycleMarksAdopted =")).toBeGreaterThan(
+      rehydrate.indexOf("GlobalVariablesTotal()"),
+    );
   });
 
   test("clamps the poll interval so the sweep cannot be starved", () => {
@@ -775,14 +842,14 @@ describe("MT5 Expert Advisor source", () => {
 
     // A live position keeps its mark and resets the absence clock.
     expect(reclaim).toMatch(
-      /PositionSelectByTicket\(lifecycleMarks\[index\]\.positionTicket\)[\s\S]*?absentSince = 0;/,
+      /PositionSelectByTicket\(lifecycleMarks\[index\]\.positionTicket\)[\s\S]*?absentPasses = 0;/,
     );
     // A single absent reading is never enough: a reconnect can hide an open position,
     // and no removal happens at all without a connection to confirm it.
     expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
-    expect(reclaim).toContain("if(lifecycleMarks[index].absentSince == 0)");
+    expect(reclaim).toContain("lifecycleMarks[index].absentPasses++;");
     expect(reclaim).toContain(
-      "if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)",
+      "if(lifecycleMarks[index].absentPasses < LIFECYCLE_MARK_ABSENT_PASSES)",
     );
     // A mark guarding a runner that outlives the four-week expiry is rewritten, and
     // only a rewrite the terminal confirmed may advance the clock. Advancing it on a
@@ -824,12 +891,14 @@ describe("MT5 Expert Advisor source", () => {
     expect(mark).toMatch(/GlobalVariableSet\(variable[\s\S]*RegisterLifecycleMark\(variable/);
     const register =
       source.match(
-        /void RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
+        /bool RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
-    expect(register).toContain("if(lifecycleMarkCount >= ArraySize(lifecycleMarks))");
-    expect(register).toContain("is not tracked for reclamation");
+    expect(register).toContain(
+      "if(freeSlot < 0 && lifecycleMarkCount < ArraySize(lifecycleMarks))",
+    );
+    expect(register).toContain("is not tracked and will not be refreshed");
     expect(register).toContain("if(freeSlot < 0 && !lifecycleMarks[index].active)");
-    expect(register).toMatch(/variable == variable[\s\S]*?return;[\s\S]*?freeSlot = index/);
+    expect(register).toMatch(/variable == variable[\s\S]*?return true;[\s\S]*?freeSlot = index/);
 
     // Global variables outlive the process; the registry does not. Adopt what an
     // earlier session left or nothing would ever reclaim it.
@@ -847,7 +916,7 @@ describe("MT5 Expert Advisor source", () => {
       'identity = ""',
       "positionTicket = 0",
       "refreshedAt = 0",
-      "absentSince = 0",
+      "absentPasses = 0",
     ]) {
       expect(release).toContain(cleared);
     }

@@ -40,8 +40,8 @@ const mutations: Mutation[] = [
   {
     id: "ownership/adoption-claims-ownership",
     breaks: "adopted marks become deletable, so another account's mark can be removed",
-    from: "RegisterLifecycleMark(name, identity, ticket, false, 0);",
-    to: "RegisterLifecycleMark(name, identity, ticket, true, 0);",
+    from: "if(RegisterLifecycleMark(name, identity, ticket, false, 0))",
+    to: "if(RegisterLifecycleMark(name, identity, ticket, true, 0))",
   },
   {
     id: "ownership/revocable",
@@ -120,8 +120,77 @@ const mutations: Mutation[] = [
   {
     id: "reclaim/grace-removed",
     breaks: "one absent reading deletes the mark, so a reconnect blip is enough",
-    from: "if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)",
+    from: "if(lifecycleMarks[index].absentPasses < LIFECYCLE_MARK_ABSENT_PASSES)",
     to: "if(false)",
+  },
+  {
+    id: "reclaim/grace-back-on-the-clock",
+    breaks: "a backward clock step can collapse the grace and delete a live mark",
+    from: `      lifecycleMarks[index].absentPasses++;
+      if(lifecycleMarks[index].absentPasses < LIFECYCLE_MARK_ABSENT_PASSES)
+         continue;`,
+    to: `      if(lifecycleMarks[index].absentPasses == 0)
+      {
+         lifecycleMarks[index].absentPasses = (int)now;
+         continue;
+      }
+      if(now - lifecycleMarks[index].absentPasses < 300)
+         continue;`,
+  },
+  {
+    id: "reclaim/absence-run-not-reset",
+    breaks: "a sighting does not reset the run, so scattered absences add up to a delete",
+    from: `      if(live)
+      {
+         lifecycleMarks[index].absentPasses = 0;
+         continue;
+      }`,
+    to: `      if(live)
+         continue;`,
+  },
+  {
+    id: "clock/refresh-not-jump-tolerant",
+    breaks: "a backward clock step defers refresh instead of triggering it",
+    from: "         || now < lifecycleMarks[index].refreshedAt\n",
+    to: "",
+  },
+  {
+    id: "clock/sweep-throttle-not-jump-tolerant",
+    breaks: "a backward clock step stalls the sweep, and refresh with it",
+    from: "      || now < LastLifecycleReclaimAt\n",
+    to: "",
+  },
+  {
+    id: "registry/overflow-silent",
+    breaks: "a dropped registration reports success, so nothing knows the mark is untracked",
+    from: `      PrintFormat("Telegram TC lifecycle mark registry full (%d slots). %s is not tracked and will not be refreshed",
+         ArraySize(lifecycleMarks),
+         variable);
+      return false;`,
+    to: "      return true;",
+  },
+  {
+    id: "registry/adoption-counts-failures",
+    breaks:
+      "a failed adoption is counted as adopted, so the log reports success it did not achieve",
+    from: `      if(RegisterLifecycleMark(name, identity, ticket, false, 0))
+         adopted++;
+      else
+         untracked++;`,
+    to: `      RegisterLifecycleMark(name, identity, ticket, false, 0);
+      adopted++;`,
+  },
+  {
+    id: "registry/no-retry-after-overflow",
+    breaks: "adoption marks itself done despite dropping entries, so nothing retries",
+    from: "   LifecycleMarksAdopted = untracked == 0;",
+    to: "   LifecycleMarksAdopted = true;",
+  },
+  {
+    id: "registry/owned-cannot-evict-adopted",
+    breaks: "a live position's mark loses the last slot to a previous session's",
+    from: "   if(freeSlot < 0 && owned && adoptedSlot >= 0)",
+    to: "   if(false)",
   },
   {
     id: "reclaim/command-scoped-tracked",
@@ -140,7 +209,6 @@ const mutations: Mutation[] = [
       Print("Telegram TC: no account login yet, lifecycle mark adoption deferred to the next sweep");
       return;
    }
-   LifecycleMarksAdopted = true;
 `,
     to: "",
   },
@@ -217,6 +285,21 @@ if (!selected.length) {
 }
 
 const pristine = readFileSync(EA_PATH, "utf8");
+
+// Score nothing until the unmutated tree is green. If it is already failing, every
+// mutation "catches" for a reason that has nothing to do with the mutation, and the run
+// reports a clean sweep while proving nothing at all.
+const baseline = runEaSourceTest();
+if (baseline.caught) {
+  console.error(
+    `Refusing to run: ${TEST_PATH} already fails on the unmutated tree.\n` +
+      `Fix these first, or every mutation will appear caught for the wrong reason:\n  ` +
+      baseline.failing.join("\n  "),
+  );
+  process.exit(2);
+}
+console.log(`baseline clean: ${TEST_PATH} passes unmutated\n`);
+
 const survivors: Mutation[] = [];
 const missing: Mutation[] = [];
 

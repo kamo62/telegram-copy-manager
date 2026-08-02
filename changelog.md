@@ -46,6 +46,17 @@ while the new EA still reads the old names, prefer recompiling when the account 
   a long disconnection stopped every refresh, and the refresh clock itself ran on server time,
   which stops advancing while disconnected. Refresh now runs on local time and is not gated on
   connectivity; reclamation still requires both a connection and a live-position check.
+- Reclamation no longer reads a clock. A mark is deleted after its position has been absent on ten
+  consecutive sweeps rather than for five minutes, so a backward wall-clock correction, whether an
+  NTP step or a manual change, cannot collapse the window and delete a mark guarding a live
+  position. Refresh still uses elapsed time, which is safe at a three-week window where five
+  minutes was not, and a backward jump there now reads as due rather than as not yet due.
+- A full mark registry is reported rather than passed over. A dropped registration used to be
+  invisible: the mark still guarded its trade, but nothing refreshed it and it expired at four weeks
+  with the position still open, while adoption counted it as a success and never retried. Adoption
+  now counts only what it tracked, retries while anything is outstanding, and a mark this session
+  wrote takes the last slot ahead of one adopted from a previous session, since adoption is what
+  fills the registry and live positions never will.
 - The poll interval is clamped in the EA. It drives the only timer, so it is also the refresh
   cadence, and a startup value beyond the four-week expiry meant the sweep never ran in time to
   save a mark. The backend caps what it sends but cannot correct the interval before the first

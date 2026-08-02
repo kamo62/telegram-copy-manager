@@ -98,7 +98,13 @@ struct TrailingStopState
 // How long a mark whose position has vanished is held before reclamation. Covers a
 // reconnect window in which PositionSelectByTicket can fail on a position that is
 // still open at the broker.
-#define LIFECYCLE_MARK_ABSENT_GRACE_SECONDS 300
+// Consecutive sweeps a position must be absent for before its mark is reclaimed. This
+// is deliberately a count and not a duration: the sweep runs on a clamped timer, so
+// counting passes buys a controlled window without trusting a clock that a backward
+// NTP step or a manual correction could collapse. Refresh may use elapsed time because
+// a three-week window absorbs any plausible jump; a five-minute grace would not, and
+// this is the path that deletes.
+#define LIFECYCLE_MARK_ABSENT_PASSES 10
 // The terminal deletes a global variable four weeks after its last use, so a mark
 // guarding a still-open position is rewritten well inside that window.
 #define LIFECYCLE_MARK_REFRESH_SECONDS 604800
@@ -123,7 +129,7 @@ struct LifecycleMark
    // advancing while the terminal is disconnected, which is exactly when a mark most
    // needs its expiry pushed back, so it cannot be what drives the refresh.
    datetime refreshedAt;   // 0 = never refreshed by this session, refresh on sight
-   datetime absentSince;
+   int absentPasses;       // consecutive sweeps the position was absent, no clock involved
 };
 
 TrailingStopState trailingStopStates[100];
@@ -135,6 +141,7 @@ datetime LastHeartbeatSentAt = 0;
 datetime LastHistoryBackfillAt = 0;
 datetime LastLifecycleReclaimAt = 0;
 bool LifecycleMarksAdopted = false;
+string LastLifecycleAdoptionReport = "";
 string EaCapabilitiesJson = "[\"lane2-close-contract\",\"pending-close-flatten-v1\"]";
 
 int ClampPollSeconds(int seconds)
@@ -173,7 +180,12 @@ void OnTimer()
    }
    SendSnapshot();
    ManageTrailingStops();
-   if(LastLifecycleReclaimAt == 0 || now - LastLifecycleReclaimAt >= LIFECYCLE_MARK_SWEEP_SECONDS)
+   // now < LastLifecycleReclaimAt means the clock went backwards. Sweep instead of
+   // waiting for it to catch up, or a large backward correction would stall refreshes
+   // for as long as the jump.
+   if(LastLifecycleReclaimAt == 0
+      || now < LastLifecycleReclaimAt
+      || now - LastLifecycleReclaimAt >= LIFECYCLE_MARK_SWEEP_SECONDS)
    {
       // OnInit runs before the terminal has necessarily resolved an account, and it is
       // the only other caller, so adoption has to be able to catch up here. Without
@@ -2031,9 +2043,14 @@ void MarkLifecycleExecuted(SignalCommand &command, ulong ticket = 0)
 // Slots are recycled in place and lifecycleMarkCount is a high-water mark that only
 // grows, so ReclaimLifecycleMarks can release an entry mid-pass without shifting
 // anything under its own index walk.
-void RegisterLifecycleMark(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt)
+//
+// Returns false when the mark could not be tracked. The caller must not treat that as
+// success: an untracked mark still guards its trade but is never refreshed, so it
+// expires at four weeks even though its position may still be open.
+bool RegisterLifecycleMark(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt)
 {
    int freeSlot = -1;
+   int adoptedSlot = -1;
    for(int index = 0; index < lifecycleMarkCount; index++)
    {
       if(lifecycleMarks[index].active && lifecycleMarks[index].variable == variable)
@@ -2044,25 +2061,40 @@ void RegisterLifecycleMark(string variable, string identity, ulong ticket, bool 
          lifecycleMarks[index].identity = identity;
          lifecycleMarks[index].positionTicket = ticket;
          lifecycleMarks[index].refreshedAt = refreshedAt;
-         lifecycleMarks[index].absentSince = 0;
-         return;
+         lifecycleMarks[index].absentPasses = 0;
+         return true;
       }
       if(freeSlot < 0 && !lifecycleMarks[index].active)
          freeSlot = index;
+      if(adoptedSlot < 0 && lifecycleMarks[index].active && !lifecycleMarks[index].owned)
+         adoptedSlot = index;
+   }
+   if(freeSlot < 0 && lifecycleMarkCount < ArraySize(lifecycleMarks))
+   {
+      freeSlot = lifecycleMarkCount;
+      lifecycleMarkCount++;
+   }
+   // Adoption can fill the registry with marks from previous sessions; live positions
+   // never will. So a mark this session just wrote outranks an adopted one and takes
+   // its slot. Releasing an adopted entry stops its refresh and nothing else, since
+   // nothing may delete an adopted mark's variable anyway.
+   if(freeSlot < 0 && owned && adoptedSlot >= 0)
+   {
+      PrintFormat("Telegram TC lifecycle mark registry full (%d slots). Dropped refresh tracking for adopted %s to track owned %s",
+         ArraySize(lifecycleMarks),
+         lifecycleMarks[adoptedSlot].variable,
+         variable);
+      ReleaseLifecycleMarkSlot(adoptedSlot);
+      freeSlot = adoptedSlot;
    }
    if(freeSlot < 0)
    {
-      if(lifecycleMarkCount >= ArraySize(lifecycleMarks))
-      {
-         // Degrades to the old behaviour for this one mark: it still guards the trade,
-         // it just waits for the terminal's four-week expiry instead of the sweep.
-         PrintFormat("Telegram TC lifecycle mark registry full (%d slots). %s is not tracked for reclamation",
-            ArraySize(lifecycleMarks),
-            variable);
-         return;
-      }
-      freeSlot = lifecycleMarkCount;
-      lifecycleMarkCount++;
+      // Degrades to the pre-1.67 behaviour for this one mark: it still guards the
+      // trade, it just waits for the terminal's four-week expiry instead of the sweep.
+      PrintFormat("Telegram TC lifecycle mark registry full (%d slots). %s is not tracked and will not be refreshed",
+         ArraySize(lifecycleMarks),
+         variable);
+      return false;
    }
    lifecycleMarks[freeSlot].active = true;
    lifecycleMarks[freeSlot].owned = owned;
@@ -2070,7 +2102,8 @@ void RegisterLifecycleMark(string variable, string identity, ulong ticket, bool 
    lifecycleMarks[freeSlot].identity = identity;
    lifecycleMarks[freeSlot].positionTicket = ticket;
    lifecycleMarks[freeSlot].refreshedAt = refreshedAt;
-   lifecycleMarks[freeSlot].absentSince = 0;
+   lifecycleMarks[freeSlot].absentPasses = 0;
+   return true;
 }
 
 void ReleaseLifecycleMarkSlot(int index)
@@ -2081,7 +2114,7 @@ void ReleaseLifecycleMarkSlot(int index)
    lifecycleMarks[index].identity = "";
    lifecycleMarks[index].positionTicket = 0;
    lifecycleMarks[index].refreshedAt = 0;
-   lifecycleMarks[index].absentSince = 0;
+   lifecycleMarks[index].absentPasses = 0;
 }
 
 bool IsHexRun(string text, int length)
@@ -2147,7 +2180,6 @@ void RehydrateLifecycleMarks()
       Print("Telegram TC: no account login yet, lifecycle mark adoption deferred to the next sweep");
       return;
    }
-   LifecycleMarksAdopted = true;
 
    // Drop adopted entries and rebuild them, so an account switch cannot carry the
    // previous account's guesses into this one. Owned entries are kept: this session
@@ -2162,6 +2194,7 @@ void RehydrateLifecycleMarks()
    int total = GlobalVariablesTotal();
    int adopted = 0;
    int skipped = 0;
+   int untracked = 0;
    for(int index = 0; index < total; index++)
    {
       string name = GlobalVariableName(index);
@@ -2179,14 +2212,28 @@ void RehydrateLifecycleMarks()
       // refreshedAt 0 means the first sweep rewrites it. An adopted mark may already be
       // most of the way through its four weeks, so its expiry is pushed back on sight
       // rather than a refresh interval later.
-      RegisterLifecycleMark(name, identity, ticket, false, 0);
-      adopted++;
+      if(RegisterLifecycleMark(name, identity, ticket, false, 0))
+         adopted++;
+      else
+         untracked++;
    }
-   if(adopted > 0 || skipped > 0)
-      PrintFormat("Telegram TC lifecycle marks: adopted %d for refresh under tag %s, left %d untouched",
-         adopted,
-         currentTag,
-         skipped);
+
+   // Only a pass that tracked everything it found counts as done. Anything dropped for
+   // want of a slot must be retried, because a mark nothing refreshes expires at four
+   // weeks whether or not its position is still open.
+   LifecycleMarksAdopted = untracked == 0;
+
+   string report = StringFormat("Telegram TC lifecycle marks: adopted %d for refresh under tag %s, left %d untouched, %d untracked",
+      adopted,
+      currentTag,
+      skipped,
+      untracked);
+   // The retry re-runs this every sweep, so only say something when it changed.
+   if((adopted > 0 || skipped > 0 || untracked > 0) && report != LastLifecycleAdoptionReport)
+   {
+      Print(report);
+      LastLifecycleAdoptionReport = report;
+   }
 }
 
 // Reclamation is positive: a mark is deleted only when this EA instance wrote it in
@@ -2228,7 +2275,11 @@ void ReclaimLifecycleMarks()
       // life, so a wrong guess here leaks; refusing to refresh loses a live guard.
       // Only a rewrite the terminal confirmed may advance the clock: recording a
       // refresh that did not happen would let the mark quietly expire anyway.
+      // A clock that jumped backwards makes elapsed time negative. Read that as due
+      // rather than as not-yet: refreshing early costs nothing, refreshing late loses
+      // the mark.
       bool refreshDue = lifecycleMarks[index].refreshedAt == 0
+         || now < lifecycleMarks[index].refreshedAt
          || now - lifecycleMarks[index].refreshedAt >= LIFECYCLE_MARK_REFRESH_SECONDS;
       if((lifecycleMarks[index].owned || sameAccount) && refreshDue
          && GlobalVariableSet(lifecycleMarks[index].variable, (double)TimeCurrent()) != 0)
@@ -2242,17 +2293,14 @@ void ReclaimLifecycleMarks()
          continue;
       if(live)
       {
-         lifecycleMarks[index].absentSince = 0;
+         lifecycleMarks[index].absentPasses = 0;
          continue;
       }
-      // One absent reading is not proof. The position must stay absent for the
-      // whole grace window, which a reconnect blip cannot span.
-      if(lifecycleMarks[index].absentSince == 0)
-      {
-         lifecycleMarks[index].absentSince = now;
-         continue;
-      }
-      if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)
+      // One absent reading is not proof. The position must be absent on this many
+      // consecutive sweeps, which a reconnect blip cannot span. Counting passes rather
+      // than seconds keeps every clock out of the only path that deletes anything.
+      lifecycleMarks[index].absentPasses++;
+      if(lifecycleMarks[index].absentPasses < LIFECYCLE_MARK_ABSENT_PASSES)
          continue;
 
       // The whole safety argument reduces to this line. Only a mark this session
