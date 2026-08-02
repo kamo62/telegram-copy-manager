@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.67.1 - 2026-08-02 (Patch)
+
+Release impact: Patch. App only. No EA recompile, no command contract change, no API shape
+change. The database gains one index and, on a database that needs it, a one-time collapse of
+duplicate broker deal rows. The live database has no such rows today.
+
+- A snapshot position or order now has to match the trade's symbol and direction before it can
+  be treated as that trade's broker record. `matchedBrokerRecordForTrade` accepted the first row
+  bearing a tracking comment or a recorded ticket, and neither of those says the row still
+  describes the same instrument on the same side. A stale or mis-tagged row could hand another
+  position's ticket, open price, stop or volume to a decision about this trade, and all four
+  callers spend that on a live position: the virtual-TP monitor queues closes against the ticket
+  it gets back, percentage closes convert a percentage using its volume, the reconciler adds its
+  ticket to the candidate set, and provider equity attributes its floating P/L. A mismatch has to
+  be provable to count, so a record with no symbol or no numeric type is read exactly as before.
+- One broker deal is now one `broker_orders` row. `/api/mt5/report` carried no idempotency, so a
+  redelivered report wrote a second row for a deal already on file, and a deal repeated inside a
+  single history payload did the same. Both close-volume readers sum `filled_volume` across close
+  rows, so an extra close row overstates how much of a position is already closed and pushes any
+  remaining-volume check in the direction that passes. The report path now keeps the row already
+  recorded and audits the repeat, and the history sweep registers each row it writes so a repeat
+  inside one payload lands on the update branch.
+- A partial unique index backs that up for rows carrying a real deal ticket. Pending opens,
+  cancellations and synthetic snapshot-diff closes carry `''` or `'0'`, are repeatable by design,
+  and stay outside the constraint. Any pre-existing duplicates are collapsed first, keeping the
+  row that carries P/L and then the earliest, logging every removed row whole. If the index still
+  cannot be created the app boots without it rather than refusing to start.
+
 ## 1.67.0 - 2026-08-02 (Minor)
 
 Release impact: Minor because EA behaviour changed. This release requires an EA recompile and
