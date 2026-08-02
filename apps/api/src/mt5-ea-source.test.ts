@@ -548,10 +548,13 @@ describe("MT5 Expert Advisor source", () => {
       source.match(
         /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
-    expect(variable).toContain("LifecycleKeyHash(LifecycleCommandKey(command))");
+    expect(variable).toContain("LifecycleKeyHash(scopedKey)");
     expect(variable).toContain("LIFECYCLE_MARK_PREFIX");
     expect(variable).not.toContain("StringSubstr");
     expect(variable).not.toContain("63");
+    // Fixed-width hex for both the account tag and the hash. Rendering either as
+    // decimal makes the component variable-width and puts the cap back in reach.
+    expect(variable).toContain('"%s%08X.%08X%08X.%I64u"');
 
     // 64-bit FNV-1a. Both constants matter: a wrong offset basis still hashes, it
     // just stops being the function whose collision behaviour is being relied on.
@@ -560,10 +563,76 @@ describe("MT5 Expert Advisor source", () => {
     expect(hash).toContain("ulong prime = 1099511628211;");
     expect(hash).toContain("hash = (hash ^ (ulong)(code & 0xFF)) * prime;");
 
-    // Prefix plus a 20-digit hash, a dot and a 20-digit ticket is 55 characters, so
-    // no key the backend can send reaches the cap.
+    // 14 prefix + 8 tag + 1 + 16 hash + 1 + at most 20 ticket digits = 60. Only the
+    // ticket varies, and a ulong bounds it at 20.
     expect(source).toContain('#define LIFECYCLE_MARK_PREFIX "TelegramTC.lc."');
-    expect("TelegramTC.lc.".length + 20 + 1 + 20).toBeLessThan(64);
+    expect("TelegramTC.lc.".length + 8 + 1 + 16 + 1 + 20).toBe(60);
+    expect("TelegramTC.lc.".length + 8 + 1 + 16 + 1 + 20).toBeLessThan(64);
+  });
+
+  test("scopes every mark to the account that wrote it", () => {
+    // Terminal global variables are shared across every account the terminal logs
+    // into; position tickets are not. Without this, account B sees A's still-open
+    // position as absent, deletes A's mark, and a later duplicate closes A's position
+    // a second time.
+    const variable =
+      source.match(
+        /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    // Scoped two independent ways: folded into the hash so a foreign name can never be
+    // computed, and carried as a tag so the sweep can recognise what is not its own.
+    expect(variable).toContain(
+      'IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "|" + LifecycleCommandKey(command)',
+    );
+    expect(variable).toContain("LifecycleAccountTag()");
+    const tag = source.match(/uint LifecycleAccountTag\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(tag).toContain("AccountInfoInteger(ACCOUNT_LOGIN)");
+    expect(tag).toContain("(uint)((login ^ (login >> 32)) & 0xFFFFFFFF)");
+
+    // The sweep rechecks the account every pass, not only at rehydration, so a switch
+    // that did not reinitialise the EA still cannot delete another account's mark.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).toContain("uint currentTag = LifecycleAccountTag();");
+    expect(reclaim).toMatch(
+      /accountTag != currentTag[\s\S]{0,400}?ReleaseLifecycleMarkSlot\(index\);\s*\n\s*continue;/,
+    );
+    // Releasing tracking must not delete the variable: only the owning account can
+    // tell whether its position is still open.
+    const foreignBranch =
+      reclaim.slice(
+        reclaim.indexOf("accountTag != currentTag"),
+        reclaim.indexOf("PositionSelectByTicket"),
+      ) ?? "";
+    expect(foreignBranch).not.toContain("GlobalVariableDel");
+
+    // Rehydration adopts only this account's marks and rebuilds from scratch.
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(rehydrate).toContain("lifecycleMarkCount = 0;");
+    expect(rehydrate).toContain('string currentTag = StringFormat("%08X", LifecycleAccountTag());');
+    expect(rehydrate).toContain("if(tagText != currentTag)");
+    expect(rehydrate).not.toContain("GlobalVariableDel");
+    expect(source).toContain("uint accountTag;");
+  });
+
+  test("validates every segment of a mark name before adopting it", () => {
+    // Anything may use the terminal's global variables. A name that merely starts with
+    // the reserved prefix is not one of ours and must not be adopted or swept.
+    const parse =
+      source.match(
+        /bool ParseLifecycleMarkName\(string variable, string &accountTagText, ulong &ticket\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(parse).toBeTruthy();
+    expect(parse).toContain("if(tagEnd != prefixLength + 8)");
+    expect(parse).toContain("if(hashEnd != tagEnd + 17)");
+    expect(parse).toContain('if(!IsHexRun(tagText, 8) || !IsHexRun(hashText, 16) || digits == "")');
+    expect(parse).toContain("if(IntegerToString((long)ticket) != digits)");
+    const isHex = source.match(/bool IsHexRun\(string text, int length\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(isHex).toContain("if(StringLen(text) != length)");
+    expect(isHex).toContain("code >= '0' && code <= '9'");
+    expect(isHex).toContain("code >= 'A' && code <= 'F'");
+    // Recognising the ranges is not enough; anything outside them must be rejected.
+    expect(isHex).toMatch(/if\(!digit && !upper\)\s*\n\s*return false;/);
+    expect(source).toContain("if(!ParseLifecycleMarkName(name, tagText, ticket))");
   });
 
   test("keeps reading marks written under the pre-1.67 name and never writes that name again", () => {
@@ -612,14 +681,33 @@ describe("MT5 Expert Advisor source", () => {
     expect(reclaim).toContain(
       "if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)",
     );
-    // A mark guarding a runner that outlives the four-week expiry is rewritten.
-    expect(reclaim).toContain("LIFECYCLE_MARK_REFRESH_SECONDS");
-    expect(reclaim).toContain("GlobalVariableSet(lifecycleMarks[index].variable, (double)now);");
-    // CANCEL_PENDING marks carry no ticket, so they run on a retention window instead.
-    expect(reclaim).toContain(
-      "else if(now - lifecycleMarks[index].writtenAt < LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS)",
+    // A mark guarding a runner that outlives the four-week expiry is rewritten, and
+    // only a rewrite the terminal confirmed may advance the clock. Advancing it on a
+    // failed write records a refresh that did not happen and lets the mark expire.
+    expect(reclaim).toMatch(
+      /now - lifecycleMarks\[index\]\.writtenAt >= LIFECYCLE_MARK_REFRESH_SECONDS\s*\n\s*&& GlobalVariableSet\(lifecycleMarks\[index\]\.variable, \(double\)now\) != 0\)\s*\n\s*lifecycleMarks\[index\]\.writtenAt = now;/,
     );
     expect(source).toMatch(/void\s+OnTimer\(\)[\s\S]*ReclaimLifecycleMarks\(\)/);
+  });
+
+  test("does not reclaim command-scoped marks on a timer", () => {
+    // A CANCEL_PENDING mark has no ticket to watch, and no age at which the EA can
+    // prove the server will not ask again, so any number would be a guess. Untracked
+    // means never deleted here: the terminal's expiry applies, and MQL5 renews that on
+    // every read, so a mark still being consulted survives.
+    const mark =
+      source.match(
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(mark).toMatch(/if\(ticket == 0\)\s*\n\s*return;/);
+    expect(source).not.toContain("LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS");
+    // Rehydration must not pull them back in either.
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(rehydrate).toMatch(/if\(ticket == 0\)\s*\n\s*continue;/);
+    // Every tracked entry therefore has a real ticket, so the sweep has no ticket-zero
+    // branch left to get wrong.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).not.toContain("positionTicket > 0");
   });
 
   test("never lets mark bookkeeping stop a mark being recorded, and survives a restart", () => {
@@ -633,7 +721,7 @@ describe("MT5 Expert Advisor source", () => {
     expect(mark).toMatch(/GlobalVariableSet\(variable[\s\S]*RegisterLifecycleMark\(variable/);
     const register =
       source.match(
-        /void RegisterLifecycleMark\(string variable, ulong ticket, datetime writtenAt\)[\s\S]*?\n}\n/,
+        /void RegisterLifecycleMark\(string variable, uint accountTag, ulong ticket, datetime writtenAt\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(register).toContain("if(lifecycleMarkCount >= ArraySize(lifecycleMarks))");
     expect(register).toContain("is not tracked for reclamation");
@@ -643,11 +731,6 @@ describe("MT5 Expert Advisor source", () => {
     // Global variables outlive the process; the registry does not. Adopt what an
     // earlier session left or nothing would ever reclaim it.
     expect(source).toMatch(/int OnInit\(\)[\s\S]*RehydrateLifecycleMarks\(\)/);
-    // A ticket that does not read back exactly means the mark is left alone, never
-    // reclaimed against a position it may not belong to.
-    expect(source).toContain("bool LifecycleMarkTicket(string variable, ulong &ticket)");
-    expect(source).toContain("return IntegerToString((long)ticket) == digits;");
-    expect(source).toContain("if(!LifecycleMarkTicket(name, ticket))");
     // OnDeinit must not clear marks: a reattach has to keep them.
     const deinit = source.match(/void OnDeinit\(const int reason\)[\s\S]*?\n}/)?.[0] ?? "";
     expect(deinit).not.toContain("GlobalVariable");

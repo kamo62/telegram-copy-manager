@@ -99,10 +99,6 @@ struct TrailingStopState
 // reconnect window in which PositionSelectByTicket can fail on a position that is
 // still open at the broker.
 #define LIFECYCLE_MARK_ABSENT_GRACE_SECONDS 300
-// Retention for command-scoped marks (CANCEL_PENDING), which have no ticket to
-// watch. Far beyond any queue redelivery window and far inside the terminal's
-// four-week expiry.
-#define LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS 86400
 // The terminal deletes a global variable four weeks after its last use, so a mark
 // guarding a still-open position is rewritten well inside that window.
 #define LIFECYCLE_MARK_REFRESH_SECONDS 604800
@@ -112,7 +108,8 @@ struct LifecycleMark
 {
    bool active;
    string variable;
-   ulong positionTicket;   // 0 = command-scoped, no ticket to observe
+   uint accountTag;        // owning account; a foreign entry is never acted on
+   ulong positionTicket;   // always > 0: only ticket-scoped marks are tracked
    datetime writtenAt;
    datetime absentSince;
 };
@@ -1921,18 +1918,42 @@ ulong LifecycleKeyHash(string key)
    return hash;
 }
 
+// Terminal global variables are shared by every account the terminal logs into, but
+// position tickets are not. Marks therefore carry the account in two independent
+// ways: a fixed-width tag the sweep can read back, and the login folded into the
+// hash so a name computed on one account can never match a mark written on another.
+// ACCOUNT_LOGIN is a long, so it is folded to 32 bits rather than printed, keeping
+// the component fixed-width whatever the broker's login range.
+uint LifecycleAccountTag()
+{
+   ulong login = (ulong)AccountInfoInteger(ACCOUNT_LOGIN);
+   return (uint)((login ^ (login >> 32)) & 0xFFFFFFFF);
+}
+
 // MQL5 caps a global variable name at 63 characters and silently keeps only the
-// first 63. Hashing the backend-supplied key holds the name to 55 characters even
-// at a 20-digit hash and a 20-digit ticket, so no key the backend can send, however
-// long, can ever make two distinct marks share a name.
+// first 63. Every component here is fixed-width except the ticket, which a ulong
+// bounds at 20 digits, so the name is 60 characters at absolute worst: 14 prefix,
+// 8 account tag, 16 hash, 2 separators, 20 ticket. No key the backend can send,
+// however long, can move that bound or make two distinct marks share a name.
 string LifecycleIdempotencyVariable(SignalCommand &command, ulong ticket = 0)
 {
-   return StringFormat("%s%I64u.%I64u", LIFECYCLE_MARK_PREFIX, LifecycleKeyHash(LifecycleCommandKey(command)), ticket);
+   string scopedKey = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "|" + LifecycleCommandKey(command);
+   ulong hash = LifecycleKeyHash(scopedKey);
+   return StringFormat("%s%08X.%08X%08X.%I64u",
+      LIFECYCLE_MARK_PREFIX,
+      LifecycleAccountTag(),
+      (uint)((hash >> 32) & 0xFFFFFFFF),
+      (uint)(hash & 0xFFFFFFFF),
+      ticket);
 }
 
 // Marks written before this version used the truncated plaintext name. Nothing
 // writes that name any more; it stays readable so a close executed just before the
-// recompile is still recognised, and the terminal's four-week expiry drains the rest.
+// recompile is still recognised. These names carry no account, so they are never
+// adopted, refreshed or deleted here: acting on one would mean acting on a mark that
+// may belong to another account, which is the failure this version exists to remove.
+// MQL5 renews a variable's four-week life on every read, so a legacy mark still being
+// consulted stays alive and one nothing has asked about for four weeks is discarded.
 string LegacyLifecycleIdempotencyVariable(SignalCommand &command, ulong ticket = 0)
 {
    return StringSubstr(LEGACY_LIFECYCLE_MARK_PREFIX + LifecycleCommandKey(command) + "." + IntegerToString(ticket), 0, 63);
@@ -1959,19 +1980,27 @@ void MarkLifecycleExecuted(SignalCommand &command, ulong ticket = 0)
          GetLastError());
       return;
    }
-   RegisterLifecycleMark(variable, ticket, writtenAt);
+   // Only ticket-scoped marks are tracked. A command-scoped mark (CANCEL_PENDING) has
+   // nothing observable to bound it: no ticket to watch, and no age at which the EA can
+   // prove the server will not ask again. It is left to the terminal's four-week expiry,
+   // which renews on every read, so one still being consulted survives and one nothing
+   // has asked about is discarded. That is the pre-1.67 behaviour for this one category.
+   if(ticket == 0)
+      return;
+   RegisterLifecycleMark(variable, LifecycleAccountTag(), ticket, writtenAt);
 }
 
 // Slots are recycled in place and lifecycleMarkCount is a high-water mark that only
 // grows, so ReclaimLifecycleMarks can release an entry mid-pass without shifting
 // anything under its own index walk.
-void RegisterLifecycleMark(string variable, ulong ticket, datetime writtenAt)
+void RegisterLifecycleMark(string variable, uint accountTag, ulong ticket, datetime writtenAt)
 {
    int freeSlot = -1;
    for(int index = 0; index < lifecycleMarkCount; index++)
    {
       if(lifecycleMarks[index].active && lifecycleMarks[index].variable == variable)
       {
+         lifecycleMarks[index].accountTag = accountTag;
          lifecycleMarks[index].positionTicket = ticket;
          lifecycleMarks[index].writtenAt = writtenAt;
          lifecycleMarks[index].absentSince = 0;
@@ -1996,6 +2025,7 @@ void RegisterLifecycleMark(string variable, ulong ticket, datetime writtenAt)
    }
    lifecycleMarks[freeSlot].active = true;
    lifecycleMarks[freeSlot].variable = variable;
+   lifecycleMarks[freeSlot].accountTag = accountTag;
    lifecycleMarks[freeSlot].positionTicket = ticket;
    lifecycleMarks[freeSlot].writtenAt = writtenAt;
    lifecycleMarks[freeSlot].absentSince = 0;
@@ -2005,91 +2035,149 @@ void ReleaseLifecycleMarkSlot(int index)
 {
    lifecycleMarks[index].active = false;
    lifecycleMarks[index].variable = "";
+   lifecycleMarks[index].accountTag = 0;
    lifecycleMarks[index].positionTicket = 0;
    lifecycleMarks[index].writtenAt = 0;
    lifecycleMarks[index].absentSince = 0;
 }
 
-// The hash is decimal digits, so the first dot after the prefix is the ticket
-// separator and the ticket is never truncated out of the name. Returns false when
-// the segment does not read back exactly, so a mark is never reclaimed on a guess
-// about which position it belongs to.
-bool LifecycleMarkTicket(string variable, ulong &ticket)
+bool IsHexRun(string text, int length)
 {
-   ticket = 0;
-   int separator = StringFind(variable, ".", StringLen(LIFECYCLE_MARK_PREFIX));
-   if(separator < 0)
+   if(StringLen(text) != length)
       return false;
-   string digits = StringSubstr(variable, separator + 1);
-   ticket = (ulong)StringToInteger(digits);
-   return IntegerToString((long)ticket) == digits;
+   for(int index = 0; index < length; index++)
+   {
+      ushort code = StringGetCharacter(text, index);
+      bool digit = code >= '0' && code <= '9';
+      bool upper = code >= 'A' && code <= 'F';
+      if(!digit && !upper)
+         return false;
+   }
+   return true;
 }
 
-// A terminal restart keeps the global variables and loses this registry, so adopt
-// what an earlier session left behind or nothing would ever reclaim it. Legacy-named
-// marks are deliberately not adopted: their ticket may have been truncated away, so
-// the EA cannot tell whether their position is still open and must not guess.
+// A name this EA wrote is exactly prefix + 8 hex + '.' + 16 hex + '.' + decimal ticket.
+// Every segment is validated rather than assumed, so a variable that merely starts with
+// the reserved prefix is not adopted, and a mark is never reclaimed on a guess about
+// which account or which position it belongs to.
+bool ParseLifecycleMarkName(string variable, string &accountTagText, ulong &ticket)
+{
+   accountTagText = "";
+   ticket = 0;
+   int prefixLength = StringLen(LIFECYCLE_MARK_PREFIX);
+   int tagEnd = StringFind(variable, ".", prefixLength);
+   if(tagEnd != prefixLength + 8)
+      return false;
+   int hashEnd = StringFind(variable, ".", tagEnd + 1);
+   if(hashEnd != tagEnd + 17)
+      return false;
+   string tagText = StringSubstr(variable, prefixLength, 8);
+   string hashText = StringSubstr(variable, tagEnd + 1, 16);
+   string digits = StringSubstr(variable, hashEnd + 1);
+   if(!IsHexRun(tagText, 8) || !IsHexRun(hashText, 16) || digits == "")
+      return false;
+   ticket = (ulong)StringToInteger(digits);
+   if(IntegerToString((long)ticket) != digits)
+      return false;
+   accountTagText = tagText;
+   return true;
+}
+
+// A terminal restart, a recompile and an account switch all keep the global variables
+// and lose this registry, so adopt what an earlier session left behind or nothing would
+// ever reclaim it. Two categories are deliberately never adopted. Marks tagged for
+// another account are not this account's to judge: their ticket means nothing here.
+// Legacy-named marks carry no account at all and their ticket may have been truncated
+// away. Both are left untouched for the account that owns them, or for the terminal.
 void RehydrateLifecycleMarks()
 {
+   // Rebuild from scratch. An account switch reinitialises the EA, and the registry
+   // must not carry the previous account's entries into this one even if MQL5 left
+   // them in place.
+   for(int index = 0; index < lifecycleMarkCount; index++)
+      ReleaseLifecycleMarkSlot(index);
+   lifecycleMarkCount = 0;
+
+   string currentTag = StringFormat("%08X", LifecycleAccountTag());
    int total = GlobalVariablesTotal();
    int adopted = 0;
+   int foreign = 0;
    for(int index = 0; index < total; index++)
    {
       string name = GlobalVariableName(index);
       if(StringFind(name, LIFECYCLE_MARK_PREFIX) != 0)
          continue;
+      string tagText = "";
       ulong ticket = 0;
-      if(!LifecycleMarkTicket(name, ticket))
+      if(!ParseLifecycleMarkName(name, tagText, ticket))
          continue;
-      // An unreadable stored time starts the clock now rather than treating the mark
-      // as ancient, which would reclaim a command-scoped mark on the first sweep.
+      if(tagText != currentTag)
+      {
+         foreign++;
+         continue;
+      }
+      if(ticket == 0)
+         continue;
+      // An unreadable stored time starts the clock now rather than reading as ancient.
       datetime writtenAt = (datetime)(long)GlobalVariableGet(name);
       if(writtenAt <= 0)
          writtenAt = TimeCurrent();
-      RegisterLifecycleMark(name, ticket, writtenAt);
+      RegisterLifecycleMark(name, LifecycleAccountTag(), ticket, writtenAt);
       adopted++;
    }
-   if(adopted > 0)
-      PrintFormat("Telegram TC adopted %d lifecycle idempotency mark(s) from a previous session", adopted);
+   if(adopted > 0 || foreign > 0)
+      PrintFormat("Telegram TC lifecycle marks: adopted %d for account %s, left %d belonging to other accounts",
+         adopted,
+         currentTag,
+         foreign);
 }
 
-// Every ticket-scoped mark is only ever read for a ticket CollectPositionTickets
-// returned, and that function only returns positions PositionSelectByTicket accepts.
-// Once the position is gone the mark can never be consulted again, so removing it
-// cannot lose idempotency. Command-scoped marks have no ticket to watch and are held
-// on a retention window instead.
+// Every tracked mark is only ever read for a ticket CollectPositionTickets returned,
+// and that function only returns positions PositionSelectByTicket accepts. Once the
+// position is gone the mark can never be consulted again, so removing it cannot lose
+// idempotency.
+//
+// That argument only holds within one account. Terminal global variables are shared
+// across accounts and position tickets are not, so a live position on account A reads
+// as absent while the terminal is on account B. The account tag is therefore rechecked
+// on every pass rather than only at rehydration: an account switch that somehow did not
+// reinitialise the EA would otherwise let B delete A's marks and leave A's open
+// positions unprotected against a duplicate close.
 void ReclaimLifecycleMarks()
 {
    if(!TerminalInfoInteger(TERMINAL_CONNECTED))
       return;
+   uint currentTag = LifecycleAccountTag();
    datetime now = TimeCurrent();
    for(int index = 0; index < lifecycleMarkCount; index++)
    {
       if(!lifecycleMarks[index].active)
          continue;
-      if(lifecycleMarks[index].positionTicket > 0)
+      if(lifecycleMarks[index].accountTag != currentTag)
       {
-         if(PositionSelectByTicket(lifecycleMarks[index].positionTicket))
-         {
-            lifecycleMarks[index].absentSince = 0;
-            if(now - lifecycleMarks[index].writtenAt >= LIFECYCLE_MARK_REFRESH_SECONDS)
-            {
-               GlobalVariableSet(lifecycleMarks[index].variable, (double)now);
-               lifecycleMarks[index].writtenAt = now;
-            }
-            continue;
-         }
-         // One absent reading is not proof. The position must stay absent for the
-         // whole grace window, which a reconnect blip cannot span.
-         if(lifecycleMarks[index].absentSince == 0)
-         {
-            lifecycleMarks[index].absentSince = now;
-            continue;
-         }
-         if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)
-            continue;
+         // Not this account's mark. Drop the tracking, never the variable: only the
+         // account that owns it can tell whether its position is still open.
+         ReleaseLifecycleMarkSlot(index);
+         continue;
       }
-      else if(now - lifecycleMarks[index].writtenAt < LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS)
+      if(PositionSelectByTicket(lifecycleMarks[index].positionTicket))
+      {
+         lifecycleMarks[index].absentSince = 0;
+         // Only a confirmed rewrite may advance the clock. Recording a refresh that
+         // did not happen would let a mark guarding a live position quietly expire.
+         if(now - lifecycleMarks[index].writtenAt >= LIFECYCLE_MARK_REFRESH_SECONDS
+            && GlobalVariableSet(lifecycleMarks[index].variable, (double)now) != 0)
+            lifecycleMarks[index].writtenAt = now;
+         continue;
+      }
+      // One absent reading is not proof. The position must stay absent for the
+      // whole grace window, which a reconnect blip cannot span.
+      if(lifecycleMarks[index].absentSince == 0)
+      {
+         lifecycleMarks[index].absentSince = now;
+         continue;
+      }
+      if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)
          continue;
 
       GlobalVariableDel(lifecycleMarks[index].variable);

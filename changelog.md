@@ -19,7 +19,21 @@ while the new EA still reads the old names, prefer recompiling when the account 
   ticket `CollectPositionTickets` returned, and that function only returns positions the terminal
   can still select, so a mark for a closed position can never be consulted again. The five-minute
   window and a connection check keep a reconnect blip from reading as a closed position.
-  `CANCEL_PENDING` marks carry no ticket to watch and are held for 24 hours instead.
+- Marks are scoped to the account that wrote them. Terminal global variables are shared by every
+  account a terminal logs into, but position tickets are not, so without this a switch to a second
+  account read the first account's open positions as closed and deleted their marks: switching back
+  left live positions with no duplicate-close protection at all. The account login is now folded
+  into the hash, so a name computed on one account can never match a mark written on another, and
+  carried as a fixed-width tag, so the sweep can recognise what is not its own. The sweep rechecks
+  the tag on every pass rather than trusting reinitialisation, and a mark belonging to another
+  account is dropped from tracking but never deleted, because only its owner can tell whether its
+  position is still open. Those marks are picked up again when the terminal returns to that account,
+  and expire on the terminal's own schedule if it never does.
+- `CANCEL_PENDING` marks are no longer reclaimed on a timer. They carry no ticket to watch and there
+  is no age at which the EA can prove the server will not ask again, so any number would have been a
+  guess. They keep the pre-1.67 behaviour: the terminal expires them after four weeks without a
+  read, and a read renews that, so one still being consulted survives. This is the one category
+  still bounded by cancel volume rather than by live work, at one variable per cancel command.
 - The mark name can no longer be truncated. MQL5 caps a global variable name at 63 characters and
   keeps only the first 63; the name was built by pasting the backend's idempotency key in plaintext
   and cutting the result to 63. Today's keys are 16 characters and cannot reach the cap, but a
@@ -27,14 +41,24 @@ while the new EA still reads the old names, prefer recompiling when the account 
   characters and today only ever attach to `MODIFY_SL`, would have pushed the ticket out of the
   name entirely and made every position under one command share a single mark. The first close
   would then have been recorded and every other position silently skipped, and a silently skipped
-  close is an unmanaged position. The key is now a 64-bit FNV-1a hash, which holds the name to 55
-  characters at absolute worst whatever the backend sends.
+  close is an unmanaged position. Every component of the name is now fixed width except the ticket,
+  which a `ulong` bounds at 20 digits, holding the whole name to 60 characters at absolute worst
+  whatever the backend sends.
 - A mark guarding a position that stays open for more than four weeks, a runner for example, is
-  rewritten weekly so the terminal's inactivity expiry cannot delete it while it is still needed.
+  rewritten weekly so the terminal's inactivity expiry cannot delete it while it is still needed,
+  and only a rewrite the terminal confirmed advances the clock.
 - Marks survive a terminal restart as they always did, and the EA now adopts the ones a previous
-  session left behind on startup so they are reclaimed rather than orphaned. Marks written by an
-  EA older than 1.67.0 are still read, so a close executed just before the recompile keeps its
-  protection; nothing writes that older name again and the terminal expires what remains.
+  session left behind on startup so they are reclaimed rather than orphaned. Adoption validates
+  every segment of the name, so a variable that merely starts with the reserved prefix is left
+  alone.
+- **Positions open for more than four weeks lose duplicate-close protection during the transition.**
+  Marks written by an EA older than 1.67.0 are still read, so a close executed just before the
+  recompile keeps its protection. Those older names carry no account, so this release deliberately
+  never adopts, refreshes or deletes one: acting on them would mean acting on a mark that may belong
+  to another account, which is the failure above. They therefore rely on the terminal's four-week
+  expiry, which renews on every read. A position that stays open beyond four weeks with no lifecycle
+  command against it in that time loses its pre-upgrade mark. Recompiling when the account is flat
+  avoids this entirely.
 - A full mark registry no longer stops a mark being recorded. The global variable is written first
   and the bookkeeping second, so the worst case is that one mark waits for the terminal's expiry
   instead of the sweep, which is exactly the old behaviour.
