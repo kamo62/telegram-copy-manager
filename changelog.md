@@ -1,5 +1,102 @@
 # Changelog
 
+## 1.67.0 - 2026-08-02 (Minor)
+
+Release impact: Minor because EA behaviour changed. This release requires an EA recompile and
+reattach. Build `mt5/TelegramTC_EA.mq5` from this commit in MetaEditor and reattach it to the
+chart. The command contract, capability strings, API shape, parser and database schema are all
+unchanged, so an old EA keeps working exactly as it does today, including the leak below. There
+is one upgrade note: the recompile changes the name every idempotency mark is stored under, and
+while the new EA still reads the old names, prefer recompiling when the account is flat.
+
+- **EA recompile and reattach required.** Until a terminal is rebuilt it keeps the old behaviour.
+- Lifecycle idempotency marks are now reclaimed. `MarkLifecycleExecuted` writes a terminal global
+  variable per lifecycle command and per ticket so a redelivered close cannot close twice, and
+  nothing ever deleted one: the set grew with trading history and drained only on the terminal's
+  own four-week expiry. A mark is now deleted once the position it guards has been absent from the
+  broker for five minutes, which bounds the set by live work instead of by history.
+- Reclamation cannot drop a mark that is still needed. A ticket-scoped mark is only ever read for a
+  ticket `CollectPositionTickets` returned, and that function only returns positions the terminal
+  can still select, so a mark for a closed position can never be consulted again. The five-minute
+  window and a connection check keep a reconnect blip from reading as a closed position.
+- Marks are scoped to the account that wrote them, and a mark is deleted only when this EA wrote it
+  in this session. Terminal global variables are shared by every account a terminal logs into, but
+  position tickets are not, so without this a switch to a second account read the first account's
+  open positions as closed and deleted their marks: switching back left live positions with no
+  duplicate-close protection at all. Reclamation is now positive. Rather than trying to prove a mark
+  belongs to somebody else and deleting whatever fails the test, the EA deletes only what it can
+  prove is its own, which makes cross-account deletion impossible by construction rather than
+  dependent on reading an account back out of a name. Marks left by an earlier session are still
+  adopted so their weekly refresh continues, but adoption grants the right to extend a mark's life
+  and never to end it.
+- An account is identified by login, server and company together. The same account number at two
+  brokers is a real configuration, so a login-only identity would have collided every time rather
+  than rarely. That identity scopes the hash, so a name computed on one account cannot match a mark
+  written on another, and every removal decision compares it exactly. A mark whose account is not
+  the current one is skipped and kept, not dropped, so returning to that account resumes where it
+  left off without needing a reinitialisation, and an owned mark keeps being refreshed even while
+  the terminal sits on another account.
+- Nothing is adopted when the terminal reports no account login yet, which would otherwise have
+  matched every mark written under the same blank identity. `OnInit` runs before the terminal has
+  necessarily resolved an account, so adoption now retries on the timer until a real login appears
+  instead of being skipped for the whole session, which would have left every mark from the
+  previous session unrefreshed until it expired.
+- A disconnection no longer stops marks being refreshed. Rewriting a terminal global needs no
+  server connection; only deciding that a position is gone does. Both were behind the same gate, so
+  a long disconnection stopped every refresh, and the refresh clock itself ran on server time,
+  which stops advancing while disconnected. Refresh now runs on local time and is not gated on
+  connectivity; reclamation still requires both a connection and a live-position check.
+- Reclamation no longer reads a clock. A mark is deleted after its position has been absent on ten
+  consecutive sweeps rather than for five minutes, so a backward wall-clock correction, whether an
+  NTP step or a manual change, cannot collapse the window and delete a mark guarding a live
+  position. Refresh still uses elapsed time, which is safe at a three-week window where five
+  minutes was not, and a backward jump there now reads as due rather than as not yet due.
+- A full mark registry is reported rather than passed over. A dropped registration used to be
+  invisible: the mark still guarded its trade, but nothing refreshed it and it expired at four weeks
+  with the position still open, while adoption counted it as a success and never retried. Adoption
+  now counts only what it tracked, retries while anything is outstanding, and a mark this session
+  wrote takes the last slot ahead of one adopted from a previous session, since adoption is what
+  fills the registry and live positions never will.
+- The poll interval is clamped in the EA. It drives the only timer, so it is also the refresh
+  cadence, and a startup value beyond the four-week expiry meant the sweep never ran in time to
+  save a mark. The backend caps what it sends but cannot correct the interval before the first
+  timer event.
+- `CANCEL_PENDING` marks are no longer reclaimed on a timer. They carry no ticket to watch, and a
+  held item can be requeued by an operator at any age carrying its original idempotency key, so
+  there is no age at which the EA can say the mark is finished with. They keep the pre-1.67
+  behaviour: the terminal expires them after four weeks without a read, and a read renews that, so
+  one still being consulted survives. This is the one category still bounded by cancel volume rather
+  than by live work, at one variable per cancel command. Putting a maximum age on requeue would
+  bound it properly, and that belongs in the app rather than the EA.
+- The mark name can no longer be truncated. MQL5 caps a global variable name at 63 characters and
+  keeps only the first 63; the name was built by pasting the backend's idempotency key in plaintext
+  and cutting the result to 63. Today's keys are 16 characters and cannot reach the cap, but a
+  close or cancel carrying one of the longer app-managed keys, which are already 48 to 50
+  characters and today only ever attach to `MODIFY_SL`, would have pushed the ticket out of the
+  name entirely and made every position under one command share a single mark. The first close
+  would then have been recorded and every other position silently skipped, and a silently skipped
+  close is an unmanaged position. Every component of the name is now fixed width except the ticket,
+  which a `ulong` bounds at 20 digits, holding the whole name to 60 characters at absolute worst
+  whatever the backend sends.
+- A mark guarding a position that stays open for more than four weeks, a runner for example, is
+  rewritten weekly so the terminal's inactivity expiry cannot delete it while it is still needed,
+  and only a rewrite the terminal confirmed advances the clock.
+- Marks survive a terminal restart as they always did, and the EA now adopts the ones a previous
+  session left behind on startup so they are reclaimed rather than orphaned. Adoption validates
+  every segment of the name, so a variable that merely starts with the reserved prefix is left
+  alone.
+- **Positions open for more than four weeks lose duplicate-close protection during the transition.**
+  Marks written by an EA older than 1.67.0 are still read, so a close executed just before the
+  recompile keeps its protection. Those older names carry no account, so this release deliberately
+  never adopts, refreshes or deletes one: acting on them would mean acting on a mark that may belong
+  to another account, which is the failure above. They therefore rely on the terminal's four-week
+  expiry, which renews on every read. A position that stays open beyond four weeks with no lifecycle
+  command against it in that time loses its pre-upgrade mark. Recompiling when the account is flat
+  avoids this entirely.
+- A full mark registry no longer stops a mark being recorded. The global variable is written first
+  and the bookkeeping second, so the worst case is that one mark waits for the terminal's expiry
+  instead of the sweep, which is exactly the old behaviour.
+
 ## 1.66.2 - 2026-08-02 (Patch)
 
 Release impact: Patch. Test seam and encapsulation only. No runtime behaviour change, no API change,

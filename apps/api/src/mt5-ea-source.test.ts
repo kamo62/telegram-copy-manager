@@ -13,7 +13,7 @@ describe("MT5 Expert Advisor source", () => {
     // an EA nobody rebuilds is worse than one legitimately a patch behind.
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
-    expect(eaVersion).toBe("1.66.0");
+    expect(eaVersion).toBe("1.67.0");
     const line = (version: string) => version.split(".").slice(0, 2).join(".");
     expect(line(eaVersion!)).toBe(line(packageJson.version!));
   });
@@ -213,8 +213,8 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.66.0"');
-    expect(source.match(/"1\.66\.0"/g)).toHaveLength(3);
+    expect(source).toContain('#property version   "1.67.0"');
+    expect(source.match(/"1\.67\.0"/g)).toHaveLength(3);
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
@@ -537,6 +537,390 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain(
       "if(sent && result.retcode == TRADE_RETCODE_DONE && filledConfirmed && (positionGone || !fullClose))",
     );
+  });
+
+  test("builds lifecycle idempotency names that MQL5 cannot truncate", () => {
+    // MQL5 caps a global variable name at 63 characters and keeps only the first 63.
+    // The old name pasted the backend's idempotency key in plaintext and cut the
+    // result to 63, so a longer key would have pushed the ticket out of the name and
+    // made two tickets share one mark - a close silently skipped on a live account.
+    const variable =
+      source.match(
+        /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(variable).toContain("LifecycleKeyHash(scopedKey)");
+    expect(variable).toContain("LIFECYCLE_MARK_PREFIX");
+    expect(variable).not.toContain("StringSubstr");
+    expect(variable).not.toContain("63");
+    // Fixed-width hex for both the account tag and the hash. Rendering either as
+    // decimal makes the component variable-width and puts the cap back in reach.
+    expect(variable).toContain('"%s%08X.%08X%08X.%I64u"');
+
+    // 64-bit FNV-1a. Both constants matter: a wrong offset basis still hashes, it
+    // just stops being the function whose collision behaviour is being relied on.
+    const hash = source.match(/ulong LifecycleKeyHash\(string key\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(hash).toContain("((ulong)3421674724 << 32) | (ulong)2216829733");
+    expect(hash).toContain("ulong prime = 1099511628211;");
+    expect(hash).toContain("hash = (hash ^ (ulong)(code & 0xFF)) * prime;");
+
+    // 14 prefix + 8 tag + 1 + 16 hash + 1 + at most 20 ticket digits = 60. Only the
+    // ticket varies, and a ulong bounds it at 20.
+    expect(source).toContain('#define LIFECYCLE_MARK_PREFIX "TelegramTC.lc."');
+    expect("TelegramTC.lc.".length + 8 + 1 + 16 + 1 + 20).toBe(60);
+    expect("TelegramTC.lc.".length + 8 + 1 + 16 + 1 + 20).toBeLessThan(64);
+  });
+
+  test("deletes only marks this session wrote, never marks it merely failed to disown", () => {
+    // Terminal global variables are shared across every account the terminal logs
+    // into; position tickets are not. Account B therefore sees A's still-open position
+    // as absent. Detecting that from the name would rest the whole safety argument on
+    // a lossy tag, so deletion is gated on ownership instead: this EA is logged into
+    // one account and only writes marks for it, so anything it owns is its own.
+    expect(source).toContain("bool owned;");
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).toMatch(
+      /if\(lifecycleMarks\[index\]\.owned\)\s*\n\s*GlobalVariableDel\(lifecycleMarks\[index\]\.variable\);/,
+    );
+    // Exactly one delete site, and it is the guarded one.
+    expect(reclaim.match(/GlobalVariableDel/g)).toHaveLength(1);
+    // Only MarkLifecycleExecuted may claim ownership.
+    const mark =
+      source.match(
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(mark).toContain(
+      "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal())",
+    );
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(rehydrate).toContain("if(RegisterLifecycleMark(name, identity, ticket, false, 0))");
+    expect(rehydrate).not.toContain("GlobalVariableDel");
+    // Ownership ratchets up only, so an adopted entry this session writes to becomes
+    // deletable, and nothing can strip the right once granted.
+    const register =
+      source.match(
+        /bool RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(register).toContain(
+      "lifecycleMarks[index].owned = lifecycleMarks[index].owned || owned;",
+    );
+  });
+
+  test("identifies an account by more than its number and keeps state across a switch", () => {
+    // The same account number at two brokers is a real configuration, so a login-only
+    // identity collides deterministically rather than rarely.
+    const identity = source.match(/string LifecycleAccountIdentity\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(identity).toContain("AccountInfoInteger(ACCOUNT_LOGIN)");
+    expect(identity).toContain("AccountInfoString(ACCOUNT_SERVER)");
+    expect(identity).toContain("AccountInfoString(ACCOUNT_COMPANY)");
+    // The full identity, not the lossy fold, is what scopes reads.
+    const variable =
+      source.match(
+        /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(variable).toContain(
+      'string scopedKey = LifecycleAccountIdentity() + "|" + LifecycleCommandKey(command);',
+    );
+    // ...and the full identity, compared exactly, is what gates removal.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).toContain("string identity = LifecycleAccountIdentity();");
+    expect(reclaim).toContain("bool sameAccount = lifecycleMarks[index].identity == identity;");
+    expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
+    // An off-account entry must be skipped, never released: adoption cannot restore an
+    // owned entry, so releasing it would strand its variable forever.
+    const offAccount = reclaim.slice(
+      reclaim.indexOf("if(!connected || !sameAccount)"),
+      reclaim.indexOf("if(live)"),
+    );
+    expect(offAccount).not.toContain("ReleaseLifecycleMarkSlot");
+    // An owned mark is still refreshed off-account, so a long switch cannot let a mark
+    // guarding a live position expire.
+    expect(reclaim).toMatch(
+      /if\(\(lifecycleMarks\[index\]\.owned \|\| sameAccount\) && refreshDue[\s\S]{0,200}?GlobalVariableSet/,
+    );
+  });
+
+  test("defers adoption when there is no account login and retries until there is", () => {
+    // A login of zero is not an account. Adopting against it would match every mark
+    // written under the same blank identity. But OnInit is not the only chance: it runs
+    // before the terminal has necessarily resolved an account, and skipping adoption
+    // for the whole session leaves every prior mark unrefreshed until it expires.
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(rehydrate).toMatch(
+      /if\(AccountInfoInteger\(ACCOUNT_LOGIN\) == 0\)\s*\n\s*\{[\s\S]{0,240}?return;\s*\n\s*\}/,
+    );
+    // The guard must precede both the clearing and the adoption, or a retry with no
+    // login would wipe a registry it cannot rebuild.
+    expect(rehydrate.indexOf("ACCOUNT_LOGIN) == 0")).toBeLessThan(
+      rehydrate.indexOf("ReleaseLifecycleMarkSlot"),
+    );
+    expect(rehydrate.indexOf("ACCOUNT_LOGIN) == 0")).toBeLessThan(
+      rehydrate.indexOf("GlobalVariablesTotal()"),
+    );
+    expect(rehydrate).toContain("LifecycleMarksAdopted = untracked == 0;");
+    // The timer retries while adoption has not happened.
+    expect(source).toMatch(
+      /void\s+OnTimer\(\)[\s\S]*if\(!LifecycleMarksAdopted\)\s*\n\s*RehydrateLifecycleMarks\(\);/,
+    );
+
+    // A retry must not destroy owned entries: re-adoption can only produce undeletable
+    // ones, so clearing an owned entry would strand its variable forever.
+    expect(rehydrate).toMatch(
+      /if\(lifecycleMarks\[index\]\.active && !lifecycleMarks\[index\]\.owned\)\s*\n\s*ReleaseLifecycleMarkSlot\(index\);/,
+    );
+    expect(rehydrate).not.toContain("lifecycleMarkCount = 0;");
+  });
+
+  test("keeps refreshing marks while the terminal is disconnected", () => {
+    // Rewriting a terminal global needs no server connection; only deciding a position
+    // is gone does. Gating both meant a long disconnection stopped every refresh, and a
+    // mark guarding a live position expired at four weeks with a replay still possible.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).toContain("bool connected = TerminalInfoInteger(TERMINAL_CONNECTED) != 0;");
+    // No early return: the function must reach the refresh arm while disconnected.
+    expect(reclaim).not.toMatch(/TERMINAL_CONNECTED\)[\s\S]{0,40}?\n\s*return;/);
+    // Connectivity gates removal only, and it gates it together with the account check.
+    expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
+    // The refresh arm sits before that gate.
+    expect(reclaim.indexOf("GlobalVariableSet")).toBeLessThan(
+      reclaim.indexOf("if(!connected || !sameAccount)"),
+    );
+
+    // TimeCurrent is the last quote's server time and stops advancing while
+    // disconnected, so it cannot be the clock that decides a refresh is due.
+    expect(reclaim).toContain("datetime now = TimeLocal();");
+    expect(reclaim).toContain(
+      "|| now - lifecycleMarks[index].refreshedAt >= LIFECYCLE_MARK_REFRESH_SECONDS;",
+    );
+    // An adopted mark may already be near its expiry, so it refreshes on sight rather
+    // than a full interval after adoption.
+    expect(reclaim).toContain("lifecycleMarks[index].refreshedAt == 0");
+  });
+
+  test("keeps every clock out of the path that deletes a mark", () => {
+    // Refresh needs an advancing clock so it survives a disconnection, but the same
+    // clock must not reach the destructive path: a backward NTP step or a manual
+    // correction would collapse the grace and delete a mark guarding a live position.
+    // A three-week refresh window absorbs a jump; a five-minute grace does not.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    const destructive = reclaim.slice(reclaim.indexOf("if(!connected || !sameAccount)"));
+    expect(destructive).toContain("GlobalVariableDel");
+    for (const clock of ["TimeLocal", "TimeCurrent", "now", "SECONDS"]) {
+      expect(destructive).not.toContain(clock);
+    }
+    // The grace is a count of consecutive sweeps, which the clamped timer makes a
+    // duration the EA controls without trusting any clock.
+    expect(source).toContain("#define LIFECYCLE_MARK_ABSENT_PASSES 10");
+    expect(source).toContain("int absentPasses;");
+    expect(destructive).toContain("lifecycleMarks[index].absentPasses++;");
+    expect(destructive).toContain(
+      "if(lifecycleMarks[index].absentPasses < LIFECYCLE_MARK_ABSENT_PASSES)",
+    );
+    // A sighting must reset the run, or ten scattered absences across a month would
+    // add up to a deletion.
+    expect(reclaim).toMatch(
+      /if\(live\)\s*\n\s*\{\s*\n\s*lifecycleMarks\[index\]\.absentPasses = 0;/,
+    );
+
+    // Where a clock does remain, a backward jump reads as due rather than not-yet.
+    expect(reclaim).toContain("|| now < lifecycleMarks[index].refreshedAt");
+    expect(source).toMatch(
+      /\|\| now < LastLifecycleReclaimAt\s*\n\s*\|\| now - LastLifecycleReclaimAt >=/,
+    );
+  });
+
+  test("reports a full registry instead of silently dropping a mark", () => {
+    // A dropped registration is invisible otherwise: the variable is still written so
+    // the first duplicate is still refused, but nothing refreshes it and it expires at
+    // four weeks with the position still open.
+    const register =
+      source.match(
+        /bool RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(register).toContain("return false;");
+    expect(register).toContain("is not tracked and will not be refreshed");
+    // Adoption fills the registry with previous sessions' marks; live positions never
+    // will. So a mark this session wrote outranks an adopted one for the last slot.
+    expect(register).toContain("if(freeSlot < 0 && owned && adoptedSlot >= 0)");
+    expect(register).toMatch(
+      /ReleaseLifecycleMarkSlot\(adoptedSlot\);\s*\n\s*freeSlot = adoptedSlot;/,
+    );
+    // Evicting an adopted entry drops tracking only; its variable is never deleted.
+    const eviction = register.slice(
+      register.indexOf("if(freeSlot < 0 && owned && adoptedSlot >= 0)"),
+      register.indexOf("if(freeSlot < 0)\n   {"),
+    );
+    expect(eviction).not.toContain("GlobalVariableDel");
+
+    // A failed adoption must not be counted as adopted, and must leave a retry open.
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(rehydrate).toMatch(
+      /if\(RegisterLifecycleMark\(name, identity, ticket, false, 0\)\)\s*\n\s*adopted\+\+;\s*\n\s*else\s*\n\s*untracked\+\+;/,
+    );
+    expect(rehydrate).toContain("LifecycleMarksAdopted = untracked == 0;");
+    // The completion flag is set from the result, after the loop, not asserted up front.
+    expect(rehydrate.indexOf("LifecycleMarksAdopted =")).toBeGreaterThan(
+      rehydrate.indexOf("GlobalVariablesTotal()"),
+    );
+  });
+
+  test("clamps the poll interval so the sweep cannot be starved", () => {
+    // The timer drives the sweep, so the poll interval is the refresh cadence. The
+    // backend caps what it sends but cannot correct a startup value before the first
+    // timer event, and an interval beyond the four-week expiry means no sweep in time.
+    expect(source).toContain("#define MAX_POLL_SECONDS 300");
+    const clamp = source.match(/int ClampPollSeconds\(int seconds\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(clamp).toContain("MathMax(1, MathMin(MAX_POLL_SECONDS, seconds))");
+    // Both entry points clamp: the operator input at init and the backend value later.
+    expect(source).toContain("CurrentPollSeconds = ClampPollSeconds(PollSeconds);");
+    expect(source).toContain("CurrentPollSeconds = ClampPollSeconds(nextPollSeconds);");
+    expect(source).not.toContain("CurrentPollSeconds = MathMax(1, PollSeconds);");
+    expect(source).not.toContain("CurrentPollSeconds = MathMax(1, nextPollSeconds);");
+  });
+
+  test("validates every segment of a mark name before adopting it", () => {
+    // Anything may use the terminal's global variables. A name that merely starts with
+    // the reserved prefix is not one of ours and must not be adopted.
+    //
+    // These are source-text assertions, not behavioural ones: nothing here executes
+    // MQL5, so a parser that kept every asserted line and still misbehaved would pass.
+    // That is tolerable only because reclamation is gated on ownership rather than on
+    // this parser. A wrong answer here can leak a mark or skip a refresh; it cannot
+    // delete anything, because an adopted mark is never deletable.
+    const parse =
+      source.match(
+        /bool ParseLifecycleMarkName\(string variable, string &accountTagText, ulong &ticket\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(parse).toBeTruthy();
+    expect(parse).toContain("if(tagEnd != prefixLength + 8)");
+    expect(parse).toContain("if(hashEnd != tagEnd + 17)");
+    expect(parse).toContain('if(!IsHexRun(tagText, 8) || !IsHexRun(hashText, 16) || digits == "")');
+    expect(parse).toContain("if(IntegerToString((long)ticket) != digits)");
+    const isHex = source.match(/bool IsHexRun\(string text, int length\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(isHex).toContain("if(StringLen(text) != length)");
+    expect(isHex).toContain("code >= '0' && code <= '9'");
+    expect(isHex).toContain("code >= 'A' && code <= 'F'");
+    // Recognising the ranges is not enough; anything outside them must be rejected.
+    expect(isHex).toMatch(/if\(!digit && !upper\)\s*\n\s*return false;/);
+    expect(source).toContain("if(!ParseLifecycleMarkName(name, tagText, ticket))");
+  });
+
+  test("keeps reading marks written under the pre-1.67 name and never writes that name again", () => {
+    // The recompile changes the name every mark is stored under. Without this read a
+    // close executed just before the upgrade would lose its mark and could run twice.
+    expect(source).toContain('#define LEGACY_LIFECYCLE_MARK_PREFIX "TelegramTC.lifecycle."');
+    const already =
+      source.match(
+        /bool LifecycleAlreadyExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(already).toContain("GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket))");
+    expect(already).toContain(
+      "GlobalVariableCheck(LegacyLifecycleIdempotencyVariable(command, ticket))",
+    );
+
+    const mark =
+      source.match(
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(mark).toContain("string variable = LifecycleIdempotencyVariable(command, ticket);");
+    expect(mark).not.toContain("Legacy");
+    // A legacy mark's ticket may have been truncated out of its name, so the EA cannot
+    // tell whether its position is still open and must leave it to the terminal.
+    expect(source).not.toContain("GlobalVariableDel(LegacyLifecycleIdempotencyVariable");
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(rehydrate).toContain("StringFind(name, LIFECYCLE_MARK_PREFIX) != 0");
+    expect(rehydrate).not.toContain("LEGACY_LIFECYCLE_MARK_PREFIX");
+  });
+
+  test("reclaims a lifecycle mark only once its position is gone for good", () => {
+    // Nothing ever called GlobalVariableDel, so the mark set grew with history and
+    // drained only on the terminal's four-week expiry. Dropping a mark early is the
+    // worse failure though: it puts double-close back on a live account.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).toBeTruthy();
+    expect(reclaim).toContain("GlobalVariableDel(lifecycleMarks[index].variable);");
+    expect(reclaim).toContain("ReleaseLifecycleMarkSlot(index);");
+
+    // A live position keeps its mark and resets the absence clock.
+    expect(reclaim).toMatch(
+      /PositionSelectByTicket\(lifecycleMarks\[index\]\.positionTicket\)[\s\S]*?absentPasses = 0;/,
+    );
+    // A single absent reading is never enough: a reconnect can hide an open position,
+    // and no removal happens at all without a connection to confirm it.
+    expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
+    expect(reclaim).toContain("lifecycleMarks[index].absentPasses++;");
+    expect(reclaim).toContain(
+      "if(lifecycleMarks[index].absentPasses < LIFECYCLE_MARK_ABSENT_PASSES)",
+    );
+    // A mark guarding a runner that outlives the four-week expiry is rewritten, and
+    // only a rewrite the terminal confirmed may advance the clock. Advancing it on a
+    // failed write records a refresh that did not happen and lets the mark expire.
+    expect(reclaim).toMatch(
+      /&& GlobalVariableSet\(lifecycleMarks\[index\]\.variable, \(double\)TimeCurrent\(\)\) != 0\)\s*\n\s*lifecycleMarks\[index\]\.refreshedAt = now;/,
+    );
+    expect(source).toMatch(/void\s+OnTimer\(\)[\s\S]*ReclaimLifecycleMarks\(\)/);
+  });
+
+  test("does not reclaim command-scoped marks on a timer", () => {
+    // A CANCEL_PENDING mark has no ticket to watch, and no age at which the EA can
+    // prove the server will not ask again, so any number would be a guess. Untracked
+    // means never deleted here: the terminal's expiry applies, and MQL5 renews that on
+    // every read, so a mark still being consulted survives.
+    const mark =
+      source.match(
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(mark).toMatch(/if\(ticket == 0\)\s*\n\s*return;/);
+    expect(source).not.toContain("LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS");
+    // Rehydration must not pull them back in either.
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(rehydrate).toContain("if(tagText != currentTag || ticket == 0)");
+    // Every tracked entry therefore has a real ticket, so the sweep has no ticket-zero
+    // branch left to get wrong.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).not.toContain("positionTicket > 0");
+  });
+
+  test("never lets mark bookkeeping stop a mark being recorded, and survives a restart", () => {
+    // The global variable is what protects the account. Registry state is only how the
+    // EA hands it back, so the write must come first and a full registry must not fail
+    // the write.
+    const mark =
+      source.match(
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(mark).toMatch(/GlobalVariableSet\(variable[\s\S]*RegisterLifecycleMark\(variable/);
+    const register =
+      source.match(
+        /bool RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(register).toContain(
+      "if(freeSlot < 0 && lifecycleMarkCount < ArraySize(lifecycleMarks))",
+    );
+    expect(register).toContain("is not tracked and will not be refreshed");
+    expect(register).toContain("if(freeSlot < 0 && !lifecycleMarks[index].active)");
+    expect(register).toMatch(/variable == variable[\s\S]*?return true;[\s\S]*?freeSlot = index/);
+
+    // Global variables outlive the process; the registry does not. Adopt what an
+    // earlier session left or nothing would ever reclaim it.
+    expect(source).toMatch(/int OnInit\(\)[\s\S]*RehydrateLifecycleMarks\(\)/);
+    // OnDeinit must not clear marks: a reattach has to keep them.
+    const deinit = source.match(/void OnDeinit\(const int reason\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(deinit).not.toContain("GlobalVariable");
+
+    const release =
+      source.match(/void ReleaseLifecycleMarkSlot\(int index\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    for (const cleared of [
+      "active = false",
+      'variable = ""',
+      "owned = false",
+      'identity = ""',
+      "positionTicket = 0",
+      "refreshedAt = 0",
+      "absentPasses = 0",
+    ]) {
+      expect(release).toContain(cleared);
+    }
+    expect(source).not.toContain("lifecycleMarkCount--");
   });
 
   test("aggregates partial-close slices so a failed slice cannot be masked", () => {
