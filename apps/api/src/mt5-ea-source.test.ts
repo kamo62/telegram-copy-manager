@@ -869,8 +869,9 @@ describe("MT5 Expert Advisor source", () => {
     expect(collect).toContain("identifiers[0] = PositionMarkKey(command.targetPositionTicket);");
     // The ticket-only callers share the one matching rule rather than a second copy.
     const ticketsOnly =
-      source.match(/int CollectPositionTickets\(SignalCommand &command, ulong &tickets\[\]\)[\s\S]*?\n}\n/)?.[0] ??
-      "";
+      source.match(
+        /int CollectPositionTickets\(SignalCommand &command, ulong &tickets\[\]\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
     expect(ticketsOnly).toContain("return CollectPositionTargets(command, tickets, identifiers);");
     expect(ticketsOnly).not.toContain("PositionsTotal()");
 
@@ -903,8 +904,9 @@ describe("MT5 Expert Advisor source", () => {
       /if\(connected\)\s*\n\s*openIdentifierCount = CollectOpenPositionIdentifiers\(openIdentifiers\);/,
     );
     const scan =
-      source.match(/int CollectOpenPositionIdentifiers\(ulong &identifiers\[\]\)[\s\S]*?\n}\n/)?.[0] ??
-      "";
+      source.match(
+        /int CollectOpenPositionIdentifiers\(ulong &identifiers\[\]\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
     expect(scan).toContain("identifiers[next] = PositionMarkKey(ticket);");
     // The registry holds the identifier and nothing else, so no code path can reach a
     // stored ticket and quietly key off it again. Other structures keep their own

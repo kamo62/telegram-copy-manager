@@ -262,8 +262,7 @@ const mutations: Mutation[] = [
   },
   {
     id: "identifier/mark-keyed-by-ticket",
-    breaks:
-      "the mark key goes back to the ticket, which a broker service operation replaces",
+    breaks: "the mark key goes back to the ticket, which a broker service operation replaces",
     from: `   ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
    return identifier == 0 ? ticket : identifier;`,
     to: "   return ticket;",
@@ -291,7 +290,8 @@ const mutations: Mutation[] = [
   },
   {
     id: "identifier/targeted-collect-returns-ticket",
-    breaks: "a command naming its position keys by the ticket, missing the replacement case entirely",
+    breaks:
+      "a command naming its position keys by the ticket, missing the replacement case entirely",
     from: "      identifiers[0] = PositionMarkKey(command.targetPositionTicket);",
     to: "      identifiers[0] = command.targetPositionTicket;",
   },
@@ -337,7 +337,8 @@ const mutations: Mutation[] = [
   },
   {
     id: "upgrade/legacy-plaintext-fallback-dropped",
-    breaks: "the pre-1.67 plaintext name stops being read, so a close from before that rename repeats",
+    breaks:
+      "the pre-1.67 plaintext name stops being read, so a close from before that rename repeats",
     from: "   return GlobalVariableCheck(LegacyLifecycleIdempotencyVariable(command, ticket));",
     to: "   return false;",
   },
