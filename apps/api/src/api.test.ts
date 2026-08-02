@@ -559,6 +559,37 @@ async function tradeLegStatuses(app: ReturnType<typeof createApi>, tradeId: stri
   );
 }
 
+async function tradeLegAnnouncements(app: ReturnType<typeof createApi>, tradeId: string) {
+  const dashboard = await json<{
+    logicalTrades: Array<{ id: string; legs: Array<{ providerAnnounced: boolean }> }>;
+  }>(await app.request("/api/dashboard"));
+  return (dashboard.logicalTrades.find((item) => item.id === tradeId)?.legs ?? []).map(
+    (leg) => leg.providerAnnounced,
+  );
+}
+
+// Parses and approves a provider take-profit announcement, asserting it really did travel the
+// MARK_TP_HIT path rather than being classified as something else.
+async function announceProviderTpHit(
+  app: ReturnType<typeof createApi>,
+  providerId: string,
+  rawText: string,
+) {
+  const parsed = await json<{ parsedSignalId: string; result: { commandType: string } }>(
+    await app.request("/api/parser/parse", {
+      method: "POST",
+      body: JSON.stringify({ providerId, accountId: "mt5-63442826", rawText }),
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  expect(parsed.result.commandType).toBe("MARK_TP_HIT");
+  const approval = await json<{ status: string }>(
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+  );
+  expect(approval.status).toBe("RECORDED");
+  return approval;
+}
+
 async function sendGoldPendingSnapshot(
   app: ReturnType<typeof createApi>,
   shortId: string,
@@ -5726,17 +5757,22 @@ describe("Telegram TC API", () => {
     expect(approval).toMatchObject({ logicalTradeId: "trade-demo-1", status: "RECORDED" });
 
     const dashboard = await json<{
-      logicalTrades: Array<{ id: string; legs: Array<{ leg: number; status: string }> }>;
+      logicalTrades: Array<{
+        id: string;
+        legs: Array<{ leg: number; status: string; providerAnnounced: boolean }>;
+      }>;
     }>(await app.request("/api/dashboard"));
+    // MARK_TP_HIT queues nothing, so no volume has moved on any leg. The announcement is
+    // recorded against leg 1 and every leg keeps the status its execution earned.
     expect(
       dashboard.logicalTrades
         .find((item) => item.id === "trade-demo-1")
-        ?.legs.map((leg) => [leg.leg, leg.status]),
+        ?.legs.map((leg) => [leg.leg, leg.status, leg.providerAnnounced]),
     ).toEqual([
-      [1, "HIT"],
-      [2, "OPEN"],
-      [3, "OPEN"],
-      [4, "OPEN"],
+      [1, "OPEN", true],
+      [2, "OPEN", false],
+      [3, "OPEN", false],
+      [4, "OPEN", false],
     ]);
 
     const noWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
@@ -10433,6 +10469,147 @@ describe("Telegram TC API", () => {
     const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
     expect(work).toContain("commandType=MODIFY_SL");
     expect(work).toContain("newStopLoss=1.086");
+  });
+
+  test("a provider TP announcement does not consume a volume-closing leg", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureVirtualTpProvider(app, {
+      takeProfitLevels: [
+        { leg: 1, percentage: 50, strategy: { kind: "no-change" } },
+        { leg: 2, percentage: 50, strategy: { kind: "no-change" } },
+      ],
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70901",
+      filledPrice: 1.086,
+    });
+    // Price has NOT reached TP1, so nothing the app knows says this volume moved.
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70901",
+      bid: 1.0875,
+      ask: 1.0877,
+      sl: 1.081,
+    });
+
+    await announceProviderTpHit(app, providerId, "TP 1");
+
+    // MARK_TP_HIT queues no close, so the leg still holds all of its volume.
+    expect(await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text()).toContain(
+      "status=NO_WORK",
+    );
+    expect(await tradeLegStatuses(app, approval.logicalTradeId)).toEqual(["OPEN", "OPEN"]);
+    expect(await tradeLegAnnouncements(app, approval.logicalTradeId)).toEqual([true, false]);
+  });
+
+  test("a genuine crossing still closes a leg the provider already announced", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureVirtualTpProvider(app, {
+      takeProfitLevels: [
+        { leg: 1, percentage: 50, strategy: { kind: "no-change" } },
+        { leg: 2, percentage: 50, strategy: { kind: "no-change" } },
+      ],
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70902",
+      filledPrice: 1.086,
+    });
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70902",
+      bid: 1.0875,
+      ask: 1.0877,
+      sl: 1.081,
+    });
+    await announceProviderTpHit(app, providerId, "TP 1");
+
+    // The monitor still owns the leg, so the real crossing produces a real close.
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70902",
+      bid: 1.0911,
+      ask: 1.0913,
+      sl: 1.081,
+    });
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("commandType=CLOSE_PARTIAL");
+    expect(work).toContain("partialCloseValue=1");
+    expect(await tradeLegStatuses(app, approval.logicalTradeId)).toEqual(["HIT", "OPEN"]);
+
+    await reportExecutedQueue(app, {
+      queueItemId: work.match(/queueItemId=([^\n]+)/)?.[1] ?? "",
+      ticket: "70902",
+      price: 1.0911,
+      volume: 0.01,
+      remainingVolume: 0.01,
+    });
+    expect(await tradeLegStatuses(app, approval.logicalTradeId)).toEqual(["CLOSED", "OPEN"]);
+
+    // A later blanket announcement must not pull the booked close back to HIT. CLOSED is the
+    // broker's word and outranks the provider's; every path that reads a leg as finished
+    // (archive, readopt, startup recovery, the closed-trade view) depends on it staying put.
+    await announceProviderTpHit(app, providerId, "Full TP ✅");
+    expect(await tradeLegStatuses(app, approval.logicalTradeId)).toEqual(["CLOSED", "OPEN"]);
+  });
+
+  test("a second bare TP announcement lands on the next leg, not the announced one", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureVirtualTpProvider(app, {
+      takeProfitLevels: [
+        { leg: 1, percentage: 50, strategy: { kind: "no-change" } },
+        { leg: 2, percentage: 50, strategy: { kind: "no-change" } },
+      ],
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70903",
+      filledPrice: 1.086,
+    });
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70903",
+      bid: 1.0875,
+      ask: 1.0877,
+      sl: 1.081,
+    });
+
+    // Neither announcement names a leg, so each one advances the pointer by itself. Leg
+    // status cannot carry that pointer any more: both legs stay OPEN throughout.
+    await announceProviderTpHit(app, providerId, "TP ✅");
+    expect(await tradeLegAnnouncements(app, approval.logicalTradeId)).toEqual([true, false]);
+    await announceProviderTpHit(app, providerId, "TP hit ✅");
+    expect(await tradeLegAnnouncements(app, approval.logicalTradeId)).toEqual([true, true]);
+    expect(await tradeLegStatuses(app, approval.logicalTradeId)).toEqual(["OPEN", "OPEN"]);
+  });
+
+  test("one announcement burns the reference leg and spares the volume leg", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureVirtualTpProvider(app, {
+      takeProfitLevels: [
+        { leg: 1, percentage: 0, strategy: { kind: "set-sl-to-entry", offsetPips: 0 } },
+        { leg: 2, percentage: 100, strategy: { kind: "no-change" } },
+      ],
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70904",
+      filledPrice: 1.086,
+    });
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70904",
+      bid: 1.0875,
+      ask: 1.0877,
+      sl: 1.081,
+    });
+
+    // "Full TP" announces every leg at once, so both halves of the rule are exercised by
+    // one message: the 0%-allocation leg's stop work becomes real and retires it, while the
+    // 100%-allocation leg keeps its volume and its OPEN status.
+    await announceProviderTpHit(app, providerId, "Full TP ✅");
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("commandType=MODIFY_SL");
+    expect(work).toContain("newStopLoss=1.086");
+    expect(work).not.toContain("commandType=CLOSE_PARTIAL");
+    expect(await tradeLegStatuses(app, approval.logicalTradeId)).toEqual(["HIT", "OPEN"]);
+    expect(await tradeLegAnnouncements(app, approval.logicalTradeId)).toEqual([true, true]);
   });
 
   test("repairs an executed reference stop when the live position no longer holds it", async () => {
@@ -16919,9 +17096,16 @@ describe("step 3 evidence gate wiring", () => {
         const trade = db
           .query("SELECT data_json FROM logical_trades WHERE id = ?")
           .get(activeTrade!.id) as { data_json: string };
-        expect(JSON.parse(trade.data_json).legs).toEqual(
-          expect.arrayContaining([expect.objectContaining({ status: "HIT" })]),
-        );
+        // The order is still PENDING and no volume has moved, so no leg may be retired.
+        expect(
+          JSON.parse(trade.data_json).legs.map((leg: { status: string }) => leg.status),
+        ).not.toContain("HIT");
+        // The announcement ("Tp 2 150pips") is recorded in its own ledger, durably on disk.
+        expect(
+          db
+            .query("SELECT leg FROM provider_tp_announcements WHERE logical_trade_id = ?")
+            .all(activeTrade!.id),
+        ).toEqual([{ leg: 2 }]);
       } finally {
         db.close();
       }

@@ -334,89 +334,112 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // operator checks to see what is running was reporting the library we had
   // just removed.
   name = "teleproto";
-  private readonly pending = new Map<string, PendingLogin>();
-  private readonly clients = new Map<string, TeleprotoClient>();
+  // Both the state below and every method that touches it are `#`-private rather
+  // than TypeScript-private, and that is load-bearing. TypeScript `private` is a
+  // compile-time hint a single `as unknown as` walks straight past, and for four
+  // releases running a test did exactly that: it seeded a client against a
+  // session id, never went through a login, and left the post-login lookup
+  // untested every time it broke.
+  //
+  // Making the state private is only half of it. A method left on the prototype
+  // is just as seedable, because an own property shadows it: assigning
+  // `publishedClient` on an instance hands fetchRecentMessages any client the
+  // caller likes, with no login and no session, which is the same bypass reached
+  // one door along. `this.#publishedClient()` resolves a private name, not a
+  // property, so an own property of that name is ignored.
+  //
+  // The line is what decides which client an RPC reaches, or whether a session
+  // may be published or restored at all. That is `#`. The dialog-entity cache,
+  // the contact timestamps and the three helpers that only read or write them
+  // hold values, not identity, and stay TypeScript-private.
+  readonly #pending = new Map<string, PendingLogin>();
+  readonly #clients = new Map<string, TeleprotoClient>();
   // Every client this adapter has put into a session id's service, not just the
   // one the id currently answers with. `pending` and `clients` each hold one
   // entry, so a second login on the same id displaces the first and the first
   // client used to survive the disconnect that was supposed to end the session.
   // disconnect() closes everything in here.
-  private readonly sessionClients = new Map<string, Set<TeleprotoClient>>();
-  private readonly dialogEntities = new Map<string, unknown>();
-  private readonly lastContactAt = new Map<string, number>();
+  readonly #sessionClients = new Map<string, Set<TeleprotoClient>>();
   // The lifecycle counter for a session id. disconnect() bumps it in its
   // synchronous prefix, which retires the session for every caller at once.
   // Anything that would put the session back into the adapter's state captures
   // the epoch before its awaits and refuses to publish once it has moved. One
   // check, consulted the same way by a login, a poll and a legacy import, so a
   // caller that holds no login is covered too.
-  private readonly sessionEpochs = new Map<string, number>();
+  readonly #sessionEpochs = new Map<string, number>();
   // Which epoch wrote the session file that is on disk now. A login that starts
   // after a disconnect owns a newer epoch, and that disconnect must leave its
   // file alone.
-  private readonly sessionFileEpochs = new Map<string, number>();
+  readonly #sessionFileEpochs = new Map<string, number>();
   // Session ids whose file a disconnect tried to remove and could not. The file
   // is still on disk and still authorised, so nothing may restore from it until
   // it is genuinely gone or a login has legitimately replaced it. This is a
   // refusal rather than a wait, so it cannot hold a caller open.
-  private readonly unremovedSessions = new Set<string>();
+  readonly #unremovedSessions = new Set<string>();
   // The disconnects still tearing a session id down. The epoch alone cannot
   // cover this stretch: a caller that arrives after the bump holds a legitimately
   // current epoch, so every later epoch check waves it through even though the
   // file it just read is about to be unlinked. A restore is admitted only while
   // this is empty.
-  private readonly teardowns = new Map<string, Set<Promise<void>>>();
+  readonly #teardowns = new Map<string, Set<Promise<void>>>();
   // Serialises everything that touches `<sessionId>.json`: a write's persist and
   // its ownership claim on one side, a disconnect's ownership decision and its
   // unlink on the other. Without it those are two steps a successor write can
   // slip between, and the file it has just written is removed under it. It is
   // also what holds a disconnect behind every write that started before it, so
   // none of them can land after the unlink and recreate the file.
-  private readonly sessionFileLocks = new Map<string, Promise<unknown>>();
+  readonly #sessionFileLocks = new Map<string, Promise<unknown>>();
   // Names each session-file write apart from every other, so an abandoned write
   // and its replacement never share a target.
-  private writeSequence = 0;
-  private readonly sessionDir: string;
-  private readonly createClientFor: TeleprotoClientFactory;
+  #writeSequence = 0;
+  readonly #sessionDir: string;
+  readonly #createClientFor: TeleprotoClientFactory;
+  // Value caches, and deliberately not part of the block above. Neither decides
+  // which client an RPC reaches or whether a session survives: one saves a
+  // getDialogs round trip, the other records when a call last succeeded so
+  // sessionHealth can report a stall. A test that wanted to prime either would be
+  // priming a cache, not standing in for a login.
+  private readonly dialogEntities = new Map<string, unknown>();
+  private readonly lastContactAt = new Map<string, number>();
 
   constructor(options: TeleprotoAdapterOptions = {}) {
-    this.sessionDir =
+    this.#sessionDir =
       options.sessionDir ?? process.env.TELEGRAM_SESSION_DIR ?? "data/telegram-sessions";
-    this.createClientFor = options.createClient ?? createTeleprotoClient;
+    this.#createClientFor = options.createClient ?? createTeleprotoClient;
   }
 
-  private sessionEpoch(sessionId: string) {
-    return this.sessionEpochs.get(sessionId) ?? 0;
+  #sessionEpoch(sessionId: string) {
+    return this.#sessionEpochs.get(sessionId) ?? 0;
   }
 
   // Retires everything the current epoch owns and hands the caller the epoch it
   // is now working in. Monotonic, so a session id is never reused by an older
   // caller.
-  private retireSession(sessionId: string) {
-    const next = this.sessionEpoch(sessionId) + 1;
-    this.sessionEpochs.set(sessionId, next);
+  #retireSession(sessionId: string) {
+    const next = this.#sessionEpoch(sessionId) + 1;
+    this.#sessionEpochs.set(sessionId, next);
     return next;
   }
 
-  private sessionMoved(sessionId: string, epoch: number) {
-    return this.sessionEpoch(sessionId) !== epoch;
+  #sessionMoved(sessionId: string, epoch: number) {
+    return this.#sessionEpoch(sessionId) !== epoch;
   }
 
   // Opens the teardown window for a disconnect and hands back the closer. The
   // window is per session id and holds every disconnect in flight for it, so two
   // overlapping disconnects both have to finish before the id is admitting work
   // again.
-  private openTeardownWindow(sessionId: string, teardown: Promise<void>) {
-    let open = this.teardowns.get(sessionId);
+  #openTeardownWindow(sessionId: string, teardown: Promise<void>) {
+    let open = this.#teardowns.get(sessionId);
     if (!open) {
       open = new Set<Promise<void>>();
-      this.teardowns.set(sessionId, open);
+      this.#teardowns.set(sessionId, open);
     }
     open.add(teardown);
     return () => {
       open.delete(teardown);
-      if (open.size === 0 && this.teardowns.get(sessionId) === open) {
-        this.teardowns.delete(sessionId);
+      if (open.size === 0 && this.#teardowns.get(sessionId) === open) {
+        this.#teardowns.delete(sessionId);
       }
     };
   }
@@ -428,12 +451,12 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // much as the wait: a disconnect that opened while we were waiting owns the id
   // just as much as the one we waited for. A file a disconnect could not remove
   // is refused outright, because waiting for it would never end.
-  private async admitRestore(sessionId: string) {
+  async #admitRestore(sessionId: string) {
     for (;;) {
-      const open = this.teardowns.get(sessionId);
+      const open = this.#teardowns.get(sessionId);
       if (!open?.size) {
-        if (this.unremovedSessions.has(sessionId)) throw new Error(SESSION_FILE_STUCK_MESSAGE);
-        return this.sessionEpoch(sessionId);
+        if (this.#unremovedSessions.has(sessionId)) throw new Error(SESSION_FILE_STUCK_MESSAGE);
+        return this.#sessionEpoch(sessionId);
       }
       await Promise.allSettled([...open]);
     }
@@ -442,11 +465,11 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // Records a client as this session id's to close. Called in the same
   // synchronous turn as the publication it accompanies, so a disconnect either
   // sees the client or has already retired the epoch that produced it.
-  private trackClient(sessionId: string, client: TeleprotoClient) {
-    let tracked = this.sessionClients.get(sessionId);
+  #trackClient(sessionId: string, client: TeleprotoClient) {
+    let tracked = this.#sessionClients.get(sessionId);
     if (!tracked) {
       tracked = new Set<TeleprotoClient>();
-      this.sessionClients.set(sessionId, tracked);
+      this.#sessionClients.set(sessionId, tracked);
     }
     tracked.add(client);
   }
@@ -454,18 +477,18 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // The critical section for `<sessionId>.json`. Entries run in the order they
   // were queued and the chain never rejects, so a failed write cannot strand the
   // lock for the callers behind it.
-  private async withSessionFile<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
-    const previous = this.sessionFileLocks.get(sessionId) ?? Promise.resolve();
+  async #withSessionFile<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.#sessionFileLocks.get(sessionId) ?? Promise.resolve();
     const run = previous.then(action);
     const chain = run.then(
       () => undefined,
       () => undefined,
     );
-    this.sessionFileLocks.set(sessionId, chain);
+    this.#sessionFileLocks.set(sessionId, chain);
     try {
       return await run;
     } finally {
-      if (this.sessionFileLocks.get(sessionId) === chain) this.sessionFileLocks.delete(sessionId);
+      if (this.#sessionFileLocks.get(sessionId) === chain) this.#sessionFileLocks.delete(sessionId);
     }
   }
 
@@ -476,21 +499,21 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
     // nor a client, no-op, and then watch this login rewrite the session file it
     // had just unlinked. Two logins racing on one id both hold the pre-disconnect
     // epoch, so the single bump invalidates both.
-    const epoch = this.sessionEpoch(input.appSessionId);
+    const epoch = this.#sessionEpoch(input.appSessionId);
 
     const { StringSession } = await import("teleproto/sessions");
     let client: TeleprotoClient | undefined;
     let registered = false;
     try {
-      let sessionString = await this.readSession(input.appSessionId, epoch);
+      let sessionString = await this.#readSession(input.appSessionId, epoch);
       let session = new StringSession(sessionString);
-      client = await this.createClientFor(session, Number(input.apiId), input.apiHash);
+      client = await this.#createClientFor(session, Number(input.apiId), input.apiHash);
 
-      if (sessionString && !(await this.sessionMatchesPhone(client, input.phone))) {
+      if (sessionString && !(await this.#sessionMatchesPhone(client, input.phone))) {
         await client.disconnect().catch(() => undefined);
         sessionString = "";
         session = new StringSession("");
-        client = await this.createClientFor(session, Number(input.apiId), input.apiHash);
+        client = await this.#createClientFor(session, Number(input.apiId), input.apiHash);
       }
 
       // Load-bearing ordering: nothing may await between this check and the
@@ -498,7 +521,7 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
       // inside the gap and this login would register itself behind its back. A
       // pending entry is publication in its own right: connectedClient hands its
       // client straight to a poll.
-      if (this.sessionMoved(input.appSessionId, epoch)) {
+      if (this.#sessionMoved(input.appSessionId, epoch)) {
         throw new Error(LOGIN_CANCELLED_MESSAGE);
       }
       const loginClient = client;
@@ -508,12 +531,12 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
         status: "DISCONNECTED" as TelegramSessionStatus,
         loginPromise: Promise.resolve(),
       };
-      this.pending.set(input.appSessionId, pending);
+      this.#pending.set(input.appSessionId, pending);
       // Tracked alongside the pending entry, not instead of it. A second login on
       // this id will take `pending` from under this one, and without this the
       // displaced client would still be signed in after a disconnect reported the
       // session gone.
-      this.trackClient(input.appSessionId, loginClient);
+      this.#trackClient(input.appSessionId, loginClient);
       registered = true;
 
       pending.loginPromise = loginClient
@@ -541,20 +564,20 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
           pending.status = "CONNECTED";
           // writeSession re-checks the epoch itself, in the same turn as it
           // registers the write, so a retired login writes nothing.
-          await this.writeSession(input.appSessionId, session.save(), epoch);
+          await this.#writeSession(input.appSessionId, session.save(), epoch);
           // The same rule at the other end of the login: check, then mutate,
           // with no await in between. A retired login installs no client. Its
           // client is already torn down, because a disconnect() this late took
           // it from `pending`.
-          if (this.sessionMoved(input.appSessionId, epoch)) return;
-          this.clients.set(input.appSessionId, loginClient);
+          if (this.#sessionMoved(input.appSessionId, epoch)) return;
+          this.#clients.set(input.appSessionId, loginClient);
         })
         .catch((error: Error) => {
           pending.error = error.message;
           throw error;
         });
 
-      await this.waitForState(input.appSessionId, [
+      await this.#waitForState(input.appSessionId, [
         "CODE_REQUIRED",
         "PASSWORD_REQUIRED",
         "CONNECTED",
@@ -575,7 +598,7 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
       // caller sees whatever incidental error the teardown produced, usually
       // waitForState's "no active login" from the pending entry disconnect()
       // deleted, which reads as a server fault rather than an operator action.
-      if (this.sessionMoved(input.appSessionId, epoch)) {
+      if (this.#sessionMoved(input.appSessionId, epoch)) {
         throw new Error(LOGIN_CANCELLED_MESSAGE);
       }
       throw error;
@@ -583,18 +606,18 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   }
 
   async submitCode(sessionId: string, code: string) {
-    const pending = this.requirePending(sessionId);
+    const pending = this.#requirePending(sessionId);
     if (!pending.resolveCode) {
       throw new Error("Telegram code was not requested for this session");
     }
     pending.resolveCode(code);
     pending.resolveCode = undefined;
-    await this.waitForState(sessionId, ["PASSWORD_REQUIRED", "CONNECTED"]);
+    await this.#waitForState(sessionId, ["PASSWORD_REQUIRED", "CONNECTED"]);
     return { status: pending.status, passwordHint: pending.passwordHint };
   }
 
   async submitPassword(sessionId: string, password: string) {
-    const pending = this.requirePending(sessionId);
+    const pending = this.#requirePending(sessionId);
     if (!pending.resolvePassword) {
       throw new Error("Telegram 2FA password was not requested for this session");
     }
@@ -610,19 +633,19 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
     // the session for callers this call cannot see: a login mid-preparation, a
     // poll parked in the middle of restoring a saved session, a legacy import.
     // They re-read the epoch at their next publish point and abandon themselves.
-    const epoch = this.retireSession(sessionId);
-    const closing = [...(this.sessionClients.get(sessionId) ?? [])];
-    this.pending.delete(sessionId);
-    this.clients.delete(sessionId);
-    this.sessionClients.delete(sessionId);
+    const epoch = this.#retireSession(sessionId);
+    const closing = [...(this.#sessionClients.get(sessionId) ?? [])];
+    this.#pending.delete(sessionId);
+    this.#clients.delete(sessionId);
+    this.#sessionClients.delete(sessionId);
     // Dropping the maps is not enough on its own. Until the file is gone a poll
     // can still read it, and a poll that starts here captures this call's own
     // epoch, so the bump does not retire it and it publishes a client whose
     // durable session this call then deletes. The window opens in the same
     // synchronous prefix as the bump and closes once the file step below has
     // finished.
-    const teardown = this.runTeardown(sessionId, closing, epoch);
-    const closeWindow = this.openTeardownWindow(sessionId, teardown);
+    const teardown = this.#runTeardown(sessionId, closing, epoch);
+    const closeWindow = this.#openTeardownWindow(sessionId, teardown);
     try {
       await teardown;
     } finally {
@@ -633,7 +656,7 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
     }
   }
 
-  private async runTeardown(sessionId: string, closing: TeleprotoClient[], epoch: number) {
+  async #runTeardown(sessionId: string, closing: TeleprotoClient[], epoch: number) {
     // Every client this id ever had, closed together rather than one behind the
     // other, so a session with two of them is not held for twice the bound. The
     // session is already gone from this adapter's state, so a teardown that
@@ -657,10 +680,10 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
     // decision and the unlink that carries it out, and every write that had
     // already started lands before this runs rather than recreating the file
     // afterwards. This unlink stays the only place that removes a session file.
-    await this.withSessionFile(sessionId, async () => {
-      const owner = this.sessionFileEpochs.get(sessionId);
+    await this.#withSessionFile(sessionId, async () => {
+      const owner = this.#sessionFileEpochs.get(sessionId);
       if (owner !== undefined && owner >= epoch) return;
-      const failure = await this.removeSessionFile(sessionId);
+      const failure = await this.#removeSessionFile(sessionId);
       if (failure) {
         // The file is still there and still authorised. Keeping the ownership
         // record describes what is actually on disk, but it is the refusal that
@@ -668,11 +691,11 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
         // and adopts it, which is the resurrection this whole call exists to
         // prevent, reached by failing instead of by racing. The caller is told,
         // so nothing records a disconnect that did not happen.
-        this.unremovedSessions.add(sessionId);
+        this.#unremovedSessions.add(sessionId);
         throw failure;
       }
-      this.sessionFileEpochs.delete(sessionId);
-      this.unremovedSessions.delete(sessionId);
+      this.#sessionFileEpochs.delete(sessionId);
+      this.#unremovedSessions.delete(sessionId);
     });
   }
 
@@ -689,9 +712,9 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // path itself. A removal that never returns therefore holds the session's
   // critical section, which is where it was held before this lane and is the one
   // failure a caller waits on rather than hears about.
-  private async removeSessionFile(sessionId: string) {
+  async #removeSessionFile(sessionId: string) {
     try {
-      await unlink(join(this.sessionDir, `${sessionId}.json`));
+      await unlink(join(this.#sessionDir, `${sessionId}.json`));
       return undefined;
     } catch (error) {
       const removed = (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -700,7 +723,7 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   }
 
   async listDialogs(sessionId: string): Promise<TelegramDialog[]> {
-    const client = await this.connectedClient(sessionId);
+    const client = await this.#connectedClient(sessionId);
     const dialogs = await client.getDialogs({ limit: 100 });
     this.markContact(sessionId);
     return dialogs.map((dialog) => {
@@ -724,7 +747,7 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
     limit: number,
     options: TelegramFetchOptions = {},
   ) {
-    const client = await this.connectedClient(sessionId);
+    const client = await this.#connectedClient(sessionId);
     const entity = await this.resolveDialogEntity(client, sessionId, dialogId);
     const messages: TelegramCapturedMessage[] = [];
     const fromTime = options.dateFrom ? new Date(options.dateFrom).getTime() : undefined;
@@ -853,8 +876,8 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
     return this.dialogEntities.get(key) ?? dialogId;
   }
 
-  private async connectedClient(sessionId: string) {
-    const published = await this.publishedClient(sessionId);
+  async #connectedClient(sessionId: string) {
+    const published = await this.#publishedClient(sessionId);
     if (published) return published;
 
     // Restoring a saved session is three round trips long, and it publishes the
@@ -865,25 +888,25 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
     // arrives while a disconnect is tearing the id down waits the teardown out
     // first, because the epoch it would otherwise capture is that disconnect's
     // own and would carry it past every check.
-    const epoch = await this.admitRestore(sessionId);
+    const epoch = await this.#admitRestore(sessionId);
 
     // A login that ran while we waited may already have published. Rebuilding
     // here would install a second client over the top of a live one.
-    const successor = await this.publishedClient(sessionId);
+    const successor = await this.#publishedClient(sessionId);
     if (successor) return successor;
 
-    const sessionString = await this.readSession(sessionId, epoch);
+    const sessionString = await this.#readSession(sessionId, epoch);
     if (!sessionString) {
       throw new Error("No saved Telegram session is available for this profile");
     }
-    const client = await this.createClient(sessionString);
+    const client = await this.#createClient(sessionString);
     await client.connect();
-    if (this.sessionMoved(sessionId, epoch)) {
+    if (this.#sessionMoved(sessionId, epoch)) {
       await client.disconnect().catch(() => undefined);
       throw new Error(SESSION_RETIRED_MESSAGE);
     }
-    this.clients.set(sessionId, client);
-    this.trackClient(sessionId, client);
+    this.#clients.set(sessionId, client);
+    this.#trackClient(sessionId, client);
     this.markContact(sessionId);
     return client;
   }
@@ -895,17 +918,17 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // client, so we do NOT health-check or rebuild here: doing so caused a
   // reconnect storm. A genuine stall is surfaced via sessionHealth (contact
   // recency) for the operator instead.
-  private async publishedClient(sessionId: string) {
-    const pending = this.pending.get(sessionId);
+  async #publishedClient(sessionId: string) {
+    const pending = this.#pending.get(sessionId);
     if (pending) {
       await pending.loginPromise;
       if (pending.error) throw new Error(pending.error);
       return pending.client;
     }
-    return this.clients.get(sessionId);
+    return this.#clients.get(sessionId);
   }
 
-  private async createClient(sessionString: string): Promise<TeleprotoClient> {
+  async #createClient(sessionString: string): Promise<TeleprotoClient> {
     const apiId = process.env.TELEGRAM_API_ID;
     const apiHash = process.env.TELEGRAM_API_HASH;
     if (!apiId || !apiHash) {
@@ -913,7 +936,7 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
         "TELEGRAM_API_ID and TELEGRAM_API_HASH are required to reuse a saved session",
       );
     }
-    return this.createClientFor(sessionString, Number(apiId), apiHash);
+    return this.#createClientFor(sessionString, Number(apiId), apiHash);
   }
 
   private markContact(sessionId: string) {
@@ -938,8 +961,8 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
     };
   }
 
-  private requirePending(sessionId: string) {
-    const pending = this.pending.get(sessionId);
+  #requirePending(sessionId: string) {
+    const pending = this.#pending.get(sessionId);
     if (!pending) {
       throw new Error("No active Telegram login session is available on this server");
     }
@@ -949,14 +972,10 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
     return pending;
   }
 
-  private async waitForState(
-    sessionId: string,
-    states: TelegramSessionStatus[],
-    timeoutMs = 30_000,
-  ) {
+  async #waitForState(sessionId: string, states: TelegramSessionStatus[], timeoutMs = 30_000) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      const pending = this.requirePending(sessionId);
+      const pending = this.#requirePending(sessionId);
       if (states.includes(pending.status)) return;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -967,36 +986,36 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // `<sessionId>.json`, so both of these are a way to put a session file back for
   // an id a disconnect has already cleared, and an optional parameter is how the
   // polling path came to reach them with no guard at all.
-  private async readSession(sessionId: string, epoch: number) {
+  async #readSession(sessionId: string, epoch: number) {
     try {
-      return await readFile(join(this.sessionDir, `${sessionId}.json`), "utf8");
+      return await readFile(join(this.#sessionDir, `${sessionId}.json`), "utf8");
     } catch {
-      return await this.importExistingSession(sessionId, epoch);
+      return await this.#importExistingSession(sessionId, epoch);
     }
   }
 
-  private async importExistingSession(sessionId: string, epoch: number) {
+  async #importExistingSession(sessionId: string, epoch: number) {
     const explicitPath = process.env.TELEGRAM_SESSION_FILE;
     if (explicitPath) {
       const sessionString = (await readFile(explicitPath, "utf8")).trim();
-      await this.writeSession(sessionId, sessionString, epoch);
+      await this.#writeSession(sessionId, sessionString, epoch);
       return sessionString;
     }
 
     if (process.env.TELEGRAM_IMPORT_EXISTING_SESSION !== "true") return "";
 
     try {
-      const files = (await readdir(this.sessionDir)).filter((file) => file.endsWith(".json"));
+      const files = (await readdir(this.#sessionDir)).filter((file) => file.endsWith(".json"));
       if (files.length !== 1) return "";
-      const sessionString = (await readFile(join(this.sessionDir, files[0]!), "utf8")).trim();
-      await this.writeSession(sessionId, sessionString, epoch);
+      const sessionString = (await readFile(join(this.#sessionDir, files[0]!), "utf8")).trim();
+      await this.#writeSession(sessionId, sessionString, epoch);
       return sessionString;
     } catch {
       return "";
     }
   }
 
-  private async sessionMatchesPhone(client: TeleprotoClient, requestedPhone: string) {
+  async #sessionMatchesPhone(client: TeleprotoClient, requestedPhone: string) {
     try {
       await client.connect();
       if (!(await client.isUserAuthorized())) return false;
@@ -1014,9 +1033,9 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // takes the same critical section, which puts it behind this write however long
   // the write runs, and then finds the file claimed and leaves it alone if the
   // claim is newer than itself.
-  private async writeSession(sessionId: string, sessionString: string, epoch: number) {
-    if (this.sessionMoved(sessionId, epoch)) return;
-    await this.withSessionFile(sessionId, async () => {
+  async #writeSession(sessionId: string, sessionString: string, epoch: number) {
+    if (this.#sessionMoved(sessionId, epoch)) return;
+    await this.#withSessionFile(sessionId, async () => {
       // Bounded inside persistSession, for the same reason the transport close is.
       // This runs in the session's critical section and a disconnect queues behind
       // it, so a write that never returns would hold that disconnect, and the
@@ -1024,15 +1043,15 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
       // passes the bound claims nothing, because the claim is below this line, and
       // marks nothing unrestorable, because an indeterminate file is still a file
       // a later disconnect may remove.
-      await this.persistSession(sessionId, sessionString);
+      await this.#persistSession(sessionId, sessionString);
       // Claimed only once the bytes are on disk, and in the same critical section
       // the disconnect's ownership decision takes. A claim staked before the write
       // outlives a write that failed, and the disconnect then spares the
       // pre-disconnect file believing a newer one replaced it.
-      this.sessionFileEpochs.set(sessionId, epoch);
+      this.#sessionFileEpochs.set(sessionId, epoch);
       // A login that got its own session onto disk has replaced whatever a failed
       // removal left there, so the id is restorable again.
-      this.unremovedSessions.delete(sessionId);
+      this.#unremovedSessions.delete(sessionId);
     });
   }
 
@@ -1051,12 +1070,12 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // would then publish whichever of them finished last. The rename itself is not
   // bounded: it runs only after a write this call watched finish, so there is
   // nothing abandoned to sequence against it.
-  private async persistSession(sessionId: string, sessionString: string) {
-    await mkdir(this.sessionDir, { recursive: true });
-    const pendingDir = join(this.sessionDir, PENDING_WRITE_DIR);
+  async #persistSession(sessionId: string, sessionString: string) {
+    await mkdir(this.#sessionDir, { recursive: true });
+    const pendingDir = join(this.#sessionDir, PENDING_WRITE_DIR);
     await mkdir(pendingDir, { recursive: true });
-    this.writeSequence += 1;
-    const pending = join(pendingDir, `${sessionId}.json.${this.writeSequence}.tmp`);
+    this.#writeSequence += 1;
+    const pending = join(pendingDir, `${sessionId}.json.${this.#writeSequence}.tmp`);
     try {
       await withTelegramRpcTimeout(
         writeFile(pending, sessionString, { mode: 0o600 }),
@@ -1070,7 +1089,7 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
       void unlink(pending).catch(() => undefined);
       throw error;
     }
-    await rename(pending, join(this.sessionDir, `${sessionId}.json`));
+    await rename(pending, join(this.#sessionDir, `${sessionId}.json`));
   }
 
   private dialogKey(sessionId: string, dialogId: string) {

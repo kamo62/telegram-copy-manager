@@ -1,9 +1,25 @@
 import "../test-setup";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, within } from "@testing-library/react";
 import { AccountHeader, type AccountHeaderData } from "./AccountHeader";
 
 afterEach(() => cleanup());
+
+// The rename form commits through a promise, so the state update lands a
+// microtask after the click rather than inside it. Driving that boundary with
+// act() flushes React's work queue to empty and lets every assertion below be
+// synchronous.
+//
+// Do not reach for waitFor here. Its first poll runs before the microtask and
+// therefore always fails, and a failing bun matcher whose received value is a
+// live happy-dom element spends about 2.7s of CPU serialising the attached
+// document into the failure message. That single wasted poll, not the
+// component, is what made this file take ten seconds and time out under load.
+async function flush(body: () => void) {
+  await act(async () => {
+    body();
+  });
+}
 
 const data: AccountHeaderData = {
   connectedPlatform: {
@@ -76,15 +92,9 @@ describe("AccountHeader", () => {
     fireEvent.click(accountActions!);
     fireEvent.click(view.getByRole("button", { name: "Rename" }));
     fireEvent.change(view.getByLabelText("Account name"), { target: { value: "Gold live" } });
-    fireEvent.click(view.getByRole("button", { name: "Save name" }));
-    // The wait has to finish inside the test's own budget, or a genuine failure
-    // surfaces as an opaque test timeout instead of the assertion that failed.
-    // These were both 10s, so under load the wait ate the whole budget and this
-    // test failed intermittently for no reason connected to what it asserts.
-    await waitFor(() => expect(view.queryByLabelText("Account name")).toBeNull(), {
-      timeout: 5_000,
-    });
-  }, 15_000);
+    await flush(() => fireEvent.click(view.getByRole("button", { name: "Save name" })));
+    expect(view.queryByLabelText("Account name")).toBeNull();
+  });
 
   test("resets rename state when switching accounts and keeps an empty nickname clearable", async () => {
     const renamed: string[] = [];
@@ -102,24 +112,24 @@ describe("AccountHeader", () => {
     fireEvent.click(view.getByRole("button", { name: "Rename" }));
     expect((view.getByLabelText("Account name") as HTMLInputElement).value).toBe("Alpha");
 
-    view.rerender(
-      <AccountHeader
-        key="account-b"
-        data={{ ...data, accountId: "account-b", accountLabel: "200", accountNickname: null }}
-        onRename={(nickname) => {
-          renamed.push(nickname);
-        }}
-      />,
+    await flush(() =>
+      view.rerender(
+        <AccountHeader
+          key="account-b"
+          data={{ ...data, accountId: "account-b", accountLabel: "200", accountNickname: null }}
+          onRename={(nickname) => {
+            renamed.push(nickname);
+          }}
+        />,
+      ),
     );
 
-    await waitFor(() => expect(view.queryByLabelText("Account name")).toBeNull());
+    expect(view.queryByLabelText("Account name")).toBeNull();
     fireEvent.click(view.getByRole("button", { name: "Rename" }));
     expect((view.getByLabelText("Account name") as HTMLInputElement).value).toBe("");
     fireEvent.input(view.getByLabelText("Account name"), { target: { value: "Bravo" } });
-    await waitFor(() =>
-      expect((view.getByLabelText("Account name") as HTMLInputElement).value).toBe("Bravo"),
-    );
-    fireEvent.click(view.getByRole("button", { name: "Save name" }));
-    await waitFor(() => expect(renamed).toEqual(["Bravo"]));
+    expect((view.getByLabelText("Account name") as HTMLInputElement).value).toBe("Bravo");
+    await flush(() => fireEvent.click(view.getByRole("button", { name: "Save name" })));
+    expect(renamed).toEqual(["Bravo"]);
   });
 });

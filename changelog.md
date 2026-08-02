@@ -97,6 +97,86 @@ while the new EA still reads the old names, prefer recompiling when the account 
   and the bookkeeping second, so the worst case is that one mark waits for the terminal's expiry
   instead of the sweep, which is exactly the old behaviour.
 
+## 1.66.2 - 2026-08-02 (Patch)
+
+Release impact: Patch. Test seam and encapsulation only. No runtime behaviour change, no API change,
+no database schema change, no parser change and no EA protocol change, so the EA stays where it is and
+no live terminal needs a recompile or reattach. Nothing in the deployment or environment changes.
+
+- The Telegram adapter's session-keyed state is now unreachable from outside the class. `pending`,
+  `clients`, `sessionClients`, `sessionEpochs`, `sessionFileEpochs`, `unremovedSessions`, `teardowns`
+  and `sessionFileLocks` are ECMAScript `#`-private fields, along with the write sequence, the session
+  directory and the client factory. Everything that decides which client an RPC reaches, or whether a
+  session may be restored at all, is covered. Seeding any of it from a test is now a runtime
+  TypeError.
+- The nineteen methods that read or publish that state are `#`-private too, `publishedClient` and
+  `connectedClient` among them. Private state alone was not enough: a method left on the prototype is
+  shadowed by an own property of the same name, so assigning `publishedClient` on an instance handed
+  `fetchRecentMessages` any client the caller liked, with no login and no session. That is the
+  original bypass one door along, and it worked until this release. `this.#publishedClient()` resolves
+  a private name rather than a property, so the assignment is ignored and the call falls through to
+  the real path.
+- The three helpers that only touch the dialog-entity cache and the contact timestamps stay
+  TypeScript-private, as do the two caches themselves. They hold values, not identity, so priming any
+  of them could never stand in for a login.
+- The reply-capture and pagination tests sign a client in through `startLogin` and `submitCode` rather
+  than writing one into the adapter's client map. They use the client factory `createTelegramAdapter`
+  already accepts, so they drive the real login path with no socket. This is the shape that let the
+  same post-login lookup defect ship four separate times: a test that seeds a client never runs the
+  code that publishes one, so the defect was fixed for the seeded case each time and stayed broken for
+  the real one. Removing the login registration from the adapter now fails ten of these tests, where
+  before it failed none of them.
+- Three guards replace the review rule that was supposed to prevent this and did not. They assert the
+  adapter's private members are exactly the thirty that must stay unreachable, that none of them
+  answers to its name on an instance or on the prototype, and that no call site reaches one by
+  property name. Reverting any one of the thirty to `private` fails at least one guard, which was
+  checked by doing it thirty times. The old check could not manage that: it was a grep whose pass
+  condition was "no output", so a misspelt identifier and a clean codebase looked identical, and it
+  reported clean for weeks with the banned pattern in the file.
+Release impact: Patch. Test-only, so no shipped code changed. The EA stays on 1.66.0, no terminal needs
+a recompile, and there is no API, database, parser, or protocol change.
+
+- Fixed the intermittent failure in `AccountHeader.test.tsx` that fired on a loaded machine and passed
+  in isolation. The cause was in the test, not the component. Both waits were written as
+  `waitFor(() => expect(view.queryByLabelText("Account name")).toBeNull())`, and `waitFor` runs its
+  first poll synchronously, before the microtask that commits the rename. That first poll therefore
+  always failed, and a failing bun matcher whose received value is a live happy-dom element serialises
+  the whole attached document into its failure message, which measures at about 2.7s of CPU per call.
+  The wasted poll, not the component, was the entire wait.
+- Both waits now drive the component's own async boundary with `act()` and assert synchronously
+  afterwards. The assertions are unchanged: after saving, the rename field is gone. Nothing now depends
+  on a clock, so machine load cannot move the result. The file went from 8 to 10 seconds, with observed
+  failures at 10.4s, 16.9s, 17.4s, 23.5s and one run of 200s, to a steady 0.8 to 1.1 seconds at a load
+  average of 530 on 8 cores.
+- Removed the 15 second per-test budget, which was the only per-test budget in the web suite. The test
+  no longer needs one, and a genuine regression now surfaces as the assertion that failed rather than
+  as an opaque timeout.
+Release impact: Patch. App only. No EA protocol change and no parser change, so the EA stays on 1.66.0
+and no live terminal needs a recompile or reattach. One additive table, `provider_tp_announcements`,
+is created on startup; nothing existing is altered or backfilled. `GET /api/dashboard` gains a
+`providerAnnounced` boolean on each logical-trade leg. Trades already carrying a provider-announced
+`HIT` keep it: this release changes what new announcements write, and does not rewrite history.
+
+- Fixed a provider take-profit announcement marking a volume-closing leg `HIT` on message text alone.
+  `MARK_TP_HIT` queues no command, so nothing had closed, and `HIT` is what the virtual-TP monitor,
+  cancellation, readopt, archive and startup recovery all read as already dealt with. The leg left the
+  monitor's reach still holding its full volume, so when price later reached that target the app
+  queued no close and the volume rode on to the stop. Two announcements on a two-leg trade took both
+  legs out, and the position closed at a loss having reached both of its targets.
+- A volume-closing leg now stays `OPEN` when the provider announces it. The announcement is recorded
+  in its own ledger instead, and the price monitor stays the only thing that can retire the leg, so a
+  real crossing still produces a real close. A `0%`-allocation reference leg is unchanged: it closes
+  no volume, so its stop work being queued or already satisfied is still the completed work, and it is
+  still consumed once and only once.
+- Which leg a bare announcement lands on now comes from the announcement ledger rather than from leg
+  status. Leg status used to double as that pointer, which only worked because an announcement burned
+  a leg. A second bare announcement now advances to the next leg without anything having been
+  falsely recorded.
+- Also fixed a `Full TP` announcement pulling a leg that had a genuine broker close booked against it
+  back from `CLOSED` to `HIT`.
+- The dashboard reports each leg's announcement separately from its status, so an announcement that
+  correctly retires nothing is still visible on the trade.
+
 ## 1.66.1 - 2026-08-02 (Patch)
 
 Release impact: Patch. App only, so the EA stays on 1.66.0 and no terminal needs a recompile beyond the one 1.66.0 already requires. A Telegram disconnect now takes effect against anything that would restore the
