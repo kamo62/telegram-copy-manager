@@ -1,5 +1,183 @@
 # Handoff
 
+## STOP HERE FIRST — paused 2026-08-02, resuming in a few days
+
+Work paused after a ~20 hour session. Everything is committed and pushed. Nothing is left in a
+temporary directory. Read this section, then "Where each branch stands", then stop.
+
+### The one thing to do tonight
+
+**Recompile the EA and reattach.** Build `mt5/TelegramTC_EA.mq5` from `main` in MetaEditor and
+reattach to the chart. Terminals currently run **EA 1.60.0**; `main` is **v1.67.0**. The book is one
+pending gold buy limit and zero open positions, which is the closest to flat it will be all week.
+Keep the old `.ex5` for instant rollback, and after reattaching confirm a heartbeat and one command
+round-trip.
+
+### The finding that outranks the entire backlog
+
+**Every safety mechanism in this system lives inside a process, on a machine that dies daily, and
+nothing off that machine knows whether it is running.**
+
+Verified 2026-08-02:
+
+- The host crashed uncleanly at roughly 16:24 UTC, about five hours before the weekly open. `last -x
+  reboot` shows two consecutive "still running" boot sessions, meaning the previous session never
+  recorded a shutdown.
+- **14 boots in 12 days.** Seven fall in the 17:00-19:00 local band, which on weekdays is the
+  London-NY overlap, i.e. active gold hours.
+- The box co-hosts 14 containers including the MT5 terminal, a media server and scrapers.
+- Alert dispatch is in-process, fire-and-forget, 5s timeout, no retry, no queue. A failed delivery
+  becomes an audit row on the same disk.
+- The Docker HEALTHCHECK detects a wedged container and **nothing acts on it**: plain Docker's
+  `restart: unless-stopped` ignores health status and there is no autoheal on the box.
+- Under `VIRTUAL_TP` the broker holds a stop and **no take-profit**. So during any outage the entire
+  profit-taking and management layer is off while the risk stays on. At this reboot cadence that is a
+  weekly unmanaged-position window, not a tail case.
+
+An audit log cannot represent "the machine was off". The 16:33 stall entry reads exactly like a
+self-recovered Telegram stall; it was the host coming back.
+
+**The fix is an external dead-man switch**, roughly an hour: a one-minute ping from the box to an
+external heartbeat service that pages a phone when pings stop. It covers host death, power, network,
+Docker not starting, container wedge and event-loop freeze in one move. That is more coverage than
+the latch, the reopen, the stall recovery and the requeue ceiling combined, none of which shipped.
+
+Then: make the healthcheck act on unhealthy, and find out why a real-money host reboots daily, or
+move the copier and terminal off the machine that also runs jellyfin.
+
+### What to close first when work resumes
+
+Order comes from an independent review, not from the task numbering.
+
+1. **#18, arm alerting, plus the dead-man switch above.** Configuration and a BotFather session,
+   under an hour. Armed alerting changes the value of everything else on the list: #16's residual
+   alerts on the rejected close, #19/#21 duplicates surface within minutes, #9's stall becomes a phone
+   buzz instead of hours of silence. Half the backlog's practical severity is a function of this being
+   undone.
+2. **#21, evidence-held releases minting a fresh key.** App-only, works against the deployed EA 1.60.0
+   because the mark machinery dates to v1.50.0, triggered by a review-queue button that is actually
+   used, and the failure is a direct double close.
+3. **Fold #19 into #21 and drop its age ceiling.** A mechanism that fights the operator on the
+   recovery path, in a copier whose worst outcome is a missed close, is the wrong shape. Keep only the
+   decision it poses: requeue should preserve the original idempotency key everywhere, and age ceilings
+   should apply to `OPEN_TRADE` only.
+4. **#22 is not worth a task slot.** Live box is configured at 1800 so exposure is zero. Flip the
+   default as a rider on the next release.
+5. **#20 bundles with the next EA release.** Real but rare, and needs a recompile anyway.
+6. **#16: let the in-flight groundwork land, then stop for the month.**
+7. **#9: deliberately do not build this month.** Teleproto produced zero spontaneous session stalls
+   once the reboots are correctly attributed. Wait for one real market week of data.
+
+### The process finding, worth more than any single item
+
+The pipeline's only effective output channel is code. #18 was raised as an owner action on 2026-07-26
+and sat untouched while eight code PRs shipped around it. The EA recompile has been pending for weeks.
+The daily reboots have been known since June and have **no task number at all**: `app.ts` carries
+seven open items and the machine everything runs on carries zero. Effort flows to where the system can
+act rather than where the risk is. Any review output starting with "owner must" needs a channel with
+teeth, because those items currently starve with perfect reliability.
+
+### Where each branch stands
+
+All four are pushed. None is merged. `main` is `fb397174`, v1.67.0, deployed and healthy.
+
+**`fix/requeue-age-ceiling`** (`3b03e7fa`, v1.67.1, app-only). **Reviewed NO-GO twice. Do not merge.
+Strongly consider deleting this branch rather than finishing it.**
+
+It refuses a requeue that would replay an idempotency key older than the EA's mark can survive, and
+preserves the *effective* key so an app-managed TP close is not silently handed a new one. The
+key-preservation half is correct and worth keeping. The age ceiling is not.
+
+Round-three findings, all verified in source: the boot backfill misses legacy `LEASED` rows, because
+leasing predates `lease_count` and those rows have `leased_at` set with `lease_count = 0`, so once
+recovery clears `leased_at` the age lookup returns nothing and the replay is allowed. The backfill's
+`COALESCE(leased_at, created_at)` permanently substitutes row-creation time for recovered rows, which
+is the exact value the fix exists to stop trusting. The age lookup has no `account_id` predicate. And
+the 21-day derivation is unsound: full closes deliberately carry no target ticket, and targeted
+partial closes fall back to matching every position by symbol, magic and comment, so after the
+original mark is swept a replay can close a *successor* position rather than finding nothing.
+
+The independent review's recommendation, which I agree with, is to fold the key-preservation piece
+into #21 and drop the ceiling. A mechanism that fights the operator on the recovery path, in a copier
+whose worst outcome is a missed close, is the wrong shape.
+
+**`fix/ea-position-identifier`** (`0911576c`, v1.68.0, needs recompile). **Complete and self-verified;
+the last blocking finding is fixed but that fix is unreviewed.**
+
+Keys lifecycle idempotency marks by `POSITION_IDENTIFIER` instead of `POSITION_TICKET`, because MT5
+can replace a ticket during a server service operation and leave the successor unguarded. MQL5
+documents that an identifier equals the opening order's ticket, so for any position never re-opened
+the old and new names are the same string and the upgrade is free.
+
+Reviewed NO-GO once: keying by identifier meant the sweep could no longer use `PositionSelectByTicket`
+for liveness, and the replacement treated a *connected* partial or failed scan as proof of absence, so
+ten such sweeps would delete the mark guarding a live position. Fixed by making the scan report
+completion separately from count and having an incomplete scan abstain from reclamation exactly as
+disconnection already does. A genuinely flat account is still distinguishable, because
+`PositionsTotal() == 0` means nothing could have failed.
+
+Harness is 47/47. One mutation survived the first run and exposed a real defect in its own test: an
+`indexOf(...)` assertion passed *because* the thing it checked had been deleted, returning `-1`, which
+satisfied `toBeLessThan`. Same shape as the tripwire lesson below.
+
+The first commit is still labelled WIP from the outage recovery and is superseded; squash or reword at
+merge.
+
+**`fix/broker-record-identity`** (`ea8f9f64`, v1.67.1, app-only). **Complete and self-verified,
+unreviewed.** Groundwork for #16.
+
+Adds symbol and direction validation to `matchedBrokerRecordForTrade`, where a mismatch must be
+*provable* so nothing that matches today stops matching, and deduplicates `broker_orders` by deal
+ticket. Verified against production before shipping: all four accounts flat, zero records that match
+today would stop matching, and zero duplicate deal tickets exist in 499 live rows.
+
+Three corrections it made that matter more than the code:
+
+- There are **four** callers, not three. `withAbsolutePartialCloseTarget` was missing from my list and
+  it is the one that actually reads volume.
+- **A plain unique index would have broken production.** 116 live rows legitimately carry `''` or `'0'`
+  as their deal ticket. The index is therefore partial, excluding those.
+- **My aggregation hypothesis was wrong.** `targetRemainingVolume` is consumed *per position* by the
+  EA, so a trade-wide sum would make the percent-close path worse, not better. The real fix is a
+  per-position target in the command contract, which needs the EA.
+
+It also found that `snapshotMatchForRecords` has the identical symbol/direction hole and left it
+alone, and that `brokerOrdersByDealTicket` has no account filter. Both want their own lane.
+
+**`fix/ea-lifecycle-marks`** (`3623da7c`) is already merged into `main` as `fb397174`. The branch is
+retained only for history.
+
+### Merge order when resuming
+
+All four collide on `package.json` and `changelog.md`. The EA lane is a minor bump (1.68.0) and the
+others are patches on 1.67.x, so the EA lane must go last or its version will be clobbered. Re-run
+`bun scripts/mutate-ea-guards.ts` after any merge that touches the EA; it refuses to score on a broken
+baseline, so a green run also proves the merge did not break a guard.
+
+### Things learned that will save time later
+
+**Proof by absence does not hold in this codebase.** Two mechanisms were built and deliberately not
+shipped for this reason. Identity and state are reconstructed from loosely matched snapshot rows:
+snapshots carry no broker capture timestamp, the broker-record matcher validates neither symbol nor
+direction, and `broker_orders` has no deduplication. Prefer positive evidence.
+
+**A timeout that does not cancel converts a hang into an unsequenced late write.** Seen three times,
+including `AbortSignal` on `fsPromises.writeFile`, which was measured rather than assumed: a 64MB
+write aborted at 20ms rejects with `AbortError` and still lands all 64MB.
+
+**A tripwire must assert it can still see its subject before it asserts an absence.** The
+`grep -c testSeam` rule reported clean for weeks while the banned pattern sat in the file under a
+differently-cased name. Its first replacement had the identical defect.
+
+**Prefer inverting a default over adding a guard.** The EA lifecycle lane took seven passes; three of
+its last five findings were in code added to fix the previous finding. What ended it was inverting
+deletion from "prove this mark is foreign" to "prove I wrote it", which made every remaining bug leak
+rather than kill.
+
+**Test evidence:** `bun scripts/mutate-ea-guards.ts` is the EA guard harness. It refuses to score on a
+broken baseline and reports stale mutation targets rather than skipping them. Use
+`bun test apps/api/src/telegram.test.ts -t "encapsulation"` as the adapter seam check.
+
 ## START HERE — 2026-08-02
 
 **The most important open item is not code.** Alerting is unarmed. The live `app_settings` JSON has
