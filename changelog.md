@@ -1,5 +1,95 @@
 # Changelog
 
+## 1.66.1 - 2026-08-02 (Patch)
+
+Release impact: Patch. App only, so the EA stays on 1.66.0 and no terminal needs a recompile beyond the one 1.66.0 already requires. A Telegram disconnect now takes effect against anything that would restore the
+session behind it, whether that is a login still preparing, a message poll rebuilding a saved session,
+or a legacy session import, and it holds that ground until its session file is gone rather than only
+until it has cleared memory. A message poll that lands during a disconnect waits for it to finish and
+then finds nothing to restore, instead of failing; the wait is bounded by the disconnect itself. No API
+removals, no database schema change, no parser change, and no EA protocol change, so the EA stays on
+1.65.0 and no live terminal needs a recompile and reattach. `createTelegramAdapter` gains an optional
+second argument, and `TELEGRAM_DISCONNECT_TIMEOUT_MS` and `TELEGRAM_SESSION_FILE_TIMEOUT_MS` are new
+optional settings; existing callers and deployments are unaffected. Saved session values keep working,
+and a `pending` subdirectory now appears under the session directory where writes are staged.
+One behaviour change worth planning for: `POST /api/telegram/disconnect` now fails, rather than
+reporting success, when the session file cannot be removed, and leaves the session's stored status
+alone so nothing records a disconnect that did not happen. Retrying it once the filesystem allows the
+removal completes the disconnect.
+
+- Fixed a race where disconnecting a Telegram session during login restored it. `startLogin` did all
+  of its slow work first, reading the saved session, building the client, and on phone reuse
+  connecting and calling `isUserAuthorized`, and only then registered the session in the adapter's
+  maps. A disconnect arriving in that window found nothing to remove, so it unlinked the session file
+  and returned success while the login went on to rewrite that file and install its client. The
+  operator saw the session as disconnected and the account stayed logged in and polling.
+- Every session id now carries a lifecycle counter that `disconnect` advances in its own synchronous
+  prefix, before its first await. Anything that would put the session back, a login, a message poll
+  restoring a saved session, or a legacy session import, reads that counter before its awaits and
+  refuses to publish once it has moved, with the check in the same turn as the state it guards.
+  Disconnect wins in every case, including for callers that hold no login at all.
+- A message poll arriving on a cold cache used to rebuild the session with no cancellation check
+  anywhere along it: with `TELEGRAM_SESSION_FILE` configured, a poll whose legacy read was in progress
+  when the operator disconnected would copy the session file back and install a connected client
+  afterwards. It now abandons the restore and closes the client it had already connected.
+- Two logins racing on one session id are both retired by a single disconnect. Previously only the
+  later of the two was tracked, so the earlier one survived and restored the session.
+- A message poll that started while a disconnect was still tearing the session down could put an
+  authorised client back. The lifecycle counter could not stop it, because the poll started after the
+  counter moved and so held the disconnect's own value: it read the session file that was still on
+  disk, passed every check with a value nothing had invalidated, and installed a client that the same
+  disconnect then left running with its session file deleted. On infinite retries that client
+  reconnects for the life of the process with nothing on disk to explain it. A session id is now
+  closed to session restores from the moment a disconnect starts until its session file has gone, and
+  a restore that arrives in that window waits the disconnect out and then finds nothing to restore.
+  The window is closed even when the teardown throws or is cut short by its timeout, so a failed
+  disconnect cannot leave a session refusing work.
+- `disconnect` waits for every session-file write in flight before it unlinks, not just the most
+  recent one, and it clears the in-memory client and pending login even when the client teardown
+  itself fails or hangs. That ordering now comes from a single lock on the session file, which also
+  covers the gap between deciding not to remove a file and removing it: a login that saved its own
+  session in that gap used to have it deleted underneath. The unlink under `data/telegram-sessions`
+  remains the only place a session file is removed.
+- A session file is recorded as belonging to a login only once its bytes are on disk. Recording it
+  first meant a write that then failed still counted, and the disconnect spared the earlier file
+  believing it had been replaced, leaving a disconnected account for the next boot to re-import.
+- A session file the disconnect could not remove is no longer treated as removed. The removal's
+  failure used to be discarded and the ownership record dropped before it was even attempted, so a
+  permission or IO problem produced a successful disconnect over an authorised session still sitting
+  on disk with nothing recorded against it, and the next message poll adopted it. A file that is
+  already gone still counts as removed; anything else fails the disconnect, keeps the ownership
+  record, and puts the session id out of service until the file is genuinely gone or a login has
+  replaced it. The refusal is immediate rather than a wait, so a session that cannot be cleaned up
+  never holds a caller open.
+- A disconnect now closes every client the session id has open, not only the most recent. Two logins
+  on one id share a single pending slot, so the second displaced the first and the first client stayed
+  signed in and reconnecting after the operator disconnected, with no session file to explain it.
+- Writing the session file is bounded, at 10 seconds by default and overridable with
+  `TELEGRAM_SESSION_FILE_TIMEOUT_MS`. A write that never returns used to hold the session's file lock,
+  and with it the disconnect queued behind it and every message poll waiting on that disconnect, for
+  the life of the process. A write that passes the bound claims nothing and leaves the session
+  restorable, so a slow filesystem costs a login rather than the session.
+- Session files are now written to a staging file under `data/telegram-sessions/pending` and renamed
+  into place, so the session file is only ever whole or absent. The bound above is a timeout on a
+  race, and a race does not stop the work it gave up on: a write in place could still finish
+  afterwards and leave a valid session on disk for an id whose disconnect had already completed,
+  putting the account back. A write that has been abandoned can now only finish onto a staging name
+  that nothing reads, and the rename happens only once the write is seen to finish. A restore also can
+  no longer read a half-written session.
+- Removing the session file is deliberately not bounded. The same race that makes an abandoned write
+  safe once it has a target of its own cannot make an abandoned removal safe, because a removal's
+  target is the live session path: it would land later and delete the file of whichever login had
+  replaced the session by then. A removal that never returns instead holds the session's file lock,
+  which is where it was held before this release.
+- `disconnect` no longer deletes a session file that belongs to a login which started after it. That
+  used to leave a signed-in account whose saved session was gone, which the next restart lost for
+  good.
+- A transport that hangs while closing no longer holds the disconnect open. The teardown is bounded at
+  10 seconds, overridable with `TELEGRAM_DISCONNECT_TIMEOUT_MS`, after which the session file is
+  removed anyway. A hung close used to leave the file on disk for the next boot to re-import and
+  re-authorise, and left the operator's request waiting.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
 ## 1.66.0 - 2026-08-02 (Minor)
 
 Release impact: Minor because EA behaviour changed. This release requires an EA recompile and
