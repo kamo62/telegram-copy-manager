@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.65.0"
+#property version   "1.66.0"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -161,7 +161,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.65.0",
+      "1.66.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -624,15 +624,61 @@ void ExecuteTrailingStop(SignalCommand &command)
       found,
       command.targetPositionTicket);
 
+   int untracked = 0;
    for(int index = 0; index < found; index++)
    {
-      TrackTrailingStop(command, tickets[index], distance);
+      if(!TrackTrailingStop(command, tickets[index], distance))
+         untracked++;
       ApplyTrailingStopToTicket(command, tickets[index], distance);
+   }
+
+   // Every slot holds a live trailing position. The one-shot stop above still went
+   // in, but nothing will ever move it again, so this must not pass silently: an
+   // untracked trailing stop is an unmanaged position. The report lands after the
+   // per-ticket ones and the last report wins, so the queue item reads FAILED.
+   if(untracked > 0)
+   {
+      PrintFormat("Telegram TC TRAILING_STOP capacity exhausted queue=%s logicalTradeId=%s untracked=%d of %d slots=%d",
+         command.queueItemId,
+         command.logicalTradeId,
+         untracked,
+         found,
+         ArraySize(trailingStopStates));
+      ReportFailure(
+         command.queueItemId,
+         "Trailing stop tracking capacity exhausted",
+         StringFormat("%d of %d position(s) left holding a one-shot stop; all %d trailing slots hold live positions",
+            untracked,
+            found,
+            ArraySize(trailingStopStates)));
    }
 }
 
-void TrackTrailingStop(SignalCommand &command, ulong ticket, double distance)
+// A slot is free when active is false. Releasing clears every field, so a recycled
+// slot cannot carry a finished position's queue item, trade id, symbol, direction
+// or distance into a new ticket, and clearing the ticket stops the reuse scan in
+// TrackTrailingStop from matching a slot that no longer owns one.
+void ReleaseTrailingStopSlot(int index)
 {
+   trailingStopStates[index].active = false;
+   trailingStopStates[index].queueItemId = "";
+   trailingStopStates[index].logicalTradeId = "";
+   trailingStopStates[index].symbol = "";
+   trailingStopStates[index].direction = "";
+   trailingStopStates[index].positionTicket = 0;
+   trailingStopStates[index].distance = 0.0;
+}
+
+// Returns false only when every slot holds a live trailing position. Slots are
+// recycled in place and never compacted: trailingStopStateCount is a high-water
+// mark that only grows, so ManageTrailingStops can release an entry mid-pass
+// without any index shifting underneath its loop.
+bool TrackTrailingStop(SignalCommand &command, ulong ticket, double distance)
+{
+   if(ticket == 0)
+      return false;
+
+   int freeSlot = -1;
    for(int index = 0; index < trailingStopStateCount; index++)
    {
       if(trailingStopStates[index].positionTicket == ticket)
@@ -643,22 +689,28 @@ void TrackTrailingStop(SignalCommand &command, ulong ticket, double distance)
          trailingStopStates[index].symbol = command.brokerSymbol;
          trailingStopStates[index].direction = command.direction;
          trailingStopStates[index].distance = distance;
-         return;
+         return true;
       }
+      if(freeSlot < 0 && !trailingStopStates[index].active)
+         freeSlot = index;
    }
 
-   if(trailingStopStateCount >= ArraySize(trailingStopStates))
-      return;
+   if(freeSlot < 0)
+   {
+      if(trailingStopStateCount >= ArraySize(trailingStopStates))
+         return false;
+      freeSlot = trailingStopStateCount;
+      trailingStopStateCount++;
+   }
 
-   int slot = trailingStopStateCount;
-   trailingStopStateCount++;
-   trailingStopStates[slot].active = true;
-   trailingStopStates[slot].queueItemId = command.queueItemId;
-   trailingStopStates[slot].logicalTradeId = command.logicalTradeId;
-   trailingStopStates[slot].symbol = command.brokerSymbol;
-   trailingStopStates[slot].direction = command.direction;
-   trailingStopStates[slot].positionTicket = ticket;
-   trailingStopStates[slot].distance = distance;
+   trailingStopStates[freeSlot].active = true;
+   trailingStopStates[freeSlot].queueItemId = command.queueItemId;
+   trailingStopStates[freeSlot].logicalTradeId = command.logicalTradeId;
+   trailingStopStates[freeSlot].symbol = command.brokerSymbol;
+   trailingStopStates[freeSlot].direction = command.direction;
+   trailingStopStates[freeSlot].positionTicket = ticket;
+   trailingStopStates[freeSlot].distance = distance;
+   return true;
 }
 
 void ManageTrailingStops()
@@ -675,7 +727,11 @@ void ManageTrailingStops()
       command.targetPositionTicket = trailingStopStates[index].positionTicket;
       if(!PositionSelectByTicket(trailingStopStates[index].positionTicket))
       {
-         trailingStopStates[index].active = false;
+         PrintFormat("Telegram TC TRAILING_STOP released slot=%d ticket=%I64u logicalTradeId=%s (position gone)",
+            index,
+            trailingStopStates[index].positionTicket,
+            trailingStopStates[index].logicalTradeId);
+         ReleaseTrailingStopSlot(index);
          continue;
       }
       ApplyTrailingStopToTicket(command, trailingStopStates[index].positionTicket, trailingStopStates[index].distance);
@@ -1839,7 +1895,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.65.0",
+      "1.66.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );

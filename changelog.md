@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.66.0 - 2026-08-02 (Minor)
+
+Release impact: Minor because EA behaviour changed. This release requires an EA recompile and
+reattach. Build `mt5/TelegramTC_EA.mq5` from this commit in MetaEditor and reattach it to the
+chart before relying on trailing stops. The command contract, capability strings, API shape and
+database schema are all unchanged, so an old EA keeps working exactly as it does today, including
+the defect below.
+
+- **EA recompile and reattach required.** Until a terminal is rebuilt it keeps the old behaviour.
+- Trailing-stop slots are now reclaimed when the position they track closes. `trailingStopStates`
+  holds 100 entries and `trailingStopStateCount` only ever grew: a closed position's slot was marked
+  inactive but never reused, so after 100 trailing-stop registrations in a terminal's lifetime every
+  later `TRAILING_STOP` command silently registered nothing. The one-shot stop still went in, then
+  nothing moved it again, leaving live positions with a frozen stop while the app showed trailing as
+  active. State is memory-only, so a terminal restart reset the counter and hid the pattern.
+- Releasing a slot clears its queue item, logical trade id, symbol, direction, ticket and distance,
+  so a recycled slot can never trail a new ticket using a finished position's state. Slots are
+  recycled in place rather than compacted, which keeps `ManageTrailingStops` safe: it walks the array
+  by index and can release an entry mid-pass without shifting the entries after it.
+- A genuinely full slot array now reports `FAILED` on the queue item and prints the count to the
+  Experts log instead of returning silently. That only happens with 100 positions trailing at once.
+
 ## 1.65.8 - 2026-08-01 (Patch)
 
 Release impact: Patch. A dashboard rendering lifecycle fix only. No API change, no database schema
