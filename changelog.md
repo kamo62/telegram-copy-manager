@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.66.2 - 2026-08-02 (Patch)
+
+Release impact: Patch. Test seam and encapsulation only. No runtime behaviour change, no API change,
+no database schema change, no parser change and no EA protocol change, so the EA stays where it is and
+no live terminal needs a recompile or reattach. Nothing in the deployment or environment changes.
+
+- The Telegram adapter's session-keyed state is now unreachable from outside the class. `pending`,
+  `clients`, `sessionClients`, `sessionEpochs`, `sessionFileEpochs`, `unremovedSessions`, `teardowns`
+  and `sessionFileLocks` are ECMAScript `#`-private fields, along with the write sequence, the session
+  directory and the client factory. Everything that decides which client an RPC reaches, or whether a
+  session may be restored at all, is covered. Seeding any of it from a test is now a runtime
+  TypeError.
+- The nineteen methods that read or publish that state are `#`-private too, `publishedClient` and
+  `connectedClient` among them. Private state alone was not enough: a method left on the prototype is
+  shadowed by an own property of the same name, so assigning `publishedClient` on an instance handed
+  `fetchRecentMessages` any client the caller liked, with no login and no session. That is the
+  original bypass one door along, and it worked until this release. `this.#publishedClient()` resolves
+  a private name rather than a property, so the assignment is ignored and the call falls through to
+  the real path.
+- The three helpers that only touch the dialog-entity cache and the contact timestamps stay
+  TypeScript-private, as do the two caches themselves. They hold values, not identity, so priming any
+  of them could never stand in for a login.
+- The reply-capture and pagination tests sign a client in through `startLogin` and `submitCode` rather
+  than writing one into the adapter's client map. They use the client factory `createTelegramAdapter`
+  already accepts, so they drive the real login path with no socket. This is the shape that let the
+  same post-login lookup defect ship four separate times: a test that seeds a client never runs the
+  code that publishes one, so the defect was fixed for the seeded case each time and stayed broken for
+  the real one. Removing the login registration from the adapter now fails ten of these tests, where
+  before it failed none of them.
+- Three guards replace the review rule that was supposed to prevent this and did not. They assert the
+  adapter's private members are exactly the thirty that must stay unreachable, that none of them
+  answers to its name on an instance or on the prototype, and that no call site reaches one by
+  property name. Reverting any one of the thirty to `private` fails at least one guard, which was
+  checked by doing it thirty times. The old check could not manage that: it was a grep whose pass
+  condition was "no output", so a misspelt identifier and a clean codebase looked identical, and it
+  reported clean for weeks with the banned pattern in the file.
+
 ## 1.66.1 - 2026-08-02 (Patch)
 
 Release impact: Patch. App only, so the EA stays on 1.66.0 and no terminal needs a recompile beyond the one 1.66.0 already requires. A Telegram disconnect now takes effect against anything that would restore the
