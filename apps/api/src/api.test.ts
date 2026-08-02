@@ -16491,6 +16491,232 @@ describe("Telegram TC API", () => {
   });
 });
 
+// A snapshot whose single position carries the trade's tracking comment but describes some
+// other instrument or side. This is the row a broker leaves behind when a comment is copied
+// onto an unrelated position, or when a recycled ticket lands on a different market.
+async function postMistaggedSnapshot(
+  app: ReturnType<typeof createApi>,
+  approval: { shortId: string },
+  input: {
+    ticket: string;
+    positionSymbol: string;
+    positionType: number;
+    quoteSymbol: string;
+    bid: number;
+    ask: number;
+  },
+) {
+  return app.request("/api/mt5/snapshot", {
+    method: "POST",
+    body: JSON.stringify({
+      accountId: "mt5-63442826",
+      positions: [
+        {
+          ticket: input.ticket,
+          symbol: input.positionSymbol,
+          type: input.positionType,
+          volume: 0.02,
+          openPrice: 1.086,
+          sl: 1.081,
+          tp: 0,
+          profit: 40,
+          magic: 26050901,
+          isExternal: false,
+          comment: `ttc:${approval.shortId}`,
+        },
+      ],
+      orders: [],
+      symbols: [{ symbol: input.quoteSymbol, bid: input.bid, ask: input.ask, point: 0.00001 }],
+    }),
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function brokerOrdersFor(app: ReturnType<typeof createApi>, tradeId: string) {
+  const body = await json<{
+    orders: Array<{ action: string; dealTicket: string; filledVolume: number | null }>;
+  }>(await app.request(`/api/trades/${tradeId}/broker-orders`));
+  return body.orders;
+}
+
+describe("broker record identity", () => {
+  test("a mis-tagged position on another symbol never stands in for the trade", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureVirtualTpProvider(app, {
+      takeProfitLevels: [
+        { leg: 1, percentage: 50, strategy: { kind: "no-change" } },
+        { leg: 2, percentage: 50, strategy: { kind: "no-change" } },
+      ],
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70902",
+      filledPrice: 1.086,
+    });
+
+    // GBPUSD position, EURUSD trade, EURUSD quote well past TP1. The comment matches, so
+    // without an identity check the monitor takes this row's ticket and closes a position
+    // on a market the trade was never opened on.
+    await postMistaggedSnapshot(app, approval, {
+      ticket: "88001",
+      positionSymbol: "GBPUSD.raw",
+      positionType: 0,
+      quoteSymbol: "EURUSD.raw",
+      bid: 1.0925,
+      ask: 1.0927,
+    });
+
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("status=NO_WORK");
+    expect(work).not.toContain("88001");
+    expect(await tradeLegStatuses(app, approval.logicalTradeId)).toEqual(["OPEN", "OPEN"]);
+  });
+
+  test("a mis-tagged position on the opposite side never stands in for the trade", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureVirtualTpProvider(app, {
+      takeProfitLevels: [
+        { leg: 1, percentage: 50, strategy: { kind: "no-change" } },
+        { leg: 2, percentage: 50, strategy: { kind: "no-change" } },
+      ],
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70902",
+      filledPrice: 1.086,
+    });
+
+    // Right symbol, MT5 type 1, which is a sell. The trade is a buy, so this is somebody
+    // else's position however well its comment reads.
+    await postMistaggedSnapshot(app, approval, {
+      ticket: "88002",
+      positionSymbol: "EURUSD.raw",
+      positionType: 1,
+      quoteSymbol: "EURUSD.raw",
+      bid: 1.0925,
+      ask: 1.0927,
+    });
+
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("status=NO_WORK");
+    expect(work).not.toContain("88002");
+    expect(await tradeLegStatuses(app, approval.logicalTradeId)).toEqual(["OPEN", "OPEN"]);
+  });
+
+  test("a redelivered execution report does not record the same broker deal twice", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureVirtualTpProvider(app, {
+      takeProfitLevels: [
+        { leg: 1, percentage: 50, strategy: { kind: "no-change" } },
+        { leg: 2, percentage: 50, strategy: { kind: "no-change" } },
+      ],
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70902",
+      filledPrice: 1.086,
+    });
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70902",
+      bid: 1.0911,
+      ask: 1.0913,
+      sl: 1.081,
+    });
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    const queueItemId = work.match(/queueItemId=([^\n]+)/)?.[1] ?? "";
+    expect(queueItemId).not.toBe("");
+
+    const closeReport = {
+      accountId: "mt5-63442826",
+      queueItemId,
+      status: "EXECUTED",
+      retcode: 10009,
+      retcodeExternal: 0,
+      brokerComment: "Request executed",
+      orderTicket: "70902",
+      positionTicket: "70902",
+      dealTicket: "990001",
+      requestedPrice: 1.0911,
+      filledPrice: 1.0911,
+      volume: 0.01,
+      remainingVolume: 0.01,
+      errorText: "",
+    };
+    for (const _attempt of [1, 2]) {
+      await app.request("/api/mt5/report", {
+        method: "POST",
+        body: JSON.stringify(closeReport),
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    const orders = await brokerOrdersFor(app, approval.logicalTradeId);
+    // The close-volume readers sum filled_volume across close rows. A second row here reports
+    // 0.02 of a 0.02 position already closed and makes the trade look flat.
+    const closedVolume = orders
+      .filter((order) => order.action === "PARTIAL_CLOSE" || order.action === "FULL_CLOSE")
+      .reduce((sum, order) => sum + (order.filledVolume ?? 0), 0);
+    expect(closedVolume).toBeCloseTo(0.01, 8);
+    expect(orders.filter((order) => order.dealTicket === "990001")).toHaveLength(1);
+    expect(await tradeLegStatuses(app, approval.logicalTradeId)).toEqual(["CLOSED", "OPEN"]);
+  });
+
+  test("a second close carrying its own broker deal is still recorded", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const providerId = await configureVirtualTpProvider(app, {
+      takeProfitLevels: [
+        { leg: 1, percentage: 50, strategy: { kind: "no-change" } },
+        { leg: 2, percentage: 50, strategy: { kind: "no-change" } },
+      ],
+    });
+    const approval = await openVirtualTpTrade(app, providerId, {
+      rawText: "BUY EURUSD @ 1.0860\nSL 1.0810\nTP1 1.0910\nTP2 1.0950",
+      ticket: "70902",
+      filledPrice: 1.086,
+    });
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70902",
+      bid: 1.0911,
+      ask: 1.0913,
+      sl: 1.081,
+    });
+    const firstWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    await reportExecutedQueue(app, {
+      queueItemId: firstWork.match(/queueItemId=([^\n]+)/)?.[1] ?? "",
+      ticket: "70902",
+      price: 1.0911,
+      volume: 0.01,
+      remainingVolume: 0.01,
+    });
+
+    await postVirtualTpSnapshot(app, approval, {
+      ticket: "70902",
+      bid: 1.0955,
+      ask: 1.0957,
+      sl: 1.081,
+      volume: 0.01,
+    });
+    const secondWork = await (
+      await app.request("/api/mt5/poll-line?accountId=mt5-63442826")
+    ).text();
+    expect(secondWork).toContain("commandType=CLOSE_PARTIAL");
+    await reportExecutedQueue(app, {
+      queueItemId: secondWork.match(/queueItemId=([^\n]+)/)?.[1] ?? "",
+      ticket: "70902",
+      price: 1.0955,
+      volume: 0.01,
+      remainingVolume: 0,
+    });
+
+    const closes = (await brokerOrdersFor(app, approval.logicalTradeId)).filter(
+      (order) => order.action === "PARTIAL_CLOSE" || order.action === "FULL_CLOSE",
+    );
+    expect(closes).toHaveLength(2);
+    expect(new Set(closes.map((order) => order.dealTicket)).size).toBe(2);
+    expect(closes.reduce((sum, order) => sum + (order.filledVolume ?? 0), 0)).toBeCloseTo(0.02, 8);
+  });
+});
+
 describe("step 3 evidence gate wiring", () => {
   test("uses real VIP Gold fixtures for open, activation suppression, and reply close", async () => {
     const app = createApi({
