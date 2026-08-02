@@ -11221,6 +11221,20 @@ class AppStore {
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_reference_stop_actions_queue ON reference_stop_actions(queue_item_id)",
     );
+    // One row per leg the provider has announced a take-profit for. This is the announcement
+    // ledger, not an execution record: a row here says only that the provider said so, and
+    // never that volume moved. It exists because leg.status used to serve both purposes, and
+    // an announcement that burned a leg to HIT took that leg out of the virtual-TP monitor's
+    // reach for good. Primary key + DO NOTHING makes it durable, once-only and never regressing.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS provider_tp_announcements (
+        logical_trade_id TEXT NOT NULL,
+        leg INTEGER NOT NULL,
+        announced_at TEXT NOT NULL,
+        announced_text TEXT NOT NULL,
+        PRIMARY KEY (logical_trade_id, leg)
+      );
+    `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS held_lifecycle_drops (
         id TEXT PRIMARY KEY,
@@ -12906,6 +12920,14 @@ class AppStore {
   }
 
   private logicalTradesForDashboard() {
+    // A provider-announced volume leg stays OPEN, so leg status no longer carries the fact
+    // that the provider called it. Surface the announcement separately or the operator loses
+    // the only trace of it that the trade view ever showed.
+    const announced = new Set(
+      (
+        this.db.query("SELECT logical_trade_id, leg FROM provider_tp_announcements").all() as Row[]
+      ).map((row) => `${String(row.logical_trade_id)}:${Number(row.leg)}`),
+    );
     return this.logicalTrades().map((trade) => {
       const matchedBrokerTickets =
         trade.status === "OUT_OF_SYNC"
@@ -12931,6 +12953,7 @@ class AppStore {
           allocationPercent: leg.allocationPercent,
           volume: leg.volume,
           status: leg.status,
+          providerAnnounced: announced.has(`${trade.id}:${leg.leg}`),
         })),
       };
     });
@@ -12976,11 +12999,24 @@ class AppStore {
       .run(JSON.stringify(updated), tradeId);
   }
 
+  private providerAnnouncedTpLegs(tradeId: string) {
+    return new Set(
+      (
+        this.db
+          .query("SELECT leg FROM provider_tp_announcements WHERE logical_trade_id = ?")
+          .all(tradeId) as Row[]
+      ).map((row) => Number(row.leg)),
+    );
+  }
+
   private recordProviderTpHit(tradeId: string, signal: ParsedSignal) {
     const trade = this.logicalTrade(tradeId);
     if (!trade) return;
 
-    const hitLeg = tpHitLegFromText(signal.originalText, trade);
+    // The announcement ledger, not leg status, is what advances the pointer for a bare
+    // announcement. Both are needed: a leg already dealt with by either party is skipped.
+    const alreadyAnnounced = this.providerAnnouncedTpLegs(tradeId);
+    const hitLeg = tpHitLegFromText(signal.originalText, trade, alreadyAnnounced);
     const announced = (leg: LogicalTrade["legs"][number]) =>
       hitLeg === "all" || (typeof hitLeg === "number" && leg.leg === hitLeg);
 
@@ -13054,12 +13090,34 @@ class AppStore {
           }
         }
       }
+      const announcedLegs = trade.legs.filter(announced);
+      const at = nowIso();
+      for (const leg of announcedLegs) {
+        this.db
+          .query(
+            `INSERT INTO provider_tp_announcements
+               (logical_trade_id, leg, announced_at, announced_text)
+             VALUES (?, ?, ?, ?) ON CONFLICT(logical_trade_id, leg) DO NOTHING`,
+          )
+          .run(trade.id, leg.leg, at, signal.originalText);
+      }
       const updated: LogicalTrade = {
         ...trade,
         virtualTpWatermark: watermark,
         legs: trade.legs.map((leg) => {
           if (!announced(leg)) return leg;
-          if (isReferenceVirtualTpLeg(leg) && !resolvedReference.has(leg.leg)) return leg;
+          // Only a 0%-allocation reference leg may be consumed here, and only once its stop
+          // work is real. That leg closes no volume, so "queued or satisfied" IS the completed
+          // work and HIT is the truth.
+          //
+          // A volume-closing leg is the opposite case. Nothing has closed: MARK_TP_HIT queues
+          // no command, and the message text is not evidence a broker did anything. Marking it
+          // HIT would book a take-profit that never happened AND take the leg out of
+          // `evaluateVirtualTakeProfits`, which only ever looks at OPEN legs, so the app would
+          // then sit through the real crossing without closing anything. The announcement is
+          // recorded in the ledger above instead; the leg keeps its volume and its OPEN status
+          // so the price monitor stays the only thing that can retire it.
+          if (!isReferenceVirtualTpLeg(leg) || !resolvedReference.has(leg.leg)) return leg;
           return { ...leg, status: "HIT", brokerEvidence: "provider-announced" };
         }),
         commandHistory: [
@@ -13074,6 +13132,21 @@ class AppStore {
       this.db
         .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
         .run(JSON.stringify(updated), tradeId);
+      const heldVolumeLegs = announcedLegs
+        .filter((leg) => !isReferenceVirtualTpLeg(leg))
+        .map((leg) => leg.leg);
+      if (heldVolumeLegs.length) {
+        this.audit(
+          "virtual-tp.provider-announced",
+          "info",
+          "Provider announced a take-profit; the leg keeps its volume until a close is booked",
+          {
+            logicalTradeId: trade.id,
+            legs: heldVolumeLegs,
+            text: signal.originalText,
+          },
+        );
+      }
     })();
   }
 
@@ -15197,11 +15270,23 @@ function virtualTpLegFromExecutionReport(
   return bestLeg !== undefined && bestDistance <= tolerance ? bestLeg : undefined;
 }
 
-function tpHitLegFromText(text: string, trade: LogicalTrade): number | "all" | undefined {
+// Which leg a provider's take-profit announcement is about. An explicit "TP 2" always means
+// leg 2. A bare announcement ("TP ✅") is positional, so it lands on the first leg neither
+// party has dealt with yet: not retired by execution (HIT/CLOSED) and not already the subject
+// of an earlier announcement. `announcedLegs` has to be consulted separately because a
+// volume-closing leg deliberately stays OPEN when the provider announces it, so leg status
+// alone would hand the same leg to every subsequent bare announcement.
+function tpHitLegFromText(
+  text: string,
+  trade: LogicalTrade,
+  announcedLegs: ReadonlySet<number>,
+): number | "all" | undefined {
   if (/\bFULL\s+TP\b/i.test(text)) return "all";
   const explicit = text.match(/\bTP\s*([1-4])\b/i);
   if (explicit?.[1]) return Number(explicit[1]);
-  return trade.legs.find((leg) => leg.status !== "HIT" && leg.status !== "CLOSED")?.leg;
+  return trade.legs.find(
+    (leg) => leg.status !== "HIT" && leg.status !== "CLOSED" && !announcedLegs.has(leg.leg),
+  )?.leg;
 }
 
 interface SnapshotTradeMatch {
