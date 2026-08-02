@@ -48,7 +48,7 @@ export function StatusBar({
       ? "Refreshing dashboard"
       : "Live updates active";
   const telegramAdapterStatus =
-    telegramAdapter === "gramjs" || telegramAdapter === "live"
+    telegramAdapter === "teleproto" || telegramAdapter === "gramjs" || telegramAdapter === "live"
       ? "ok"
       : telegramAdapter === "mock"
         ? "warn"

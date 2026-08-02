@@ -184,7 +184,11 @@ export const TELEGRAM_STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS 
 export function createTelegramAdapter(
   name = process.env.TELEGRAM_ADAPTER ?? "mock",
 ): TelegramAdapter {
-  if (name === "gramjs") {
+  // "gramjs" is still accepted because that is what the deployed .env sets, and
+  // anything unrecognised falls through to the mock adapter, which would stop
+  // live trading silently. Do not remove it without changing the server's env
+  // first. "teleproto" is the accurate name for what this actually builds.
+  if (name === "teleproto" || name === "gramjs") {
     return new TeleprotoTelegramAdapter();
   }
   return new MockTelegramAdapter();
@@ -277,7 +281,11 @@ interface TeleprotoMessage {
 }
 
 class TeleprotoTelegramAdapter implements TelegramAdapter {
-  name = "gramjs";
+  // Reported through /api/health, /api/telegram/status and the dashboard. It
+  // said "gramjs" for the whole of the teleproto migration, so the one field an
+  // operator checks to see what is running was reporting the library we had
+  // just removed.
+  name = "teleproto";
   private readonly pending = new Map<string, PendingLogin>();
   private readonly clients = new Map<string, TeleprotoClient>();
   private readonly dialogEntities = new Map<string, unknown>();
