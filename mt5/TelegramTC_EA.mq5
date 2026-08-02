@@ -107,8 +107,12 @@ struct TrailingStopState
 struct LifecycleMark
 {
    bool active;
+   // Written by this EA instance in this session. Only an owned mark may ever be
+   // deleted, which is what makes cross-account deletion structurally impossible
+   // rather than something the EA has to keep proving from a name.
+   bool owned;
    string variable;
-   uint accountTag;        // owning account; a foreign entry is never acted on
+   string identity;        // full account identity this entry was registered under
    ulong positionTicket;   // always > 0: only ticket-scoped marks are tracked
    datetime writtenAt;
    datetime absentSince;
@@ -1919,15 +1923,25 @@ ulong LifecycleKeyHash(string key)
 }
 
 // Terminal global variables are shared by every account the terminal logs into, but
-// position tickets are not. Marks therefore carry the account in two independent
-// ways: a fixed-width tag the sweep can read back, and the login folded into the
-// hash so a name computed on one account can never match a mark written on another.
-// ACCOUNT_LOGIN is a long, so it is folded to 32 bits rather than printed, keeping
-// the component fixed-width whatever the broker's login range.
+// position tickets are not, so a mark has to say which account it belongs to. The
+// login alone is not an identity: the same account number at two brokers is a real
+// configuration, and this app is built for multiple accounts. Server and company
+// make it unique.
+string LifecycleAccountIdentity()
+{
+   return IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "|" +
+          AccountInfoString(ACCOUNT_SERVER) + "|" +
+          AccountInfoString(ACCOUNT_COMPANY);
+}
+
+// A fixed-width fold of that identity, used only to decide which marks are worth
+// adopting for refresh after a restart. It is 64-to-32 and therefore lossy, which is
+// tolerable precisely because nothing destructive reads it: adoption grants the right
+// to extend a mark's life, never to end it.
 uint LifecycleAccountTag()
 {
-   ulong login = (ulong)AccountInfoInteger(ACCOUNT_LOGIN);
-   return (uint)((login ^ (login >> 32)) & 0xFFFFFFFF);
+   ulong hash = LifecycleKeyHash(LifecycleAccountIdentity());
+   return (uint)((hash ^ (hash >> 32)) & 0xFFFFFFFF);
 }
 
 // MQL5 caps a global variable name at 63 characters and silently keeps only the
@@ -1937,7 +1951,7 @@ uint LifecycleAccountTag()
 // however long, can move that bound or make two distinct marks share a name.
 string LifecycleIdempotencyVariable(SignalCommand &command, ulong ticket = 0)
 {
-   string scopedKey = IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "|" + LifecycleCommandKey(command);
+   string scopedKey = LifecycleAccountIdentity() + "|" + LifecycleCommandKey(command);
    ulong hash = LifecycleKeyHash(scopedKey);
    return StringFormat("%s%08X.%08X%08X.%I64u",
       LIFECYCLE_MARK_PREFIX,
@@ -1987,20 +2001,23 @@ void MarkLifecycleExecuted(SignalCommand &command, ulong ticket = 0)
    // has asked about is discarded. That is the pre-1.67 behaviour for this one category.
    if(ticket == 0)
       return;
-   RegisterLifecycleMark(variable, LifecycleAccountTag(), ticket, writtenAt);
+   RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, writtenAt, true);
 }
 
 // Slots are recycled in place and lifecycleMarkCount is a high-water mark that only
 // grows, so ReclaimLifecycleMarks can release an entry mid-pass without shifting
 // anything under its own index walk.
-void RegisterLifecycleMark(string variable, uint accountTag, ulong ticket, datetime writtenAt)
+void RegisterLifecycleMark(string variable, string identity, ulong ticket, datetime writtenAt, bool owned)
 {
    int freeSlot = -1;
    for(int index = 0; index < lifecycleMarkCount; index++)
    {
       if(lifecycleMarks[index].active && lifecycleMarks[index].variable == variable)
       {
-         lifecycleMarks[index].accountTag = accountTag;
+         // Ownership only ever ratchets up. An adopted entry that this session then
+         // writes to becomes owned; nothing may take that right away again.
+         lifecycleMarks[index].owned = lifecycleMarks[index].owned || owned;
+         lifecycleMarks[index].identity = identity;
          lifecycleMarks[index].positionTicket = ticket;
          lifecycleMarks[index].writtenAt = writtenAt;
          lifecycleMarks[index].absentSince = 0;
@@ -2024,8 +2041,9 @@ void RegisterLifecycleMark(string variable, uint accountTag, ulong ticket, datet
       lifecycleMarkCount++;
    }
    lifecycleMarks[freeSlot].active = true;
+   lifecycleMarks[freeSlot].owned = owned;
    lifecycleMarks[freeSlot].variable = variable;
-   lifecycleMarks[freeSlot].accountTag = accountTag;
+   lifecycleMarks[freeSlot].identity = identity;
    lifecycleMarks[freeSlot].positionTicket = ticket;
    lifecycleMarks[freeSlot].writtenAt = writtenAt;
    lifecycleMarks[freeSlot].absentSince = 0;
@@ -2034,8 +2052,9 @@ void RegisterLifecycleMark(string variable, uint accountTag, ulong ticket, datet
 void ReleaseLifecycleMarkSlot(int index)
 {
    lifecycleMarks[index].active = false;
+   lifecycleMarks[index].owned = false;
    lifecycleMarks[index].variable = "";
-   lifecycleMarks[index].accountTag = 0;
+   lifecycleMarks[index].identity = "";
    lifecycleMarks[index].positionTicket = 0;
    lifecycleMarks[index].writtenAt = 0;
    lifecycleMarks[index].absentSince = 0;
@@ -2084,24 +2103,36 @@ bool ParseLifecycleMarkName(string variable, string &accountTagText, ulong &tick
 }
 
 // A terminal restart, a recompile and an account switch all keep the global variables
-// and lose this registry, so adopt what an earlier session left behind or nothing would
-// ever reclaim it. Two categories are deliberately never adopted. Marks tagged for
-// another account are not this account's to judge: their ticket means nothing here.
-// Legacy-named marks carry no account at all and their ticket may have been truncated
-// away. Both are left untouched for the account that owns them, or for the terminal.
+// and lose this registry. Marks left by an earlier session are adopted so the weekly
+// refresh keeps covering them, because a requeued command replays the original
+// idempotency key at any age and a mark guarding a still-open position must outlive
+// the terminal's four-week expiry.
+//
+// Adoption grants the right to extend a mark's life and nothing else. Adopted entries
+// are not owned, so no path here can ever delete one. That is why matching on the
+// lossy tag is safe: the worst a wrong match can do is keep a stranger's mark alive
+// a while longer.
 void RehydrateLifecycleMarks()
 {
-   // Rebuild from scratch. An account switch reinitialises the EA, and the registry
-   // must not carry the previous account's entries into this one even if MQL5 left
-   // them in place.
+   // Rebuild from scratch so an account switch cannot carry the previous account's
+   // entries into this one, even if MQL5 left the registry in place.
    for(int index = 0; index < lifecycleMarkCount; index++)
       ReleaseLifecycleMarkSlot(index);
    lifecycleMarkCount = 0;
 
+   // A login of zero means the terminal has not resolved an account yet. Adopting
+   // against that identity would sweep up every mark written under the same blank.
+   if(AccountInfoInteger(ACCOUNT_LOGIN) == 0)
+   {
+      Print("Telegram TC: no account login at startup, lifecycle marks left for the next initialisation");
+      return;
+   }
+
    string currentTag = StringFormat("%08X", LifecycleAccountTag());
+   string identity = LifecycleAccountIdentity();
    int total = GlobalVariablesTotal();
    int adopted = 0;
-   int foreign = 0;
+   int skipped = 0;
    for(int index = 0; index < total; index++)
    {
       string name = GlobalVariableName(index);
@@ -2111,63 +2142,74 @@ void RehydrateLifecycleMarks()
       ulong ticket = 0;
       if(!ParseLifecycleMarkName(name, tagText, ticket))
          continue;
-      if(tagText != currentTag)
+      if(tagText != currentTag || ticket == 0)
       {
-         foreign++;
+         skipped++;
          continue;
       }
-      if(ticket == 0)
-         continue;
       // An unreadable stored time starts the clock now rather than reading as ancient.
       datetime writtenAt = (datetime)(long)GlobalVariableGet(name);
       if(writtenAt <= 0)
          writtenAt = TimeCurrent();
-      RegisterLifecycleMark(name, LifecycleAccountTag(), ticket, writtenAt);
+      RegisterLifecycleMark(name, identity, ticket, writtenAt, false);
       adopted++;
    }
-   if(adopted > 0 || foreign > 0)
-      PrintFormat("Telegram TC lifecycle marks: adopted %d for account %s, left %d belonging to other accounts",
+   if(adopted > 0 || skipped > 0)
+      PrintFormat("Telegram TC lifecycle marks: adopted %d for refresh under tag %s, left %d untouched",
          adopted,
          currentTag,
-         foreign);
+         skipped);
 }
 
-// Every tracked mark is only ever read for a ticket CollectPositionTickets returned,
-// and that function only returns positions PositionSelectByTicket accepts. Once the
-// position is gone the mark can never be consulted again, so removing it cannot lose
-// idempotency.
+// Reclamation is positive: a mark is deleted only when this EA instance wrote it in
+// this session and can see that its position is gone. It is never deleted because the
+// EA failed to prove it belonged to somebody else.
 //
-// That argument only holds within one account. Terminal global variables are shared
-// across accounts and position tickets are not, so a live position on account A reads
-// as absent while the terminal is on account B. The account tag is therefore rechecked
-// on every pass rather than only at rehydration: an account switch that somehow did not
-// reinitialise the EA would otherwise let B delete A's marks and leave A's open
-// positions unprotected against a duplicate close.
+// That matters because terminal global variables are shared across accounts while
+// position tickets are not, so a live position on account A reads as absent while the
+// terminal is on account B. Trying to detect that from the name would put the whole
+// safety argument on an account tag that is a lossy 64-to-32 fold, and on a hash that
+// no reader can verify. Requiring ownership instead makes cross-account deletion
+// impossible by construction: this EA is logged into one account and only ever writes
+// marks for that account, so anything it owns is its own.
+//
+// Within an account the old argument still carries the rest: a tracked mark is only
+// read for a ticket CollectPositionTickets returned, and that only returns positions
+// PositionSelectByTicket accepts, so once the position is gone the mark can never be
+// consulted again and removing it cannot lose idempotency.
 void ReclaimLifecycleMarks()
 {
    if(!TerminalInfoInteger(TERMINAL_CONNECTED))
       return;
-   uint currentTag = LifecycleAccountTag();
+   string identity = LifecycleAccountIdentity();
    datetime now = TimeCurrent();
    for(int index = 0; index < lifecycleMarkCount; index++)
    {
       if(!lifecycleMarks[index].active)
          continue;
-      if(lifecycleMarks[index].accountTag != currentTag)
-      {
-         // Not this account's mark. Drop the tracking, never the variable: only the
-         // account that owns it can tell whether its position is still open.
-         ReleaseLifecycleMarkSlot(index);
+
+      bool sameAccount = lifecycleMarks[index].identity == identity;
+      bool live = sameAccount && PositionSelectByTicket(lifecycleMarks[index].positionTicket);
+
+      // Refreshing only ever extends a mark's life, so it needs no account check. An
+      // owned mark is refreshed even while the terminal sits on another account,
+      // because this EA wrote that exact name and knows the position it guards.
+      // Only a rewrite the terminal confirmed may advance the clock: recording a
+      // refresh that did not happen would let the mark quietly expire.
+      if((lifecycleMarks[index].owned || live)
+         && now - lifecycleMarks[index].writtenAt >= LIFECYCLE_MARK_REFRESH_SECONDS
+         && GlobalVariableSet(lifecycleMarks[index].variable, (double)now) != 0)
+         lifecycleMarks[index].writtenAt = now;
+
+      // Everything below removes something. None of it may run against an account
+      // this entry was not registered under, and the entry is kept rather than
+      // released so returning to that account resumes exactly where it left off,
+      // with no reinitialisation required.
+      if(!sameAccount)
          continue;
-      }
-      if(PositionSelectByTicket(lifecycleMarks[index].positionTicket))
+      if(live)
       {
          lifecycleMarks[index].absentSince = 0;
-         // Only a confirmed rewrite may advance the clock. Recording a refresh that
-         // did not happen would let a mark guarding a live position quietly expire.
-         if(now - lifecycleMarks[index].writtenAt >= LIFECYCLE_MARK_REFRESH_SECONDS
-            && GlobalVariableSet(lifecycleMarks[index].variable, (double)now) != 0)
-            lifecycleMarks[index].writtenAt = now;
          continue;
       }
       // One absent reading is not proof. The position must stay absent for the
@@ -2180,7 +2222,12 @@ void ReclaimLifecycleMarks()
       if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)
          continue;
 
-      GlobalVariableDel(lifecycleMarks[index].variable);
+      // The whole safety argument reduces to this line. Only a mark this session
+      // wrote is deleted, so no name, tag or hash has to be trusted to decide whose
+      // a variable is. An adopted entry loses its tracking and nothing else, and the
+      // terminal's four-week expiry remains its owner's backstop.
+      if(lifecycleMarks[index].owned)
+         GlobalVariableDel(lifecycleMarks[index].variable);
       ReleaseLifecycleMarkSlot(index);
    }
 }

@@ -570,53 +570,98 @@ describe("MT5 Expert Advisor source", () => {
     expect("TelegramTC.lc.".length + 8 + 1 + 16 + 1 + 20).toBeLessThan(64);
   });
 
-  test("scopes every mark to the account that wrote it", () => {
+  test("deletes only marks this session wrote, never marks it merely failed to disown", () => {
     // Terminal global variables are shared across every account the terminal logs
-    // into; position tickets are not. Without this, account B sees A's still-open
-    // position as absent, deletes A's mark, and a later duplicate closes A's position
-    // a second time.
+    // into; position tickets are not. Account B therefore sees A's still-open position
+    // as absent. Detecting that from the name would rest the whole safety argument on
+    // a lossy tag, so deletion is gated on ownership instead: this EA is logged into
+    // one account and only writes marks for it, so anything it owns is its own.
+    expect(source).toContain("bool owned;");
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).toMatch(
+      /if\(lifecycleMarks\[index\]\.owned\)\s*\n\s*GlobalVariableDel\(lifecycleMarks\[index\]\.variable\);/,
+    );
+    // Exactly one delete site, and it is the guarded one.
+    expect(reclaim.match(/GlobalVariableDel/g)).toHaveLength(1);
+    // Only MarkLifecycleExecuted may claim ownership.
+    const mark =
+      source.match(
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(mark).toContain(
+      "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, writtenAt, true)",
+    );
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(rehydrate).toContain("RegisterLifecycleMark(name, identity, ticket, writtenAt, false)");
+    expect(rehydrate).not.toContain("GlobalVariableDel");
+    // Ownership ratchets up only, so an adopted entry this session writes to becomes
+    // deletable, and nothing can strip the right once granted.
+    const register =
+      source.match(
+        /void RegisterLifecycleMark\(string variable, string identity, ulong ticket, datetime writtenAt, bool owned\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(register).toContain(
+      "lifecycleMarks[index].owned = lifecycleMarks[index].owned || owned;",
+    );
+  });
+
+  test("identifies an account by more than its number and keeps state across a switch", () => {
+    // The same account number at two brokers is a real configuration, so a login-only
+    // identity collides deterministically rather than rarely.
+    const identity = source.match(/string LifecycleAccountIdentity\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(identity).toContain("AccountInfoInteger(ACCOUNT_LOGIN)");
+    expect(identity).toContain("AccountInfoString(ACCOUNT_SERVER)");
+    expect(identity).toContain("AccountInfoString(ACCOUNT_COMPANY)");
+    // The full identity, not the lossy fold, is what scopes reads.
     const variable =
       source.match(
         /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
-    // Scoped two independent ways: folded into the hash so a foreign name can never be
-    // computed, and carried as a tag so the sweep can recognise what is not its own.
     expect(variable).toContain(
-      'IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "|" + LifecycleCommandKey(command)',
+      'string scopedKey = LifecycleAccountIdentity() + "|" + LifecycleCommandKey(command);',
     );
-    expect(variable).toContain("LifecycleAccountTag()");
-    const tag = source.match(/uint LifecycleAccountTag\(\)[\s\S]*?\n}/)?.[0] ?? "";
-    expect(tag).toContain("AccountInfoInteger(ACCOUNT_LOGIN)");
-    expect(tag).toContain("(uint)((login ^ (login >> 32)) & 0xFFFFFFFF)");
-
-    // The sweep rechecks the account every pass, not only at rehydration, so a switch
-    // that did not reinitialise the EA still cannot delete another account's mark.
+    // ...and the full identity, compared exactly, is what gates removal.
     const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
-    expect(reclaim).toContain("uint currentTag = LifecycleAccountTag();");
-    expect(reclaim).toMatch(
-      /accountTag != currentTag[\s\S]{0,400}?ReleaseLifecycleMarkSlot\(index\);\s*\n\s*continue;/,
+    expect(reclaim).toContain("string identity = LifecycleAccountIdentity();");
+    expect(reclaim).toContain("bool sameAccount = lifecycleMarks[index].identity == identity;");
+    expect(reclaim).toMatch(/if\(!sameAccount\)\s*\n\s*continue;/);
+    // An off-account entry must be skipped, never released: rehydration only runs from
+    // OnInit, so releasing it would drop state nothing could restore without a reinit.
+    const offAccount = reclaim.slice(
+      reclaim.indexOf("if(!sameAccount)"),
+      reclaim.indexOf("if(live)"),
     );
-    // Releasing tracking must not delete the variable: only the owning account can
-    // tell whether its position is still open.
-    const foreignBranch =
-      reclaim.slice(
-        reclaim.indexOf("accountTag != currentTag"),
-        reclaim.indexOf("PositionSelectByTicket"),
-      ) ?? "";
-    expect(foreignBranch).not.toContain("GlobalVariableDel");
+    expect(offAccount).not.toContain("ReleaseLifecycleMarkSlot");
+    // An owned mark is still refreshed off-account, so a long switch cannot let a mark
+    // guarding a live position expire.
+    expect(reclaim).toMatch(
+      /if\(\(lifecycleMarks\[index\]\.owned \|\| live\)[\s\S]{0,200}?GlobalVariableSet/,
+    );
+  });
 
-    // Rehydration adopts only this account's marks and rebuilds from scratch.
+  test("refuses to adopt anything when the terminal has no account login yet", () => {
+    // A login of zero is not an account. Adopting against it would sweep up every mark
+    // written under the same blank identity.
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(rehydrate).toMatch(
+      /if\(AccountInfoInteger\(ACCOUNT_LOGIN\) == 0\)\s*\n\s*\{[\s\S]{0,220}?return;\s*\n\s*\}/,
+    );
+    // The guard must sit before any adoption work.
+    expect(rehydrate.indexOf("ACCOUNT_LOGIN) == 0")).toBeLessThan(
+      rehydrate.indexOf("GlobalVariablesTotal()"),
+    );
     expect(rehydrate).toContain("lifecycleMarkCount = 0;");
-    expect(rehydrate).toContain('string currentTag = StringFormat("%08X", LifecycleAccountTag());');
-    expect(rehydrate).toContain("if(tagText != currentTag)");
-    expect(rehydrate).not.toContain("GlobalVariableDel");
-    expect(source).toContain("uint accountTag;");
   });
 
   test("validates every segment of a mark name before adopting it", () => {
     // Anything may use the terminal's global variables. A name that merely starts with
-    // the reserved prefix is not one of ours and must not be adopted or swept.
+    // the reserved prefix is not one of ours and must not be adopted.
+    //
+    // These are source-text assertions, not behavioural ones: nothing here executes
+    // MQL5, so a parser that kept every asserted line and still misbehaved would pass.
+    // That is tolerable only because reclamation is gated on ownership rather than on
+    // this parser. A wrong answer here can leak a mark or skip a refresh; it cannot
+    // delete anything, because an adopted mark is never deletable.
     const parse =
       source.match(
         /bool ParseLifecycleMarkName\(string variable, string &accountTagText, ulong &ticket\)[\s\S]*?\n}\n/,
@@ -703,7 +748,7 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).not.toContain("LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS");
     // Rehydration must not pull them back in either.
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
-    expect(rehydrate).toMatch(/if\(ticket == 0\)\s*\n\s*continue;/);
+    expect(rehydrate).toContain("if(tagText != currentTag || ticket == 0)");
     // Every tracked entry therefore has a real ticket, so the sweep has no ticket-zero
     // branch left to get wrong.
     const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
@@ -721,7 +766,7 @@ describe("MT5 Expert Advisor source", () => {
     expect(mark).toMatch(/GlobalVariableSet\(variable[\s\S]*RegisterLifecycleMark\(variable/);
     const register =
       source.match(
-        /void RegisterLifecycleMark\(string variable, uint accountTag, ulong ticket, datetime writtenAt\)[\s\S]*?\n}\n/,
+        /void RegisterLifecycleMark\(string variable, string identity, ulong ticket, datetime writtenAt, bool owned\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(register).toContain("if(lifecycleMarkCount >= ArraySize(lifecycleMarks))");
     expect(register).toContain("is not tracked for reclamation");
@@ -740,6 +785,8 @@ describe("MT5 Expert Advisor source", () => {
     for (const cleared of [
       "active = false",
       'variable = ""',
+      "owned = false",
+      'identity = ""',
       "positionTicket = 0",
       "writtenAt = 0",
       "absentSince = 0",

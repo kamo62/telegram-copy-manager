@@ -19,21 +19,32 @@ while the new EA still reads the old names, prefer recompiling when the account 
   ticket `CollectPositionTickets` returned, and that function only returns positions the terminal
   can still select, so a mark for a closed position can never be consulted again. The five-minute
   window and a connection check keep a reconnect blip from reading as a closed position.
-- Marks are scoped to the account that wrote them. Terminal global variables are shared by every
-  account a terminal logs into, but position tickets are not, so without this a switch to a second
-  account read the first account's open positions as closed and deleted their marks: switching back
-  left live positions with no duplicate-close protection at all. The account login is now folded
-  into the hash, so a name computed on one account can never match a mark written on another, and
-  carried as a fixed-width tag, so the sweep can recognise what is not its own. The sweep rechecks
-  the tag on every pass rather than trusting reinitialisation, and a mark belonging to another
-  account is dropped from tracking but never deleted, because only its owner can tell whether its
-  position is still open. Those marks are picked up again when the terminal returns to that account,
-  and expire on the terminal's own schedule if it never does.
-- `CANCEL_PENDING` marks are no longer reclaimed on a timer. They carry no ticket to watch and there
-  is no age at which the EA can prove the server will not ask again, so any number would have been a
-  guess. They keep the pre-1.67 behaviour: the terminal expires them after four weeks without a
-  read, and a read renews that, so one still being consulted survives. This is the one category
-  still bounded by cancel volume rather than by live work, at one variable per cancel command.
+- Marks are scoped to the account that wrote them, and a mark is deleted only when this EA wrote it
+  in this session. Terminal global variables are shared by every account a terminal logs into, but
+  position tickets are not, so without this a switch to a second account read the first account's
+  open positions as closed and deleted their marks: switching back left live positions with no
+  duplicate-close protection at all. Reclamation is now positive. Rather than trying to prove a mark
+  belongs to somebody else and deleting whatever fails the test, the EA deletes only what it can
+  prove is its own, which makes cross-account deletion impossible by construction rather than
+  dependent on reading an account back out of a name. Marks left by an earlier session are still
+  adopted so their weekly refresh continues, but adoption grants the right to extend a mark's life
+  and never to end it.
+- An account is identified by login, server and company together. The same account number at two
+  brokers is a real configuration, so a login-only identity would have collided every time rather
+  than rarely. That identity scopes the hash, so a name computed on one account cannot match a mark
+  written on another, and every removal decision compares it exactly. A mark whose account is not
+  the current one is skipped and kept, not dropped, so returning to that account resumes where it
+  left off without needing a reinitialisation, and an owned mark keeps being refreshed even while
+  the terminal sits on another account.
+- Nothing is adopted when the terminal reports no account login yet, which would otherwise have
+  matched every mark written under the same blank identity.
+- `CANCEL_PENDING` marks are no longer reclaimed on a timer. They carry no ticket to watch, and a
+  held item can be requeued by an operator at any age carrying its original idempotency key, so
+  there is no age at which the EA can say the mark is finished with. They keep the pre-1.67
+  behaviour: the terminal expires them after four weeks without a read, and a read renews that, so
+  one still being consulted survives. This is the one category still bounded by cancel volume rather
+  than by live work, at one variable per cancel command. Putting a maximum age on requeue would
+  bound it properly, and that belongs in the app rather than the EA.
 - The mark name can no longer be truncated. MQL5 caps a global variable name at 63 characters and
   keeps only the first 63; the name was built by pasting the backend's idempotency key in plaintext
   and cutting the result to 63. Today's keys are 16 characters and cannot reach the cap, but a
