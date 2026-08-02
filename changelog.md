@@ -12,7 +12,7 @@ needs a recompile or reattach. Nothing in the deployment or environment changes.
   operator could replay a key at any age. That key is the name of the EA's duplicate guard. Past the
   guard's life the replay lands as a fresh command and the EA can close or cancel a second time.
   1.67.0 left this open on the EA side deliberately, noting that the bound belongs in the app.
-- The 21 days come from the EA rather than from a round number. MQL5 deletes a terminal global
+- The 21 days are derived from the EA. MQL5 deletes a terminal global
   variable four weeks after its last use, and a `CANCEL_PENDING` mark carries ticket 0, so the EA
   never tracks, refreshes or adopts it and its whole life is those 28 days. Subtracting one 7-day
   refresh cycle leaves 21 and gives the requeued command a week to reach a terminal that is off when
@@ -21,9 +21,9 @@ needs a recompile or reattach. Nothing in the deployment or environment changes.
   `CLOSE_TRADE` and `CLOSE_PARTIAL`. Stop management carries no mark and stays releasable at any
   age, as do app-managed virtual-TP closes, which carry no key of their own and get a fresh one on
   every requeue.
-- Age is measured from the queue row that minted the key, not from the held row. Requeue keeps the
-  key while creating a younger row, so measuring the held row would have let an operator walk a
-  command past the ceiling in a chain of shorter hops.
+- Age is measured from the queue row that minted the key. Requeue keeps the key while creating a
+  younger row, so measuring the held row would have let an operator walk a command past the ceiling
+  in a chain of shorter hops.
 - The refusal is a 409 naming the command type, the key's age and the limit, and it writes a
   `queue.requeue-refused` audit entry against the operator. Nothing is queued and the item stays
   `HELD`, so it can still be dismissed and reissued as a fresh command after reconciling the broker

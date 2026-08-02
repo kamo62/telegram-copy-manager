@@ -317,7 +317,7 @@ const MARK_GUARDED_COMMAND_TYPES = new Set<CommandType>([
 // a redelivered close running a second time. Once the variable is gone the refusal stops
 // happening, so the replay needs a ceiling on this side.
 //
-// Derived from the EA at v1.67.0, not picked as a round number:
+// The derivation, from the EA at v1.67.0:
 //   * MQL5 deletes a terminal global variable four weeks after its last use. 28 days is
 //     therefore the most any mark is worth on its own.
 //   * The EA rewrites ticket-scoped marks every LIFECYCLE_MARK_REFRESH_SECONDS (7 days) and
