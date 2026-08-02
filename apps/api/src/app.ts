@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import {
   type AccountSymbolMapping,
   buildExecutionCommand,
+  type CommandType,
   correlateMessages,
   createLogicalTradeFromSignal,
   createMessageFingerprint,
@@ -295,6 +296,45 @@ const EA_HEARTBEAT_SECONDS = 5;
 const EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS = 30;
 const GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS = 60 * 60;
 const EA_OFFLINE_RELEASE_MAX_AGE_SECONDS = 15 * 60;
+
+// The only command types the EA guards with a lifecycle mark. MarkLifecycleExecuted in
+// mt5/TelegramTC_EA.mq5 is reached from ExecuteCancelPending and from ClosePositionTicket,
+// and nowhere else, so MODIFY_SL, MODIFY_TP, MOVE_SL_TO_BE and TRAILING_STOP carry no mark
+// and execute on arrival however old their key is. Replaying a key for one of those changes
+// nothing at the EA, so the ceiling below must not touch them: stop management is safety
+// work and has to stay releasable at any age.
+const MARK_GUARDED_COMMAND_TYPES = new Set<CommandType>([
+  "CANCEL_PENDING",
+  "CLOSE_TRADE",
+  "CLOSE_PARTIAL",
+]);
+
+// How old the idempotency key a requeue would replay may be before the requeue is refused.
+//
+// requeueQueueItem mints a new queue row but keeps the payload's existing idempotencyKey, so
+// the EA sees the same key it saw the first time. The EA turns that key into a terminal
+// global variable and refuses any command whose variable is already set, which is what stops
+// a redelivered close running a second time. Once the variable is gone the refusal stops
+// happening, so the replay needs a ceiling on this side.
+//
+// Derived from the EA at v1.67.0, not picked as a round number:
+//   * MQL5 deletes a terminal global variable four weeks after its last use. 28 days is
+//     therefore the most any mark is worth on its own.
+//   * The EA rewrites ticket-scoped marks every LIFECYCLE_MARK_REFRESH_SECONDS (7 days) and
+//     re-adopts them after a restart, but only while it is running, only while its 512-slot
+//     registry has room for them, and only on the account that wrote them.
+//   * A CANCEL_PENDING mark carries ticket 0. MarkLifecycleExecuted returns before
+//     registering it, RehydrateLifecycleMarks skips it, and nothing ever rewrites it. Its
+//     whole life is those 28 days. That is the weakest class and it sets the budget.
+//
+// 28 days less one 7-day refresh cycle leaves 21. The slack has a job: a requeue only returns
+// the item to PENDING, and the EA collects it whenever it next polls, so a terminal that is
+// off for a week after the operator clicks still receives the command inside the mark's life.
+// The same slack absorbs clock skew between this host and the terminal's.
+//
+// If LIFECYCLE_MARK_REFRESH_SECONDS moves, move this with it. The rule is the MQL5 four-week
+// expiry minus one refresh cycle.
+const REQUEUE_REPLAYED_KEY_MAX_AGE_SECONDS = 21 * 24 * 60 * 60;
 
 type EvidenceTarget = {
   accountId: string;
@@ -5218,6 +5258,7 @@ class AppStore {
       .query(
         `SELECT queue_items.id, queue_items.account_id, queue_items.logical_trade_id,
                 queue_items.status, queue_items.held_reason, queue_items.payload_json, queue_items.parsed_signal_id,
+                queue_items.created_at,
                 parsed_signals.provider_id, parsed_signals.result_json
          FROM queue_items
          LEFT JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
@@ -5262,6 +5303,37 @@ class AppStore {
     ) {
       return this.requeueHeldLifecycle(id, row, mode, selectedLogicalTradeId);
     }
+    // Everything below replays the payload as it stands, idempotency key included. Past the
+    // ceiling the EA's duplicate guard may already be gone, so a replay would land as a fresh
+    // command and could close or cancel a second time. Refuse instead, loudly.
+    const replayedKeyAgeMs = this.replayedIdempotencyKeyAgeMs(originalPayload, row);
+    if (
+      replayedKeyAgeMs !== undefined &&
+      replayedKeyAgeMs > REQUEUE_REPLAYED_KEY_MAX_AGE_SECONDS * 1000
+    ) {
+      const ageDays = Math.floor(replayedKeyAgeMs / 86_400_000);
+      const limitDays = REQUEUE_REPLAYED_KEY_MAX_AGE_SECONDS / 86_400;
+      this.audit(
+        "queue.requeue-refused",
+        "warn",
+        "Requeue refused because the idempotency key it would replay is older than the EA's duplicate guard",
+        {
+          heldQueueItemId: id,
+          accountId: targetAccountId,
+          logicalTradeId: logicalTradeId || undefined,
+          commandType: originalPayload.commandType,
+          idempotencyKey: originalPayload.idempotencyKey,
+          keyAgeSeconds: Math.floor(replayedKeyAgeMs / 1000),
+          maxKeyAgeSeconds: REQUEUE_REPLAYED_KEY_MAX_AGE_SECONDS,
+          reason: "idempotency_key_past_ea_guard",
+        },
+        "operator",
+      );
+      return {
+        statusCode: 409 as const,
+        error: `Cannot requeue this ${originalPayload.commandType}: it would replay an idempotency key that is ${ageDays} days old, past the ${limitDays}-day window the EA's duplicate guard covers, so the EA could execute it a second time. Reconcile the broker position and issue a fresh command instead.`,
+      };
+    }
     const payload =
       mode === "market"
         ? { ...originalPayload, orderType: "MARKET" as const, entry: undefined }
@@ -5302,6 +5374,32 @@ class AppStore {
         droppedLifecycle,
       };
     });
+  }
+
+  // Age of the idempotency key a generic requeue would hand back to the EA, or undefined when
+  // the requeue replays no key that the EA could still be holding a mark for.
+  //
+  // buildExecutionCommand names every key after the queue row that minted it, and requeue keeps
+  // the key while minting a new row id, so the key still names the row it was born on and queue
+  // rows are never deleted. Measuring from that row rather than from the held row is what stops
+  // an operator walking a command past the ceiling in a chain of shorter hops: each hop makes a
+  // younger row, but the key, and therefore the mark, keeps its original age.
+  //
+  // The EA can only have written the mark once that row existed, so this age is at least the
+  // mark's age. Any error in it refuses early rather than late.
+  private replayedIdempotencyKeyAgeMs(payload: ExecutionQueueItem["payload"], heldRow: Row) {
+    // No key on the payload means toMt5LinePayload falls back to the new row's own id, which is
+    // brand new, so nothing is replayed. App-managed virtual-TP closes are built this way.
+    const key = payload.idempotencyKey;
+    if (!key) return undefined;
+    if (!MARK_GUARDED_COMMAND_TYPES.has(payload.commandType)) return undefined;
+    const origin = this.db
+      .query("SELECT created_at FROM queue_items WHERE id = ?")
+      .get(key) as Row | null;
+    const mintedAt = Date.parse(String(origin?.created_at ?? heldRow.created_at ?? ""));
+    // An unreadable timestamp must not block a close an operator genuinely needs.
+    if (!Number.isFinite(mintedAt)) return undefined;
+    return Date.now() - mintedAt;
   }
 
   private requeueHeldOpen(id: string, row: Row, payload: ExecutionQueueItem["payload"]) {

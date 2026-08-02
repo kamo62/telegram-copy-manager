@@ -603,6 +603,102 @@ async function sendGoldPendingSnapshot(
   });
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Runs `run` with the whole process clock moved forward, `new Date()` included. Moving
+// Date.now on its own is not enough: `new Date()` reads the host clock directly, and queue rows
+// are stamped with `new Date().toISOString()`, so a requeue would otherwise create a row that
+// claims to be exactly as old as the one it replaced and the age tests would prove nothing.
+async function atClockOffset<T>(offsetMs: number, run: () => Promise<T>): Promise<T> {
+  const realDate = globalThis.Date;
+  globalThis.Date = new Proxy(realDate, {
+    construct: (target, args) =>
+      Reflect.construct(target, args.length === 0 ? [realDate.now() + offsetMs] : args),
+    get: (target, property, receiver) =>
+      property === "now"
+        ? () => realDate.now() + offsetMs
+        : Reflect.get(target, property, receiver),
+  });
+  try {
+    return await run();
+  } finally {
+    globalThis.Date = realDate;
+  }
+}
+
+// The demo EURUSD open, filled and reported, with a provider close approved and leased by the
+// EA. Nothing reports back, which is the lost-delivery case: the EA may or may not have executed
+// it, and may or may not have written the lifecycle mark for the key returned here.
+async function leaseDemoProviderClose(app: ReturnType<typeof createApi>) {
+  const open = await json<{ item: { id: string } | null }>(
+    await app.request("/api/mt5/poll?accountId=mt5-100200300"),
+  );
+  await app.request("/api/mt5/report", {
+    method: "POST",
+    body: JSON.stringify({
+      accountId: "mt5-100200300",
+      queueItemId: open.item?.id,
+      status: "EXECUTED",
+      retcode: 10009,
+      retcodeExternal: 0,
+      brokerComment: "opened",
+      orderTicket: "70001",
+      positionTicket: "70001",
+      dealTicket: "70001",
+      requestedVolume: 0.03,
+      filledVolume: 0.03,
+      remainingVolume: 0.03,
+      requestedPrice: 1.085,
+      filledPrice: 1.085,
+    }),
+    headers: { "content-type": "application/json" },
+  });
+  const parsed = await json<{ parsedSignalId: string }>(
+    await app.request("/api/parser/parse", {
+      method: "POST",
+      body: JSON.stringify({ providerId: "provider-alpha", rawText: "Close EURUSD" }),
+      headers: { "content-type": "application/json" },
+    }),
+  );
+  const close = await json<{ queueItemId: string }>(
+    await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+  );
+  const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+  expect(work).toContain("commandType=CLOSE_TRADE");
+  expect(work).toContain(`queueItemId=${close.queueItemId}`);
+  // The key the EA would have named its lifecycle mark after.
+  expect(work).toContain(`idempotencyKey=${close.queueItemId}`);
+  return close.queueItemId;
+}
+
+// Asking for work again after the lease timeout is how production discovers an unreported lease,
+// so the hold is produced by the same code path an operator would have hit.
+async function expectHeldOnDeliveryUnknown(app: ReturnType<typeof createApi>, queueItemId: string) {
+  expect(await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text()).toContain(
+    "status=NO_WORK",
+  );
+  const signals = await json<{
+    queue: Array<{ id: string; status: string; heldReason?: string }>;
+  }>(await app.request("/api/signals"));
+  expect(signals.queue).toContainEqual(
+    expect.objectContaining({ id: queueItemId, status: "HELD", heldReason: "DELIVERY_UNKNOWN" }),
+  );
+}
+
+async function requeueOriginal(app: ReturnType<typeof createApi>, queueItemId: string) {
+  return app.request(`/api/queue-items/${queueItemId}/requeue`, {
+    method: "POST",
+    body: JSON.stringify({ mode: "original" }),
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function requeueRefusals(app: ReturnType<typeof createApi>) {
+  return json<{ logs: Array<{ eventType: string; level: string; data: Record<string, unknown> }> }>(
+    await app.request("/api/audit-logs?event=queue.requeue-refused"),
+  );
+}
+
 describe("Telegram TC API", () => {
   test("flags real remove vocabulary for the first-week drop audit", () => {
     const message = realFixtureMessages(["15496"])[0]!;
@@ -9738,6 +9834,178 @@ describe("Telegram TC API", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test("requeues a lost close inside the idempotency-key ceiling exactly as before", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const closeQueueItemId = await leaseDemoProviderClose(app);
+
+    await atClockOffset(20 * DAY_MS, async () => {
+      await expectHeldOnDeliveryUnknown(app, closeQueueItemId);
+      const response = await requeueOriginal(app, closeQueueItemId);
+      expect(response.status).toBe(200);
+      const body = await json<{ queueItemId: string }>(response);
+      expect(body).toMatchObject({
+        originQueueItemId: closeQueueItemId,
+        accountId: "mt5-100200300",
+        logicalTradeId: "trade-demo-1",
+        mode: "original",
+        status: "PENDING",
+      });
+
+      const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+      expect(work).toContain(`queueItemId=${body.queueItemId}`);
+      expect(work).toContain("commandType=CLOSE_TRADE");
+      // The whole point of the release: the EA is handed back the key it already knows, so a
+      // command it did execute is refused rather than run twice.
+      expect(work).toContain(`idempotencyKey=${closeQueueItemId}`);
+      expect((await requeueRefusals(app)).logs).toHaveLength(0);
+    });
+  });
+
+  test("refuses a requeue that would replay an idempotency key past the EA's duplicate guard", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const closeQueueItemId = await leaseDemoProviderClose(app);
+
+    await atClockOffset(22 * DAY_MS, async () => {
+      await expectHeldOnDeliveryUnknown(app, closeQueueItemId);
+      const response = await requeueOriginal(app, closeQueueItemId);
+      expect(response.status).toBe(409);
+      expect(await json<{ error: string }>(response)).toEqual({
+        error:
+          "Cannot requeue this CLOSE_TRADE: it would replay an idempotency key that is 22 days old, past the 21-day window the EA's duplicate guard covers, so the EA could execute it a second time. Reconcile the broker position and issue a fresh command instead.",
+      });
+
+      // The refusal changes nothing: the item is still there to dismiss, and nothing was queued.
+      const signals = await json<{ queue: Array<{ id: string; status: string }> }>(
+        await app.request("/api/signals"),
+      );
+      expect(signals.queue.filter((item) => item.status === "PENDING")).toEqual([]);
+      expect(signals.queue).toContainEqual(
+        expect.objectContaining({ id: closeQueueItemId, status: "HELD" }),
+      );
+      expect(
+        await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text(),
+      ).toContain("status=NO_WORK");
+    });
+  });
+
+  test("audits a requeue refused for replaying an expired idempotency key", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const closeQueueItemId = await leaseDemoProviderClose(app);
+
+    await atClockOffset(22 * DAY_MS, async () => {
+      await expectHeldOnDeliveryUnknown(app, closeQueueItemId);
+      expect((await requeueOriginal(app, closeQueueItemId)).status).toBe(409);
+
+      const audit = await requeueRefusals(app);
+      expect(audit.logs).toHaveLength(1);
+      expect(audit.logs[0]).toMatchObject({
+        eventType: "queue.requeue-refused",
+        level: "warn",
+        data: {
+          heldQueueItemId: closeQueueItemId,
+          accountId: "mt5-100200300",
+          logicalTradeId: "trade-demo-1",
+          commandType: "CLOSE_TRADE",
+          idempotencyKey: closeQueueItemId,
+          maxKeyAgeSeconds: 21 * 24 * 60 * 60,
+          reason: "idempotency_key_past_ea_guard",
+          actor: "operator",
+        },
+      });
+      expect(Number(audit.logs[0]?.data.keyAgeSeconds)).toBeGreaterThan(21 * 24 * 60 * 60);
+    });
+  });
+
+  test("keeps stop management releasable at any age because the EA marks no stop command", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    await app.request("/api/mt5/poll-line?accountId=mt5-100200300");
+    const parsed = await json<{ parsedSignalId: string }>(
+      await app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId: "provider-alpha", rawText: "Trail stop 50 pips" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const trail = await json<{ queueItemId: string }>(
+      await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, { method: "POST" }),
+    );
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+    expect(work).toContain("commandType=TRAILING_STOP");
+    expect(work).toContain(`queueItemId=${trail.queueItemId}`);
+
+    await atClockOffset(40 * DAY_MS, async () => {
+      await expectHeldOnDeliveryUnknown(app, trail.queueItemId);
+      const response = await requeueOriginal(app, trail.queueItemId);
+      expect(response.status).toBe(200);
+      expect((await requeueRefusals(app)).logs).toHaveLength(0);
+      expect(
+        await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text(),
+      ).toContain("commandType=TRAILING_STOP");
+    });
+  });
+
+  test("keeps an app-managed TP close releasable at any age because it replays no key", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+    await reportGoldFill(app, approved);
+    await sendGoldSnapshot(app, { shortId: approved.shortId, bid: 4546.2 });
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("commandType=CLOSE_PARTIAL");
+    expect(work).toContain("partialCloseKind=TP_LEG");
+
+    const queued = await json<{
+      queue: Array<{ id: string; status: string; payload: { commandType: string } }>;
+    }>(await app.request("/api/signals"));
+    const partial = queued.queue.find((item) => item.payload.commandType === "CLOSE_PARTIAL");
+    // The app builds this one by hand with no idempotencyKey, so the EA is given the row id and
+    // a requeue mints a fresh row and therefore a fresh key. Nothing is replayed and no ceiling
+    // applies, however old the trade is.
+    expect(partial?.payload).not.toHaveProperty("idempotencyKey");
+    expect(work).toContain(`idempotencyKey=${partial?.id}`);
+
+    await atClockOffset(40 * DAY_MS, async () => {
+      expect(
+        await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text(),
+      ).toContain("status=NO_WORK");
+      const response = await requeueOriginal(app, String(partial?.id));
+      expect(response.status).toBe(200);
+      expect((await requeueRefusals(app)).logs).toHaveLength(0);
+      const replay = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+      expect(replay).toContain("commandType=CLOSE_PARTIAL");
+      expect(replay).not.toContain(`idempotencyKey=${partial?.id}`);
+    });
+  });
+
+  test("cannot walk a close past the idempotency-key ceiling in shorter requeue hops", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const closeQueueItemId = await leaseDemoProviderClose(app);
+
+    const hop = await atClockOffset(10 * DAY_MS, async () => {
+      await expectHeldOnDeliveryUnknown(app, closeQueueItemId);
+      const response = await requeueOriginal(app, closeQueueItemId);
+      expect(response.status).toBe(200);
+      const body = await json<{ queueItemId: string }>(response);
+      // Leased and lost a second time, so the second hold is ten days younger than the first.
+      const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-100200300")).text();
+      expect(work).toContain(`queueItemId=${body.queueItemId}`);
+      expect(work).toContain(`idempotencyKey=${closeQueueItemId}`);
+      return body.queueItemId;
+    });
+
+    await atClockOffset(25 * DAY_MS, async () => {
+      await expectHeldOnDeliveryUnknown(app, hop);
+      const response = await requeueOriginal(app, hop);
+      expect(response.status).toBe(409);
+      // The row is fifteen days old. The key it would replay, and so the EA's mark, is
+      // twenty-five, and that is what the ceiling has to measure.
+      expect((await json<{ error: string }>(response)).error).toContain(
+        "an idempotency key that is 25 days old",
+      );
+      expect((await requeueRefusals(app)).logs).toHaveLength(1);
+    });
   });
 
   test("queues trailing-stop lifecycle commands with pips or points preserved for the EA", async () => {
