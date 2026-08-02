@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.68.0 - 2026-08-02 (Minor)
+
+Release impact: Minor because EA behaviour changed. This release requires an EA recompile and
+reattach. Build `mt5/TelegramTC_EA.mq5` from this commit in MetaEditor and reattach it to the
+chart. The command contract, capability strings, API shape, parser and database schema are all
+unchanged. Marks written by a 1.67 EA are still read, so unlike the 1.67 upgrade there is no
+window in which a position loses duplicate-close protection.
+
+- **EA recompile and reattach required.** Until a terminal is rebuilt it keeps the old behaviour.
+- A redelivered close could close a position twice after the broker replaced its ticket. MQL5
+  documents `POSITION_TICKET` as changeable "as a result of service operations on the server, for
+  example, when charging swaps with position re-opening", while `POSITION_IDENTIFIER` "does not
+  change throughout its life cycle". Idempotency marks were keyed by whichever ticket was current
+  when the mark was written. Finding the position again was never the problem, since matching runs
+  on symbol, magic and comment, but the successor carried a ticket no mark had been written
+  against, so `LifecycleAlreadyExecuted` answered false and the close ran a second time. On a
+  runner or any position that survives its first close this is a real duplicate close on a live
+  account. Marks are now keyed by the position identifier, which no server operation moves.
+- The identifier is read once, while the position is selected, and passed down. A full close
+  removes the position, so reading it at the point the mark is written would have read whatever
+  was selected last. One function derives the key from a selected position and both the write side
+  and the reclamation sweep use it, so the two cannot drift into keying by different numbers. A
+  position with no readable identifier falls back to its ticket, which is exactly the 1.67 key, so
+  the worst case is the behaviour this release replaces. The key is never zero: zero is the
+  command-scoped name `CANCEL_PENDING` writes, and a position landing on it would put every
+  position under one command on a single mark and silently skip all but the first close.
+- Reclamation no longer asks `PositionSelectByTicket` whether a position is still open, since that
+  lookup is precisely what a replaced ticket defeats and a live position would have read as gone.
+  The sweep collects the identifiers the terminal currently holds open, once per sweep rather than
+  once per mark, and checks membership. Only the removal arm reads it, so it is not collected while
+  disconnected. Position identifiers are issued per account and the same number is routinely live
+  on two accounts, so the account check short-circuits ahead of the membership test.
+- Marks written by a 1.67 EA keep working. A close redelivered after the upgrade reads the
+  identifier-keyed name first and, only when the two numbers differ, the same name keyed by the
+  position's current ticket. An identifier is the ticket of the order that opened the position, so
+  for every position the server never re-opened the 1.67 name and the 1.68 name are the same
+  string and the second read never happens. Where the server did replace a ticket, the second read
+  is what finds a mark 1.67 wrote afterwards. This is a second key under one name format, not a
+  third format, and it can be dropped once no mark a 1.67 EA wrote can still be live, four weeks
+  after the last terminal is rebuilt. The pre-1.67 plaintext name is still read as before.
+- Everything 1.67 established is unchanged. Deletion is still gated on this session having written
+  the mark, through the single `GlobalVariableDel`, and adoption still grants only the right to
+  extend a mark's life. No clock reaches the destructive path: the grace is still ten consecutive
+  absent sweeps. An account is still login, server and company compared exactly. The name is still
+  bounded at 60 characters against MQL5's 63, unchanged because the trailing number was a `ulong`
+  before and is a `ulong` now, so 14 prefix plus 8 tag plus 16 hash plus 2 separators plus at most
+  20 digits is the same worst case.
+
 ## 1.67.0 - 2026-08-02 (Minor)
 
 Release impact: Minor because EA behaviour changed. This release requires an EA recompile and
