@@ -73,8 +73,9 @@ function startCartesianLoop({
   // Read per frame off the live context, never captured: a chart switched to
   // `animate={false}` has to stop winking so the loop can park, and a duration
   // change has to land mid-entrance. Rebuilding the loop on a settings change
-  // would do the same job but would also reset the eased surfaces, the hover
-  // lift and the canvas backing store — a visible jolt for a prop tweak.
+  // would do the same job, but it would also reset the eased surfaces, the
+  // hover lift and the canvas backing store, which is a visible jolt for what
+  // is only a prop tweak.
   const animating = () => state.current.animate && !reduce;
   const current: Record<string, Surface> = {};
 

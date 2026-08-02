@@ -54,9 +54,10 @@ function flushFrame(now: number) {
 
 const paints = () => ops.filter((op) => op === "drawImage").length;
 
-/** Cells written into the offscreen fill on the current frame — everything
- * before the offscreen is blitted across. Zero means the cached fill was
- * re-blitted untouched; a small number means the reveal front cut it short. */
+/** Cells written into the offscreen fill on the current frame, meaning
+ * everything before the offscreen is blitted across. Zero means the cached fill
+ * was re-blitted untouched; a small number means the reveal front cut it
+ * short. */
 const filledCells = () => {
   const blit = ops.indexOf("drawImage");
   return (blit < 0 ? ops : ops.slice(0, blit)).filter((op) => op.startsWith("fillRect")).length;
@@ -112,9 +113,9 @@ const TWO_SERIES_ROWS = [
   { x: 2, alpha: 12, beta: 6 },
 ];
 
-// Same kind, same variant, same colour — everything the paint signature used to
-// cover. The only difference between these two configs is the key order, which
-// is what picks each layer's dither sparsity.
+// Same kind, same variant, same colour, which is everything the paint signature
+// used to cover. The only difference between these two configs is the key
+// order, which is what picks each layer's dither sparsity.
 const ALPHA_FIRST: ChartConfig = {
   alpha: { label: "Alpha", color: "grey" },
   beta: { label: "Beta", color: "grey" },
@@ -140,7 +141,7 @@ function Harness({
   height: number;
   data?: Record<string, unknown>[];
   color?: DitherColor;
-  /** Overrides the single-series default — used for the ordering tests. */
+  /** Overrides the single-series default. Used by the ordering tests. */
   config?: ChartConfig;
   animate?: boolean;
   animationDuration?: number;
@@ -331,7 +332,7 @@ describe("CartesianCanvas paint loop", () => {
     expect(pending()).toBe(0);
 
     // Nothing about the two series changes except their position in
-    // `configKeys` — same kind, same variant, same colour, same data, same
+    // `configKeys`: same kind, same variant, same colour, same data, same
     // targets. Only the per-series dither sparsity moves.
     ops = [];
     view.rerender(<Harness width={200} height={100} data={TWO_SERIES_ROWS} config={BETA_FIRST} />);
@@ -385,8 +386,9 @@ describe("CartesianCanvas paint loop", () => {
 
     // Animation switched on 100ms into what would be a 900ms entrance, with an
     // accent change alongside it so the fill is definitely re-rendered. The
-    // reveal front must not run again — only a revision bump replays it — so
-    // the repaint covers the full width instead of wiping back to one column.
+    // reveal front must not run again, because only a revision bump replays
+    // it, so the repaint covers the full width instead of wiping back to one
+    // column.
     ops = [];
     view.rerender(<Harness width={200} height={100} color="red" animate />);
     flushFrame(200);
@@ -412,8 +414,9 @@ describe("CartesianCanvas paint loop", () => {
       <Harness width={200} height={100} animate animationDuration={50} onReady={track} />,
     );
     flushFrame(300);
-    // 200ms into a 50ms entrance — the reveal is over and the DOM markers are
-    // released, instead of the loop holding the creation-time 10s duration.
+    // 200ms into a 50ms entrance, so the reveal is over and the DOM markers
+    // are released, instead of the loop holding the creation-time 10s
+    // duration.
     expect(entranceDone).toBe(true);
   });
 
