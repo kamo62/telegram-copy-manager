@@ -1,5 +1,66 @@
 # Handoff
 
+## START HERE — 2026-08-02
+
+**The most important open item is not code.** Alerting is unarmed. The live `app_settings` JSON has
+15 keys and not one alert key: no `alertBotToken`, no `alertChatId`, and `alertOnTelegramStall`,
+`alertOnEaOffline` and `alertOnExecFailed` all sit at their unset defaults. Verified against the live
+box on 2026-08-02.
+
+So every detection path built over the last weeks ends nowhere. `telegram.session.stalled` fires and
+notifies no one. The `execution-failed` alert notifies no one, which matters because the v1.65.8
+changelog names that alert as the remedy for a stranded `FAILED` leg. `/api/health` deliberately
+returns HTTP 200 on `degraded` so the container healthcheck cannot be a backstop either, which was
+the right call for its own purpose but leaves no second path. The dispatch code and stall detection
+already exist and are tested; this needs configuration, not development. It was raised as an owner
+action on 2026-07-26.
+
+Second instance of the same pattern: both live terminals still run **EA 1.60.0**. The v1.66.0
+trailing-slot reclamation and the pending v1.67.0 lifecycle-mark work protect nothing until someone
+recompiles in MetaEditor and reattaches. Prefer doing that while the account is flat.
+
+The blunt version: safety code is being shipped faster than it is being armed.
+
+**Highest residual risk**, following from the above: a silent ingestion stall while positions are
+open, unnoticed for hours. Reconnect-after-outage under teleproto is still unverified, there is no
+FloodWait or ban handling anywhere, and the failure mode of both is silent signal loss. A backlog
+drain recovers messages after reconnect, but a missed close or stop move during the stall is not
+recoverable afterwards.
+
+**Deployed.** `main` at v1.66.1, adapter reporting `teleproto`, 2/2 providers ready. Four deploys
+landed on 2026-08-02 in a Sunday window with markets closed and a flat book. The teleproto cutover
+succeeded, which was the one thing that could not be verified offline.
+
+**Merged since, not yet deployed and not requiring one:** adapter encapsulation and the
+`AccountHeader` determinism fix, both test-and-encapsulation only.
+
+## Lessons that generalise, 2026-08-02
+
+Three mechanisms were built and then deliberately not shipped this session. All three failed for
+reasons worth keeping, because the same reasoning will come up again.
+
+**Proof by absence does not hold in this codebase.** The per-provider ingestion latch assumed no
+latch entry means no outstanding request. The unproven-`HIT` reopen assumed no close command plus
+unchanged broker volume means no close happened. Neither inference survives, because identity and
+state are reconstructed from loosely matched snapshot rows held across awaits: snapshots carry no
+broker capture timestamp, the broker-record matcher validates neither symbol nor direction, and
+`broker_orders` has no deduplication. Prefer positive evidence. Treat "nothing recorded it" as
+unproven rather than false.
+
+**A timeout that does not cancel converts a hang into an unsequenced late write.** This appeared
+three times: `withTelegramRpcTimeout` on Telegram RPCs, the same helper on filesystem writes, and
+`AbortSignal` on `fsPromises.writeFile`. The third was measured, not assumed: a 64MB write aborted at
+20ms rejects with `AbortError` and still lands all 64MB. Where cancellation does not exist, contain
+instead: session writes now stage to a private per-write name and rename into place, so an abandoned
+write can only land somewhere nothing reads.
+
+**A tripwire must assert it can still see its subject before it asserts an absence.** The
+`grep -c testSeam` rule reported clean for weeks while the banned pattern sat in the file under a
+differently-cased name, because its pass condition was "no output", which is indistinguishable from
+looking in the wrong place. The first replacement guard had the identical defect: it counted the
+private fields it discovered and required eight of eleven, so a field regressing to `private` left it
+green. Both are now set-equality checks that fail in either direction.
+
 ## Milestone log — 2026-08-01
 
 ### Parallel-lane batch: seven of eight findings closed
