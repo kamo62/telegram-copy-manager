@@ -1,12 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { Logger, TelegramClient } from "teleproto";
+import { StringSession } from "teleproto/sessions";
 import {
   createTelegramAdapter,
-  GRAMJS_CLIENT_OPTIONS,
+  createTeleprotoClient,
+  TELEPROTO_CLIENT_OPTIONS,
   type TelegramCapturedMessage,
   telegramLogLevel,
 } from "./telegram";
 
-type GramjsAdapterTestSeam = {
+type TeleprotoAdapterTestSeam = {
   clients: Map<string, unknown>;
 };
 
@@ -24,12 +27,12 @@ async function* messagesWith(
   };
 }
 
-function gramjsAdapterWithReply(
+function teleprotoAdapterWithReply(
   replyToMsgId?: string | number | bigint,
   fwdFrom?: { fromId?: unknown; fromName?: string; date?: number },
 ) {
   const adapter = createTelegramAdapter("gramjs");
-  const seam = adapter as unknown as GramjsAdapterTestSeam;
+  const seam = adapter as unknown as TeleprotoAdapterTestSeam;
   seam.clients.set("session", {
     getDialogs: async () => [{ id: "dialog", entity: "dialog" }],
     iterMessages: () => messagesWith(replyToMsgId, fwdFrom),
@@ -37,9 +40,9 @@ function gramjsAdapterWithReply(
   return adapter;
 }
 
-describe("GramJS reply-link capture", () => {
+describe("teleproto reply-link capture", () => {
   test("captures replyToMessageId from the structured reply header", async () => {
-    const { messages } = await gramjsAdapterWithReply(7n).fetchRecentMessages(
+    const { messages } = await teleprotoAdapterWithReply(7n).fetchRecentMessages(
       "session",
       "dialog",
       1,
@@ -49,18 +52,22 @@ describe("GramJS reply-link capture", () => {
   });
 
   test("leaves replyToMessageId undefined when the reply header is absent", async () => {
-    const { messages } = await gramjsAdapterWithReply().fetchRecentMessages("session", "dialog", 1);
+    const { messages } = await teleprotoAdapterWithReply().fetchRecentMessages(
+      "session",
+      "dialog",
+      1,
+    );
 
     expect(messages[0]?.replyToMessageId).toBeUndefined();
   });
 
   test("round-trips forwarded metadata and leaves it null for ordinary messages", async () => {
-    const { messages: forwarded } = await gramjsAdapterWithReply(undefined, {
+    const { messages: forwarded } = await teleprotoAdapterWithReply(undefined, {
       fromId: { channelId: 991n },
       fromName: "VIP Gold",
       date: 1_784_344_000,
     }).fetchRecentMessages("session", "dialog", 1);
-    const { messages: ordinary } = await gramjsAdapterWithReply().fetchRecentMessages(
+    const { messages: ordinary } = await teleprotoAdapterWithReply().fetchRecentMessages(
       "session",
       "dialog",
       1,
@@ -75,6 +82,18 @@ describe("GramJS reply-link capture", () => {
   });
 });
 
+describe("mock Telegram adapter", () => {
+  test("keeps deterministic local dialogs and messages", async () => {
+    const adapter = createTelegramAdapter("mock");
+    const dialogs = await adapter.listDialogs("local");
+    const messages = await adapter.fetchRecentMessages("local", "dialog-alpha", 1);
+
+    expect(adapter.name).toBe("mock");
+    expect(dialogs).toHaveLength(3);
+    expect(messages.messages[0]?.rawText).toContain("BUY EURUSD");
+  });
+});
+
 function backlog(count: number) {
   const start = Date.parse("2026-07-01T00:00:00.000Z");
   return Array.from({ length: count }, (_, index) => {
@@ -83,10 +102,10 @@ function backlog(count: number) {
   });
 }
 
-function gramjsAdapterWithBacklog(messages: ReturnType<typeof backlog>) {
+function teleprotoAdapterWithBacklog(messages: ReturnType<typeof backlog>) {
   const calls: Array<{ limit: number; offsetDate?: number; offsetId?: number }> = [];
   const adapter = createTelegramAdapter("gramjs");
-  const seam = adapter as unknown as GramjsAdapterTestSeam;
+  const seam = adapter as unknown as TeleprotoAdapterTestSeam;
   seam.clients.set("session", {
     getDialogs: async () => [{ id: "dialog", entity: "dialog" }],
     iterMessages: (
@@ -111,9 +130,9 @@ function gramjsAdapterWithBacklog(messages: ReturnType<typeof backlog>) {
   return { adapter, calls };
 }
 
-describe("GramJS backlog pagination", () => {
+describe("teleproto backlog pagination", () => {
   test("drains a backlog larger than one page without duplicates", async () => {
-    const { adapter } = gramjsAdapterWithBacklog(backlog(130));
+    const { adapter } = teleprotoAdapterWithBacklog(backlog(130));
     const result = await adapter.fetchRecentMessages("session", "dialog", 50, {
       dateFrom: "2026-06-30T00:00:00.000Z",
     });
@@ -132,7 +151,7 @@ describe("GramJS backlog pagination", () => {
   });
 
   test("stops paginating once it reaches dateFrom", async () => {
-    const { adapter, calls } = gramjsAdapterWithBacklog(backlog(130));
+    const { adapter, calls } = teleprotoAdapterWithBacklog(backlog(130));
     const result = await adapter.fetchRecentMessages("session", "dialog", 50, {
       dateFrom: "2026-07-01T00:01:10.000Z",
     });
@@ -145,7 +164,7 @@ describe("GramJS backlog pagination", () => {
   });
 
   test("fetches exactly one page when dateFrom is undefined", async () => {
-    const { adapter, calls } = gramjsAdapterWithBacklog(backlog(130));
+    const { adapter, calls } = teleprotoAdapterWithBacklog(backlog(130));
     const result = await adapter.fetchRecentMessages("session", "dialog", 50);
 
     expect(result.messages.map((message) => message.telegramMessageId)).toEqual(
@@ -158,7 +177,7 @@ describe("GramJS backlog pagination", () => {
     const prior = process.env.TELEGRAM_FETCH_MAX_PAGES;
     process.env.TELEGRAM_FETCH_MAX_PAGES = "2";
     try {
-      const { adapter } = gramjsAdapterWithBacklog(backlog(130));
+      const { adapter } = teleprotoAdapterWithBacklog(backlog(130));
       const result = await adapter.fetchRecentMessages("session", "dialog", 50, {
         dateFrom: "2026-06-30T00:00:00.000Z",
       });
@@ -183,7 +202,7 @@ describe("GramJS backlog pagination", () => {
     // Before pagination it received its whole page; the caps exist to bound a
     // 2-second poll, so they must not silently truncate a caller that asked
     // for more than the poll's budget.
-    const { adapter } = gramjsAdapterWithBacklog(backlog(2_400));
+    const { adapter } = teleprotoAdapterWithBacklog(backlog(2_400));
     const result = await adapter.fetchRecentMessages("session", "dialog", 5_000, {
       dateFrom: "2026-06-01T00:00:00.000Z",
     });
@@ -200,7 +219,7 @@ describe("GramJS backlog pagination", () => {
     process.env.TELEGRAM_FETCH_MAX_PAGES = "2";
     try {
       const mediaOnly = backlog(130).map((message) => ({ ...message, message: "" }));
-      const { adapter } = gramjsAdapterWithBacklog(mediaOnly);
+      const { adapter } = teleprotoAdapterWithBacklog(mediaOnly);
       const result = await adapter.fetchRecentMessages("session", "dialog", 50, {
         dateFrom: "2026-06-30T00:00:00.000Z",
       });
@@ -219,7 +238,7 @@ describe("GramJS backlog pagination", () => {
   });
 
   test("returns a partial drain and resume cursor when its reply work exhausts the budget", async () => {
-    const { adapter } = gramjsAdapterWithBacklog(
+    const { adapter } = teleprotoAdapterWithBacklog(
       backlog(50).map((message) => ({
         ...message,
         getReplyMessage: async () => await new Promise((resolve) => setTimeout(resolve, 5)),
@@ -239,15 +258,69 @@ describe("GramJS backlog pagination", () => {
   });
 });
 
-describe("GramJS logging", () => {
-  test("defaults GramJS to error-only logging while accepting supported overrides", () => {
-    expect(String(GRAMJS_CLIENT_OPTIONS.baseLogger.logLevel)).toBe("error");
+describe("teleproto client compatibility", () => {
+  test("defaults teleproto to error-only logging while accepting supported overrides", () => {
+    expect(String(TELEPROTO_CLIENT_OPTIONS.baseLogger.logLevel)).toBe("error");
     expect(String(telegramLogLevel("warn"))).toBe("warn");
     expect(String(telegramLogLevel("invalid"))).toBe("error");
   });
 
-  test("passes the configured logger to every TelegramClient construction site", async () => {
+  test("matches teleproto Logger filtering semantics", () => {
+    const logger = new Logger(telegramLogLevel("error"));
+    expect(String(logger.logLevel)).toBe("error");
+    expect(logger.canSend(telegramLogLevel("error"))).toBe(true);
+    expect(logger.canSend(telegramLogLevel("warn"))).toBe(false);
+    expect(logger.canSend(telegramLogLevel("info"))).toBe(false);
+    expect(new Logger(telegramLogLevel("none")).canSend(telegramLogLevel("error"))).toBe(false);
+  });
+
+  test("passes the configured logger to the teleproto TelegramClient construction site", async () => {
     const source = await Bun.file(new URL("./telegram.ts", import.meta.url)).text();
-    expect(source.match(/new TelegramClient\([\s\S]*?GRAMJS_CLIENT_OPTIONS,/g)).toHaveLength(3);
+    expect(source.match(/new TelegramClient\([\s\S]*?TELEPROTO_CLIENT_OPTIONS,/g)).toHaveLength(1);
+  });
+
+  test("constructs a teleproto client under Bun without connecting", async () => {
+    const session = new StringSession("");
+    const client = await createTeleprotoClient(session, 12345, "test-api-hash");
+    const internals = client as unknown as {
+      _connectionRetries: number;
+      _reconnectRetries: number;
+      _log: Logger;
+      session: StringSession;
+    };
+
+    expect(client).toBeInstanceOf(TelegramClient);
+    expect(internals.session).toBe(session);
+    expect(internals._connectionRetries).toBe(Number.POSITIVE_INFINITY);
+    expect(internals._reconnectRetries).toBe(Number.POSITIVE_INFINITY);
+    expect(internals._log).toBeInstanceOf(Logger);
+    expect(String(internals._log.logLevel)).toBe("error");
+  });
+});
+
+describe("teleproto StringSession compatibility", () => {
+  test("loads a GramJS-format session and round-trips its connection fields", async () => {
+    const authKey = Buffer.from(Array.from({ length: 256 }, (_, index) => index));
+    const address = Buffer.from("149.154.167.50");
+    const addressLength = Buffer.alloc(2);
+    addressLength.writeInt16BE(address.length);
+    const port = Buffer.alloc(2);
+    port.writeInt16BE(443);
+    const sessionString = `1${Buffer.concat([
+      Buffer.from([2]),
+      addressLength,
+      address,
+      port,
+      authKey,
+    ]).toString("base64")}`;
+
+    const session = new StringSession(sessionString);
+    await session.load();
+
+    expect(session.dcId).toBe(2);
+    expect(session.serverAddress).toBe("149.154.167.50");
+    expect(session.port).toBe(443);
+    expect(session.authKey?.getKey()).toEqual(authKey);
+    expect(session.save()).toBe(sessionString);
   });
 });

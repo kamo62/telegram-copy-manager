@@ -1,5 +1,242 @@
 # Changelog
 
+## 1.65.8 - 2026-08-01 (Patch)
+
+Release impact: Patch. A dashboard rendering lifecycle fix plus one virtual-TP leg accounting
+correction. No API change, no database schema change, and no EA protocol change, so the EA stays on
+1.65.0 and no live terminal needs a recompile and reattach.
+
+- Recorded a broker-rejected take-profit close on the leg it targeted. A virtual-TP leg is marked
+  `HIT` the moment its close is queued and `CLOSED` only when the broker confirms the fill, so an
+  `Invalid volume` or `Market closed` rejection used to leave the leg sitting in `HIT` with its
+  volume still on the position. `HIT` is what the dashboard, an unnumbered provider "TP hit"
+  message, cancellation, readopt and startup recovery all read as already dealt with, so the app
+  was booking volume the broker had explicitly refused to take off. A rejection is direct evidence
+  the close did not happen, and the leg now reads `FAILED`, with a `virtual-tp.close-rejected`
+  audit entry naming the trade, leg and position ticket alongside the execution-failed alert the
+  report already dispatches. This corrects the record rather than the stranding: a `FAILED` leg is
+  skipped by the monitor exactly as a `HIT` one is, and is recovered only once the trade reaches
+  `OUT_OF_SYNC` or an operator readopts it. It is deliberately not reopened, because re-queueing
+  against a broker that has just refused would send a close per EA round trip. The "position gone"
+  rejection keeps its existing terminal handling.
+- Parked the chart paint loop when there is nothing to paint. `startCartesianLoop` called
+  `requestAnimationFrame(draw)` as the first statement of `draw`, ahead of the `if (!s.ready) return`
+  guard, so every mounted chart held a frame at the display refresh rate for its whole life whether or
+  not a pixel changed. The loop now schedules the next frame only while something is genuinely in
+  motion (the entrance reveal, a surface easing toward new data, the hover lift settling, winking
+  stars) and otherwise waits to be woken. Every other paint input reaches the canvas through a React
+  commit, and the commit effect that refreshes the loop's refs now also wakes it, so late readiness,
+  resize, data changes, accent changes, hover and selection all repaint as before. The account growth
+  chart passes `animate={false}`, so it now costs nothing once settled instead of burning a frame
+  budget continuously.
+- Repaint the dither fill when a series colour or kind changes. The paint signature only tracked the
+  stack type and area variant, so a settled chart that switched accent colour or swapped between area
+  and line kept the old fill. Previously masked by the loop repainting unconditionally.
+- Cancel the outstanding animation frame on teardown rather than a stale handle, and ignore wake
+  requests after the loop has stopped.
+- Bounded `GET /api/providers/:id/messages` with the same Telegram RPC timeout the ingestion loop
+  uses. It called `fetchRecentMessages` unwrapped, so against a wedged client the await never
+  settled: the request hung open indefinitely, its own error fallback never ran, and each operator
+  retry started another RPC. The timeout rejection lands in the existing `catch`, so the endpoint
+  degrades exactly as it already did on a fetch failure. Capture semantics, the backlog cursor and
+  `last_message_at` are untouched.
+- Closed the last two ways the parked loop could show stale pixels. The paint signature now carries
+  each series key, so reordering the chart config repaints: a layer's dither sparsity comes from its
+  position in the key list, and two series matching on kind, variant and colour used to produce a
+  byte-identical signature after a swap, leaving the cached fill painted in the old order. Animation
+  settings are also read per frame instead of being captured when the loop starts, so switching to
+  `animate={false}` stops the winking stars and lets the chart park, and a new `animationDuration`
+  lands mid-entrance. The entrance reveal stays pinned once it has finished, so turning animation
+  back on resumes the sparkle without re-wiping a revealed chart.
+
+## 1.65.7 - 2026-08-01 (Patch)
+
+Release impact: Patch. The Telegram client dependency moves to the maintained teleproto fork and
+`/api/health` gains a `degraded` status, both of which leave every consumer contract intact. No API
+removals, no database schema change, and critically no EA protocol change, so the EA stays on 1.65.0
+and no live terminal needs a recompile and reattach. Saved session values keep working.
+
+- Replaced GramJS with teleproto for the Telegram runtime, and externalized teleproto in the
+  production API bundle. `gram-js/gramjs` was archived on 2026-07-14 and `2.26.22` published
+  2025-02-12 is its final release, so the client we depended on will never see another Telegram
+  protocol update. Saved `StringSession` values load unchanged, verified against a session string
+  built from raw bytes rather than round-tripped through teleproto itself. Both `connectionRetries`
+  and `reconnectRetries` are now set explicitly to infinite so a future default change cannot
+  reintroduce the bounded-retry bug that previously caused silent live-signal loss.
+- Debounced missing pending-order cancellation from the first observed absence for each account and
+  broker order ticket. The in-memory clock resets when the order reappears and is cleared on fills,
+  cancellations, terminal trade states, and account deletion. The existing order-creation grace is
+  kept, and cancellation now requires continuous absence past `max(10 seconds, polling interval x 3)`.
+  Previously the grace measured age since order creation, so any order older than it was cancelled by
+  a single omitted snapshot. That is how a 35-hour-old limit order lost its stop management.
+- Rekeyed `reference_stop_actions` rows when a position ticket transition is accepted. Nine sites can
+  replace a matched ticket, and without rekeying a reference leg that had already fired left the
+  replacement ticket holding a less protective stop, permanently and silently.
+- Passed broker point metadata through reference-stop strategy resolution for default-distance TP
+  targets, including the post-close and runner `last-tp` paths. Instruments whose broker point
+  differs from the pip fallback, such as index CFDs, previously resolved those stops to roughly entry.
+- Made same-time stop ordering fall back to the logical trade direction when a payload omits it, so a
+  SELL tie can no longer execute protective-first.
+- Labelled the SQL migration file as a historical bootstrap snapshot; the runtime schema in
+  `apps/api/src/app.ts` remains the source of truth.
+
+## 1.65.6 - 2026-07-31 (Patch)
+
+Release impact: Patch. Restores stop management on a revived trade and adds snapshot liveness
+reporting. No API removals, no parser change, no EA protocol change.
+
+- A pending order that disappears from one snapshot has its trade cancelled and every unresolved
+  leg marked `SKIPPED`. When the broker later fills that order the trade revives to `OPEN`, but the
+  leg map only promoted `PLANNED` legs, so the skipped legs stayed skipped for the trade's whole
+  life. Every virtual-TP gate keys on a leg being `OPEN`, so the evaluator ran on every snapshot,
+  wrote its watermark, and silently discarded the legs. A live gold trade crossed its break-even
+  trigger by 7 points with the stop never moving. Legs skipped by a cancellation now reopen when a
+  real open deal proves the cancellation wrong.
+- Added `lastSnapshotReceivedAt` and `snapshotAgeSeconds` per account on `GET /api/mt5/accounts`.
+  `mt5_snapshots.updated_at` has been a structural-change watermark since v1.52.1 and stops moving
+  while the book is idle, which is not a liveness signal. The new fields are in-memory only and add
+  no write to the snapshot path.
+
+The `/api/health` Telegram readiness contract is built: enabled providers define expected ingestion,
+status reads `degraded` when any expected provider is not ready, HTTP stays 200, and the `telegram`
+object reports `expectedProviders`, `readyProviders`, `unreadyProviders`, and `stalledProviders`.
+
+## 1.65.5 - 2026-07-31 (Patch)
+
+Release impact: Patch because this hardens the existing virtual-TP stop workflow without changing
+the API or EA protocol. The SQLite action table is additive and created automatically on startup.
+
+- Added durable per-leg reference-stop actions. The queue insert and leg `HIT` transition now commit
+  together, and live snapshots repair an `EXECUTED` command whose stop is absent or replay the same
+  delivery-unknown `HELD` or stale `LEASED` command.
+- Persisted each trade's most favorable observed quote so a sampled crossing survives a crash or
+  restart. A remembered crossing waits until the desired stop is valid relative to the current bid or
+  ask before it queues work.
+- Made every virtual-TP fixed-stop path compare against the live broker stop and active stop work for
+  the same position ticket. MT5 `sl = 0` remains an absent stop for BUY and SELL positions.
+- Coalesced provider full-TP reference actions at the most protective stop, preserved unresolved
+  reference legs in every status, selected only the original `OPEN_TRADE` plan, and ordered
+  same-time stop work so the most protective command executes last.
+- Made `set-sl-to-tp` resolve referenced targets derived from default distances as well as explicit
+  Telegram prices, so those stop strategies no longer remain permanently uncomputable.
+- Added restart compatibility for v1.65.4 trades whose reference legs were already `HIT` before the
+  durable action table existed.
+- Restricted the already-satisfied stop skip to app-generated strategies. A provider or operator
+  `MODIFY_SL` can deliberately widen a stop to give a trade room, and the skip was swallowing those
+  and recording them as executed without ever sending them to the EA.
+- Recorded a provider-announced take-profit hit on the trade's favorable-price watermark when the
+  desired stop cannot be placed yet. The announcement is durable evidence that the target was
+  reached, and discarding it meant break-even was never applied after a crossing seen only while the
+  app was down.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
+## 1.65.4 - 2026-07-31 (Patch)
+
+Release impact: Patch because this restores intended stop-management behaviour without changing API,
+parser, database, or EA contracts. `MODIFY_SL` is an existing command the EA already handles.
+
+- A take-profit leg allocated 0 percent now applies its own stop strategy when price reaches its
+  target, without closing any volume. This is how break-even is configured when the operator does not
+  want to give up a partial at TP1, and the virtual-TP monitor was skipping those legs entirely, so
+  the stop stayed at the provider's original level for the life of the trade.
+- Crossed reference legs are resolved as one batch before any volume-closing leg, so a price gap
+  through several of them queues a single stop modification at the most protective resulting level.
+  The queue is read in `created_at` order with no tiebreaker, so two commands in the same millisecond
+  could otherwise have executed worst-last and left a less protective stop on a live position.
+- A reference strategy is dropped when it would not improve on the stop the broker already reports,
+  so a late or out-of-order leg can no longer widen risk on an open position.
+- A reference leg is marked `HIT` only once its strategy was queued, was already satisfied, or is a
+  deliberate no-change. A leg whose stop price is not yet computable, such as a market entry with no
+  fill price recorded, stays open and is retried on the next snapshot instead of being consumed.
+- A provider-announced take-profit hit now also applies a reference leg's stop strategy. Marking the
+  leg hit had taken it out of the monitor's reach, so for providers that post "TP1 hit" the
+  announcement silently consumed the only trigger break-even had.
+- Runner hand-off no longer waits for reference legs to close, which they never do, and a late partial
+  opening report no longer reopens a reference leg that has already fired.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
+## 1.65.3 - 2026-07-30 (Patch)
+
+Release impact: Patch because this improves operator feedback and corrects reconciliation styling
+without changing API, execution, parser, database, or EA contracts.
+
+- Replaced the bright dashed out-of-sync resolution border with the standard card divider.
+- Added an explicit disabled `Dismissing…` state while bulk held-signal dismissal is completing.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
+## 1.65.2 - 2026-07-30 (Patch)
+
+Release impact: Patch because this corrects table density and clipping without changing API,
+execution, parser, database, or EA contracts.
+
+- Reduced shared data-table horizontal padding and aligned row headings to the 12px table scale so
+  dense provider and performance columns use the available desktop width.
+- Corrected the performance attribution table wrapper sizing so its 16px side margins no longer
+  push the rightmost realised P/L column behind the clipped panel edge.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
+## 1.65.1 - 2026-07-29 (Patch)
+
+Release impact: Patch because this corrects responsive presentation and removes redundant provider
+summary content without changing API, execution, parser, database, or EA contracts.
+
+- Reflowed held-signal rows into compact two-column cards on narrow screens, hid lifecycle release
+  buttons until a target trade is selected, and changed machine-style review reasons into readable
+  supporting text.
+- Kept the compact Symbol Mapping table inside the viewport by prioritising provider symbol, broker
+  symbol, status, and actions on narrow screens.
+- Removed the duplicate provider-health card strip from the all-account Providers page while
+  retaining health cards in account-specific Provider views.
+- Left EA source metadata at 1.65.0 because this patch does not change EA behaviour or protocol.
+
+## 1.65.0 - 2026-07-29 (Minor)
+
+Release impact: Minor because this adds a backward-compatible bulk review workflow while keeping
+the existing API, execution, parser, database, and EA contracts unchanged.
+
+- Added a confirmed Dismiss all action that uses the existing audited per-signal dismissal path and
+  reports partial failures instead of hiding them.
+- Made top-level Logs a standalone review view and condensed the held-signal table from ten columns
+  to six so row actions stay visible on desktop.
+- Replaced raw chart epochs and repeated day-only ticks with bounded date-and-time labels, and fixed
+  provider action cells to use theme tokens instead of a hard-coded dark fallback.
+- Kept the EA source version metadata aligned at 1.65.0; no EA behavior or protocol changed.
+
+## 1.64.5 - 2026-07-29 (Patch)
+
+Release impact: Patch because this corrects route presentation without changing API, execution,
+parser, database, or EA contracts.
+
+- Made top-level Providers and Symbols standalone Setup views without the unrelated dashboard tab
+  strip or operational alert banner.
+- Preserved account workspace navigation on account-specific Provider routes.
+
+## 1.64.4 - 2026-07-29 (Patch)
+
+Release impact: Patch because this removes redundant presentation and standardises existing controls
+without changing API, execution, parser, database, or EA contracts.
+
+- Removed the repeated account summary from secondary routes so Providers, Performance, Guardian,
+  Logs, and Symbols begin with their actual content.
+- Moved provider export beside its explanatory copy and flattened provider monitoring and Telegram
+  setup status into compact rows instead of one-purpose card sections.
+- Standardised segmented controls, compacted the statistics toolbar, simplified Symbol Mapping
+  framing, and replaced the glowing growth chart with a shorter monochrome plot.
+
+## 1.64.3 - 2026-07-29 (Patch)
+
+Release impact: Patch because this reduces presentation density and redundant framing without
+changing API, execution, parser, database, or EA contracts.
+
+- Compacted the shared account summary and workspace spacing so secondary-route content sits above
+  the fold on full-screen displays.
+- Removed redundant Settings, Providers, and Telegram panel headers and flattened nested page
+  shells while preserving their existing controls and accessible labels.
+- Reduced empty-state and panel padding, aligned Settings section icons with their headings, and
+  restored a single-column Settings layout on compact screens.
+- Shifted light mode to a warmer neutral canvas with quieter shadows while preserving the requested
+  SF Pro type, text hierarchy, icon sizes, and radii.
+
 ## 1.64.2 - 2026-07-29 (Patch)
 
 Release impact: Patch because this standardises presentation and controls without changing API,

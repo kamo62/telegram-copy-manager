@@ -1,6 +1,6 @@
 {
   "name": "telegram-tc",
-  "version": "1.64.2",
+  "version": "1.65.8",
   "license": "SEE LICENSE IN LICENSE",
   "private": true,
   "type": "module",
@@ -18,7 +18,7 @@
     "lint": "bun scripts/check-css-duplicates.ts && biome check .",
     "format": "biome check --write .",
     "build": "bun run build:api && bun run build:web",
-    "build:api": "bun build apps/api/src/server.ts --target=bun --outdir dist/api --external telegram --external telegram/sessions --external websocket --external bufferutil --external utf-8-validate",
+    "build:api": "bun build apps/api/src/server.ts --target=bun --outdir dist/api --external teleproto --external teleproto/sessions --external websocket --external bufferutil --external utf-8-validate",
     "build:web": "bun run --cwd apps/web build",
     "docker:build": "docker build -t telegram-tc:local .",
     "deploy": "bash scripts/deploy.sh",
@@ -40,7 +40,7 @@
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-router-dom": "^7.15.1",
-    "telegram": "^2.26.22"
+    "teleproto": "^1.228.4"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.9",

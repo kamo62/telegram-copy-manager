@@ -1,7 +1,6 @@
 import { Server } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { type NavigateOptions, type To, useLocation, useNavigate } from "react-router-dom";
-import { AccountHeader, type AccountHeaderData } from "./components/AccountHeader";
 import {
   AlertsBanner,
   type OperationalAlert,
@@ -49,7 +48,6 @@ import {
   type HeldRequeueMode,
   type TradeResolutionAction,
 } from "./lib/api";
-import { downsample } from "./lib/downsample";
 import type { ExposurePosition } from "./lib/exposure";
 import { setSyncStatus } from "./lib/syncStatus";
 import { EquityGuardianPage } from "./pages/EquityGuardianPage";
@@ -524,6 +522,9 @@ function parseRoute(pathname: string): RouteState {
   if (seg[0] === "telegram") return { view: "telegram", accountId: null, tab: "performance" };
   if (seg[0] === "linked-accounts") return { view: "mt5", accountId: null, tab: "performance" };
   if (seg[0] === "settings") return { view: "settings", accountId: null, tab: "performance" };
+  if (seg[0] === "providers") return { view: "providers", accountId: null, tab: "providers" };
+  if (seg[0] === "symbols") return { view: "mapping", accountId: null, tab: "symbols" };
+  if (seg[0] === "logs") return { view: "parser", accountId: null, tab: "logs" };
   if (seg[0] === "accounts" && seg[1]) {
     const requestedTab =
       seg[2] && (TAB_IDS as string[]).includes(seg[2]) ? (seg[2] as TabId) : "performance";
@@ -1085,157 +1086,11 @@ export function App({
     snapshot.accountProviderLinks,
   ]);
 
-  const accountHeaderData = useMemo<AccountHeaderData>(() => {
-    const accounts = snapshot.mt5Accounts;
-    const focusedPerf = focusedAccount
-      ? snapshot.accountPerformanceByAccount?.[focusedAccount.id]
-      : undefined;
-    const perf = focusedPerf ?? snapshot.accountPerformance;
-    const onlineCount = accounts.filter((a) => a.heartbeatStatus === "online").length;
-    const performanceAccount =
-      (perf?.accountId ? accounts.find((account) => account.id === perf.accountId) : undefined) ??
-      focusedAccount ??
-      accounts[0];
-    const focusedPerformanceMatches = Boolean(
-      focusedAccount && perf?.accountId === focusedAccount.id,
-    );
-    const usePerformanceSeries = !focusedAccount || focusedPerformanceMatches;
-    const performanceIsLive = focusedAccount
-      ? focusedAccount.heartbeatStatus === "online"
-      : perf?.heartbeatStatus
-        ? perf.heartbeatStatus === "online"
-        : !performanceAccount || performanceAccount.heartbeatStatus === "online";
-    const headerCurrency = focusedAccount?.currency ?? perf?.currency ?? "$";
-    const normalizeAccountCurrency = (currency?: string) => {
-      const normalized = currency?.trim().toUpperCase();
-      if (normalized === "$") return "USD";
-      if (normalized === "R") return "ZAR";
-      return normalized || "USD";
-    };
-    const nativeCurrencies = new Set(
-      accounts.map((account) => normalizeAccountCurrency(account.currency)),
-    );
-    const useNativeCurrencyGroups = !focusedAccount && nativeCurrencies.size > 1;
-    const sumComplete = (values: Array<number | null | undefined>) =>
-      values.length > 0 && values.every((value): value is number => typeof value === "number")
-        ? values.reduce((total, value) => total + value, 0)
-        : null;
-    const nativeCurrencyGroups = useNativeCurrencyGroups
-      ? [...nativeCurrencies].sort().map((currency) => {
-          const currencyAccounts = accounts.filter(
-            (account) => normalizeAccountCurrency(account.currency) === currency,
-          );
-          const currencyPerformance = currencyAccounts.map(
-            (account) => snapshot.accountPerformanceByAccount?.[account.id],
-          );
-          return {
-            currency,
-            accountCount: currencyAccounts.length,
-            balance: sumComplete(currencyAccounts.map((account) => account.balance)),
-            equity: sumComplete(currencyAccounts.map((account) => account.equity)),
-            totalProfit: sumComplete(currencyPerformance.map((entry) => entry?.totalProfit)),
-            today: sumComplete(currencyPerformance.map((entry) => entry?.today)),
-          };
-        })
-      : undefined;
-
-    let platform = "—";
-    let broker = "—";
-    let accountType: "DEMO" | "LIVE" | "—" = "—";
-    let eaActive = false;
-    let expertAdvisorVersion = "Idle";
-
-    if (focusedAccount) {
-      platform = "MT5";
-      broker = focusedAccount.server.split("-")[0] || focusedAccount.server;
-      accountType = focusedAccount.server.toLowerCase().includes("demo") ? "DEMO" : "LIVE";
-      eaActive = focusedAccount.heartbeatStatus === "online";
-      expertAdvisorVersion = eaActive ? "Active" : "Idle";
-    } else if (accounts.length > 0) {
-      platform = `MT5 · ${accounts.length} account${accounts.length === 1 ? "" : "s"}`;
-      broker = `${onlineCount} of ${accounts.length} online`;
-      const allDemo = accounts.every((a) => a.server.toLowerCase().includes("demo"));
-      const allLive = accounts.every((a) => !a.server.toLowerCase().includes("demo"));
-      accountType = allDemo ? "DEMO" : allLive ? "LIVE" : "—";
-      eaActive = onlineCount > 0;
-      expertAdvisorVersion =
-        onlineCount === accounts.length ? "All active" : onlineCount === 0 ? "Idle" : "Mixed";
-    }
-
-    // Derive sparkline series from the equity curve so each KPI card shows
-    // a representative trend. Balance/Equity track equity itself; the P/L
-    // cards track cumulative profit (equity − initialBalance) over the
-    // relevant window. Today/Week/Month slice the last N points as a cheap
-    // approximation — exact per-window aggregation would need a separate
-    // backend roll-up and isn't worth the round-trip for a 28px chart.
-    const equityPoints = usePerformanceSeries ? (perf?.equityCurve ?? []) : [];
-    const fullEquitySeries = equityPoints.map((point) => point.equity);
-    const equitySeries = downsample(fullEquitySeries, 96);
-    const initialBalance = perf?.initialBalance ?? null;
-    const fullProfitSeries =
-      initialBalance !== null && fullEquitySeries.length > 0
-        ? fullEquitySeries.map((value) => value - initialBalance)
-        : [];
-    const profitSeries = downsample(fullProfitSeries, 96);
-    const tail = (arr: number[], count: number) =>
-      arr.length > count ? arr.slice(arr.length - count) : arr;
-    const series: AccountHeaderData["series"] = {
-      balance: equitySeries,
-      equity: equitySeries,
-      totalProfit: profitSeries,
-      today: tail(fullProfitSeries, 12),
-      thisWeek: tail(fullProfitSeries, 24),
-      thisMonth: tail(fullProfitSeries, 48),
-    };
-
-    return {
-      accountId: focusedAccount?.id,
-      accountLabel: focusedAccount
-        ? focusedAccount.nickname || focusedAccount.accountNumber || focusedAccount.id
-        : undefined,
-      accountNickname: focusedAccount?.nickname ?? null,
-      heartbeatStatus: focusedAccount?.heartbeatStatus ?? perf?.heartbeatStatus,
-      lastHeartbeatAt: focusedAccount?.lastHeartbeatAt ?? perf?.lastHeartbeatAt,
-      connectedPlatform: {
-        platform,
-        broker,
-        accountType,
-        expertAdvisorVersion,
-        eaActive,
-      },
-      kpis: {
-        balance: focusedAccount ? (focusedAccount.balance ?? null) : (perf?.currentBalance ?? null),
-        equity: focusedAccount ? (focusedAccount.equity ?? null) : (perf?.currentEquity ?? null),
-        totalProfit: {
-          amount: focusedAccount
-            ? usePerformanceSeries
-              ? (perf?.totalProfit ?? null)
-              : null
-            : performanceIsLive
-              ? (perf?.totalProfit ?? null)
-              : null,
-          deltaPercent: null,
-        },
-        today: { amount: usePerformanceSeries ? (perf?.today ?? null) : null, deltaPercent: null },
-        thisWeek: {
-          amount: usePerformanceSeries ? (perf?.thisWeek ?? null) : null,
-          deltaPercent: null,
-        },
-        thisMonth: {
-          amount: usePerformanceSeries ? (perf?.thisMonth ?? null) : null,
-          deltaPercent: null,
-        },
-      },
-      series,
-      nativeCurrencyGroups,
-      currency: headerCurrency,
-    };
-  }, [
-    focusedAccount,
-    snapshot.accountPerformance,
-    snapshot.accountPerformanceByAccount,
-    snapshot.mt5Accounts,
-  ]);
+  const performanceCurrency = focusedAccount
+    ? (focusedAccount.currency ??
+      snapshot.accountPerformanceByAccount?.[focusedAccount.id]?.currency ??
+      snapshot.accountPerformance?.currency)
+    : snapshot.accountPerformance?.currency;
 
   const sidebarAccounts = useMemo(
     () =>
@@ -1689,17 +1544,6 @@ export function App({
     await refreshDashboard();
   }
 
-  async function renameAccount(accountId: string, nickname: string) {
-    try {
-      await apiPatch(`/api/mt5/accounts/${accountId}`, { nickname });
-      toast.success(nickname ? "Account name saved" : "Account name cleared");
-      await refreshDashboard();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to save account name");
-      throw error;
-    }
-  }
-
   async function saveProviderSettings(
     provider: ProviderRowData,
     payload: ProviderConfigSubmission,
@@ -2059,6 +1903,19 @@ export function App({
     }
   }
 
+  async function dismissAllHeldItems(items: HeldQueueItem[]) {
+    const results = await Promise.allSettled(
+      items.map((item) => apiPost(`/api/queue-items/${item.id}/dismiss`)),
+    );
+    const failed = results.filter((result) => result.status === "rejected").length;
+    await Promise.all([refreshHeldItems(), refreshDashboard()]);
+    if (failed > 0) {
+      toast.error(`Dismissed ${items.length - failed} signals; ${failed} failed`);
+      return;
+    }
+    toast.success(`Dismissed ${items.length} signals`);
+  }
+
   async function toggleAccountProviderLink(
     accountId: string,
     providerId: string,
@@ -2186,11 +2043,11 @@ export function App({
   const slotFocused = showDashboard && Boolean(focusedSlot);
   const dashTab = (id: TabId) => showDashboard && !slotFocused && activeTab === id;
   const showTelegram = activeView === "telegram";
-  const showProviders = dashTab("providers");
-  const showParser = dashTab("logs");
+  const showProviders = activeView === "providers" || dashTab("providers");
+  const showParser = activeView === "parser" || dashTab("logs");
   const showTrades = dashTab("history");
   const showMt5 = activeView === "mt5";
-  const showMapping = dashTab("symbols");
+  const showMapping = activeView === "mapping" || dashTab("symbols");
   const showSettings = activeView === "settings";
   const showEquityGuardian = dashTab("equity-guardian");
   const showPerformance = dashTab("performance");
@@ -2314,7 +2171,7 @@ export function App({
           tabIndex={-1}
         >
           <WorkspaceHeading {...workspaceHeading} />
-          {!showSummary ? (
+          {showDashboard && !showSummary ? (
             <AlertsBanner
               alerts={snapshot.alerts ?? []}
               onMapUnmapped={openMappingFromAlert}
@@ -2326,23 +2183,6 @@ export function App({
             <PendingSlotView slot={focusedSlot} />
           ) : showDashboard ? (
             <>
-              {!showSummary ? (
-                <AccountHeader
-                  className="account-context-secondary"
-                  data={accountHeaderData}
-                  key={focusedAccount?.id ?? "aggregate"}
-                  loading={initialLoading}
-                  onManageLink={() => navigate("/linked-accounts")}
-                  onRemoveAccount={
-                    focusedAccount ? () => void deleteAccount(focusedAccount) : undefined
-                  }
-                  onRename={
-                    focusedAccount
-                      ? (nickname) => renameAccount(focusedAccount.id, nickname)
-                      : undefined
-                  }
-                />
-              ) : null}
               {snapshot.providers.length === 0 &&
               snapshot.mt5Accounts.length === 0 &&
               sidebarPendingSlots.length === 0 ? (
@@ -2431,7 +2271,7 @@ export function App({
             {showPerformance ? (
               <PerformancePage
                 accounts={focusedAccount ? [focusedAccount] : snapshot.mt5Accounts}
-                currency={accountHeaderData.currency}
+                currency={performanceCurrency}
                 data={growthData}
                 loading={initialLoading}
                 providers={snapshot.providers.map((provider) => ({
@@ -2540,6 +2380,7 @@ export function App({
                   fixtureStatus={fixtureStatus}
                   heldItems={heldItems}
                   onHeldDismiss={dismissHeldItem}
+                  onHeldDismissAll={dismissAllHeldItems}
                   onHeldRequeue={requeueHeldItem}
                 />
               ) : null}

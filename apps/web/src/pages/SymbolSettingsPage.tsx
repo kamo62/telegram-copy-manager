@@ -87,7 +87,7 @@ export function SymbolSettingsPage({
             Add mapping
           </button>
         }
-        className="wide-panel"
+        className="wide-panel symbol-mappings-panel"
         title="Symbol Mapping"
       >
         <div className="panel-toolbar">

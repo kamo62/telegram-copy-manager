@@ -211,6 +211,13 @@ interface AppSettings {
   alertOnTelegramStall: boolean;
 }
 
+type PendingOpenMissingState = {
+  accountId: string;
+  tradeId: string;
+  orderTicket: string;
+  missingSince: number;
+};
+
 interface AccountSlotInput {
   name: string;
 }
@@ -276,6 +283,14 @@ const defaultAppSettings: AppSettings = {
   alertOnTelegramStall: false,
 };
 const pendingOpenMissingGraceSeconds = 10;
+const pendingOpenMissingDebounceSeconds = 10;
+// Operational maximum for the MT5 poll interval. This single setting drives the EA's
+// only timer, and that timer runs heartbeat, snapshot, ManageTrailingStops,
+// PollAndExecute and history backfill. Raising it delays live stop management and
+// command execution, and past EA_HEARTBEAT_SECONDS * 3 it also marks the account
+// offline, which holds subsequent opens. Bookkeeping delays are the lesser risk, so
+// this stays capped.
+const MAX_POLLING_INTERVAL_SECONDS = 30;
 const EA_HEARTBEAT_SECONDS = 5;
 const EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS = 30;
 const GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS = 60 * 60;
@@ -384,9 +399,11 @@ export function archiveStaticAssets(
 
 export function createApi(options: ApiOptions = {}) {
   const shouldSeedDemoData = options.seedDemoData ?? process.env.SEED_DEMO_DATA === "true";
+  const effectiveTelegramRpcTimeoutMs = telegramRpcTimeoutMs(options.telegramRpcTimeoutMs);
   const store = new AppStore(
     options.databasePath ?? process.env.DATABASE_PATH ?? "data/telegram-tc.db",
     shouldSeedDemoData,
+    effectiveTelegramRpcTimeoutMs,
   );
   const telegram =
     options.telegram ??
@@ -396,15 +413,14 @@ export function createApi(options: ApiOptions = {}) {
   if (shouldSeedDemoData) {
     store.seedDemoData();
   }
+  store.refreshTelegramIngestionExpectations();
 
   const app = new Hono();
   app.use("/api/*", cors());
 
-  const healthPayload = () => ({
-    status: "ok",
-    database: "connected",
-    telegramAdapter: telegram.name,
-  });
+  // Must stay synchronous: no awaits, no teleproto calls, no IO. It reads only
+  // the in-memory provider readiness the ingestion loop already recorded.
+  const healthPayload = () => store.ingestionHealth(telegram.name);
 
   app.get("/api/health", (c) => c.json(healthPayload()));
   app.get("/health", (c) => c.json(healthPayload()));
@@ -590,10 +606,13 @@ export function createApi(options: ApiOptions = {}) {
     const sessionId = provider ? store.connectedSessionIdForProfile(provider.profileId) : undefined;
     if (provider && sessionId) {
       try {
-        const { messages: captured } = await telegram.fetchRecentMessages(
-          sessionId,
-          provider.dialogId,
-          limit,
+        // Operator-triggered, so a wedged client would otherwise hold this
+        // request open forever and every retry would start another RPC. The
+        // timeout is the ingestion loop's, and its rejection lands in the same
+        // catch a fetch failure already does, so the fallback below is unchanged.
+        const { messages: captured } = await withTelegramRpcTimeout(
+          telegram.fetchRecentMessages(sessionId, provider.dialogId, limit),
+          effectiveTelegramRpcTimeoutMs,
         );
         if (captured.length > 0) {
           store.captureMessages(provider.id, captured);
@@ -1212,7 +1231,7 @@ export function createApi(options: ApiOptions = {}) {
       options.telegramPollingEnabled ??
       (process.env.NODE_ENV !== "test" && options.databasePath !== ":memory:"),
     intervalMs: options.telegramPollingIntervalMs,
-    rpcTimeoutMs: options.telegramRpcTimeoutMs,
+    rpcTimeoutMs: effectiveTelegramRpcTimeoutMs,
   });
 
   return Object.assign(app, ingestion);
@@ -1237,6 +1256,12 @@ interface TelegramProviderHealth {
   consecutiveFailures: number;
   checkedAt: string;
   error?: string;
+}
+
+interface TelegramIngestionExpectation {
+  providerId: string;
+  profileId: string;
+  sessionId?: string;
 }
 
 type TelegramProvider = {
@@ -1292,6 +1317,7 @@ function createTelegramIngestionLoop(
   };
   const intervalMs =
     options.intervalMs ?? Math.max(1000, store.appSettings().pollingIntervalSeconds * 1000);
+  if (options.intervalMs !== undefined) store.setTelegramPollingIntervalMs(intervalMs);
   const timer = options.enabled
     ? setInterval(() => {
         void runTelegramIngestionOnce();
@@ -1536,7 +1562,12 @@ const TELEGRAM_DEAD_SESSION_ERROR_CODES = [
 ];
 
 export function isTelegramDeadSessionError(error: unknown): boolean {
-  const message = (error instanceof Error ? error.message : String(error)).toUpperCase();
+  const parts = [error instanceof Error ? error.message : String(error)];
+  if (typeof error === "object" && error !== null) {
+    const errorMessage = (error as { errorMessage?: unknown }).errorMessage;
+    if (typeof errorMessage === "string") parts.push(errorMessage);
+  }
+  const message = parts.join(" ").toUpperCase();
   return TELEGRAM_DEAD_SESSION_ERROR_CODES.some((code) => message.includes(code));
 }
 
@@ -1584,6 +1615,14 @@ class AppStore {
   // Keep the latest full snapshot in memory while SQLite stores only structural changes.
   private readonly liveMt5Snapshots = new Map<string, Mt5SnapshotState>();
   private readonly persistedMt5SnapshotSignatures = new Map<string, string>();
+  // When the last snapshot POST arrived per account, whether or not its
+  // durable content changed. mt5_snapshots.updated_at moves only on structural
+  // change, so this map is what answers "are snapshots flowing".
+  private readonly mt5SnapshotReceivedAt = new Map<string, string>();
+  // A pending order can be absent from one broker snapshot while remaining live.
+  // This state is deliberately in memory so snapshot polling does not create a
+  // durable write for every absence or reset the snapshot content deduplication.
+  private readonly pendingOpenMissingStates = new Map<string, PendingOpenMissingState>();
   // Tracks providers we've already warned about for the "no connected
   // Telegram session" state, so we log once per offline→online edge instead
   // of once per poll. Reset when a session connects.
@@ -1594,6 +1633,11 @@ class AppStore {
   // Per-provider state is kept separately because one stalled dialog RPC must
   // not wait for another provider before becoming visible to the operator.
   private readonly telegramProviderHealth = new Map<string, TelegramProviderHealth>();
+  // Enabled providers define the ingestion work the process is expected to do.
+  // This stays in memory so /api/health never needs to query SQLite.
+  private readonly telegramIngestionExpectations = new Map<string, TelegramIngestionExpectation>();
+  private readonly telegramRpcAllowanceSeconds: number;
+  private telegramFreshnessBudgetSeconds = 1;
   // In-memory pub/sub for the SSE stream. Subscribers are SSE connections that
   // forward typed deltas to the dashboard so it stops polling on a timer.
   // ponytail: single-process in-memory bus. Ceiling — events do not survive a
@@ -1624,9 +1668,14 @@ class AppStore {
     }
   >();
 
-  constructor(databasePath: string, allowDemoData = false) {
+  constructor(
+    databasePath: string,
+    allowDemoData = false,
+    telegramRpcTimeoutMs = DEFAULT_TELEGRAM_RPC_TIMEOUT_MS,
+  ) {
     this.databasePath = databasePath;
     this.allowDemoData = allowDemoData;
+    this.telegramRpcAllowanceSeconds = Math.max(1, Math.ceil(telegramRpcTimeoutMs / 1000));
     if (databasePath !== ":memory:") {
       const dir = databasePath.split("/").slice(0, -1).join("/");
       if (dir) {
@@ -1636,6 +1685,8 @@ class AppStore {
     this.db = new Database(databasePath);
     this.db.run("PRAGMA journal_mode = WAL");
     this.migrate();
+    this.updateTelegramFreshnessBudget(this.appSettings().pollingIntervalSeconds);
+    this.refreshTelegramIngestionExpectations();
   }
 
   // Thrown when the HELD source row does not transition exactly once. Escapes the transaction so
@@ -1684,6 +1735,11 @@ class AppStore {
 
   updateTelegramSession(sessionId: string, status: TelegramSessionStatus) {
     const now = nowIso();
+    if (status === "DISCONNECTED") {
+      // Drop the recorded health so a deliberately disconnected session stops
+      // counting toward /api/health staleness forever.
+      this.telegramHealth.delete(sessionId);
+    }
     this.db
       .query("UPDATE telegram_sessions SET status = ?, updated_at = ? WHERE id = ?")
       .run(status, now, sessionId);
@@ -1696,6 +1752,7 @@ class AppStore {
     if (status === "CONNECTED") {
       if (this.allowDemoData) this.ensureMockProvider(String(session.profile_id));
     }
+    this.refreshTelegramIngestionExpectations();
     this.audit("telegram.status", "info", `Telegram session moved to ${status}`, {
       sessionId,
       status,
@@ -1785,6 +1842,7 @@ class AppStore {
       this.db
         .query("UPDATE providers SET profile_id = ?, title = ?, kind = ? WHERE id = ?")
         .run(input.profileId, title, kind, String(existing.id));
+      this.refreshTelegramIngestionExpectations();
       this.audit("provider.rebind", "info", "Provider bound to Telegram session profile", {
         providerId: String(existing.id),
         dialogId: input.dialogId,
@@ -1814,6 +1872,7 @@ class AppStore {
         defaultAppSettings.defaultLotSize,
         now,
       );
+    this.refreshTelegramIngestionExpectations();
     return { provider: this.providers().find((provider) => provider.id === id) };
   }
 
@@ -1857,6 +1916,7 @@ class AppStore {
       alreadyCurrent,
       stillOffline: stillOffline.length,
     });
+    this.refreshTelegramIngestionExpectations();
     return {
       profileId: input.profileId,
       dialogsSeen: input.dialogs.length,
@@ -1941,6 +2001,7 @@ class AppStore {
       providerId: id,
       ...input,
     });
+    this.refreshTelegramIngestionExpectations();
     return { provider: this.providers().find((provider) => provider.id === id) };
   }
 
@@ -2159,6 +2220,7 @@ class AppStore {
       providerId,
       title: provider.title,
     });
+    this.refreshTelegramIngestionExpectations();
     return { providerId, status: "DELETED" };
   }
 
@@ -2195,6 +2257,7 @@ class AppStore {
       this.db.query("DELETE FROM mt5_accounts WHERE id = ?").run(accountId);
     });
     removeAll();
+    this.clearPendingOpenMissingForAccount(accountId);
     this.audit("mt5-account.delete", "warn", "MT5 account hard-deleted", {
       accountId,
       accountNumber: account.accountNumber,
@@ -3043,8 +3106,8 @@ class AppStore {
       );
       this.recordProviderHealth(telegram, provider, sessionId, error);
       recordedHealth = true;
-      // A revoked/expired GramJS auth key keeps the DB row CONNECTED forever
-      // (gramjs just retries the dead key), so reconcile it without letting a
+      // A revoked/expired teleproto auth key keeps the DB row CONNECTED forever
+      // (teleproto retries the dead key), so reconcile it without letting a
       // stuck disconnect hold the provider health record or the ingestion pass.
       if (isTelegramDeadSessionError(error)) {
         await this.reconcileDeadTelegramSession(telegram, sessionId, error, rpcTimeoutMs);
@@ -3103,10 +3166,10 @@ class AppStore {
     return linked;
   }
 
-  // A GramJS session's auth key can be revoked server-side (logged out from
-  // another device, session expired, account deactivated). GramJS surfaces it
+  // A teleproto session's auth key can be revoked server-side (logged out from
+  // another device, session expired, account deactivated). teleproto surfaces it
   // as AUTH_KEY_UNREGISTERED on the next RPC and then retries the dead key
-  // forever, but nothing flips the DB row off CONNECTED — so telegramStatus()
+  // forever, but nothing flips the DB row off CONNECTED, so telegramStatus()
   // keeps reporting connected:true and the login form stays hidden. Drop the
   // dead client and mark the row DISCONNECTED so re-login becomes possible.
   private async reconcileDeadTelegramSession(
@@ -3136,7 +3199,8 @@ class AppStore {
   private recordTelegramHealth(telegram: TelegramAdapter, sessionIds: Set<string>) {
     if (!telegram.sessionHealth) return;
     for (const sessionId of sessionIds) {
-      const health = telegram.sessionHealth(sessionId);
+      const observedHealth = telegram.sessionHealth(sessionId);
+      const health = this.normalizeTelegramSessionHealth(observedHealth);
       const previous = this.telegramHealth.get(sessionId);
       this.telegramHealth.set(sessionId, health);
       // Log the healthy->stalled and stalled->recovered edges once each so the
@@ -3168,13 +3232,13 @@ class AppStore {
     error?: unknown,
   ) {
     const sessionHealth = telegram.sessionHealth?.(sessionId);
+    const sessionStalled = this.telegramSessionIsStalled(sessionHealth);
     const timeout = error instanceof TelegramRpcTimeoutError;
     const previous = this.telegramProviderHealth.get(provider.id);
     const consecutiveFailures = error ? (previous?.consecutiveFailures ?? 0) + 1 : 0;
     const stalled =
-      Boolean(sessionHealth?.stalled) ||
-      (timeout && consecutiveFailures >= TELEGRAM_PROVIDER_STALL_FAILURES);
-    const healthy = !error && !sessionHealth?.stalled;
+      sessionStalled || (timeout && consecutiveFailures >= TELEGRAM_PROVIDER_STALL_FAILURES);
+    const healthy = !error && !sessionStalled;
     const health: TelegramProviderHealth = {
       providerId: provider.id,
       sessionId,
@@ -3207,11 +3271,153 @@ class AppStore {
   }
 
   telegramSessionHealth(): TelegramSessionHealth[] {
-    return [...this.telegramHealth.values()];
+    return [...this.telegramHealth.values()].map((health) =>
+      this.normalizeTelegramSessionHealth(health),
+    );
   }
 
   telegramProviderHealthSnapshot(): TelegramProviderHealth[] {
-    return [...this.telegramProviderHealth.values()];
+    return [...this.telegramProviderHealth.values()].map((health) => {
+      const sessionStalled = this.telegramSessionIsStalled(
+        this.telegramHealth.get(health.sessionId),
+      );
+      return {
+        ...health,
+        healthy: !health.error && !sessionStalled,
+        stalled: sessionStalled || Boolean(health.error && health.stalled),
+      };
+    });
+  }
+
+  refreshTelegramIngestionExpectations() {
+    const expectations = new Map<string, TelegramIngestionExpectation>();
+    for (const provider of this.providers()) {
+      if (!provider.enabled) continue;
+      expectations.set(provider.id, {
+        providerId: provider.id,
+        profileId: provider.profileId,
+        sessionId: this.connectedSessionIdForProfile(provider.profileId),
+      });
+    }
+
+    for (const providerId of this.providersWithoutSession) {
+      const expectation = expectations.get(providerId);
+      if (!expectation || expectation.sessionId) this.providersWithoutSession.delete(providerId);
+    }
+    for (const [providerId, health] of this.telegramProviderHealth) {
+      const expectation = expectations.get(providerId);
+      if (!expectation || expectation.sessionId !== health.sessionId) {
+        this.telegramProviderHealth.delete(providerId);
+      }
+    }
+    const expectedSessionIds = new Set(
+      [...expectations.values()]
+        .map((expectation) => expectation.sessionId)
+        .filter((sessionId): sessionId is string => Boolean(sessionId)),
+    );
+    for (const sessionId of this.telegramHealth.keys()) {
+      if (!expectedSessionIds.has(sessionId)) this.telegramHealth.delete(sessionId);
+    }
+
+    this.telegramIngestionExpectations.clear();
+    for (const [providerId, expectation] of expectations) {
+      this.telegramIngestionExpectations.set(providerId, expectation);
+    }
+  }
+
+  // The single source of truth for "can this system ingest Telegram signals".
+  // Both `/api/health` and the dashboard payload read it, so the operator sees
+  // the same answer wherever they look. The dashboard previously hardcoded
+  // status "ok", which meant the surface an operator actually watches during an
+  // incident was structurally incapable of showing a problem.
+  //
+  // Must stay synchronous: no awaits, no teleproto calls, no IO, no DB query. It
+  // reads only the in-memory readiness the ingestion loop already recorded.
+  ingestionHealth(telegramAdapter: string) {
+    const providers = this.telegramIngestionReadinessSnapshot();
+    const expectedProviders = providers.length;
+    const readyProviders = providers.filter((provider) => provider.ready).length;
+    const unreadyProviders = expectedProviders - readyProviders;
+    const stalledProviders = providers.filter((provider) => provider.stalled).length;
+    return {
+      // "degraded" while any enabled provider lacks a current readiness
+      // observation. The HTTP code stays 200 so a container healthcheck added
+      // later cannot restart-loop the app over a stall.
+      status: unreadyProviders > 0 ? "degraded" : "ok",
+      database: "connected",
+      telegramAdapter,
+      telegram: {
+        expectedProviders,
+        readyProviders,
+        unreadyProviders,
+        stalledProviders,
+      },
+    };
+  }
+
+  telegramIngestionReadinessSnapshot() {
+    return [...this.telegramIngestionExpectations.values()].map((expectation) => {
+      const health = this.telegramProviderHealth.get(expectation.providerId);
+      const sessionHealth = expectation.sessionId
+        ? this.telegramHealth.get(expectation.sessionId)
+        : undefined;
+      const providerAgeSeconds = health
+        ? Math.floor((Date.now() - Date.parse(health.checkedAt)) / 1000)
+        : undefined;
+      const providerStalled = Boolean(health?.stalled && health.error);
+      const stalled = Boolean(
+        providerStalled ||
+          (providerAgeSeconds !== undefined &&
+            providerAgeSeconds > this.telegramFreshnessBudgetSeconds) ||
+          this.telegramSessionIsStalled(sessionHealth),
+      );
+      const sessionReady = sessionHealth
+        ? sessionHealth.lastContactAt
+          ? !this.telegramSessionIsStalled(sessionHealth)
+          : sessionHealth.connected
+        : true;
+      const ready = Boolean(
+        expectation.sessionId &&
+          health?.sessionId === expectation.sessionId &&
+          !health?.error &&
+          sessionReady &&
+          !stalled,
+      );
+      return {
+        providerId: expectation.providerId,
+        ready,
+        stalled,
+      };
+    });
+  }
+
+  setTelegramPollingIntervalMs(intervalMs: number) {
+    this.updateTelegramFreshnessBudget(Math.max(1, Math.ceil(intervalMs / 1000)));
+  }
+
+  private updateTelegramFreshnessBudget(pollingIntervalSeconds: number) {
+    this.telegramFreshnessBudgetSeconds =
+      Math.max(1, Math.ceil(pollingIntervalSeconds)) + this.telegramRpcAllowanceSeconds;
+  }
+
+  private telegramSessionIsStalled(health?: TelegramSessionHealth) {
+    if (!health) return false;
+    if (health.lastContactAt) {
+      const lastContactAt = Date.parse(health.lastContactAt);
+      if (Number.isFinite(lastContactAt)) {
+        return Date.now() - lastContactAt > this.telegramFreshnessBudgetSeconds * 1000;
+      }
+    }
+    return health.stalled;
+  }
+
+  private normalizeTelegramSessionHealth(health: TelegramSessionHealth): TelegramSessionHealth {
+    const stalled = this.telegramSessionIsStalled(health);
+    return {
+      ...health,
+      connected: health.lastContactAt ? !stalled : health.connected,
+      stalled,
+    };
   }
 
   // Operational conditions that silently block trading and should be shown
@@ -5683,12 +5889,54 @@ class AppStore {
     const rows = accountId
       ? (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items WHERE status = 'PENDING' AND account_id = ? ORDER BY created_at LIMIT 25",
+            `SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at
+             FROM queue_items
+             WHERE status = 'PENDING' AND account_id = ?
+             ORDER BY created_at,
+               CASE
+                 WHEN json_extract(payload_json, '$.commandType') = 'MODIFY_SL'
+                 THEN CASE
+                   WHEN COALESCE(
+                     json_extract(payload_json, '$.direction'),
+                     json_extract(
+                       (SELECT data_json FROM logical_trades AS trade
+                        WHERE trade.id = queue_items.logical_trade_id),
+                       '$.direction'
+                     )
+                   ) = 'SELL'
+                   THEN -CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
+                   ELSE CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
+                 END
+                 ELSE 0
+               END,
+               rowid
+             LIMIT 25`,
           )
           .all(accountId) as Row[])
       : (this.db
           .query(
-            "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at FROM queue_items WHERE status = 'PENDING' ORDER BY created_at LIMIT 25",
+            `SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, origin_queue_item_id, leased_at, created_at
+             FROM queue_items
+             WHERE status = 'PENDING'
+             ORDER BY created_at,
+               CASE
+                 WHEN json_extract(payload_json, '$.commandType') = 'MODIFY_SL'
+                 THEN CASE
+                   WHEN COALESCE(
+                     json_extract(payload_json, '$.direction'),
+                     json_extract(
+                       (SELECT data_json FROM logical_trades AS trade
+                        WHERE trade.id = queue_items.logical_trade_id),
+                       '$.direction'
+                     )
+                   ) = 'SELL'
+                   THEN -CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
+                   ELSE CAST(json_extract(payload_json, '$.newStopLoss') AS REAL)
+                 END
+                 ELSE 0
+               END,
+               rowid
+             LIMIT 25`,
           )
           .all() as Row[]);
     const row = rows.find((candidate) => {
@@ -5738,6 +5986,45 @@ class AppStore {
           `EA_CAPABILITY_UNAVAILABLE:${PENDING_CLOSE_FLATTEN_CAPABILITY}`,
         );
         return false;
+      }
+      // Only app-managed stop strategies may be skipped as already-satisfied. A provider or
+      // operator MODIFY_SL is a deliberate instruction and can legitimately widen a stop to
+      // give a trade room. Swallowing those and reporting them EXECUTED would override a human
+      // decision and misreport it as delivered.
+      if (
+        item.payload.commandType === "MODIFY_SL" &&
+        item.logicalTradeId &&
+        item.payload.targetPositionTicket &&
+        isAppManagedStopPayload(item.payload)
+      ) {
+        const trade = this.logicalTrade(item.logicalTradeId);
+        const desired = Number(item.payload.newStopLoss ?? 0);
+        if (trade && Number.isFinite(desired) && desired > 0) {
+          const broker = this.latestPositionStop(trade, item.payload.targetPositionTicket);
+          if (broker.known && this.stopIsSatisfied(trade, broker.stopLoss, desired)) {
+            const now = nowIso();
+            this.db
+              .query(
+                `UPDATE queue_items
+                 SET status = 'EXECUTED', held_reason = NULL, leased_at = NULL, updated_at = ?
+                 WHERE id = ?`,
+              )
+              .run(now, item.id);
+            this.db
+              .query(
+                `UPDATE reference_stop_actions SET resolution = 'SATISFIED', updated_at = ?
+                 WHERE queue_item_id = ?`,
+              )
+              .run(now, item.id);
+            this.audit(
+              "virtual-tp.modify-sl-satisfied",
+              "info",
+              "Queued stop skipped because the live broker stop is already protective",
+              { queueItemId: item.id, brokerStopLoss: broker.stopLoss, desiredStopLoss: desired },
+            );
+            return false;
+          }
+        }
       }
       if (item.payload.commandType !== "OPEN_TRADE") return true;
       const safetyHoldReason = this.executionPayloadHoldReason(item.accountId, item.payload);
@@ -6286,6 +6573,9 @@ class AppStore {
       updatedAt: now,
     };
     this.liveMt5Snapshots.set(input.accountId, snapshot);
+    // Record arrival unconditionally: the durable write below is deduped by
+    // content signature and legitimately stands still on idle accounts.
+    this.mt5SnapshotReceivedAt.set(input.accountId, now);
 
     const signature = durableMt5SnapshotSignature(snapshot);
     let persistedSignature = this.persistedMt5SnapshotSignatures.get(input.accountId);
@@ -6424,6 +6714,262 @@ class AppStore {
     };
   }
 
+  private persistReferenceWatermark(
+    trade: LogicalTrade,
+    positionTicket: string,
+    price: number,
+  ): LogicalTrade {
+    const previous =
+      trade.virtualTpWatermark?.positionTicket === positionTicket
+        ? trade.virtualTpWatermark.favorablePrice
+        : undefined;
+    const favorablePrice =
+      previous === undefined
+        ? price
+        : trade.direction === "BUY"
+          ? Math.max(previous, price)
+          : Math.min(previous, price);
+    if (previous === favorablePrice) return trade;
+    const updated: LogicalTrade = {
+      ...trade,
+      virtualTpWatermark: {
+        positionTicket,
+        favorablePrice,
+        observedAt: nowIso(),
+      },
+    };
+    this.db
+      .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
+      .run(JSON.stringify(updated), updated.id);
+    return updated;
+  }
+
+  private rekeyReferenceStopActions(trade: LogicalTrade) {
+    const positionTicket = trade.matchedBrokerTickets?.find((ticket) => truthyBrokerTicket(ticket));
+    if (!positionTicket) return;
+    this.db
+      .query(
+        `UPDATE reference_stop_actions
+         SET position_ticket = ?, updated_at = ?
+         WHERE logical_trade_id = ? AND position_ticket <> ?`,
+      )
+      .run(positionTicket, nowIso(), trade.id, positionTicket);
+  }
+
+  private backfillHitReferenceStopActions(
+    trade: LogicalTrade,
+    positionTicket: string,
+    point?: number,
+  ) {
+    const missing = trade.legs.filter(
+      (leg) =>
+        leg.status === "HIT" &&
+        isReferenceVirtualTpLeg(leg) &&
+        !this.db
+          .query("SELECT 1 FROM reference_stop_actions WHERE logical_trade_id = ? AND leg = ?")
+          .get(trade.id, leg.leg),
+    );
+    if (!missing.length) return;
+    const prior = (
+      this.db
+        .query(
+          `SELECT id, payload_json FROM queue_items
+           WHERE logical_trade_id = ? ORDER BY created_at DESC, rowid DESC`,
+        )
+        .all(trade.id) as Row[]
+    ).find((row) => {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      return (
+        payload.commandType === "MODIFY_SL" &&
+        payload.targetPositionTicket === positionTicket &&
+        (payload.idempotencyKey?.startsWith("reference-stop:") ||
+          payload.originalText.includes("reference TP"))
+      );
+    });
+    const now = nowIso();
+    for (const leg of missing) {
+      const needsStop = Boolean(leg.strategy && leg.strategy.kind !== "no-change");
+      const desired = needsStop ? this.strategyStopPrice(trade, leg.strategy!, point) : undefined;
+      if (needsStop && !desired) continue;
+      this.db
+        .query(
+          `INSERT INTO reference_stop_actions
+             (logical_trade_id, leg, position_ticket, desired_stop_loss, resolution, queue_item_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(logical_trade_id, leg) DO NOTHING`,
+        )
+        .run(
+          trade.id,
+          leg.leg,
+          positionTicket,
+          desired ?? null,
+          desired ? "NEEDS_RECONCILE" : "NO_CHANGE",
+          prior ? String(prior.id) : null,
+          now,
+          now,
+        );
+    }
+  }
+
+  private reconcileDeliveryUnknownModifySl(input: {
+    trade: LogicalTrade;
+    positionTicket: string;
+    brokerStopLoss?: number;
+    marketPrice: number;
+  }) {
+    const rows = this.db
+      .query(
+        `SELECT id, status, held_reason, leased_at, payload_json FROM queue_items
+         WHERE logical_trade_id = ? AND status IN ('LEASED','HELD')
+         ORDER BY created_at, rowid`,
+      )
+      .all(input.trade.id) as Row[];
+    const cutoff = Date.now() - this.appSettings().leaseTimeoutSeconds * 1000;
+    for (const row of rows) {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      if (
+        payload.commandType !== "MODIFY_SL" ||
+        payload.targetPositionTicket !== input.positionTicket
+      ) {
+        continue;
+      }
+      const staleLease =
+        String(row.status) === "LEASED" && Date.parse(String(row.leased_at ?? "")) < cutoff;
+      const deliveryUnknown =
+        String(row.status) === "HELD" && String(row.held_reason) === "DELIVERY_UNKNOWN";
+      if (!staleLease && !deliveryUnknown) continue;
+      const desired = Number(payload.newStopLoss ?? 0);
+      if (!Number.isFinite(desired) || desired <= 0) continue;
+      const satisfied = this.stopIsSatisfied(input.trade, input.brokerStopLoss, desired);
+      if (!satisfied && !this.stopCanBePlaced(input.trade, desired, input.marketPrice)) continue;
+      const now = nowIso();
+      const status = satisfied ? "EXECUTED" : "PENDING";
+      this.db.transaction(() => {
+        this.db
+          .query(
+            `UPDATE queue_items
+             SET status = ?, held_reason = NULL, leased_at = NULL, updated_at = ? WHERE id = ?`,
+          )
+          .run(status, now, String(row.id));
+        this.db
+          .query(
+            `UPDATE reference_stop_actions SET resolution = ?, updated_at = ?
+             WHERE queue_item_id = ?`,
+          )
+          .run(satisfied ? "SATISFIED" : "QUEUED", now, String(row.id));
+      })();
+      this.audit(
+        satisfied ? "virtual-tp.modify-sl-satisfied" : "virtual-tp.modify-sl-replay",
+        satisfied ? "info" : "warn",
+        satisfied
+          ? "Delivery-unknown stop confirmed from live broker state"
+          : "Delivery-unknown stop replayed from live broker state",
+        { logicalTradeId: input.trade.id, queueItemId: String(row.id), desiredStopLoss: desired },
+      );
+    }
+  }
+
+  private reconcileReferenceStopActions(input: {
+    trade: LogicalTrade;
+    positionTicket: string;
+    brokerStopLoss?: number;
+    marketPrice: number;
+  }) {
+    const actions = this.db
+      .query(
+        `SELECT leg, desired_stop_loss, queue_item_id FROM reference_stop_actions
+         WHERE logical_trade_id = ? AND position_ticket = ? AND desired_stop_loss IS NOT NULL`,
+      )
+      .all(input.trade.id, input.positionTicket) as Row[];
+    if (!actions.length) return;
+    const desired = actions
+      .map((row) => Number(row.desired_stop_loss))
+      .filter((value) => Number.isFinite(value) && value > 0);
+    if (!desired.length) return;
+    const best = desired.reduce((current, candidate) =>
+      this.improvesStop(input.trade, candidate, current) ? candidate : current,
+    );
+    const linkedIds = new Set(
+      actions.map((row) => String(row.queue_item_id ?? "")).filter(Boolean),
+    );
+
+    if (this.stopIsSatisfied(input.trade, input.brokerStopLoss, best)) {
+      this.db.transaction(() => {
+        const now = nowIso();
+        this.db
+          .query(
+            `UPDATE reference_stop_actions SET resolution = 'SATISFIED', updated_at = ?
+             WHERE logical_trade_id = ? AND position_ticket = ? AND desired_stop_loss IS NOT NULL`,
+          )
+          .run(now, input.trade.id, input.positionTicket);
+        for (const id of linkedIds) {
+          this.db
+            .query(
+              `UPDATE queue_items
+               SET status = 'EXECUTED', held_reason = NULL, leased_at = NULL, updated_at = ?
+               WHERE id = ? AND status IN ('PENDING','LEASED','HELD')`,
+            )
+            .run(now, id);
+        }
+      })();
+      return;
+    }
+
+    const queueRows = (
+      this.db
+        .query(
+          `SELECT id, status, held_reason, leased_at, payload_json FROM queue_items
+           WHERE logical_trade_id = ? ORDER BY created_at DESC, rowid DESC`,
+        )
+        .all(input.trade.id) as Row[]
+    ).filter((row) => linkedIds.has(String(row.id)));
+    const active = queueRows.find((row) => {
+      if (!["PENDING", "LEASED"].includes(String(row.status))) return false;
+      if (String(row.status) === "LEASED") {
+        const leasedAt = Date.parse(String(row.leased_at ?? ""));
+        const timeout = this.appSettings().leaseTimeoutSeconds * 1000;
+        if (Number.isFinite(leasedAt) && leasedAt < Date.now() - timeout) return false;
+      }
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      return this.stopIsSatisfied(input.trade, Number(payload.newStopLoss), best);
+    });
+    if (active) return;
+
+    const queued = this.activeModifySlFloor(input.trade, input.positionTicket);
+    if (this.stopIsSatisfied(input.trade, queued.stopLoss, best) && queued.queueItemId) {
+      this.db
+        .query(
+          `UPDATE reference_stop_actions
+           SET resolution = 'QUEUED', queue_item_id = ?, updated_at = ?
+           WHERE logical_trade_id = ? AND position_ticket = ? AND desired_stop_loss IS NOT NULL`,
+        )
+        .run(queued.queueItemId, nowIso(), input.trade.id, input.positionTicket);
+      return;
+    }
+    if (!this.stopCanBePlaced(input.trade, best, input.marketPrice)) return;
+    const open = this.originalOpenQueue(input.trade.id);
+    if (!open) return;
+    this.db.transaction(() => {
+      const legs = actions.map((row) => Number(row.leg)).sort((left, right) => left - right);
+      const queueItemId = this.queueModifySlAfterVirtualTp({
+        trade: input.trade,
+        positionTicket: input.positionTicket,
+        newStopLoss: best,
+        parsedSignalId: open.parsedSignalId,
+        idempotencyKey: `reference-stop:${input.trade.id}:${input.positionTicket}:${legs.join(",")}`,
+        originalText: "App-managed reference TP SL repair",
+        auditEvent: "virtual-tp.reference-sl-repair",
+        auditMessage: "Reference TP stop repaired from live broker state",
+      });
+      this.db
+        .query(
+          `UPDATE reference_stop_actions
+           SET resolution = 'QUEUED', queue_item_id = ?, updated_at = ?
+           WHERE logical_trade_id = ? AND position_ticket = ? AND desired_stop_loss IS NOT NULL`,
+        )
+        .run(queueItemId, nowIso(), input.trade.id, input.positionTicket);
+    })();
+  }
+
   private evaluateVirtualTakeProfits(input: {
     accountId: string;
     positions: unknown[];
@@ -6456,31 +7002,61 @@ class AppStore {
         trade.entry?.from;
       const payload = this.originalOpenQueue(trade.id)?.payload;
       const brokerManagedLeg = brokerManagedVirtualTpLeg(payload);
-      for (const leg of trade.legs) {
+      let current = this.persistReferenceWatermark(trade, positionTicket, price);
+      const brokerStopLoss = brokerStopLossFromSnapshot(position);
+      this.backfillHitReferenceStopActions(current, positionTicket, quote.point);
+      this.reconcileDeliveryUnknownModifySl({
+        trade: current,
+        positionTicket,
+        brokerStopLoss,
+        marketPrice: price,
+      });
+      this.reconcileReferenceStopActions({
+        trade: current,
+        positionTicket,
+        brokerStopLoss,
+        marketPrice: price,
+      });
+      const favorablePrice = current.virtualTpWatermark?.favorablePrice ?? price;
+      // Resolve every crossed 0%-allocation leg first, as one batch. These legs close no
+      // volume and exist only to move the stop, so a price gap through several of them must
+      // settle on a single most-protective stop. Doing them before any closing leg also
+      // means the closing leg's `break` cannot strand a later reference leg for a tick, by
+      // which time price may have retraced past its target.
+      current = this.applyCrossedReferenceLegs({
+        trade: current,
+        positionTicket,
+        price: favorablePrice,
+        marketPrice: price,
+        openPrice,
+        point: quote.point,
+        brokerStopLoss,
+      });
+      for (const leg of current.legs) {
         if (leg.status !== "OPEN" || isReferenceVirtualTpLeg(leg)) continue;
-        const targetPrice = virtualTpTargetPrice(trade, leg, openPrice, quote.point);
+        const targetPrice = virtualTpTargetPrice(current, leg, openPrice, quote.point);
         if (!targetPrice) continue;
         if (
           leg.leg === brokerManagedLeg &&
           brokerTakeProfitMatchesTarget(
             position,
             targetPrice,
-            trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "",
+            current.symbol.brokerSymbol ?? current.symbol.canonicalSymbol ?? "",
           )
         ) {
           continue;
         }
-        const hit = trade.direction === "BUY" ? price >= targetPrice : price <= targetPrice;
+        const hit = current.direction === "BUY" ? price >= targetPrice : price <= targetPrice;
         if (!hit) continue;
-        const queued = this.queueVirtualTpClose(trade, leg.leg, positionTicket, price);
+        const queued = this.queueVirtualTpClose(current, leg.leg, positionTicket, price);
         if (queued) {
-          const updated: LogicalTrade = {
-            ...trade,
-            legs: trade.legs.map((item) =>
+          current = {
+            ...current,
+            legs: current.legs.map((item) =>
               item.leg === leg.leg
                 ? {
                     ...item,
-                    status: "HIT",
+                    status: "HIT" as const,
                     brokerEvidence: `app price ${price} crossed TP${leg.leg} ${targetPrice}`,
                   }
                 : item,
@@ -6488,7 +7064,7 @@ class AppStore {
           };
           this.db
             .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
-            .run(updated.status, JSON.stringify(updated), trade.id);
+            .run(current.status, JSON.stringify(current), current.id);
         }
         break;
       }
@@ -6527,6 +7103,7 @@ class AppStore {
           )
         : historyDealAction(deal, positionStillOpen);
       const action = brokerHistoryAction(String(exists?.action ?? ""), inferredAction);
+      if (trade) this.clearPendingOpenMissingForTrade(input.accountId, tradeId);
       const openPrice = nullableNumber(open?.filled_price ?? open?.requested_price);
       const signedPips =
         trade && openPrice && deal.price
@@ -6827,7 +7404,8 @@ class AppStore {
       .query(
         `SELECT parsed_signal_id, payload_json FROM queue_items
          WHERE logical_trade_id = ?
-         ORDER BY created_at ASC LIMIT 1`,
+           AND json_extract(payload_json, '$.commandType') = 'OPEN_TRADE'
+         ORDER BY created_at ASC, rowid ASC LIMIT 1`,
       )
       .get(tradeId) as Row | null;
     if (!row) return undefined;
@@ -6914,6 +7492,267 @@ class AppStore {
     return true;
   }
 
+  private latestPositionStop(trade: LogicalTrade, positionTicket: string) {
+    const snapshot = trade.accountId ? this.liveMt5Snapshots.get(trade.accountId) : undefined;
+    const position = snapshot?.positions.find(
+      (item) => brokerTicketFromSnapshot(item) === positionTicket,
+    );
+    return {
+      known: position !== undefined,
+      stopLoss: brokerStopLossFromSnapshot(position),
+    };
+  }
+
+  private brokerPointForTrade(trade: LogicalTrade) {
+    const symbol = trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "";
+    return this.latestQuote(trade.accountId ?? "", symbol).quote?.point;
+  }
+
+  private activeModifySlFloor(trade: LogicalTrade, positionTicket: string) {
+    const rows = this.db
+      .query(
+        `SELECT id, payload_json FROM queue_items
+         WHERE logical_trade_id = ? AND status IN ('PENDING','LEASED')
+         ORDER BY created_at, rowid`,
+      )
+      .all(trade.id) as Row[];
+    let stopLoss: number | undefined;
+    let queueItemId: string | undefined;
+    for (const row of rows) {
+      const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+      if (payload.commandType !== "MODIFY_SL" || payload.targetPositionTicket !== positionTicket) {
+        continue;
+      }
+      const value = Number(payload.newStopLoss ?? 0);
+      if (
+        Number.isFinite(value) &&
+        value > 0 &&
+        (stopLoss === undefined || this.improvesStop(trade, value, stopLoss))
+      ) {
+        stopLoss = value;
+        queueItemId = String(row.id);
+      }
+    }
+    return { stopLoss, queueItemId };
+  }
+
+  private effectiveStopFloor(
+    trade: LogicalTrade,
+    input: {
+      positionTicket: string;
+      brokerStateKnown: boolean;
+      brokerStopLoss?: number;
+    },
+  ) {
+    const candidates: number[] = [];
+    if (input.brokerStopLoss !== undefined) candidates.push(input.brokerStopLoss);
+    if (!input.brokerStateKnown && trade.stopLoss !== undefined && trade.stopLoss > 0) {
+      candidates.push(trade.stopLoss);
+    }
+    const active = this.activeModifySlFloor(trade, input.positionTicket).stopLoss;
+    if (active !== undefined) candidates.push(active);
+    if (!candidates.length) return undefined;
+    return trade.direction === "BUY" ? Math.max(...candidates) : Math.min(...candidates);
+  }
+
+  private improvesStop(trade: LogicalTrade, candidate: number, incumbent?: number) {
+    if (!Number.isFinite(candidate) || candidate <= 0) return false;
+    if (incumbent === undefined) return true;
+    return trade.direction === "BUY" ? candidate > incumbent : candidate < incumbent;
+  }
+
+  private stopIsSatisfied(trade: LogicalTrade, incumbent: number | undefined, desired: number) {
+    return (
+      incumbent !== undefined &&
+      Number.isFinite(incumbent) &&
+      incumbent > 0 &&
+      !this.improvesStop(trade, desired, incumbent)
+    );
+  }
+
+  private stopCanBePlaced(trade: LogicalTrade, desired: number, marketPrice?: number) {
+    if (!marketPrice || !Number.isFinite(marketPrice)) return false;
+    return trade.direction === "BUY" ? desired < marketPrice : desired > marketPrice;
+  }
+
+  // Coalesces a set of reference legs into at most ONE MODIFY_SL at the most protective stop,
+  // and returns the legs whose work is now real and may therefore be marked HIT. Shared by the
+  // price-monitor path and the provider-announced path so both obey the same guarantees.
+  private queueCoalescedReferenceStop(input: {
+    trade: LogicalTrade;
+    positionTicket: string;
+    legs: Array<LogicalTrade["legs"][number]>;
+    source: string;
+    brokerStateKnown: boolean;
+    brokerStopLoss?: number;
+    marketPrice?: number;
+    point?: number;
+  }): Set<number> {
+    const resolved = new Set<number>();
+    if (!input.legs.length) return resolved;
+    const open = this.originalOpenQueue(input.trade.id);
+    if (!open) return resolved;
+
+    const existing = new Set(
+      (
+        this.db
+          .query("SELECT leg FROM reference_stop_actions WHERE logical_trade_id = ?")
+          .all(input.trade.id) as Row[]
+      ).map((row) => Number(row.leg)),
+    );
+    const noChange: Array<{ leg: number; desired?: number }> = [];
+    const computed: Array<{ leg: number; desired: number }> = [];
+    for (const leg of input.legs) {
+      if (existing.has(leg.leg)) {
+        resolved.add(leg.leg);
+        continue;
+      }
+      const strategy = leg.strategy;
+      if (!strategy || strategy.kind === "no-change") {
+        noChange.push({ leg: leg.leg });
+        continue;
+      }
+      const stop = this.strategyStopPrice(input.trade, strategy, input.point);
+      if (!stop) continue; // not computable yet; leave OPEN and retry
+      computed.push({ leg: leg.leg, desired: stop });
+    }
+
+    let resolution: "QUEUED" | "SATISFIED" | undefined;
+    let queueItemId: string | undefined;
+    if (computed.length && input.brokerStateKnown) {
+      const best = computed.reduce((current, candidate) =>
+        this.improvesStop(input.trade, candidate.desired, current.desired) ? candidate : current,
+      );
+      if (this.stopIsSatisfied(input.trade, input.brokerStopLoss, best.desired)) {
+        resolution = "SATISFIED";
+      } else {
+        const active = this.activeModifySlFloor(input.trade, input.positionTicket);
+        if (this.stopIsSatisfied(input.trade, active.stopLoss, best.desired)) {
+          resolution = "QUEUED";
+          queueItemId = active.queueItemId;
+        } else if (this.stopCanBePlaced(input.trade, best.desired, input.marketPrice)) {
+          const legs = computed.map((item) => item.leg).sort((left, right) => left - right);
+          queueItemId = this.queueModifySlAfterVirtualTp({
+            trade: input.trade,
+            positionTicket: input.positionTicket,
+            newStopLoss: best.desired,
+            parsedSignalId: open.parsedSignalId,
+            idempotencyKey: `reference-stop:${input.trade.id}:${input.positionTicket}:${legs.join(",")}`,
+            originalText: `App-managed reference TP${best.leg} SL strategy`,
+            auditEvent: "virtual-tp.reference-sl-strategy",
+            auditMessage: "Reference TP leg queued SL strategy",
+            auditFields: {
+              leg: best.leg,
+              source: input.source,
+              coalescedLegs: legs,
+              brokerStopLoss: input.brokerStopLoss ?? null,
+            },
+          });
+          resolution = "QUEUED";
+        }
+      }
+    }
+
+    const actions = [
+      ...noChange.map((item) => ({ ...item, resolution: "NO_CHANGE" })),
+      ...(resolution ? computed.map((item) => ({ ...item, resolution })) : []),
+    ];
+    const now = nowIso();
+    for (const action of actions) {
+      this.db
+        .query(
+          `INSERT INTO reference_stop_actions
+             (logical_trade_id, leg, position_ticket, desired_stop_loss, resolution, queue_item_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(logical_trade_id, leg) DO NOTHING`,
+        )
+        .run(
+          input.trade.id,
+          action.leg,
+          input.positionTicket,
+          action.desired ?? null,
+          action.resolution,
+          queueItemId ?? null,
+          now,
+          now,
+        );
+      resolved.add(action.leg);
+    }
+    return resolved;
+  }
+
+  // Resolves every crossed 0%-allocation reference leg in one pass.
+  //
+  // A reference leg closes no volume; it exists to move the stop when price reaches its
+  // target. Three properties this must hold, each of which is a money bug if broken:
+  //
+  //  - Coalesce. If price gaps through several reference legs, queue ONE MODIFY_SL at the
+  //    most protective resulting stop. The queue also orders same-time stop work from less
+  //    protective to more protective as a final execution-order safeguard.
+  //  - Never regress. A strategy that computes a stop no better than the one the broker
+  //    already holds is dropped, so a late or out-of-order leg cannot widen risk.
+  //  - Only burn a leg once the work is real. A leg is marked HIT only when its strategy
+  //    was queued, was already satisfied, or is a deliberate no-change. A leg whose stop
+  //    price is not yet computable (market entry with no fill price recorded) stays OPEN
+  //    and is retried on the next snapshot.
+  //
+  // Deliberately does not call queueRunnerManagementAfterFinalTp: a reference leg closes no
+  // volume so it is never the final TP that hands the remainder to the runner.
+  private applyCrossedReferenceLegs(input: {
+    trade: LogicalTrade;
+    positionTicket: string;
+    price: number;
+    marketPrice: number;
+    openPrice?: number;
+    point?: number;
+    brokerStopLoss?: number;
+  }): LogicalTrade {
+    const { trade, positionTicket, price } = input;
+
+    const crossedLegs: Array<LogicalTrade["legs"][number]> = [];
+    const targetPriceByLeg = new Map<number, number>();
+    for (const leg of trade.legs) {
+      if (leg.status !== "OPEN" || !isReferenceVirtualTpLeg(leg)) continue;
+      const targetPrice = virtualTpTargetPrice(trade, leg, input.openPrice, input.point);
+      if (!targetPrice) continue;
+      const crossed = trade.direction === "BUY" ? price >= targetPrice : price <= targetPrice;
+      if (!crossed) continue;
+      crossedLegs.push(leg);
+      targetPriceByLeg.set(leg.leg, targetPrice);
+    }
+    if (!crossedLegs.length) return trade;
+
+    return this.db.transaction(() => {
+      const resolved = this.queueCoalescedReferenceStop({
+        trade,
+        positionTicket,
+        legs: crossedLegs,
+        source: "price-monitor",
+        brokerStateKnown: true,
+        brokerStopLoss: input.brokerStopLoss,
+        marketPrice: input.marketPrice,
+        point: input.point,
+      });
+      if (!resolved.size) return trade;
+
+      const updated: LogicalTrade = {
+        ...trade,
+        legs: trade.legs.map((leg) =>
+          resolved.has(leg.leg)
+            ? {
+                ...leg,
+                status: "HIT" as const,
+                brokerEvidence: `app favorable price ${price} crossed reference TP${leg.leg} ${targetPriceByLeg.get(leg.leg)}`,
+              }
+            : leg,
+        ),
+      };
+      this.db
+        .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
+        .run(updated.status, JSON.stringify(updated), updated.id);
+      return updated;
+    })();
+  }
+
   private queueSlStrategyAfterTpClose(
     trade: LogicalTrade,
     legNumber: number,
@@ -6923,23 +7762,31 @@ class AppStore {
     if (!open) return;
     const leg = trade.legs.find((item) => item.leg === legNumber);
     const strategy = leg?.strategy;
+    const point = this.brokerPointForTrade(trade);
     if (strategy && strategy.kind !== "no-change") {
-      const newStopLoss = this.strategyStopPrice(trade, strategy);
-      if (newStopLoss) {
+      const newStopLoss = this.strategyStopPrice(trade, strategy, point);
+      const broker = this.latestPositionStop(trade, positionTicket);
+      const floor = this.effectiveStopFloor(trade, {
+        positionTicket,
+        brokerStateKnown: broker.known,
+        brokerStopLoss: broker.stopLoss,
+      });
+      if (newStopLoss && this.improvesStop(trade, newStopLoss, floor)) {
         this.queueModifySlAfterVirtualTp({
           trade,
           positionTicket,
           newStopLoss,
           parsedSignalId: open.parsedSignalId,
+          idempotencyKey: `virtual-tp-stop:${trade.id}:${positionTicket}:leg:${legNumber}`,
           originalText: `App-managed TP${legNumber} SL strategy`,
           auditEvent: "virtual-tp.sl-strategy",
           auditMessage: "App-managed virtual TP queued SL strategy",
-          auditFields: { leg: legNumber },
+          auditFields: { leg: legNumber, stopFloor: floor ?? null },
         });
       }
     }
 
-    this.queueRunnerManagementAfterFinalTp(trade, legNumber, positionTicket, open);
+    this.queueRunnerManagementAfterFinalTp(trade, legNumber, positionTicket, open, point);
   }
 
   private queueModifySlAfterVirtualTp(input: {
@@ -6947,21 +7794,23 @@ class AppStore {
     positionTicket: string;
     newStopLoss: number;
     parsedSignalId: string;
+    idempotencyKey: string;
     originalText: string;
     auditEvent: string;
     auditMessage: string;
     auditFields?: Record<string, unknown>;
   }) {
-    if (
-      this.hasLifecycleQueue(
-        input.trade.id,
-        (payload) =>
-          payload.commandType === "MODIFY_SL" &&
-          payload.targetPositionTicket === input.positionTicket &&
-          payload.newStopLoss === input.newStopLoss,
+    const existing = this.db
+      .query(
+        `SELECT id FROM queue_items
+         WHERE logical_trade_id = ?
+           AND status IN ('PENDING','LEASED','HELD')
+           AND json_extract(payload_json, '$.idempotencyKey') = ?
+         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
       )
-    ) {
-      return;
+      .get(input.trade.id, input.idempotencyKey) as Row | null;
+    if (existing) {
+      return String(existing.id);
     }
     const item: ExecutionQueueItem = {
       id: `queue_${nanoid(10)}`,
@@ -6977,6 +7826,7 @@ class AppStore {
         takeProfits: [],
         executionMode: "VIRTUAL_TP",
         targetPositionTicket: input.positionTicket,
+        idempotencyKey: input.idempotencyKey,
         originalText: input.originalText,
       },
     };
@@ -6987,6 +7837,7 @@ class AppStore {
       positionTicket: input.positionTicket,
       ...(input.auditFields ?? {}),
     });
+    return item.id;
   }
 
   private queueRunnerManagementAfterFinalTp(
@@ -6994,15 +7845,19 @@ class AppStore {
     legNumber: number,
     positionTicket: string,
     open: { parsedSignalId: string; payload: ExecutionQueueItem["payload"] },
+    point?: number,
   ) {
     const runner = open.payload.runner;
     if (!runner?.enabled || runner.lotSize <= 0) return;
     const nextLegs = trade.legs.map((leg) =>
       leg.leg === legNumber ? { ...leg, status: "CLOSED" as const } : leg,
     );
-    if (!nextLegs.length || nextLegs.some((leg) => leg.status !== "CLOSED")) return;
+    // Reference legs close no volume, so they never reach CLOSED. Requiring them to would
+    // block runner hand-off forever on any trade that uses a 0%-allocation stop trigger.
+    const volumeLegs = nextLegs.filter((leg) => !isReferenceVirtualTpLeg(leg));
+    if (!volumeLegs.length || volumeLegs.some((leg) => leg.status !== "CLOSED")) return;
 
-    this.queueRunnerSlStrategy(trade, positionTicket, runner, open.parsedSignalId, nextLegs);
+    this.queueRunnerSlStrategy(trade, positionTicket, runner, open.parsedSignalId, nextLegs, point);
   }
 
   private queueRunnerSlStrategy(
@@ -7011,6 +7866,7 @@ class AppStore {
     runner: NonNullable<ExecutionQueueItem["payload"]["runner"]>,
     parsedSignalId: string,
     legs = trade.legs,
+    point?: number,
   ) {
     if (runner.slBehavior === "trail") {
       if (!runner.trailPips || runner.trailPips <= 0) return;
@@ -7054,26 +7910,34 @@ class AppStore {
 
     const newStopLoss =
       runner.slBehavior === "last-tp"
-        ? this.lastClosedVirtualTpPrice({ ...trade, legs })
+        ? this.lastClosedVirtualTpPrice({ ...trade, legs }, point)
         : (this.openPriceForTrade(trade.id) ??
           this.snapshotOpenPrice(trade.accountId, positionTicket));
     if (!newStopLoss) return;
+    const broker = this.latestPositionStop(trade, positionTicket);
+    const floor = this.effectiveStopFloor(trade, {
+      positionTicket,
+      brokerStateKnown: broker.known,
+      brokerStopLoss: broker.stopLoss,
+    });
+    if (!this.improvesStop(trade, newStopLoss, floor)) return;
     this.queueModifySlAfterVirtualTp({
       trade,
       positionTicket,
       newStopLoss,
       parsedSignalId,
+      idempotencyKey: `virtual-tp-runner-stop:${trade.id}:${positionTicket}`,
       originalText: "App-managed runner SL strategy",
       auditEvent: "virtual-tp.runner-sl",
       auditMessage: "App-managed runner queued SL strategy",
     });
   }
 
-  private lastClosedVirtualTpPrice(trade: LogicalTrade) {
+  private lastClosedVirtualTpPrice(trade: LogicalTrade, point?: number) {
     const openPrice = this.openPriceForTrade(trade.id) ?? trade.entry?.from;
     for (const leg of trade.legs.slice().sort((left, right) => right.leg - left.leg)) {
       if (leg.status !== "CLOSED") continue;
-      const price = virtualTpTargetPrice(trade, leg, openPrice);
+      const price = virtualTpTargetPrice(trade, leg, openPrice, point);
       if (price) return price;
     }
     return undefined;
@@ -7097,7 +7961,7 @@ class AppStore {
     });
   }
 
-  private strategyStopPrice(trade: LogicalTrade, strategy: TakeProfitStrategy) {
+  private strategyStopPrice(trade: LogicalTrade, strategy: TakeProfitStrategy, point?: number) {
     const symbol = trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "";
     const pipSize = brokerPipSize(symbol);
     const offset = strategy.kind === "no-change" ? 0 : strategy.offsetPips * pipSize;
@@ -7105,7 +7969,15 @@ class AppStore {
     if (strategy.kind === "set-sl-to-entry") {
       basePrice = this.openPriceForTrade(trade.id) ?? trade.entry?.from ?? 0;
     } else if (strategy.kind === "set-sl-to-tp") {
-      basePrice = trade.legs.find((leg) => leg.leg === strategy.tpLeg)?.targetPrice ?? 0;
+      const leg = trade.legs.find((item) => item.leg === strategy.tpLeg);
+      basePrice = leg
+        ? (virtualTpTargetPrice(
+            trade,
+            leg,
+            this.openPriceForTrade(trade.id) ?? trade.entry?.from,
+            point,
+          ) ?? 0)
+        : 0;
     }
     if (!basePrice) return undefined;
     const next = trade.direction === "BUY" ? basePrice + offset : basePrice - offset;
@@ -7271,6 +8143,12 @@ class AppStore {
     let closedLeg: number | undefined;
     if (action === "OPEN") {
       if (trade.status === "CLOSED" || this.hasRecordedRealFullClose(tradeId)) return;
+      // A pending order that vanished from a snapshot gets its trade CANCELLED and its
+      // legs SKIPPED. The broker can still fill that order, and this deal is the proof
+      // the cancellation was wrong. Reopen the legs the cancellation skipped, or the
+      // virtual-TP monitor (which keys on leg.status === "OPEN") ignores the resurrected
+      // trade for its whole life and no TP or stop strategy ever fires.
+      const revivesCancelled = trade.status === "CANCELLED";
       updated = {
         ...trade,
         status: "OPEN",
@@ -7280,7 +8158,9 @@ class AppStore {
         brokerComment: deal.comment,
         lastSnapshotAt: deal.time ?? new Date().toISOString(),
         legs: trade.legs.map((leg) =>
-          leg.status === "PLANNED" ? { ...leg, status: "OPEN", brokerEvidence: evidence } : leg,
+          leg.status === "PLANNED" || (revivesCancelled && leg.status === "SKIPPED")
+            ? { ...leg, status: "OPEN", brokerEvidence: evidence }
+            : leg,
         ),
       };
     } else if (action === "PARTIAL_CLOSE") {
@@ -7316,6 +8196,7 @@ class AppStore {
       };
     }
     if (JSON.stringify(updated) !== JSON.stringify(trade)) {
+      this.rekeyReferenceStopActions(updated);
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run(updated.status, JSON.stringify(updated), trade.id);
@@ -7352,6 +8233,7 @@ class AppStore {
       // "current price" for open positions (BUY closes at bid, SELL at ask).
       const symbols = (snap?.symbols ?? []) as Array<Record<string, unknown>>;
       const accountId = String(row.id);
+      const lastSnapshotReceivedAt = this.mt5SnapshotReceivedAt.get(accountId) ?? null;
       return {
         id: accountId,
         accountNumber: String(row.account_number),
@@ -7386,6 +8268,14 @@ class AppStore {
         closedTrades: this.closedTradesForAccount(accountId),
         externalCloses: this.externalClosesForAccount(accountId),
         lastSnapshotAt: snap?.updatedAt,
+        // Snapshot feed liveness for this process. lastSnapshotAt falls back
+        // to the DB watermark after a restart, and that column only moves on
+        // structural change, so it cannot answer "are snapshots flowing".
+        // Null until the first snapshot arrives, which is the honest cold state.
+        lastSnapshotReceivedAt,
+        snapshotAgeSeconds: lastSnapshotReceivedAt
+          ? Math.max(0, Math.floor((Date.now() - Date.parse(lastSnapshotReceivedAt)) / 1000))
+          : null,
         drawdownWarnPctOverride: nullableNumber(row.drawdown_warn_pct) ?? null,
         drawdownDangerPctOverride: nullableNumber(row.drawdown_danger_pct) ?? null,
       };
@@ -7923,6 +8813,7 @@ class AppStore {
         ),
       };
     }
+    this.rekeyReferenceStopActions(updated);
     this.db
       .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
       .run(updated.status, JSON.stringify(updated), tradeId);
@@ -9752,6 +10643,7 @@ class AppStore {
       this.saveSecret("azureOpenAIApiKey", input.azureOpenAIApiKey.trim());
     }
     const settings = normalizeAppSettings({ ...this.appSettings(), ...input });
+    this.updateTelegramFreshnessBudget(settings.pollingIntervalSeconds);
     this.db
       .query("INSERT OR REPLACE INTO app_settings (id, settings_json, updated_at) VALUES (?, ?, ?)")
       .run("default", JSON.stringify(settings), new Date().toISOString());
@@ -9933,11 +10825,7 @@ class AppStore {
     const accounts = this.mt5Accounts();
     const performance = this.dashboardPerformance(accounts);
     return {
-      health: {
-        status: "ok",
-        database: "connected",
-        telegramAdapter,
-      },
+      health: this.ingestionHealth(telegramAdapter),
       appSettings: this.settingsProjection(),
       accountPerformance: performance.accountPerformance,
       accountPerformanceByAccount: performance.accountPerformanceByAccount,
@@ -10316,6 +11204,22 @@ class AppStore {
     this.ensureColumn("queue_items", "origin_queue_item_id", "TEXT");
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_queue_items_parsed_signal_created ON queue_items(parsed_signal_id, created_at)",
+    );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS reference_stop_actions (
+        logical_trade_id TEXT NOT NULL,
+        leg INTEGER NOT NULL,
+        position_ticket TEXT NOT NULL,
+        desired_stop_loss REAL,
+        resolution TEXT NOT NULL,
+        queue_item_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (logical_trade_id, leg)
+      );
+    `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_reference_stop_actions_queue ON reference_stop_actions(queue_item_id)",
     );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS held_lifecycle_drops (
@@ -10853,6 +11757,7 @@ class AppStore {
             : { ...leg, status: "SKIPPED" as const, brokerEvidence: evidence },
         ),
       };
+      this.rekeyReferenceStopActions(updated);
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run("CLOSED", JSON.stringify(updated), tradeId);
@@ -10904,6 +11809,7 @@ class AppStore {
           : { ...leg, status: nextLegStatus, brokerEvidence: evidence },
       ),
     };
+    if (updated.livePositionExists) this.rekeyReferenceStopActions(updated);
     this.db
       .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
       .run(updated.status, JSON.stringify(updated), tradeId);
@@ -11745,9 +12651,14 @@ class AppStore {
         trade.status === "CLOSED" ||
         trade.status === "CANCELLED" ||
         trade.status === "ARCHIVED"
-      )
+      ) {
+        this.clearPendingOpenMissingForTrade(accountId, trade.id);
         continue;
-      if (this.hasRecordedRealFullClose(trade.id)) continue;
+      }
+      if (this.hasRecordedRealFullClose(trade.id)) {
+        this.clearPendingOpenMissingForTrade(accountId, trade.id);
+        continue;
+      }
 
       const match = snapshotMatchForTrade(
         positions,
@@ -11756,7 +12667,17 @@ class AppStore {
         this.brokerOrderTicketsForTrade(trade.id),
       );
       const pendingOpen = match.status === "missing" ? this.pendingOpenOrder(trade.id) : null;
-      if (match.status === "missing" && this.pendingOpenMissingGraceActive(pendingOpen)) continue;
+      if (match.status !== "missing" || !pendingOpen) {
+        this.clearPendingOpenMissingForTrade(accountId, trade.id);
+      }
+      if (match.status === "missing" && pendingOpen) {
+        const absenceExceeded = this.pendingOpenMissingDebounceExpired(
+          accountId,
+          trade.id,
+          pendingOpen,
+        );
+        if (!absenceExceeded || this.pendingOpenMissingGraceActive(pendingOpen)) continue;
+      }
       const missingPendingOpen = pendingOpen ? this.missingPendingOpenOrder(pendingOpen) : null;
       const updated = missingPendingOpen
         ? cancelLogicalTrade(trade, {
@@ -11770,6 +12691,10 @@ class AppStore {
           })
         : snapshotSyncTradeState(trade, match);
       if (JSON.stringify(updated) === JSON.stringify(trade)) continue;
+      if (missingPendingOpen) {
+        this.clearPendingOpenMissingForTrade(accountId, trade.id);
+      }
+      if (updated.livePositionExists) this.rekeyReferenceStopActions(updated);
       this.db
         .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
         .run(updated.status, JSON.stringify(updated), trade.id);
@@ -11809,6 +12734,51 @@ class AppStore {
         );
       }
     }
+  }
+
+  private pendingOpenMissingStateKey(accountId: string, orderTicket: string) {
+    return `${accountId}:${orderTicket}`;
+  }
+
+  private clearPendingOpenMissingForTrade(accountId: string, tradeId: string) {
+    for (const [key, state] of this.pendingOpenMissingStates) {
+      if (state.accountId === accountId && state.tradeId === tradeId) {
+        this.pendingOpenMissingStates.delete(key);
+      }
+    }
+  }
+
+  private clearPendingOpenMissingForAccount(accountId: string) {
+    for (const [key, state] of this.pendingOpenMissingStates) {
+      if (state.accountId === accountId) this.pendingOpenMissingStates.delete(key);
+    }
+  }
+
+  private pendingOpenMissingDebounceExpired(accountId: string, tradeId: string, row: Row) {
+    const orderTicket = String(row.order_ticket ?? "");
+    if (!orderTicket) return false;
+    const key = this.pendingOpenMissingStateKey(accountId, orderTicket);
+    const current = this.pendingOpenMissingStates.get(key);
+    if (!current || current.tradeId !== tradeId) {
+      this.pendingOpenMissingStates.set(key, {
+        accountId,
+        tradeId,
+        orderTicket,
+        missingSince: Date.now(),
+      });
+      return false;
+    }
+    // Scale with the poll rate so a slow poller does not cancel on one miss, but cap the
+    // result. Without the cap a long polling interval delays recognising a genuinely
+    // cancelled order for as long as the operator's interval allows, and the order stays
+    // live in the app's model the whole time. Capping the derived threshold keeps that
+    // bounded while leaving the polling interval itself an operator choice, which the
+    // Telegram readiness budget also scales from.
+    const thresholdSeconds = Math.max(
+      pendingOpenMissingDebounceSeconds,
+      this.appSettings().pollingIntervalSeconds * 3,
+    );
+    return Date.now() - current.missingSince > thresholdSeconds * 1000;
   }
 
   private pendingOpenOrder(tradeId: string) {
@@ -12011,24 +12981,100 @@ class AppStore {
     if (!trade) return;
 
     const hitLeg = tpHitLegFromText(signal.originalText, trade);
-    const updated: LogicalTrade = {
-      ...trade,
-      legs: trade.legs.map((leg) => {
-        const shouldMark = hitLeg === "all" || (typeof hitLeg === "number" && leg.leg === hitLeg);
-        return shouldMark ? { ...leg, status: "HIT", brokerEvidence: "provider-announced" } : leg;
-      }),
-      commandHistory: [
-        ...trade.commandHistory,
-        {
-          commandType: signal.commandType,
-          text: signal.originalText,
-          at: new Date().toISOString(),
-        },
-      ],
-    };
-    this.db
-      .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
-      .run(JSON.stringify(updated), tradeId);
+    const announced = (leg: LogicalTrade["legs"][number]) =>
+      hitLeg === "all" || (typeof hitLeg === "number" && leg.leg === hitLeg);
+
+    // A provider-announced TP hit on a 0%-allocation leg must still move the stop. Marking the
+    // leg HIT takes it out of the virtual-TP monitor's reach, so the announcement would
+    // otherwise silently consume the only trigger the stop strategy had. Providers that post
+    // "TP1 hit" (KAL VIP does) would never get break-even applied.
+    //
+    // Resolve the stop BEFORE persisting any HIT. A normal OPEN_TRADE report clears
+    // matchedBrokerTickets until the next matching snapshot, so an announcement landing in that
+    // window has no ticket to modify. Burning the leg there would strand the original stop for
+    // the life of the trade, so those legs stay OPEN and the monitor picks them up instead.
+    const positionTicket = trade.matchedBrokerTickets?.find((ticket) => truthyBrokerTicket(ticket));
+    const pendingReference = trade.legs.filter(
+      (leg) => announced(leg) && leg.status === "OPEN" && isReferenceVirtualTpLeg(leg),
+    );
+    const broker = positionTicket
+      ? this.latestPositionStop(trade, positionTicket)
+      : { known: false, stopLoss: undefined };
+    const quote = this.liveMt5Snapshots
+      .get(trade.accountId ?? "")
+      ?.symbols.find(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          String((item as Record<string, unknown>).symbol ?? "").toUpperCase() ===
+            (trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "").toUpperCase(),
+      ) as Record<string, unknown> | undefined;
+    const marketPrice = Number(trade.direction === "BUY" ? (quote?.bid ?? 0) : (quote?.ask ?? 0));
+    const brokerPoint = Number(quote?.point ?? 0);
+    const point = brokerPoint > 0 ? brokerPoint : undefined;
+
+    this.db.transaction(() => {
+      const resolvedReference =
+        positionTicket && broker.known
+          ? this.queueCoalescedReferenceStop({
+              trade,
+              positionTicket,
+              legs: pendingReference,
+              source: "provider-announced",
+              brokerStateKnown: true,
+              brokerStopLoss: broker.stopLoss,
+              marketPrice,
+              point,
+            })
+          : new Set<number>();
+      // The provider telling us a target was reached is durable evidence of a crossing, even
+      // when the stop cannot be placed right now (price retraced past it while we were down, so
+      // the desired stop sits on the wrong side of market). Record the crossing on the watermark
+      // so the monitor retries it. Without this the announcement is discarded and break-even is
+      // never applied, which is the incident shape that motivated v1.65.4 in the first place.
+      const unresolved = pendingReference.filter((leg) => !resolvedReference.has(leg.leg));
+      const openPrice = this.openPriceForTrade(trade.id) ?? trade.entry?.from;
+      let watermark = trade.virtualTpWatermark;
+      if (positionTicket && unresolved.length) {
+        const reached = unresolved
+          .map((leg) => virtualTpTargetPrice(trade, leg, openPrice, point))
+          .filter((value): value is number => Number.isFinite(value) && (value ?? 0) > 0);
+        if (reached.length) {
+          const best = trade.direction === "BUY" ? Math.max(...reached) : Math.min(...reached);
+          const previous =
+            watermark?.positionTicket === positionTicket ? watermark.favorablePrice : undefined;
+          const favorablePrice =
+            previous === undefined
+              ? best
+              : trade.direction === "BUY"
+                ? Math.max(previous, best)
+                : Math.min(previous, best);
+          if (favorablePrice !== previous) {
+            watermark = { positionTicket, favorablePrice, observedAt: nowIso() };
+          }
+        }
+      }
+      const updated: LogicalTrade = {
+        ...trade,
+        virtualTpWatermark: watermark,
+        legs: trade.legs.map((leg) => {
+          if (!announced(leg)) return leg;
+          if (isReferenceVirtualTpLeg(leg) && !resolvedReference.has(leg.leg)) return leg;
+          return { ...leg, status: "HIT", brokerEvidence: "provider-announced" };
+        }),
+        commandHistory: [
+          ...trade.commandHistory,
+          {
+            commandType: signal.commandType,
+            text: signal.originalText,
+            at: new Date().toISOString(),
+          },
+        ],
+      };
+      this.db
+        .query("UPDATE logical_trades SET data_json = ? WHERE id = ?")
+        .run(JSON.stringify(updated), tradeId);
+    })();
   }
 
   private resizePartialOpen(
@@ -12056,8 +13102,10 @@ class AppStore {
               ...leg,
               allocationPercent: target.allocationPercent,
               volume: target.volume,
-              status: "OPEN" as const,
-              brokerEvidence: executionEvidence(input),
+              // A reference leg that already fired must not be reopened by a late partial
+              // opening report, or the next snapshot evaluates it a second time.
+              status: leg.status === "HIT" ? ("HIT" as const) : ("OPEN" as const),
+              brokerEvidence: leg.status === "HIT" ? leg.brokerEvidence : executionEvidence(input),
             }
           : { ...leg, allocationPercent: 0, volume: undefined, status: "SKIPPED" as const };
       }),
@@ -12079,6 +13127,9 @@ class AppStore {
     if (!trade || trade.status === "ARCHIVED") return;
 
     const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
+    if (payload.commandType === "OPEN_TRADE" || payload.commandType === "CANCEL_PENDING") {
+      this.clearPendingOpenMissingForTrade(input.accountId, tradeId);
+    }
     const evidence = executionEvidence(input);
     const virtualTpLeg = virtualTpLegFromExecutionReport(payload, input);
     let updated: LogicalTrade = trade;
@@ -12123,6 +13174,45 @@ class AppStore {
             : leg,
         );
         updated = { ...trade, status: virtualTpStatusAfterLegClose(trade, legs, payload), legs };
+      } else if (
+        payload.commandType === "CLOSE_PARTIAL" &&
+        payload.partialClose?.kind === "TP_LEG" &&
+        trade.legs.some((leg) => leg.leg === payload.partialClose?.value && leg.status === "HIT")
+      ) {
+        // A rejected close is direct evidence the close did not happen, so the volume is still
+        // on the position. The leg went HIT when the close was queued, and HIT is what the
+        // dashboard, `tpHitLegFromText`, cancellation, readopt and startup recovery all read as
+        // already dealt with, so leaving it there books volume the broker refused to take off.
+        //
+        // This corrects the record, not the stranding. On a trade that keeps matching its
+        // snapshot, FAILED is skipped by the virtual-TP monitor exactly as HIT is, and none of
+        // the paths that reopen a leg run on a healthy OPEN trade. The leg is recovered only
+        // once the trade reaches OUT_OF_SYNC, or by an operator readopt. Deliberately not
+        // reopened here: re-queueing against a broker that just refused would spin a close per
+        // EA round trip. The audit line below, plus the execution-failed alert the report
+        // already dispatches, is what an operator acts on.
+        const rejectedLeg = payload.partialClose.value;
+        updated = {
+          ...trade,
+          legs: trade.legs.map((leg) =>
+            leg.leg === rejectedLeg && leg.status === "HIT"
+              ? { ...leg, status: "FAILED" as const, brokerEvidence: evidence }
+              : leg,
+          ),
+        };
+        this.audit(
+          "virtual-tp.close-rejected",
+          "warn",
+          "Broker refused a take-profit close; the leg still holds its volume",
+          {
+            logicalTradeId: trade.id,
+            leg: rejectedLeg,
+            positionTicket: input.positionTicket ?? payload.targetPositionTicket ?? "",
+            queueItemId: input.queueItemId,
+            brokerComment: input.brokerComment,
+            retcode: input.retcode,
+          },
+        );
       }
       // Other failures (invalid stops, no money, autotrading disabled) leave the
       // trade unchanged so the operator can intervene.
@@ -12155,6 +13245,10 @@ class AppStore {
         ),
       };
     } else if (payload.commandType === "OPEN_TRADE") {
+      // Same revival rule as reconcileHistoryDeal: an executed open on a trade the
+      // snapshot sweep cancelled proves the cancellation wrong, so the legs that
+      // cancellation skipped must reopen or the virtual-TP monitor never sees them.
+      const revivesCancelled = trade.status === "CANCELLED";
       updated = {
         ...trade,
         status: "OPEN",
@@ -12164,7 +13258,9 @@ class AppStore {
         brokerComment: undefined,
         lastSnapshotAt: undefined,
         legs: trade.legs.map((leg) =>
-          leg.status === "PLANNED" ? { ...leg, status: "OPEN", brokerEvidence: evidence } : leg,
+          leg.status === "PLANNED" || (revivesCancelled && leg.status === "SKIPPED")
+            ? { ...leg, status: "OPEN", brokerEvidence: evidence }
+            : leg,
         ),
       };
     } else if (payload.commandType === "CLOSE_TRADE") {
@@ -12207,6 +13303,8 @@ class AppStore {
             input.positionTicket,
             payload.runner,
             String(row.parsed_signal_id ?? ""),
+            updated.legs,
+            this.brokerPointForTrade(updated),
           );
         }
       }
@@ -12232,6 +13330,7 @@ class AppStore {
     }
 
     if (updated === trade) return;
+    if (updated.livePositionExists) this.rekeyReferenceStopActions(updated);
     this.db
       .query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?")
       .run(updated.status, JSON.stringify(updated), trade.id);
@@ -13099,6 +14198,28 @@ function brokerCommentFromSnapshot(record: unknown) {
 function brokerOpenPriceFromSnapshot(record: unknown) {
   if (!record || typeof record !== "object") return undefined;
   const value = Number((record as Record<string, unknown>).openPrice ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+// The stop the broker currently holds on a snapshotted position. MT5 reports 0 for "no
+// stop", which must read as absent rather than as a stop at price zero.
+// Stop modifications the app generated from a configured strategy, as opposed to a provider
+// instruction or an operator action. Only these may be skipped when the live broker stop is
+// already at least as protective; a human asking for a wider stop must always be delivered.
+const APP_MANAGED_STOP_KEY_PREFIXES = [
+  "reference-stop:",
+  "virtual-tp-stop:",
+  "virtual-tp-runner-stop:",
+];
+
+function isAppManagedStopPayload(payload: ExecutionQueueItem["payload"]) {
+  const key = payload.idempotencyKey ?? "";
+  return APP_MANAGED_STOP_KEY_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
+
+function brokerStopLossFromSnapshot(record: unknown) {
+  if (!record || typeof record !== "object") return undefined;
+  const value = Number((record as Record<string, unknown>).sl ?? 0);
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
@@ -14592,8 +15713,11 @@ function normalizeAppSettings(input: Partial<AppSettings>): AppSettings {
     ),
     pollingIntervalSeconds: Math.max(
       1,
-      Math.round(
-        positiveNumber(input.pollingIntervalSeconds, defaultAppSettings.pollingIntervalSeconds),
+      Math.min(
+        MAX_POLLING_INTERVAL_SECONDS,
+        Math.round(
+          positiveNumber(input.pollingIntervalSeconds, defaultAppSettings.pollingIntervalSeconds),
+        ),
       ),
     ),
     allowedOrderTypes,

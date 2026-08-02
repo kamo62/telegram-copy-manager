@@ -77,10 +77,14 @@ describe("AccountHeader", () => {
     fireEvent.click(view.getByRole("button", { name: "Rename" }));
     fireEvent.change(view.getByLabelText("Account name"), { target: { value: "Gold live" } });
     fireEvent.click(view.getByRole("button", { name: "Save name" }));
+    // The wait has to finish inside the test's own budget, or a genuine failure
+    // surfaces as an opaque test timeout instead of the assertion that failed.
+    // These were both 10s, so under load the wait ate the whole budget and this
+    // test failed intermittently for no reason connected to what it asserts.
     await waitFor(() => expect(view.queryByLabelText("Account name")).toBeNull(), {
-      timeout: 10_000,
+      timeout: 5_000,
     });
-  }, 10_000);
+  }, 15_000);
 
   test("resets rename state when switching accounts and keeps an empty nickname clearable", async () => {
     const renamed: string[] = [];

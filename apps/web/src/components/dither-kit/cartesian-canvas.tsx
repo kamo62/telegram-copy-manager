@@ -26,12 +26,20 @@ type LoopArgs = {
   stars: RefObject<Star[]>;
 };
 
+/** Handle on a running loop: `wake` asks for one more pass after a commit,
+ * `stop` cancels whatever frame is outstanding and keeps the loop stopped. */
+type Loop = { wake: () => void; stop: () => void };
+
 /**
  * The requestAnimationFrame paint loop — eases each series toward its target
  * surface, paints the dither fill (with the entrance reveal), then layers the
  * crosshair marker and winking stars on top. Lives outside the component so the
  * component stays small and the closure is free of compiler constraints.
- * Returns a cleanup that cancels the loop.
+ *
+ * The loop only holds a frame while something is actually in motion (the
+ * entrance reveal, a surface easing toward new data, the hover lift settling,
+ * or winking stars). Once it settles it parks itself and waits for `wake`, so a
+ * static or unmeasured chart costs nothing.
  */
 function startCartesianLoop({
   canvas,
@@ -41,7 +49,7 @@ function startCartesianLoop({
   state,
   targets,
   stars,
-}: LoopArgs): (() => void) | undefined {
+}: LoopArgs): Loop | undefined {
   const c = canvas.getContext("2d");
   if (!c || cols <= 0 || rows <= 0) return undefined;
   canvas.width = cols;
@@ -62,8 +70,13 @@ function startCartesianLoop({
 
   const reduce = prefersReducedMotion();
   const EASE = reduce ? 1 : 0.18;
-  const animate = state.current.animate && !reduce;
-  const duration = state.current.animationDuration;
+  // Read per frame off the live context, never captured: a chart switched to
+  // `animate={false}` has to stop winking so the loop can park, and a duration
+  // change has to land mid-entrance. Rebuilding the loop on a settings change
+  // would do the same job, but it would also reset the eased surfaces, the
+  // hover lift and the canvas backing store, which is a visible jolt for what
+  // is only a prop tweak.
+  const animating = () => state.current.animate && !reduce;
   const current: Record<string, Surface> = {};
 
   // `reveal` (0–1) sweeps the fill in left-to-right on first paint.
@@ -99,20 +112,28 @@ function startCartesianLoop({
   };
 
   let raf = 0;
+  let scheduled = false;
+  let stopped = false;
   let tick = 0;
   let last = 0;
   let animStart = 0;
   let lastProg = -1;
   let lastRevision = state.current.revision;
-  let entranceReported = !animate;
+  let entranceReported = !animating();
   let intensity = 0;
   let needsFill = true;
   let lastPaintSig = "";
+  let lastMarkerX = -1;
+  // Set by `wake` — the component saw a commit, so re-check the paint inputs
+  // once. Also true for the first frame.
+  let dirty = true;
   let lastSelected: string | null | undefined = Symbol() as never;
 
   const draw = (now: number) => {
-    raf = requestAnimationFrame(draw);
+    scheduled = false;
     const s = state.current;
+    // Nothing measured yet, so park. `wake` restarts the loop when the plot
+    // rect arrives, so an unready chart no longer burns a frame per tick.
     if (!s.ready) return;
     const tgt = targets.current;
     if (s.revision !== lastRevision) {
@@ -122,7 +143,12 @@ function startCartesianLoop({
       entranceReported = false;
     }
     if (!animStart) animStart = now;
-    const prog = animate ? Math.min(1, (now - animStart) / duration) : 1;
+    const animate = animating();
+    const duration = s.animationDuration;
+    // Pinned to 1 once the reveal has been reported, so switching animation
+    // back on resumes the winking without re-wiping an already revealed chart.
+    // Only a revision bump replays the entrance.
+    const prog = animate && !entranceReported ? Math.min(1, (now - animStart) / duration) : 1;
     const progChanged = prog !== lastProg;
     // Tell the context the reveal is done so DOM markers fade in in sync.
     if (prog >= 1 && !entranceReported) {
@@ -181,20 +207,55 @@ function startCartesianLoop({
     // Live hover wins; the controlled markerIndex (e.g. a committed point)
     // is the fallback shown when nothing is hovered.
     const marker = s.hoverIndex != null ? s.hoverIndex : s.markerIndex;
+    const mx =
+      marker != null && s.dataLength > 1
+        ? Math.round((marker / (s.dataLength - 1)) * (cols - 1))
+        : -1;
+    // A crosshair that has not moved paints the same pixels, so only a change
+    // of column (including leaving the plot) is worth a repaint.
+    const markerMoved = mx !== lastMarkerX;
     // `animate={false}` also disables sparkle motion. Previously these static
     // charts still repainted every 100ms despite opting out of animation.
-    const winkDue = animate && !reduce && stars.current.length > 0 && now - last >= 100;
-    // Repaint when a tweak-driven paint input changes (variant, stacking) so
-    // the panel updates the fill live — without resetting the entrance reveal.
-    const paintSig = `${s.stackType}|${s.configKeys
-      .map((k) => s.seriesSpecs[k]?.variant ?? "")
+    const winking = animate && !reduce && stars.current.length > 0;
+    const winkDue = winking && now - last >= 100;
+    // Repaint when a tweak-driven paint input changes (variant, stacking,
+    // series kind or colour) so the fill updates live — without resetting the
+    // entrance reveal. Each entry carries its own key so the identity *and the
+    // order* of `configKeys` are covered: a layer's dither sparsity comes from
+    // its position in that list, so two series matching on kind, variant and
+    // colour still paint differently once they swap places.
+    const paintSig = `${s.stackType}|${s.chartType}|${s.configKeys
+      .map(
+        (k) =>
+          `${k}:${s.seriesSpecs[k]?.kind ?? ""}:${s.seriesSpecs[k]?.variant ?? ""}:${s.config[k]?.color ?? ""}`,
+      )
       .join(",")}`;
     const sigChanged = paintSig !== lastPaintSig;
     if (sigChanged) {
       lastPaintSig = paintSig;
       needsFill = true;
     }
-    if (!(moving || settling || winkDue || marker != null || progChanged || sigChanged)) return;
+
+    // Anything still in motion needs the next frame. Everything else is driven
+    // by a commit, so a settled chart parks here and `wake` brings it back.
+    if (moving || settling || prog < 1 || winking) schedule();
+
+    if (
+      !(
+        dirty ||
+        needsFill ||
+        moving ||
+        settling ||
+        winkDue ||
+        progChanged ||
+        sigChanged ||
+        markerMoved
+      )
+    ) {
+      return;
+    }
+    dirty = false;
+    lastMarkerX = mx;
     if (progChanged) {
       lastProg = prog;
       needsFill = true;
@@ -216,10 +277,6 @@ function startCartesianLoop({
     c.clearRect(0, 0, cols, rows);
     c.drawImage(off, 0, 0);
 
-    const mx =
-      marker != null && s.dataLength > 1
-        ? Math.round((marker / (s.dataLength - 1)) * (cols - 1))
-        : -1;
     if (mx >= 0 && mx <= revealCols) {
       for (const key of s.configKeys) {
         const cur = current[key];
@@ -273,8 +330,28 @@ function startCartesianLoop({
     }
   };
 
-  raf = requestAnimationFrame(draw);
-  return () => cancelAnimationFrame(raf);
+  /** Queue the next frame unless one is already queued (or the loop is stopped),
+   * so `wake` can be called freely without stacking up callbacks. */
+  const schedule = () => {
+    if (scheduled || stopped) return;
+    scheduled = true;
+    raf = requestAnimationFrame(draw);
+  };
+
+  schedule();
+  return {
+    wake: () => {
+      dirty = true;
+      schedule();
+    },
+    stop: () => {
+      stopped = true;
+      if (scheduled) {
+        scheduled = false;
+        cancelAnimationFrame(raf);
+      }
+    },
+  };
 }
 
 /**
@@ -338,16 +415,21 @@ export function CartesianCanvas() {
   const stateRef = useRef(ctx);
   const targetsRef = useRef(targets);
   const starsRef = useRef(stars);
+  const wakeRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     stateRef.current = ctx;
     targetsRef.current = targets;
     starsRef.current = stars;
+    // Every paint input (readiness, data, hover, selection, colours, bloom)
+    // reaches the canvas through a commit, so a commit is also the signal that
+    // a parked loop has work again.
+    wakeRef.current?.();
   });
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    return startCartesianLoop({
+    const loop = startCartesianLoop({
       canvas,
       bloomCanvas: bloomRef.current,
       cols,
@@ -356,6 +438,12 @@ export function CartesianCanvas() {
       targets: targetsRef,
       stars: starsRef,
     });
+    if (!loop) return;
+    wakeRef.current = loop.wake;
+    return () => {
+      wakeRef.current = null;
+      loop.stop();
+    };
   }, [cols, rows]);
 
   const bloomActive = ctx.bloomOnHover ? ctx.isMouseInChart || ctx.hovered : true;

@@ -1,6 +1,7 @@
 import { mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Logger } from "telegram";
+import { Logger } from "teleproto";
+import type { Session } from "teleproto/sessions";
 
 export type TelegramSessionStatus =
   | "CODE_REQUIRED"
@@ -104,15 +105,11 @@ export class TelegramRpcTimeoutError extends Error {
   }
 }
 
-// gramjs defaults connectionRetries to Infinity. The previous override of 5
-// capped MTProto reconnect attempts, so any network blip longer than ~5s left
-// the client permanently disconnected with no further retries and live signal
-// capture silently stopped until the process restarted. Restore unbounded
-// auto-reconnect, overridable via env for tests and diagnostics.
-export function parseConnectionRetries(raw: string | undefined): number {
-  if (raw === undefined || raw === "") return Number.POSITIVE_INFINITY;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : Number.POSITIVE_INFINITY;
+// The client must keep trying after a network blip. Keep this helper exported
+// for the existing resilience tests, while refusing finite overrides that can
+// silently stop live signal capture.
+export function parseConnectionRetries(_raw: string | undefined): number {
+  return Number.POSITIVE_INFINITY;
 }
 
 export function parseReconnectRetryDelay(raw: string | undefined): number {
@@ -162,9 +159,7 @@ export async function withTelegramRpcTimeout<T>(operation: Promise<T>, timeoutMs
   }
 }
 
-const TELEGRAM_CONNECTION_RETRIES = parseConnectionRetries(process.env.TELEGRAM_CONNECTION_RETRIES);
-
-type TelegramLogLevel = ConstructorParameters<typeof Logger>[0];
+type TelegramLogLevel = NonNullable<ConstructorParameters<typeof Logger>[0]>;
 
 export function telegramLogLevel(raw = process.env.TELEGRAM_LOG_LEVEL): TelegramLogLevel {
   const level = raw?.trim().toLowerCase();
@@ -173,8 +168,9 @@ export function telegramLogLevel(raw = process.env.TELEGRAM_LOG_LEVEL): Telegram
   ) as TelegramLogLevel;
 }
 
-export const GRAMJS_CLIENT_OPTIONS = {
-  connectionRetries: TELEGRAM_CONNECTION_RETRIES,
+export const TELEPROTO_CLIENT_OPTIONS = {
+  connectionRetries: Number.POSITIVE_INFINITY,
+  reconnectRetries: Number.POSITIVE_INFINITY,
   autoReconnect: true,
   retryDelay: parseReconnectRetryDelay(process.env.TELEGRAM_RECONNECT_RETRY_DELAY_MS),
   baseLogger: new Logger(telegramLogLevel()),
@@ -183,13 +179,13 @@ export const GRAMJS_CLIENT_OPTIONS = {
 // How long without a successful Telegram RPC before the session is considered
 // stalled. Surfaced in the status snapshot so a silent capture outage is
 // visible instead of looking like "no new messages".
-const TELEGRAM_STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS ?? 180);
+export const TELEGRAM_STALL_SECONDS = Number(process.env.TELEGRAM_STALL_SECONDS ?? 180);
 
 export function createTelegramAdapter(
   name = process.env.TELEGRAM_ADAPTER ?? "mock",
 ): TelegramAdapter {
   if (name === "gramjs") {
-    return new GramjsTelegramAdapter();
+    return new TeleprotoTelegramAdapter();
   }
   return new MockTelegramAdapter();
 }
@@ -225,7 +221,7 @@ class MockTelegramAdapter implements TelegramAdapter {
 }
 
 interface PendingLogin {
-  client: GramjsClient;
+  client: TeleprotoClient;
   session: { save: () => string };
   status: TelegramSessionStatus;
   isCodeViaApp?: boolean;
@@ -236,7 +232,7 @@ interface PendingLogin {
   loginPromise: Promise<void>;
 }
 
-interface GramjsClient {
+interface TeleprotoClient {
   readonly connected?: boolean;
   readonly disconnected?: boolean;
   connect(): Promise<boolean>;
@@ -249,14 +245,14 @@ interface GramjsClient {
   disconnect(): Promise<void>;
   isUserAuthorized(): Promise<boolean>;
   getMe(): Promise<{ phone?: string | number | bigint }>;
-  getDialogs(params: { limit: number }): Promise<GramjsDialog[]>;
+  getDialogs(params: { limit: number }): Promise<TeleprotoDialog[]>;
   iterMessages(
     entity: unknown,
     params: { limit: number; offsetDate?: number; offsetId?: number },
-  ): AsyncIterable<GramjsMessage>;
+  ): AsyncIterable<TeleprotoMessage>;
 }
 
-interface GramjsDialog {
+interface TeleprotoDialog {
   id?: string | number | bigint;
   title?: string;
   name?: string;
@@ -267,51 +263,38 @@ interface GramjsDialog {
   unreadCount?: number;
 }
 
-interface GramjsMessage {
+interface TeleprotoMessage {
   id?: string | number | bigint;
   replyTo?: { replyToMsgId?: string | number | bigint };
   fwdFrom?: { fromId?: unknown; fromName?: string; date?: number };
   date?: number;
   message?: string;
-  getReplyMessage?: () => Promise<GramjsMessage | undefined>;
+  getReplyMessage?: () => Promise<TeleprotoMessage | undefined>;
   sender?: {
     username?: string;
     firstName?: string;
   };
 }
 
-class GramjsTelegramAdapter implements TelegramAdapter {
+class TeleprotoTelegramAdapter implements TelegramAdapter {
   name = "gramjs";
   private readonly pending = new Map<string, PendingLogin>();
-  private readonly clients = new Map<string, GramjsClient>();
+  private readonly clients = new Map<string, TeleprotoClient>();
   private readonly dialogEntities = new Map<string, unknown>();
   private readonly lastContactAt = new Map<string, number>();
   private readonly sessionDir = process.env.TELEGRAM_SESSION_DIR ?? "data/telegram-sessions";
 
   async startLogin(input: TelegramLoginStartInput) {
-    const [{ TelegramClient }, { StringSession }] = await Promise.all([
-      import("telegram"),
-      import("telegram/sessions"),
-    ]);
+    const { StringSession } = await import("teleproto/sessions");
     let sessionString = await this.readSession(input.appSessionId);
     let session = new StringSession(sessionString);
-    let client = new TelegramClient(
-      session,
-      Number(input.apiId),
-      input.apiHash,
-      GRAMJS_CLIENT_OPTIONS,
-    ) as unknown as GramjsClient;
+    let client = await createTeleprotoClient(session, Number(input.apiId), input.apiHash);
 
     if (sessionString && !(await this.sessionMatchesPhone(client, input.phone))) {
       await client.disconnect().catch(() => undefined);
       sessionString = "";
       session = new StringSession("");
-      client = new TelegramClient(
-        session,
-        Number(input.apiId),
-        input.apiHash,
-        GRAMJS_CLIENT_OPTIONS,
-      ) as unknown as GramjsClient;
+      client = await createTeleprotoClient(session, Number(input.apiId), input.apiHash);
     }
 
     const pending: PendingLogin = {
@@ -536,7 +519,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     };
   }
 
-  private async resolveDialogEntity(client: GramjsClient, sessionId: string, dialogId: string) {
+  private async resolveDialogEntity(client: TeleprotoClient, sessionId: string, dialogId: string) {
     const key = this.dialogKey(sessionId, dialogId);
     const cached = this.dialogEntities.get(key);
     if (cached) return cached;
@@ -560,7 +543,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
       return pending.client;
     }
 
-    // Return the cached client as-is. GramJS reconnects the transport on its own
+    // Return the cached client as-is. teleproto reconnects the transport on its own
     // with the configured options above, and its
     // connection getters misreport on a working client, so we do NOT health-check
     // or rebuild here: doing so caused a reconnect storm. A genuine stall is
@@ -579,7 +562,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     return client;
   }
 
-  private async createClient(sessionString: string): Promise<GramjsClient> {
+  private async createClient(sessionString: string): Promise<TeleprotoClient> {
     const apiId = process.env.TELEGRAM_API_ID;
     const apiHash = process.env.TELEGRAM_API_HASH;
     if (!apiId || !apiHash) {
@@ -587,16 +570,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
         "TELEGRAM_API_ID and TELEGRAM_API_HASH are required to reuse a saved session",
       );
     }
-    const [{ TelegramClient }, { StringSession }] = await Promise.all([
-      import("telegram"),
-      import("telegram/sessions"),
-    ]);
-    return new TelegramClient(
-      new StringSession(sessionString),
-      Number(apiId),
-      apiHash,
-      GRAMJS_CLIENT_OPTIONS,
-    ) as unknown as GramjsClient;
+    return createTeleprotoClient(sessionString, Number(apiId), apiHash);
   }
 
   private markContact(sessionId: string) {
@@ -607,7 +581,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     const last = this.lastContactAt.get(sessionId);
     const stalledSeconds = last !== undefined ? Math.floor((Date.now() - last) / 1000) : undefined;
     // Health is judged by how recently a Telegram RPC actually succeeded, not by
-    // gramjs connection getters (which misreport). A session that has not made
+    // teleproto connection getters (which misreport). A session that has not made
     // contact yet (no lastContactAt) reports not-connected but not stalled, so a
     // fresh boot doesn't raise a false alarm before its first poll lands.
     const stalled = stalledSeconds !== undefined && stalledSeconds > TELEGRAM_STALL_SECONDS;
@@ -675,7 +649,7 @@ class GramjsTelegramAdapter implements TelegramAdapter {
     }
   }
 
-  private async sessionMatchesPhone(client: GramjsClient, requestedPhone: string) {
+  private async sessionMatchesPhone(client: TeleprotoClient, requestedPhone: string) {
     try {
       await client.connect();
       if (!(await client.isUserAuthorized())) return false;
@@ -698,7 +672,25 @@ class GramjsTelegramAdapter implements TelegramAdapter {
   }
 }
 
-function forwardedFrom(header: GramjsMessage["fwdFrom"]): TelegramForwardedFrom | undefined {
+export async function createTeleprotoClient(
+  session: string | Session,
+  apiId: number,
+  apiHash: string,
+): Promise<TeleprotoClient> {
+  const [{ TelegramClient }, { StringSession }] = await Promise.all([
+    import("teleproto"),
+    import("teleproto/sessions"),
+  ]);
+  const clientSession = typeof session === "string" ? new StringSession(session) : session;
+  return new TelegramClient(
+    clientSession,
+    apiId,
+    apiHash,
+    TELEPROTO_CLIENT_OPTIONS,
+  ) as unknown as TeleprotoClient;
+}
+
+function forwardedFrom(header: TeleprotoMessage["fwdFrom"]): TelegramForwardedFrom | undefined {
   if (!header) return undefined;
   const peer = forwardedPeer(header.fromId);
   return {

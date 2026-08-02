@@ -1,4 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import {
+  AuthKeyUnregisteredError,
+  SessionRevokedError,
+  UserDeactivatedBanError,
+} from "teleproto/errors";
 import { createApi, isTelegramDeadSessionError } from "./app";
 import type { TelegramAdapter } from "./telegram";
 
@@ -80,6 +85,16 @@ describe("isTelegramDeadSessionError", () => {
     expect(isTelegramDeadSessionError(new Error("TIMEOUT"))).toBe(false);
     expect(isTelegramDeadSessionError(new Error("ECONNRESET"))).toBe(false);
     expect(isTelegramDeadSessionError(new Error("Connection closed"))).toBe(false);
+  });
+
+  test("matches teleproto error codes carried in errorMessage", () => {
+    expect(isTelegramDeadSessionError(new AuthKeyUnregisteredError({ request: undefined }))).toBe(
+      true,
+    );
+    expect(isTelegramDeadSessionError(new SessionRevokedError({ request: undefined }))).toBe(true);
+    expect(isTelegramDeadSessionError(new UserDeactivatedBanError({ request: undefined }))).toBe(
+      true,
+    );
   });
 });
 

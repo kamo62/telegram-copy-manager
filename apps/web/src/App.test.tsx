@@ -163,6 +163,16 @@ async function clickTabAsync(view: ReturnType<typeof render>, label: string) {
     await view.findByRole("heading", { name: "Symbol routing" });
     return;
   }
+  if (label === "Providers") {
+    clickTab(view, label);
+    await view.findByRole("heading", { name: "Provider monitoring" });
+    return;
+  }
+  if (label === "Logs") {
+    clickTab(view, label);
+    await view.findByTestId("held-signals-panel");
+    return;
+  }
   const currentLabel =
     label === "History"
       ? "Positions"
@@ -604,6 +614,7 @@ describe("App dashboard", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/providers"));
     expect(scrollPositions.at(-1)).toEqual({ top: 0, left: 0, behavior: "auto" });
     expect((await view.findAllByRole("heading", { name: "Providers" })).length).toBeGreaterThan(0);
+    expect(view.queryByRole("tablist", { name: "Live workspace sections" })).toBeNull();
     expect(view.queryByRole("heading", { name: "Signal ledger" })).toBeNull();
 
     fireEvent.click(view.getByRole("button", { name: "Operations" }));
@@ -679,37 +690,13 @@ describe("App dashboard", () => {
     await view.findByRole("heading", { level: 1, name: "Operations" });
   });
 
-  test("account header renders MT5 balance and equity before trading P/L windows", () => {
-    const view = render(
-      <App
-        initialSnapshot={{
-          ...snapshot,
-          accountPerformance: {
-            currency: "USD",
-            initialBalance: 60.64,
-            currentBalance: 12345.67,
-            currentEquity: 15432.1,
-            totalProfit: -137.5,
-            realizedPnl: 61.79,
-            floatingPnl: 38.82,
-            netDeposits: 0,
-            today: 9.04,
-            thisWeek: 9.04,
-            thisMonth: 9.04,
-            equityCurve: [],
-          },
-        }}
-      />,
-    );
+  test("secondary routes do not repeat the account summary", () => {
+    const view = render(<App initialSnapshot={snapshot} />);
 
     clickTab(view, "Performance");
 
-    expect(view.getByText("Balance")).toBeTruthy();
-    expect(view.getByText("Equity")).toBeTruthy();
-    expect(view.queryByText("Initial Balance")).toBeNull();
-    expect(view.getByText(/12,345\.67/)).toBeTruthy();
-    expect(view.getByText(/15,432\.10/)).toBeTruthy();
-    expect(view.getAllByText(/137\.50/).length).toBeGreaterThan(0);
+    expect(view.queryByLabelText("Account performance")).toBeNull();
+    expect(view.getByLabelText("Account growth chart")).toBeTruthy();
   });
 
   test("performance growth chart uses the active performance currency over the first account row", async () => {
@@ -757,86 +744,6 @@ describe("App dashboard", () => {
     const chart = within(await view.findByLabelText("Account growth chart"));
     expect(chart.getByText(/\$12\.34/)).toBeTruthy();
     expect(chart.queryByText(/R\s*12\.34/)).toBeNull();
-  });
-
-  test("account header keeps mixed-currency totals in their native currencies", () => {
-    const view = render(
-      <App
-        initialSnapshot={{
-          ...snapshot,
-          accountPerformance: {
-            accountId: "aggregate",
-            currency: "USD",
-            heartbeatStatus: "online",
-            initialBalance: 200,
-            currentBalance: 200,
-            currentEquity: 220,
-            totalProfit: 20,
-            realizedPnl: 0,
-            floatingPnl: 20,
-            netDeposits: 0,
-            today: 0,
-            thisWeek: 20,
-            thisMonth: 20,
-            equityCurve: [],
-          },
-          mt5Accounts: [
-            {
-              ...snapshot.mt5Accounts[0]!,
-              id: "mt5-zar-old",
-              accountNumber: "54870107",
-              currency: "ZAR",
-              heartbeatStatus: "offline",
-              balance: 1600,
-              equity: 1760,
-            },
-            {
-              ...snapshot.mt5Accounts[0]!,
-              id: "mt5-usd-octa",
-              accountNumber: "63442826",
-              server: "OctaFX-Real",
-              currency: "USD",
-              heartbeatStatus: "online",
-              balance: 100,
-              equity: 110,
-            },
-          ],
-          accountPerformanceByAccount: {
-            "mt5-zar-old": {
-              accountId: "mt5-zar-old",
-              currency: "ZAR",
-              initialBalance: 1440,
-              totalProfit: 160,
-              today: 16,
-              thisWeek: 160,
-              thisMonth: 160,
-            },
-            "mt5-usd-octa": {
-              accountId: "mt5-usd-octa",
-              currency: "USD",
-              initialBalance: 90,
-              totalProfit: 10,
-              today: 1,
-              thisWeek: 10,
-              thisMonth: 10,
-            },
-          },
-        }}
-      />,
-    );
-
-    clickTab(view, "Performance");
-
-    const usd = within(view.getByRole("article", { name: "USD account totals" }));
-    const zar = within(view.getByRole("article", { name: "ZAR account totals" }));
-
-    expect(usd.getByText(/\$100\.00/)).toBeTruthy();
-    expect(usd.getByText(/\$110\.00/)).toBeTruthy();
-    expect(zar.getByText(/R\s*1,600\.00/)).toBeTruthy();
-    expect(zar.getByText(/R\s*1,760\.00/)).toBeTruthy();
-    expect(view.queryByText(/200\.00/)).toBeNull();
-    expect(view.getByText("Native currencies remain separate; no FX total is shown.")).toBeTruthy();
-    expect(view.getByText("EA WORKING")).toBeTruthy();
   });
 
   test("operations keeps USD and ZAR accounts in their native currencies without a false total", () => {
@@ -921,81 +828,33 @@ describe("App dashboard", () => {
           profit: 22.37,
         },
       ],
-    };
-    const view = rtlRender(<App initialSnapshot={routeSnapshot} />, {
-      wrapper: ({ children }) => (
-        <MemoryRouter initialEntries={["/accounts/mt5-54870107/logs"]}>{children}</MemoryRouter>
-      ),
-    });
-
-    expect(view.getAllByText("· ZAR").length).toBeGreaterThan(0);
-    expect(view.queryByText("· USD")).toBeNull();
-    expect(view.queryByText(/\$168\.64/)).toBeNull();
-  });
-
-  test("account header uses focused account performance instead of heartbeat-only PnL", () => {
-    const routeSnapshot: DashboardSnapshot = {
-      ...snapshot,
-      accountPerformance: {
-        accountId: "aggregate",
-        currency: "USD",
-        heartbeatStatus: "online",
-        initialBalance: 300,
-        currentBalance: 300,
-        currentEquity: 345.5,
-        totalProfit: 45.5,
-        realizedPnl: 45.5,
-        floatingPnl: 0,
-        netDeposits: 0,
-        today: 45.5,
-        thisWeek: 45.5,
-        thisMonth: 45.5,
-        equityCurve: [],
-      },
       accountPerformanceByAccount: {
-        "mt5-secondary": {
-          accountId: "mt5-secondary",
-          currency: "USD",
-          heartbeatStatus: "online",
+        "mt5-54870107": {
+          accountId: "mt5-54870107",
+          currency: "ZAR",
           initialBalance: 100,
-          currentBalance: 100,
-          currentEquity: 145.5,
-          totalProfit: 45.5,
-          realizedPnl: 45.5,
-          floatingPnl: 0,
-          netDeposits: 0,
-          today: 45.5,
-          thisWeek: 45.5,
-          thisMonth: 45.5,
-          equityCurve: [],
+          totalProfit: -168.64,
+          today: 0,
+          thisWeek: 9.65,
+          thisMonth: -168.64,
+          equityCurve: [
+            { x: 1, equity: 100, drawdown: 0 },
+            { x: 2, equity: -68.64, drawdown: -168.64 },
+          ],
         },
       },
-      mt5Accounts: [
-        {
-          ...snapshot.mt5Accounts[0]!,
-          id: "mt5-primary",
-          accountNumber: "100200300",
-          profit: 99,
-        },
-        {
-          ...snapshot.mt5Accounts[0]!,
-          id: "mt5-secondary",
-          accountNumber: "200300400",
-          profit: 0,
-        },
-      ],
     };
     const view = rtlRender(<App initialSnapshot={routeSnapshot} />, {
       wrapper: ({ children }) => (
-        <MemoryRouter initialEntries={["/accounts/mt5-secondary/performance"]}>
+        <MemoryRouter initialEntries={["/accounts/mt5-54870107/performance"]}>
           {children}
         </MemoryRouter>
       ),
     });
 
-    const header = within(view.getByLabelText("Account performance"));
-    // KPI amounts render without the currency symbol (currency shown in the label).
-    expect(header.getAllByText(/45\.50/).length).toBeGreaterThanOrEqual(1);
+    const chart = within(view.getByLabelText("Account growth chart"));
+    expect(chart.getByText(/R\s*168\.64/)).toBeTruthy();
+    expect(chart.queryByText(/\$168\.64/)).toBeNull();
   });
 
   test("account growth chart uses the focused account performance series", async () => {
@@ -1064,45 +923,6 @@ describe("App dashboard", () => {
     expect(chart.getByText(/\$45\.50/)).toBeTruthy();
   });
 
-  test("account header shows last-known stale MT5 telemetry", () => {
-    const view = render(
-      <App
-        initialSnapshot={{
-          ...snapshot,
-          mt5Accounts: [{ ...snapshot.mt5Accounts[0]!, heartbeatStatus: "offline" }],
-          accountPerformance: {
-            accountId: "mt5-demo-1",
-            currency: "USD",
-            heartbeatStatus: "offline",
-            lastHeartbeatAt: "2026-05-20T15:11:38.444Z",
-            initialBalance: 60.64,
-            currentBalance: 12345.67,
-            currentEquity: 15432.1,
-            totalProfit: -57.89,
-            realizedPnl: -57.89,
-            floatingPnl: 0,
-            netDeposits: 0,
-            today: -57.89,
-            thisWeek: -57.89,
-            thisMonth: -57.89,
-            equityCurve: [],
-          },
-        }}
-      />,
-    );
-
-    clickTab(view, "Performance");
-
-    expect(view.getByText("EA OFFLINE")).toBeTruthy();
-    expect(view.getByText(/12,345\.67/)).toBeTruthy();
-    expect(view.queryByText("Balance")).toBeTruthy();
-    expect(view.queryByText("Equity")).toBeTruthy();
-    expect(view.queryByText("Trading P/L")).toBeTruthy();
-    // The windowed P/L card still shows the real (closed-trade) PnL while the
-    // stale balance/equity telemetry is suppressed.
-    expect(view.getAllByText(/57\.89/).length).toBeGreaterThanOrEqual(1);
-  });
-
   test("shows an empty-state CTA on Live when no account is connected", () => {
     const view = render(
       <App initialSnapshot={{ ...snapshot, mt5Accounts: [], accountSlots: [] }} />,
@@ -1124,7 +944,9 @@ describe("App dashboard", () => {
 
     await clickTabAsync(view, "Providers");
     expect((await view.findAllByText("Provider paused")).length).toBeGreaterThan(0);
+    expect(view.queryByRole("tablist", { name: "Live workspace sections" })).toBeNull();
 
+    clickSidebar(view, "Operations");
     await clickTabAsync(view, "Logs");
     const parserLab = await view.findByTestId("parser-lab-panel");
     expect(within(parserLab).getByText("Alpha FX Signals")).toBeTruthy();
@@ -1132,7 +954,9 @@ describe("App dashboard", () => {
     expect(within(parserLab).getByText("EURUSD.raw")).toBeTruthy();
     expect(within(parserLab).getByRole("button", { name: "Save fixture" })).toBeTruthy();
     expect(within(parserLab).getByLabelText("Classification for Alpha FX Signals")).toBeTruthy();
+    expect(view.queryByRole("tablist", { name: "Live workspace sections" })).toBeNull();
 
+    clickSidebar(view, "Operations");
     await clickTabAsync(view, "History");
     fireEvent.click(await view.findByRole("tab", { name: "Closed" }));
     // No closed trades in the seed snapshot — the Closed sub-tab should land
@@ -1141,6 +965,7 @@ describe("App dashboard", () => {
 
     await clickTabAsync(view, "Symbol Settings");
     expect(await view.findByText("XAUUSD.r")).toBeTruthy();
+    expect(view.queryByRole("tablist", { name: "Live workspace sections" })).toBeNull();
 
     clickSidebar(view, "Linked Accounts");
     expect((await view.findAllByText("positions")).length).toBeGreaterThan(0);
@@ -1317,6 +1142,7 @@ describe("App dashboard", () => {
     });
 
     // Per-account mode: single Copy toggle + per-account Configure, no global Pause/Remove.
+    expect(view.getByRole("tablist", { name: "Account sections" })).toBeTruthy();
     expect(
       view.getByRole("button", { name: "Configure Alpha FX Signals for this account" }),
     ).toBeTruthy();
@@ -1733,7 +1559,9 @@ describe("App dashboard", () => {
     fireEvent.change(view.getByLabelText("USD/ZAR rate"), { target: { value: "18.5" } });
     fireEvent.click(view.getByLabelText("Allow limit orders"));
     fireEvent.click(view.getByLabelText("Allow stop orders"));
-    fireEvent.click(view.getByRole("button", { name: "Save execution settings" }));
+    const saveBar = view.getByText("Unsaved execution changes").closest(".save-bar");
+    if (!saveBar) throw new Error("Settings SaveBar did not render");
+    fireEvent.click(within(saveBar as HTMLElement).getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(calls.some((call) => call.url === "/api/settings")).toBe(true));
     const settingsCall = calls.find((call) => call.url === "/api/settings");
@@ -1770,19 +1598,17 @@ describe("App dashboard", () => {
         settings={snapshot.appSettings}
       />,
     );
-    const pageSave = view.getByRole("button", { name: "Save execution settings" });
-    expect(pageSave.hasAttribute("disabled")).toBe(true);
+    const saveBar = view.getByText("Unsaved execution changes").closest(".save-bar");
+    expect(saveBar?.getAttribute("aria-hidden")).toBe("true");
 
     fireEvent.input(view.getByLabelText("Warn at (%)"), { target: { value: "12.5" } });
     expect(view.getByRole("img", { name: "Warn at 12.5%, danger at 20%" })).toBeTruthy();
-    expect(pageSave.hasAttribute("disabled")).toBe(false);
-    expect(view.getByText("Unsaved execution changes").closest(".save-bar")?.classList).toContain(
-      "is-visible",
-    );
+    expect(view.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(false);
+    expect(saveBar?.classList).toContain("is-visible");
 
     fireEvent.click(view.getByRole("button", { name: "Discard" }));
     expect((view.getByLabelText("Warn at (%)") as HTMLInputElement).value).toBe("10");
-    expect(pageSave.hasAttribute("disabled")).toBe(true);
+    expect(saveBar?.getAttribute("aria-hidden")).toBe("true");
   });
 
   test("per-account risk override fields resync after backend normalization", () => {
@@ -2675,8 +2501,8 @@ describe("App dashboard", () => {
     await view.findByTitle("1 signal needs review");
     await clickTabAsync(view, "Logs");
     const heldPanel = within(view.getByTestId("held-signals-panel"));
-    expect(heldPanel.getByText("GUARDIAN")).toBeTruthy();
-    expect(heldPanel.getByText("2")).toBeTruthy();
+    expect(heldPanel.getByText("Guardian")).toBeTruthy();
+    expect(heldPanel.getByText("2 dropped")).toBeTruthy();
 
     fireEvent.click(heldPanel.getByRole("button", { name: "Market" }));
     expect(view.getByText(/2 lifecycle commands arrived while held/)).toBeTruthy();
@@ -2708,6 +2534,47 @@ describe("App dashboard", () => {
     await waitFor(() =>
       expect(calls.some((call) => call.url === "/api/queue-items/held-1/dismiss")).toBe(true),
     );
+  });
+
+  test("dismisses every held signal through the existing audited item endpoint", async () => {
+    const calls: string[] = [];
+    const heldItem = {
+      actionable: true,
+      accountId: "mt5-demo-1",
+      commandType: "OPEN_TRADE",
+      createdAt: "2026-07-11T08:00:00.000Z",
+      currentPrice: null,
+      driftPct: null,
+      droppedLifecycle: [],
+      droppedLifecycleCount: 0,
+      heldReason: "GUARDIAN",
+      originalEntry: null,
+      providerId: "provider-alpha",
+      symbol: "EURUSD.raw",
+    };
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      calls.push(String(url));
+      if (String(url) === "/api/queue-items/held") {
+        return Response.json({
+          items: [
+            { ...heldItem, id: "held-1" },
+            { ...heldItem, id: "held-2", symbol: "XAUUSD" },
+          ],
+        });
+      }
+      return fixtureResponse(url);
+    }) as typeof fetch;
+
+    const view = render(<App initialSnapshot={snapshot} />);
+    await view.findByTitle("2 signals need review");
+    await clickTabAsync(view, "Logs");
+    fireEvent.click(view.getByRole("button", { name: "Dismiss all" }));
+    fireEvent.click(view.getByRole("button", { name: "Dismiss 2 signals" }));
+
+    await waitFor(() => {
+      expect(calls).toContain("/api/queue-items/held-1/dismiss");
+      expect(calls).toContain("/api/queue-items/held-2/dismiss");
+    });
   });
 
   test("waiting account slots can be deleted after confirmation", async () => {

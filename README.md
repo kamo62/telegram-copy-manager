@@ -13,8 +13,8 @@ for the backend URL.
 
 ## What It Does
 
-- Connects a Telegram account through a deterministic mock adapter (for testing) or the real GramJS
-  adapter.
+- Connects a Telegram account through a deterministic mock adapter (for testing) or the real
+  teleproto adapter. The existing `gramjs` adapter setting remains as a compatibility label.
 - Turns any Telegram channel or group into a provider that can be enabled, disabled, tested against
   its own message history, configured, and assigned to one or more MT5 accounts.
 - Parses open-trade and lifecycle messages across the formats channels actually use: market, limit,
@@ -39,6 +39,9 @@ for the backend URL.
   recent Telegram history after a relaunch does not queue duplicate trades.
 - Supports app-managed virtual TP handling, TP1-TP4 allocation, runner lots, break-even/last-TP/trail
   runner behaviour, split-order execution mode, and app-owned default SL/TP distances.
+- Lets a take-profit leg configured at 0% allocation apply its own stop-loss strategy, such as
+  break-even, once price reaches its target without closing any volume, so an operator can protect a
+  trade without giving up a partial at TP1.
 - Reconciles MT5 reports, snapshots, and broker history into open/closed trade history, execution
   logs, pending-order cancellation, out-of-sync diagnostics, and account/provider performance.
 - Normalizes mixed-currency account performance into a configured reporting currency and leaves
@@ -48,31 +51,45 @@ for the backend URL.
 
 ## Application Surfaces
 
-The web app is an operator dashboard, not a landing page. The main navigation is:
+The web app is an operator dashboard, not a landing page. The sidebar has three groups.
 
-- `Live`: account overview, account-specific live workspace, pending EA link slots, and the active
-  workspace tabs.
-- `Telegram Setup`: Telegram login, OTP/2FA flow, dialog refresh, provider selection, and provider
-  resync for the global provider-monitoring lifecycle.
-- `Linked Accounts`: MT5 link-slot creation, link-code workflow, connected account cards, provider
-  assignment summary, and read-only external broker activity.
-- `Settings`: execution defaults, allowed order types, polling/dedup settings, stale open-trade
-  expiry, risk display thresholds, reporting currency/USD-ZAR rate, and optional Azure OpenAI parser
-  extraction key storage.
+`Desk`:
 
-Inside the Live workspace:
+- `Operations` (`/`): live account posture, exposure, and the latest desk activity.
+- `Review queue` (`/logs`): Parser Lab, recent-message parsing, AI review, approve/ignore actions,
+  fixture classification/redaction, saved fixtures, signal queue, and EA execution reports. Carries
+  a badge when signals need review.
 
-- `Performance`: overview chart, statistics view, account/provider range metrics, and external
-  manual broker activity that affects equity.
-- `Providers`: aggregate provider overview, account-scoped copy chips, provider config, parser
-  template and symbol lock, lot/risk sizing, TP allocation, runner config, provider config dry-run
-  tests, parse-recent action, and CSV performance export.
-- `History`: open positions/orders, external positions/orders, closed trade rollups, and per-leg
-  close detail.
-- `Equity Guardian`: account drawdown thresholds and manual unpause controls.
-- `Symbol Settings`: global/provider aliases and per-account broker symbol mappings.
-- `Logs`: Parser Lab, recent-message parsing, AI review, approve/ignore actions, fixture
-  classification/redaction, saved fixtures, signal queue, and EA execution reports.
+`Accounts`: one entry per connected MT5 account, plus any pending EA link slots waiting for their
+link code to be claimed. Selecting an account opens its workspace. `Add account`
+(`/linked-accounts`) handles MT5 link-slot creation, the link-code workflow, connected account
+cards, provider assignment summary, and read-only external broker activity. It has no standing nav
+item and is reached through that button.
+
+`Setup`:
+
+- `Providers` (`/providers`): aggregate provider overview, account-scoped copy chips, provider
+  config, parser template and symbol lock, lot/risk sizing, TP allocation, runner config, provider
+  config dry-run tests, parse-recent action, and CSV performance export.
+- `Symbols` (`/symbols`): global and provider aliases, plus per-account broker symbol mappings.
+- `Telegram` (`/telegram`): Telegram login, OTP/2FA flow, dialog refresh, provider selection, and
+  provider resync for the global provider-monitoring lifecycle.
+- `Settings` (`/settings`): display theme and colour accents, execution defaults, allowed order
+  types, polling/dedup settings, stale open-trade expiry, risk display thresholds, reporting
+  currency/USD-ZAR rate, Telegram bot alerting, on-demand database backup, and optional Azure
+  OpenAI parser extraction key storage.
+
+An account workspace at `/accounts/:accountId/:tab` shows the account-scoped tab strip:
+`performance`, `providers`, `history`, `equity-guardian`, and `logs`. `Performance`
+covers the overview chart, statistics view, account/provider range metrics, and external manual
+broker activity that affects equity. `History` covers open positions and orders, external positions
+and orders, closed trade rollups, and per-leg close detail. `Equity Guardian` covers account
+drawdown thresholds and manual unpause controls. A per-account `symbols` view exists at the same URL
+scheme so an unmapped-symbol alert can jump straight into that account's context, but it has no tab
+of its own; routine alias and mapping work happens on the top-level `Symbols` page.
+
+The top-level `/providers`, `/symbols`, and `/logs` routes are standalone views. They do not render
+the account workspace tab strip.
 
 ## Repository Structure
 
@@ -83,7 +100,10 @@ Inside the Live workspace:
   and queue payload builder.
 - `mt5`: MetaTrader 5 Expert Advisor source that registers, heartbeats, posts snapshots/history,
   polls line-oriented work, executes commands, and reports broker results.
-- `migrations`: SQLite schema used by the app and kept portable for a future D1-style backend.
+- `migrations`: historical SQLite bootstrap snapshots. The runtime schema in `apps/api/src/app.ts`
+  is current; refresh the migration set before using it for a future D1-style backend.
+- `docs`: archived planning, audit, and incident records with lasting reference value;
+  `docs/archive/README.md` explains what remains and what was deleted.
 - `scripts`: local Telegram import/backtest helper and MT5 smoke-test helper.
 - `data`: runtime-only local databases, Telegram session files, backtest output, and other generated
   state. This path is ignored by git and Docker build context.
@@ -122,13 +142,14 @@ Common environment variables:
 | `PORT` | API/server port | `8787` |
 | `DATABASE_PATH` | SQLite database path | `data/telegram-tc.db` |
 | `WEB_STATIC_ROOT` | Static web build path for the API to serve | auto-detects `apps/web/dist` |
+| `ASSET_ARCHIVE_ROOT` | Where the API archives previous web asset bundles, so a client still on an older build keeps working through a deploy | `<DATABASE_PATH dir>/asset-archive` |
 | `SEED_DEMO_DATA` | Seed local mock/demo rows | `false` |
 | `DEFAULT_MT5_ACCOUNT_ID` | Fallback parser account context | demo account id |
 | `TELEGRAM_ADAPTER` | Telegram adapter: `mock` or `gramjs` | `mock` unless real runtime is used |
-| `TELEGRAM_API_ID` | Telegram API id for GramJS login | unset |
-| `TELEGRAM_API_HASH` | Telegram API hash for GramJS login | unset |
-| `TELEGRAM_SESSION_DIR` | Server-side GramJS session storage | `data/telegram-sessions` |
-| `TELEGRAM_SESSION_FILE` | Explicit saved GramJS session file to import | unset |
+| `TELEGRAM_API_ID` | Telegram API id for teleproto login | unset |
+| `TELEGRAM_API_HASH` | Telegram API hash for teleproto login | unset |
+| `TELEGRAM_SESSION_DIR` | Server-side teleproto session storage | `data/telegram-sessions` |
+| `TELEGRAM_SESSION_FILE` | Explicit saved teleproto session file to import | unset |
 | `TELEGRAM_IMPORT_EXISTING_SESSION` | Import the only JSON session in `TELEGRAM_SESSION_DIR` | `false` |
 | `AZURE_OPENAI_API_KEY` | Optional parser extraction key | unset |
 | `AZURE_OPENAI_ENDPOINT` | Optional Azure OpenAI endpoint override | code fallback if unset |
@@ -139,14 +160,14 @@ For Docker Compose, put deployment secrets and runtime values in `.env.productio
 
 ## Telegram Workflow
 
-Local tests use the mock Telegram adapter. For a real Telegram account, run the API with GramJS:
+Local tests use the mock Telegram adapter. For a real Telegram account, run the API with teleproto:
 
 ```bash
 TELEGRAM_ADAPTER=gramjs bun run dev:api
 ```
 
 The UI collects `api_id`, `api_hash`, phone, OTP code, and optional 2FA password, but only safe
-profile/session identifiers are kept in browser state. GramJS session strings are stored on the
+profile/session identifiers are kept in browser state. Teleproto session strings are stored on the
 server under `data/telegram-sessions`.
 
 The helper script can drive a command-line import/backtest flow against a running API:
@@ -162,8 +183,8 @@ bun run telegram:backtest
 ```
 
 Optional script knobs include `TELEGRAM_TC_API_URL`, `TELEGRAM_TARGET_DIALOG`,
-`TELEGRAM_HISTORY_DAYS`, `TELEGRAM_CHUNKED`, `TELEGRAM_CHUNK_DAYS`, `TELEGRAM_DATE_FROM`, and
-`TELEGRAM_DATE_TO`.
+`TELEGRAM_HISTORY_DAYS`, `TELEGRAM_CHUNKED`, `TELEGRAM_CHUNK_DAYS`, `TELEGRAM_DATE_FROM`,
+`TELEGRAM_DATE_TO`, and `TELEGRAM_IMPORT_LIMIT` (message cap for the import step, default 50,000).
 
 ## MT5 Workflow
 
@@ -197,7 +218,12 @@ Important EA inputs:
 The API is intentionally simple HTTP/JSON plus a line-oriented MT5 polling endpoint:
 
 - Health and dashboard: `GET /health`, `GET /api/health`, `GET /api/dashboard`,
-  `GET /api/telegram/status`.
+  `GET /api/telegram/status`. `/api/health` (and the identical `/health`) report an overall `status`
+  of `ok` or `degraded` plus a `telegram` object with `expectedProviders`, `readyProviders`,
+  `unreadyProviders`, and `stalledProviders`, so Telegram ingestion readiness is visible without a
+  separate call to `/api/telegram/status`. `status` goes `degraded` when any enabled provider lacks a
+  current readiness observation; the HTTP code stays 200 either way. The dashboard's health block
+  reads the same payload.
 - Telegram: `/api/telegram/start`, `/api/telegram/verify-code`, `/api/telegram/submit-password`,
   `/api/telegram/dialogs`, `/api/telegram/disconnect`.
 - Providers and parser lab: `/api/providers`, `/api/providers/:id/*`, `/api/parser/*`,
@@ -233,6 +259,11 @@ Docker daemon restarts.
 
 Use `docker compose`, not the old `docker-compose` v1 binary. The v1 binary can fail during
 container recreation with `KeyError: 'ContainerConfig'` on newer image metadata.
+
+The image carries a `HEALTHCHECK` that polls `/api/health` and only checks that the server responds,
+which makes it a liveness check. It does not fail on a `degraded` Telegram status: restarting the
+container would not fix a Telegram-side stall and would drop in-memory readiness state. The
+`degraded` signal is for the operator and the dashboard to act on.
 
 ## Backups and restore
 
@@ -293,10 +324,11 @@ values, symbol metadata, and live order handling.
 ## Versioning
 
 The root `package.json` `version` field is the canonical application version. The MT5 EA version in
-`mt5/TelegramTC_EA.mq5` must stay aligned with it:
+`mt5/TelegramTC_EA.mq5` only needs to move when the EA's own behaviour or protocol changes; a
+web-only or API-only patch bumps the app version and leaves the EA metadata as it was:
 
 ```mql5
-#property version   "1.15.0"
+#property version   "1.65.0"
 ```
 
 Classify every change with SemVer before final verification:

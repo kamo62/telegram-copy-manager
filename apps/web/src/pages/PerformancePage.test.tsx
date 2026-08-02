@@ -1,7 +1,12 @@
 import "../test-setup";
 import { afterEach, describe, expect, test } from "bun:test";
 import { cleanup, render, waitFor, within } from "@testing-library/react";
-import { formatGrowthChartValue, GrowthChart, type GrowthSeries } from "../components/GrowthChart";
+import {
+  formatGrowthChartTime,
+  formatGrowthChartValue,
+  GrowthChart,
+  type GrowthSeries,
+} from "../components/GrowthChart";
 import { PerformancePage } from "./PerformancePage";
 
 afterEach(() => cleanup());
@@ -132,6 +137,13 @@ describe("PerformancePage", () => {
   test("uses the account currency for growth axis values", () => {
     expect(formatGrowthChartValue(100, true, "ZAR", "en-ZA")).toBe("R\u00a0100,00");
     expect(formatGrowthChartValue(12.34, false, "ZAR", "en-ZA")).toBe("12.3%");
+  });
+
+  test("formats chart timestamps as dates instead of raw epoch values", () => {
+    const formatted = formatGrowthChartTime(1_779_292_800, "en-US", true);
+
+    expect(formatted).not.toContain("1779292800");
+    expect(formatted).toContain("2026");
   });
 
   test("shows an empty state instead of fabricated growth without equity history", () => {

@@ -30,6 +30,11 @@ h3,
   letter-spacing: var(--tracking-ui);
 }
 
+strong,
+b {
+  font-weight: var(--font-weight-medium);
+}
+
 :where(button, a, input, select, textarea) {
   -webkit-tap-highlight-color: transparent;
 }
@@ -430,6 +435,7 @@ h3,
 .workspace {
   grid-column: 2;
   grid-row: 2;
+  gap: 16px;
   min-width: 0;
   padding: 0 clamp(20px, 3vw, 48px) 120px;
   background: var(--bg);
@@ -440,7 +446,7 @@ h3,
   width: 100%;
   max-width: var(--content-max);
   padding: 36px 0 0;
-  margin: 0 0 26px;
+  margin: 0 0 8px;
   margin-inline: auto;
   border: 0;
 }
@@ -588,6 +594,102 @@ h3,
   box-shadow: var(--shadow-card);
 }
 
+.account-header {
+  grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 16px;
+  padding: 14px 16px;
+}
+
+.account-header-section {
+  gap: 5px;
+}
+
+.account-header-title {
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.account-header-account-label {
+  margin-top: 1px;
+}
+
+.account-header-stale-note {
+  margin: 0;
+}
+
+.account-platform-card {
+  width: 100%;
+  gap: 8px;
+  padding: 8px 0 0;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.account-platform-card > div:last-child {
+  gap: 4px;
+}
+
+.account-platform-card-grid {
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 2px 8px;
+}
+
+.ea-badge {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.account-kpis {
+  gap: 0;
+}
+
+.kpi {
+  gap: 3px;
+  padding: 4px 12px;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.kpi:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.kpi-label {
+  color: var(--ink-2);
+  text-transform: none;
+}
+
+.kpi-badge {
+  width: 20px;
+  height: 20px;
+}
+
+.kpi-primary .kpi-amount {
+  font-size: 14px;
+}
+
+.kpi-window-spacer,
+.kpi-spark-placeholder {
+  display: none;
+}
+
+.kpi-window-toggle {
+  margin: 0;
+}
+
+.kpi-delta {
+  padding: 0;
+  background: transparent;
+}
+
 .settings-section-icon {
   display: inline-flex;
   width: 20px;
@@ -667,13 +769,14 @@ h3,
 }
 
 .panel-head,
+.panel > header,
 .panel > h2:first-child,
 .panel > h3:first-child,
 .chart-card-head,
 .statistics-toolbar,
 .attribution-panel-head {
-  min-height: 50px;
-  padding: 14px 16px;
+  min-height: 44px;
+  padding: 10px 14px;
   margin: 0;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
@@ -701,6 +804,13 @@ h3,
   line-height: 1.55;
 }
 
+.panel > .panel-intro {
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
 .panel > .panel-intro,
 .panel > .panel-toolbar,
 .panel > .list-stack,
@@ -725,6 +835,34 @@ h3,
 .panel > .panel-hint {
   margin-right: 16px;
   margin-left: 16px;
+}
+
+.panel
+  > :is(
+    .panel-intro,
+    .panel-toolbar,
+    .list-stack,
+    .data-table-wrap,
+    form,
+    .parser-grid,
+    .queue-board,
+    .log-list,
+    .settings-form-layout,
+    .setup-providers,
+    .linked-section,
+    .provider-health-strip,
+    .provider-monitoring,
+    .setup-help,
+    .connected-state,
+    .setup-next,
+    .dialog-picker,
+    .open-positions,
+    .closed-positions,
+    .out-of-sync-resolution,
+    .empty-state,
+    .panel-hint
+  ) {
+  padding: 0;
 }
 
 /* These carry side margins, so a declared `width: 100%` resolves against the
@@ -756,7 +894,7 @@ h3,
 }
 
 .panel > :is(.setup-help, .connected-state, .dialog-picker) {
-  box-shadow: var(--shadow-card);
+  box-shadow: none;
 }
 
 .panel > .dialog-picker {
@@ -773,6 +911,121 @@ h3,
 
 .panel > :last-child {
   margin-bottom: 16px;
+}
+
+.empty-state-card {
+  min-height: 72px;
+  gap: 6px;
+  padding: 14px 16px;
+}
+
+.panel > .empty-state-card {
+  padding: 14px 16px;
+}
+
+.empty-state-glyph {
+  width: 32px;
+  height: 32px;
+}
+
+.settings-panel,
+.providers-panel,
+.setup-panel {
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.settings-panel > .panel-intro,
+.settings-panel > .settings-form-layout,
+.settings-panel > .settings-section {
+  margin-right: 0;
+  margin-left: 0;
+}
+
+.providers-panel > .panel-intro,
+.providers-panel > .data-table-wrap,
+.setup-panel > .setup-help,
+.setup-panel > .connected-state,
+.setup-panel > .setup-next,
+.setup-panel > .dialog-picker {
+  margin-right: 0;
+  margin-left: 0;
+}
+
+.providers-intro-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 0;
+}
+
+.providers-intro-row .panel-intro {
+  flex: 1;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.provider-export-btn {
+  flex: 0 0 auto;
+}
+
+.setup-panel > .setup-help,
+.setup-panel > .connected-state,
+.setup-panel > .setup-next {
+  gap: 10px;
+  padding: 10px 0;
+  margin: 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+}
+
+.setup-panel > .setup-help svg {
+  width: 16px;
+  height: 16px;
+}
+
+.setup-panel > .connected-state .connected-state-glyph {
+  width: 32px;
+  height: 32px;
+}
+
+.setup-panel > .dialog-picker {
+  margin-top: 12px;
+}
+
+.settings-panel > .panel-intro {
+  margin-bottom: 4px;
+}
+
+.settings-panel .settings-section {
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 24px;
+  padding: 22px 0;
+}
+
+.settings-section-head {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.settings-section-icon {
+  margin-top: 1px;
+}
+
+.settings-section-head > div:last-child {
+  min-width: 0;
 }
 
 .btn {
@@ -859,7 +1112,88 @@ textarea {
   border-bottom-color: var(--line-subtle);
 }
 
+.data-table thead th,
+.data-table tbody :is(th, td) {
+  padding-right: 8px;
+  padding-left: 8px;
+}
+
+.data-table-row-head strong {
+  font-size: 12px;
+}
+
 .data-table tbody tr:hover td {
+  background: var(--panel-2);
+}
+
+.segmented-control {
+  min-height: 32px;
+  padding: 2px;
+  border-radius: var(--radius-pill);
+}
+
+.segmented-control button {
+  min-height: 26px;
+  padding: 0 11px;
+  border-radius: var(--radius-pill);
+}
+
+.statistics-panel {
+  overflow: visible;
+}
+
+.statistics-toolbar {
+  min-height: 0;
+  padding: 0 0 12px;
+  background: transparent;
+}
+
+.statistics-filter-group {
+  align-items: center;
+}
+
+.statistics-filter-group select {
+  min-height: 32px;
+  height: 32px;
+}
+
+.chart-canvas-wrap {
+  min-height: 256px;
+}
+
+.symbol-mappings-panel {
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.symbol-mappings-panel > header {
+  padding: 0 0 12px;
+  background: transparent;
+}
+
+.symbol-mappings-panel > .panel-toolbar,
+.symbol-mappings-panel > .data-table-wrap {
+  margin-right: 0;
+  margin-left: 0;
+}
+
+.symbol-mappings-panel > .panel-toolbar {
+  padding: 0;
+  margin-bottom: 12px;
+  border: 0;
+}
+
+.symbol-mappings-table tbody th {
+  height: 43px;
+  color: var(--ink);
+  background: transparent;
+  text-transform: none;
+}
+
+.symbol-mappings-table tbody tr:hover th {
   background: var(--panel-2);
 }
 
@@ -1115,14 +1449,15 @@ textarea {
 }
 
 .provider-monitoring {
-  /* Inset to match the intro and the table above and below it. Those get their
-     16px from the `.panel > *` group earlier in this file; this one sets it
-     directly so the group does not end up overriding a later, weaker rule. */
-  margin: 16px;
-  overflow: hidden;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-lg);
+  margin: 0 0 12px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+.providers-panel > .provider-monitoring {
+  margin-right: 0;
+  margin-left: 0;
 }
 
 .provider-monitoring-head,
@@ -1134,13 +1469,8 @@ textarea {
 }
 
 .provider-monitoring-head {
-  padding: 11px 13px;
+  padding: 0 0 8px;
   border-bottom: 1px solid var(--line);
-}
-
-.provider-monitoring-head > div {
-  display: grid;
-  gap: 2px;
 }
 
 .provider-monitoring-head span,
@@ -1164,7 +1494,7 @@ textarea {
 }
 
 .provider-monitoring-row {
-  padding: 10px 13px;
+  padding: 9px 0;
   border-bottom: 1px solid var(--line-subtle);
 }
 
@@ -1526,6 +1856,7 @@ textarea {
 }
 
 .performance-overview .attribution-table-wrap {
+  width: auto;
   margin-bottom: 16px;
 }
 
@@ -1619,6 +1950,12 @@ textarea {
   .performance-overview .attribution-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .settings-panel .settings-section {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+    padding: 20px 0;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1703,4 +2040,127 @@ textarea {
   .setup-form-credentials {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .provider-monitoring-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .provider-monitoring-actions {
+    justify-content: flex-start;
+  }
+
+  .held-table-wrap {
+    overflow: visible;
+    background: transparent;
+    border: 0;
+  }
+
+  .held-table {
+    display: block;
+    min-width: 0;
+  }
+
+  .held-table thead {
+    display: none;
+  }
+
+  .held-table tbody {
+    display: grid;
+    gap: 8px;
+  }
+
+  .held-table tbody tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 12px;
+    padding: 12px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+  }
+
+  .held-table tbody td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .held-account-cell {
+    color: var(--ink-dim);
+    text-align: right;
+  }
+
+  .held-row-actions {
+    justify-content: flex-end;
+  }
+
+  .symbol-mappings-panel > .data-table-wrap {
+    overflow: hidden;
+  }
+
+  .symbol-mappings-table {
+    table-layout: fixed;
+  }
+
+  .symbol-mappings-table :is(th, td):nth-child(2),
+  .symbol-mappings-table :is(th, td):nth-child(4) {
+    display: none;
+  }
+
+  .data-table.symbol-mappings-table :is(th, td) {
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .symbol-mappings-table th:nth-child(1) {
+    width: 30%;
+  }
+
+  .symbol-mappings-table th:nth-child(3) {
+    width: 24%;
+  }
+
+  .symbol-mappings-table th:nth-child(5) {
+    width: 32%;
+  }
+
+  .symbol-mappings-table th:nth-child(6) {
+    width: 14%;
+  }
+
+  .symbol-mappings-table .data-table-subtle {
+    line-height: 1.25;
+    overflow-wrap: anywhere;
+  }
+}
+
+.held-reason {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.held-row-actions:has(select) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+}
+
+.held-row-actions:has(select) select {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.held-row-actions:has(select) .icon-btn {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.held-row-actions:has(select) .btn {
+  grid-row: 2;
 }

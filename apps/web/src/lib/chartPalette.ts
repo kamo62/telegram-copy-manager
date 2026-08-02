@@ -19,7 +19,7 @@ export const CHART_PALETTE: {
 };
 
 export function chartDitherColor(colorAccents: boolean, tone: "growth" | "drawdown") {
-  return colorAccents ? CHART_PALETTE[tone] : CHART_PALETTE.neutral;
+  return colorAccents && tone === "drawdown" ? CHART_PALETTE.drawdown : CHART_PALETTE.neutral;
 }
 
 export function chartSparklineColor(colorAccents: boolean, tone: "growth" | "drawdown") {

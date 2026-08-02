@@ -152,21 +152,7 @@ export function SettingsPage({
   };
   return (
     <>
-      <Panel
-        actions={
-          <button
-            className="btn btn-primary btn-small"
-            disabled={!dirty || saving}
-            onClick={() => void save()}
-            type="button"
-          >
-            Save execution settings
-          </button>
-        }
-        className="wide-panel settings-panel"
-        hideTitle
-        title="Settings"
-      >
+      <Panel className="wide-panel settings-panel" hideTitle title="Settings">
         <p className="panel-intro">
           Defaults applied when a parsed signal is missing fields, plus integration secrets and
           polling cadence. Per-provider overrides live in each Provider's configuration modal.

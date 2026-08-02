@@ -1,10 +1,75 @@
 # Handoff
 
-## START HERE — 2026-07-29
+## Milestone log — 2026-08-01
 
-`main` @ `7e0f2ef0`, pushed. **Production runs v1.64.1 and is live** on 192.168.0.100 — verified by
-asset-hash match, both accounts online, Telegram connected. No EA recompile outstanding: EA versions
-have moved with the release line but no EA behaviour has changed since 1.60.0.
+### Parallel-lane batch: seven of eight findings closed
+
+**Done.** Eleven commits, `68b6460f` through `80cc7edd`, all pushed to
+`origin/fix/reference-leg-stop-strategy`. Reference-leg revival `cc144aec`. Snapshot liveness
+`eaeba29e`. Health readiness `3b992fd8`. Dashboard health plus container HEALTHCHECK `9baf52a9`.
+Pending-order debounce `144a9eb4`, with my bad integration design reverted in `4064f84b`.
+Reference-stop ticket rekeying `f77da8a2`. GramJS to teleproto `62177477`. Documentation `80cc7edd`.
+
+**Verified.** `bun test` 692 pass 0 fail, `bun run typecheck` clean, `bun run lint` clean, all run in
+the main checkout at `80cc7edd`. Every behavioural change is mutation-checked; the observed failure
+output is quoted in each commit message. Teleproto verified by deleting `node_modules/telegram`
+outright and re-running the suite green, which proves nothing still resolves GramJS.
+
+**Unverified, needs a human at cutover.** Whether the live Telegram session is still
+server-authorised under teleproto, the real phone-code and 2FA flow, real dialog and message values
+including server iteration order, and reconnection after an outage. None is checkable offline. If
+the session does not load, ingestion stops and recovery needs phone-code and 2FA on an account the
+operator owns.
+
+**Resume from.**
+```
+cd /Users/kamogelo/Code/telegram-tc && git checkout fix/reference-leg-stop-strategy && bun test
+```
+
+**Open blockers.** One finding remains, the Telegram RPC orphan and client replacement, in lane
+`/private/tmp/claude-501/-Users-kamogelo-Code-telegram-tc/0dcc3daa-4e96-48c4-9b5e-dceefbfce274/scratchpad/lanes/tg-rpc2`
+based on `62177477`. Green at 699 pass with zero private-internals references, awaiting Sol review.
+It carries one previously unclosed HIGH: `startLogin()` did its slow preparatory work before
+registering intent and capturing its generation, so a concurrent disconnect in that window could be
+undone and the deleted session file recreated.
+
+**Not deployed, deliberately.** Production runs 1.65.5. The batch is not deployed because the
+teleproto cutover needs the four human checks above. Everything else in it would deploy safely.
+
+## START HERE — 2026-08-01
+
+Branch `fix/reference-leg-stop-strategy` @ `62177477`, 10 commits ahead of
+`origin/fix/reference-leg-stop-strategy` (pushed as far as `84d87453`; the rest is local). Package
+version `1.65.7`. EA source metadata remains `1.65.0`, unchanged since that release, because every
+patch from 1.65.1 through 1.65.7 was web/API-only and left it as-is (see each entry in
+`changelog.md`). The deployed terminals run EA `v1.60.0` regardless; the source metadata string and
+the deployed binary are tracked separately, and only the binary needs a recompile.
+
+**Production runs 1.65.5.** Nothing from v1.65.6, v1.65.7, or this branch is live, including the
+teleproto migration below and the `/api/health` readiness work. Check the running container's version
+before assuming otherwise.
+
+This branch carries the reference-leg stop-strategy work, each detailed under its own heading below:
+v1.65.4 (a take-profit leg allocated 0% now applies its own stop strategy, such as break-even,
+without closing volume), v1.65.5 (durable per-leg stop actions that survive a crash or restart),
+v1.65.6 (reopens legs a spurious pending-order cancellation had left permanently `SKIPPED`, plus
+`lastSnapshotReceivedAt`/`snapshotAgeSeconds` on `GET /api/mt5/accounts`), and v1.65.7 (rekeys
+`reference_stop_actions` when a broker position ticket transition is accepted, propagates broker
+point metadata into default-distance TP targets, debounces pending-order cancellation on continuous
+absence rather than order age, and replaces the Telegram client library).
+
+**Telegram client migrated from GramJS to teleproto (commit `62177477`, part of v1.65.7).** The npm
+dependency is now `teleproto` (`^1.228.4`) instead of `telegram` (GramJS), which was archived upstream
+on 2026-07-14 with `2.26.22` as its final release. The `gramjs` adapter name and the
+`TELEGRAM_ADAPTER=gramjs` setting are unchanged and now mean "the real adapter, backed by teleproto";
+see README's What It Does section. Saved `StringSession` values load unchanged. This is a dependency
+swap, not an API/DB/EA protocol change, so it stayed a patch within v1.65.7.
+
+`/api/health` gained a `telegram` readiness section in v1.65.6
+(`expectedProviders`/`readyProviders`/`unreadyProviders`/`stalledProviders`, overall `status`
+`degraded` when any enabled provider lacks a current readiness observation). See open risk 8 below:
+an earlier version of this note wrongly described known bugs here as still open after the same commit
+that introduced the feature had already fixed them.
 
 ### The design base (owner-specified, now in effect)
 
@@ -12,39 +77,231 @@ SF Pro in regular and medium at **-0.15px** tracking. Type scale is **12 / 13 / 
 Text hierarchy is **#292929 / #5D5D5D / #9E9E9E**. Icons are **14px in navigation, 20px on cards**.
 Radii are **8px navigation, 16px cards, pill CTAs**. Content canvas is 1180px.
 
-These are the base for all remaining route work. Verified live: `font-family` resolves to SF Pro Text,
-`letter-spacing` is -0.15px, `--text-1/2/3` are the three greys, `--radius-sm/md` are 8px/16px.
+These remain the base for route work. The local browser still resolves the requested type scale,
+tracking, greys, icon sizes, and radii after the v1.64.4 structure changes.
 
-### DO THIS NEXT — the UI redesign, 7 routes remain
+### v1.65.3 — reconciliation framing and bulk-dismiss feedback
 
-The owner replaced the design target with a new design system. `SPEC-ui-fidelity-2026-07-29.md` is
-the authority — read it first. `REVIEW-ui-fidelity.md` describes the OLD target and is historical.
+- Replaced the bright dashed out-of-sync resolution border with the standard 1px card divider.
+- The confirmed Dismiss all action now disables itself and reads `Dismissing…` until every existing
+  audited per-item dismissal request has settled and the queue has refreshed.
+- The live held queue is empty after the owner's bulk dismissal, confirming that the action
+  completed; the missing progress state was the misleading part.
 
-**Shipped (v1.64.0):** canonical token layer, four new components in
-`apps/web/src/components/FormControls.tsx` (Switch, NumberField, ThresholdBar, SaveBar), Settings
-rebuilt against them. New tokens are canonical; old names (`--ink*`, `--line`, `--panel`) alias onto
-them so the vocabulary converges rather than forking.
+Focused App and Held Signals tests passed 77/77. `bun run typecheck`, `bun run lint`,
+`bun run build`, and `git diff --check` passed. Production deployment used `bun run deploy`;
+backup `telegram-tc-20260730T070151Z.db` completed before the swap. The healthy container serves
+`/assets/index-nmpDwr5k.js` and `/assets/index-ByMQLTsb.css`; image
+`sha256:5d76aa7699363f38435225ca4b1b103077d4b718251202f2b38db65b70901e16`. Both MT5
+accounts remain online on EA v1.60.0 and Telegram reports connected.
 
-**All nine routes are now on the design base and measured.** Swept at 1600px and 560px, in both
-themes, across the six workspace tabs and the three sidebar routes: zero off-scale type, zero
-misaligned panel children, zero horizontal document overflow.
+### v1.65.2 — table density and right-edge containment
 
-Two violations were found by measuring computed styles, neither visible in a grep:
-`<small>` had no size rule and fell to the UA default of 0.8em (10px) across 16 Parser Lab elements,
-and the dither-kit chart axes and tooltip used arbitrary Tailwind `text-[10px]` / `text-[11px]`.
-Both now sit at 12px. A repo-wide grep confirms `text-[Npx]` resolves to 12px in all four remaining
-places.
+- Shared data tables keep the 12px type floor but now use the existing 8px spacing unit for
+  horizontal cell insets; row headings also use 12px instead of 13px.
+- The Performance attribution table now resolves its width inside its 16px side margins. Previously
+  `width: 100%` plus those margins extended the wrapper 32px past its parent, where the panel clipped
+  the rightmost realised P/L column.
+- No columns, values, actions, or execution behaviour were removed.
 
-Interiors still use their existing layouts — this pass made them *consistent* with the base, not
-redesigned to the mockup. Redesigning interiors route by route is the remaining work.
+The in-app Browser audited the deployed populated routes after the final deployment:
 
-### Codex sandbox limits — both cost a full round trip each
+- At the default 1280px desktop viewport, Performance has a 903px table inside a 903px scroller with
+  a measured 17px right inset; global and account Providers each have `scrollWidth === clientWidth`
+  (937px), so neither requires horizontal scrolling.
+- Review queue remains a six-column 903px table inside a 903px scroller with Dismiss all present;
+  Symbols is 937px inside a 937px scroller. Top-level Logs, Providers, Symbols, Telegram, and
+  Settings expose no account workspace tabs.
+- At 560px, Review queue rows remain grid cards, Symbols keeps its four priority columns, and global
+  Providers keeps Name, Status, and Copied by; all three routes have
+  `document.scrollWidth === innerWidth === 560`.
+- At 1600px, the Performance table and scroller both measure 1144px. Dark-mode Provider actions use
+  `rgb(20, 24, 31)` and the audited main surface contains no `rgb(0, 0, 0)` background boxes.
 
-1. **Codex cannot run a browser.** No port binding, no Chrome, no Computer Use. It reports this
-   honestly instead of faking success, but it means **no visual or layout verification happens on its
-   side**. Someone with a browser must do it.
-2. **Codex cannot run git.** `.git/index.lock: Operation not permitted`. Create the branch for it and
-   tell it explicitly not to run any git command; it will stop dead otherwise.
+Repository gate after the final change:
+
+- Request-focused App and Performance tests — 79 passed, 0 failed.
+- `bun test` — 649 passed, 0 failed.
+- `bun run typecheck` — passed.
+- `bun run lint` — passed with no warnings; duplicate CSS guard passed.
+- `bun run build` — API and Vite production builds passed.
+
+Production deployment used `bun run deploy`. Final backup
+`telegram-tc-20260729T222353Z.db` completed before the swap. The healthy container serves
+`/assets/index-DrhpILFR.js` and `/assets/index-KJ9duJ0m.css`; the image is
+`sha256:0b2f4a5e3d8563b63a87eb88e0d29ae1fc49b9e3cdae48fbe21c2de454458953`. Both MT5
+accounts are online on EA v1.60.0 and Telegram reports connected.
+
+### v1.65.1 — responsive queue and provider consolidation
+
+- Held-signal lifecycle rows now show only the trade selector and dismiss action until an active
+  trade is selected. Market and Original release actions appear after selection, preserving the
+  existing evidence-gated confirmation flow while removing disabled control noise.
+- Review reasons are readable supporting text instead of a second machine-style status badge.
+  At 560px, held rows become compact two-column cards rather than a horizontally scrolling table.
+- At 560px, Symbol Mapping prioritises Provider symbol, Broker symbol, Status, and Actions; Canonical
+  and Scope remain available at wider widths. The page no longer clips its right-hand status/actions.
+- The all-account Providers page keeps global monitoring and the assignment table, but no longer
+  repeats every provider a third time as health cards. Account-specific Provider pages retain those
+  cards, where the health context belongs.
+
+The in-app Browser audited the deployed Operations, Review queue, Providers, Symbols, Telegram,
+Settings, Positions, Performance, account Providers, Guardian, and account Logs surfaces across
+light and dark themes. Final measured checks:
+
+- `/logs`, `/providers`, and `/symbols` each have `scrollWidth === innerWidth === 560` in the compact
+  layout; held rows compute to `display: grid`, and Symbols shows the four priority columns.
+- The desktop Review queue, Providers, Symbols, Telegram, Settings, Performance, account Providers,
+  and Operations routes each have `scrollWidth === innerWidth === 1600`.
+- Top-level Providers and Symbols have no account workspace tabs. Top-level Providers has zero
+  provider-health cards; the account Provider route retains two.
+- Light-mode provider action cells compute to `rgb(255, 255, 255)`, not black. The growth chart is
+  256px high and exposes six bounded date-and-hour labels with no raw epoch in its accessible chart.
+- Computed design tokens remain SF Pro, 13px body, 24px/500 page title, `-0.15px` tracking,
+  `rgb(41, 41, 41)` title text, and 14px navigation icons.
+
+Repository gate after the final change:
+
+- Request-focused App and Held Signals tests — 77 passed, 0 failed.
+- `bun test` — 649 passed, 0 failed.
+- `bun run typecheck` — passed.
+- `bun run lint` — passed with no warnings; duplicate CSS guard passed.
+- `bun run build` — API and Vite production builds passed.
+
+Production deployment used `bun run deploy`. Final backup
+`telegram-tc-20260729T215706Z.db` completed before the swap. The healthy container serves
+`/assets/index-FD9YslVB.js` and `/assets/index-C_oMzi4G.css`; the image is
+`sha256:c2540d81af3278916e8423daf7105bf0f50e7ed45681b6081d9d5bb7b19c265a`. Both MT5 accounts
+are online on EA v1.60.0 and Telegram reports connected.
+
+### v1.65.0 — compact review queue and chart correction
+
+- Top-level `/logs` is a standalone Review queue view, without the account workspace tab strip.
+- Held signals use six compact columns instead of ten. The always-visible Dismiss all action asks
+  for confirmation and then calls the existing audited item dismissal endpoint for every row.
+  Partial failures are reported; dismissal cannot execute or requeue a signal.
+- Growth-chart axes are capped at six date-and-hour labels and tooltips render local date/time
+  instead of raw Unix epochs.
+- Account Provider action cells use the active panel theme token, removing the dark sticky blocks
+  that appeared in light mode.
+
+The in-app Browser verified the populated production routes at 1600×1000:
+
+- `/logs` has no workspace tab strip, renders 30 held rows in six columns, keeps the 1144px table
+  inside its 1144px scroller, and exposes the rightmost actions without horizontal scrolling.
+- Dismiss all opens a confirmation for all 30 signals and states that nothing will execute or
+  requeue. The destructive confirmation was cancelled during verification.
+- `/accounts/mt5-1514065673/providers` uses the active panel colour in light and dark modes instead
+  of black sticky action cells.
+- The 500-sample growth chart renders six distinct date-and-hour ticks, no raw epoch text, and a
+  themed tooltip such as `Jul 22, 2026, 8:53 PM`.
+
+Repository gate after the change:
+
+- Request-focused tests — 82 passed, 0 failed.
+- `bun test` — 647 passed; the documented `AccountHeader` full-suite timeout was the only failure.
+  The timed-out test plus the EA source suite passed 49/49 in isolation.
+- `bun run typecheck` — passed.
+- `bun run lint` — passed with no warnings; duplicate CSS guard passed.
+- `bun run build` — API and Vite production builds passed.
+
+Production deployment used `bun run deploy`. Backup `telegram-tc-20260729T212821Z.db` completed
+before the final swap. The healthy container serves `/assets/index-C8grEUwY.js` and
+`/assets/index-LLge9wFu.css`; the image is
+`sha256:d84df66dfb8e5e4c66e56086ff1542c1cff2efbc26655a129c079633070d195c`. Both MT5 accounts are
+online on EA v1.60.0 and Telegram reports connected.
+
+### v1.64.5 — standalone Setup routes (deployed 2026-07-29)
+
+- Top-level `/providers` and `/symbols` are standalone Setup views. They no longer render the
+  Signals, Positions, Providers, Performance, Guardian, and Logs dashboard tab strip or the
+  unrelated operational alert banner.
+- Account-specific `/accounts/:id/providers` remains inside the account workspace and retains its
+  account navigation.
+
+The in-app Browser verified the deployed Providers and Symbols routes at 2560×1440 and 560×1000.
+Both omit the dashboard tabs and alert banner and keep `document.scrollWidth === innerWidth`.
+`/accounts/mt5-1514065673/providers` still renders the account section tabs at 1600×1000.
+
+Repository gate after the change:
+
+- `bun test` — 645 passed, 0 failed.
+- `bun run typecheck` — passed.
+- `bun run lint` — passed with no warnings; duplicate CSS guard passed.
+- `bun run build` — API and Vite production builds passed.
+
+Production deployment used `bun run deploy`. Backup `telegram-tc-20260729T210331Z.db` completed
+before the swap. The rebuilt container is healthy and serves `/assets/index-BC9ToWrI.js`, whose
+bundle contains v1.64.5. Both MT5 accounts report online on EA v1.60.0 and Telegram reports
+connected. The production image is
+`sha256:d2d8c2475da52c783ddffaae9e2f575c21fb0c1ef66046c83cdaf076843b2f22`.
+
+### v1.64.4 — secondary-route structure pass (deployed 2026-07-29)
+
+- Removed the repeated account summary from Providers, Performance, Guardian, Logs, and Symbols.
+  The workspace heading already carries account context; account health remains in Operations and
+  performance values remain in Performance.
+- Moved Providers export beside the explanatory copy, flattened global provider monitoring into
+  rows, and removed the empty monitoring block when no providers exist.
+- Replaced the glowing cyan growth chart with a shorter monochrome dotted plot, standardised every
+  segmented control to the compact shared size, and reduced the Statistics toolbar to one control
+  row.
+- Flattened Telegram help, connection, and next-step states into divided rows so the dialog picker
+  is the page's only card. Symbol Mapping now uses one table surface with neutral row headers.
+
+The in-app Browser recheck covered Performance, Providers, Symbols, and Telegram at 2560×1440 in
+light and dark themes, plus those four routes at 560×1000 in dark mode. All measured routes kept
+`document.scrollWidth === innerWidth`.
+
+Repository gate after the change:
+
+- `bun test` — 645 passed, 0 failed.
+- `bun run typecheck` — passed.
+- `bun run lint` — passed with no warnings; duplicate CSS guard passed.
+- `bun run build` — API and Vite production builds passed.
+
+Production deployment used `bun run deploy`. Backup `telegram-tc-20260729T203330Z.db` completed
+before the swap. The rebuilt container is healthy and serves `/assets/index-CVy04FH7.js`, whose
+bundle contains v1.64.4. Both MT5 accounts report online on EA v1.60.0 and Telegram reports
+connected. The production image is
+`sha256:970ac0b1b71c1e403ccd63e021b87b2a24ff03646e8b93ce46fd04ddba131695`.
+
+### v1.64.3 — full-screen density pass (deployed 2026-07-29)
+
+The owner replaced the design target with a new design system. Both design docs from this period were
+deleted on 2026-07-30: `SPEC-ui-fidelity-2026-07-29.md` was superseded a day later by the SF Pro
+base, and `REVIEW-ui-fidelity.md` targeted the older "console" design. The current authority is "The
+design base" section at the top of this file.
+
+- Shared workspace gap reduced from the old double-margin rhythm; secondary content now begins 26px
+  higher on a 1600px viewport.
+- The repeated secondary-route account summary is 135px high instead of roughly 236px. Platform
+  metadata and four KPIs remain visible, but the empty sparkline/spacer reservations are gone.
+- Settings no longer renders a redundant disabled header action above the existing SaveBar. Its
+  sections are flat, icons align with headings, and 560px returns to one column.
+- Empty Providers no longer renders an Export-only header. Providers and Telegram shed their outer
+  card shell; Telegram also no longer repeats the page title in a panel header.
+- Empty states and panel headers are shorter, direct panel children no longer inherit 24px of hidden
+  padding, and light mode uses a warmer neutral canvas with quieter shadows.
+
+Browser verification used one real in-app Browser tab against a copied database with the mock
+Telegram adapter. The audit covered Operations, Settings, Telegram, Providers, Symbols, Logs,
+Performance, and Guardian at 1600×1000. Post-fix rechecks covered Operations, Settings, Telegram,
+Providers, Symbols, and Logs at 1600×1000 plus Operations, Settings, Telegram, and Symbols at
+560×1000 across both themes. The document stayed within the viewport and wide tables retained their
+own horizontal scrollers. The final preview is left open at `/settings` in light mode.
+
+Repository gate after the change:
+
+- `bun test` — 648 passed, 0 failed.
+- `bun run typecheck` — passed.
+- `bun run lint` — passed with no warnings; duplicate CSS guard passed.
+- `bun run build` — API and Vite production builds passed.
+
+Production deployment used `bun run deploy`. Backup `telegram-tc-20260729T201002Z.db` completed
+before the swap. The rebuilt container is healthy and serves `/assets/index-Bhbue2ri.js`, whose
+bundle contains v1.64.3. The two MT5 accounts report online on EA v1.60.0 and Telegram reports
+connected. The production image is `sha256:ac60d159f95e54860cd5ba8839dfb47591543f17393b38644a9188ca8543ae73`.
 
 ### How to verify the UI (this is where three bugs came from)
 
@@ -63,15 +320,12 @@ Per route, **both themes**, at **1600px and 560px**: every content child of a `.
 and right edges, none overruns its parent, `document.scrollWidth <= innerWidth`. Measure **both
 states** of anything collapsible.
 
-Screenshots so far are in `screenshots/` (dark theme: operations, providers, settings, logs,
-performance). Light theme and the remaining routes still to capture.
-
 ### Layout hazards, each of which produced a real bug
 
-1. **`base.css` duplicated top-level blocks, the later one silently wins.** ~8,600 lines, five bugs
+1. **`base.css` duplicated top-level blocks, the later one silently wins.** ~8,250 lines, five bugs
    so far. Grep every occurrence before editing. `bun run lint` has a duplicate guard.
 2. **Panel inset depends on a DIRECT-CHILD relationship** — `.panel > *:not(header)` and the
-   `margin-inline` group at `signal-desk.css:630`. A wrapper inside a panel silently strips inset and
+   `margin-inline` group in `signal-desk.css`. A wrapper inside a panel silently strips inset and
    padding from everything below it.
 3. **Grid items default to `min-width: auto`** and will not shrink below a wide child. `/logs`
    scrolled the whole document at 560px (1554px vs 560px) until `.wide-panel { min-width: 0 }`.
@@ -88,6 +342,9 @@ performance). Light theme and the remaining routes still to capture.
   signal symbol reads as absent rather than conflicting at release time. Suppressed `DUPLICATE` rows
   now surface in the review queue, dismissible but never releasable.
 - **v1.64.0** — the UI slice above.
+- **v1.64.4 secondary-route structure pass.** Repeated account summaries and one-purpose card rows
+  are gone; Providers, Performance, Symbols, and Telegram now use the compact structure above.
+  Presentation only.
 - **Telegram ingest errors are diagnosed.** All were `Telegram RPC timed out after 20000ms`, both
   providers failing in the same second, correlated with `telegram.session.stalled`. Session-level, not
   per-provider. The backlog drain now makes recovery reliable.
@@ -116,6 +373,235 @@ roughly 1 run in 5 and passes in isolation. Do not chase it and do not let it ma
 - **Run Fable AND Sol independently, blind to each other.** Sol at xhigh returned NO-GO on a backlog
   commit that looked green and was right.
 
+### Standing safety invariants (lifted from July briefs on 2026-07-30, sources archived)
+
+These are product and safety decisions, not implementation notes. Anyone touching the parser,
+classifier, or close path needs them stated plainly.
+
+1. **Structure decides. Prose never executes.** The governing principle for the whole
+   parser/classifier. Source: `IMPL-structure-first-classification-2026-07-26.md`, shipped v1.59.0.
+2. **A provider close message means the provider is out of the trade.** The only exception is the
+   provider's `runner` flag. Erring toward closing reduces exposure, so under-closing is the
+   dangerous failure and over-closing is not. Source: `IMPL-close-semantics-2026-07-25.md`, shipped
+   v1.58.0.
+3. **Close-all holds per account and is released per trade.** `isCloseAllInstruction`, the `closeAll`
+   flag, and the `signal.closeAll` branches still exist in `app.ts` and were deliberately kept.
+   The July plan `PLAN-evidence-gated-execution.md` prescribed deleting them; v1.60.0 achieved the same safety
+   property a different way. Do not read that plan as a description of the code.
+
+### Open trade-safety risks carried forward from the 2026-07-20 audit
+
+Found in `docs/archive/AUDIT-2026-07-20-codebase.md` and re-confirmed on 2026-07-30 as showing no evidence of a
+fix in current source. The audit doc is archived; these items are live. Verify before touching
+execution, reconciliation, or guardian code.
+
+1. **NETTING accounts are accepted despite hedging-only trade semantics.** No execution or
+   reconciliation branch reads `marginMode`. Two providers buying the same symbol on a NETTING
+   account merge into one position, so closing one provider's signal can close both.
+2. **MT5 account and broker ticket identities are not globally safe.** Account identity is only
+   `mt5-${accountNumber}`. History deal and fallback ticket lookups omit `account_id`.
+3. **`SPLIT_ORDER` has no safe per-leg execution contract.** One successful close then closes the
+   entire logical trade.
+4. **Virtual-TP legs latch into an irreversible `HIT` state before broker proof.** Confirmed against
+   current source: `app.ts` still sets `status: "HIT"` on a quote crossing alone in the ordinary
+   (non-reference) virtual-TP path, with no broker-side confirmation gate. The v1.65.4/v1.65.5 work
+   added durable, once-only, non-regressing `HIT` semantics, but only for 0%-allocation reference
+   legs; the closing-leg path this item describes was explicitly left unchanged (see "Still open,
+   deliberately not fixed here" under v1.65.4 below). Correction: an earlier version of this note
+   cited `REVIEW-item7-verify.md` as independent confirmation; that file verifies a different finding
+   (pending-order MARKET/LIMIT inference, its own "item 7"), not this one, and the citation was wrong.
+5. **Trailing-stop protection is memory-only** and permanently exhausts its 100-slot array.
+
+Found 2026-07-30, separate from that audit:
+
+6. **The EA work and report endpoints are unauthenticated.** `/api/mt5/poll` and `/api/mt5/poll-line`
+   lease queue items on a bare `accountId` query parameter (`app.ts:1041-1051`), and
+   `/api/mt5/report` accepts an execution report with no auth at all (`app.ts:1053-1057`). `linkCode`
+   is only checked on register and heartbeat. Account ids are `mt5-<accountNumber>`, which is low
+   entropy. Contained today because the API is not internet-exposed. Anything that exposes the app
+   publicly, including a tunnel with an `/api/mt5/*` exemption, lets a caller lease work items and
+   post fabricated execution reports. Fix before any public exposure. Line numbers drift as `app.ts`
+   grows; re-grep before citing them again.
+7. **No FloodWait or ban handling.** Neither `telegram.ts` nor `app.ts` handles Telegram
+   rate-limiting or banning the account mid-session. The failure mode is silent signal loss.
+8. **`/api/health` Telegram readiness, corrected 2026-08-01: the previous version of this note was wrong.** v1.65.6
+   added a `telegram` readiness section (`expectedProviders`/`readyProviders`/`unreadyProviders`/
+   `stalledProviders`) and an overall `status` that goes `degraded` when any enabled provider lacks a
+   current readiness observation, replacing the old bare `telegramAdapter` name. An earlier version of
+   this note said it still reads `ok` when no session has ever connected, when the only session is
+   disconnected, and when a provider is failing its RPCs, and `degraded` only for a deliberately
+   paused provider. Those were review findings against a first draft. The fix for all of them shipped
+   the same day, in the same commit that introduced the feature (`3b992fd8`), before it was ever
+   released. Verified against current source and against the regression tests that commit added:
+   `degrades health before the first successful Telegram provider contact`, `degrades health while a
+   Telegram session is stalled and recovers after disconnect`, `degrades health after consecutive
+   Telegram provider RPC timeouts`, and `removes a disabled provider from Telegram health
+   expectations` (all in `apps/api/src/api.test.ts`) each assert the corrected behaviour. The
+   changelog's v1.65.6 entry never called this known-incomplete; that citation in the earlier version
+   of this note did not point at anything real. Still genuinely open: this has not been exercised
+   against a live FloodWait or account ban (risk 7), and `/api/telegram/status`'s `connected` boolean
+   remains a useful independent cross-check.
+
+### v1.65.5 - durable reference-leg stop recovery (FIXED 2026-07-31, not yet deployed)
+
+This follow-up closes the v1.65.4 review findings in the API and core packages:
+
+- `reference_stop_actions` durably identifies each reference leg independently of its computed stop
+  price. New queue work, the action row, and the leg `HIT` transition share one SQLite transaction.
+- Snapshot reconciliation uses the current position ticket and broker stop. An `EXECUTED` command is
+  repaired when the live stop is absent or weaker. A stale `LEASED` or delivery-unknown `HELD`
+  command is confirmed from the broker stop or moved back to `PENDING` using the same queue row.
+- Existing v1.65.4 `HIT` reference legs are backfilled into the action table on the first matching
+  snapshot, including links to old reference `MODIFY_SL` rows when present.
+- The favorable BUY high-water or SELL low-water quote is stored on the logical trade before stop
+  work begins. A crash or restart cannot erase a crossing the API already sampled. The remembered
+  crossing waits when the desired stop is on the invalid side of the current market.
+- Fixed-stop work from reference legs, volume-closing legs, and fixed runner strategies observes the
+  live broker stop and active work for the exact position ticket. `sl = 0` is treated as no stop.
+- Provider full-TP announcements share the coalescing path, unresolved reference legs remain in their
+  prior status, original-plan reads require `OPEN_TRADE`, and same-time stop commands lease from the
+  less protective level toward the more protective level.
+- `set-sl-to-tp` now resolves a referenced leg through the same target calculator used by the monitor,
+  including targets derived from configured default distances.
+
+Residual gap: the EA snapshot reports only current bid, ask, position fields, and deal history. It
+does not report an interval high or low. A target crossed entirely while the API and EA reporting path
+are unavailable can still be missed if price retraces before the next snapshot and no deal records the
+crossing. Closing that gap requires a new EA protocol field or broker price-history feed, both outside
+this API-only patch.
+
+Committed as `84d87453` and pushed to `origin/fix/reference-leg-stop-strategy`, then followed locally
+by `68b6460f` (limit-order fill path coverage) and v1.65.6 above. No deployment or EA source change
+was made. Package version is 1.65.5; EA metadata remains 1.65.0.
+
+### v1.65.4 — 0 percent TP legs never moved the stop (FIXED 2026-07-31, not yet deployed)
+
+Symptom: KAL VIP stops never moved to break-even. `trade_aq9UUlUXPQ` on `mt5-54945785` shows it:
+leg 1 `targetPrice 4068`, `allocationPercent 0`, `strategy set-sl-to-entry`, `status "SKIPPED"`,
+`brokerEvidence "sl-hit | [sl 4057.00]"`. Entry was 4063, so it stopped out with the original stop
+still in place.
+
+Cause: `monitorVirtualTps` had `if (leg.status !== "OPEN" || isReferenceVirtualTpLeg(leg)) continue`.
+A 0 percent leg reaches `status: "OPEN"` normally (line number since drifted; not re-verified here), so the reference-leg test was the
+only gate, and it skipped the leg before the price-crossed check. The stop strategy is only applied by
+`queueSlStrategyAfterTpClose`, which runs after a leg closes volume. A 0 percent leg closes nothing,
+so its strategy was unreachable by any path.
+
+A 0 percent leg is a supported, intended configuration. See the comment at the allocation rescaler
+("A leg configured at 0% is a stop-loss reference for set-sl-to-tp (KAL VIP runs 50/0/0/50)") and
+`isReferenceVirtualTpLeg`. Two distinct uses: a price reference for another leg's `set-sl-to-tp`,
+which worked, and a trigger for its own stop strategy, which did not.
+
+Fix: `applyCrossedReferenceLegs` resolves all crossed reference legs as one batch, before the
+closing-leg loop. Four invariants, each of which is a money bug if broken. A Luna max review found the
+first version violated three of them, so do not weaken these without a replacement:
+
+1. **Coalesce.** A price gap through several reference legs queues ONE `MODIFY_SL` at the most
+   protective resulting stop. `leaseNextQueueItem` orders by `created_at` with no tiebreaker, so
+   same-millisecond inserts have undefined order and could execute worst-last, leaving a less
+   protective stop on a live position.
+2. **Never regress.** A computed stop no better than `brokerStopLossFromSnapshot(position)` is
+   dropped. MT5 reports `sl = 0` for "no stop", which must read as absent rather than as zero.
+3. **Once only.** `HIT` is set only when the strategy was queued, was already satisfied, or is a
+   deliberate `no-change`. A leg whose stop is not yet computable (market entry, no fill price
+   recorded) stays `OPEN` and retries next snapshot. The first version marked `HIT` unconditionally,
+   which permanently burnt the leg on a transient failure.
+4. **Batch before close.** Running reference legs first means the closing leg's `break` cannot strand
+   a later reference leg for a tick, by which time price may have retraced past its target.
+
+Three adjacent defects were pre-existing but blocked the same feature, so they are fixed here:
+
+- `recordProviderTpHit` marked a leg `HIT` with no strategy queued. That takes a reference leg out of
+  the monitor's reach, so for a provider that posts "TP1 hit" (KAL VIP does) the announcement silently
+  consumed the only trigger break-even had. Now calls `queueReferenceLegSlStrategyForLeg`. Note it
+  guards on `trade.stopLoss` rather than the broker-reported stop, because there is no live quote on
+  that path.
+- `queueRunnerManagementAfterFinalTp` required every leg `CLOSED`. Reference legs never close, so
+  runner hand-off was blocked on any trade using one. Now filters them out.
+- `resizePartialOpen` reset every retained leg to `OPEN`, so a late partial opening report could
+  reopen a reference leg that had already fired.
+
+Verified: four tests in `api.test.ts` covering the happy path, coalescing to the most protective stop,
+the no-regression guard, and the provider-announced path. Each mutation-checked. Dropping the
+regression guard queues `newStopLoss=1.086` while the broker holds `1.09`, and disabling the provider
+trigger returns `status=NO_WORK`. Full suite 653 pass, typecheck and lint clean.
+
+Still open, deliberately not fixed here:
+
+- A crash between the queue insert and the leg-status write leaves the leg `OPEN`. Dedupe is keyed on
+  the exact stop value, so a changed `strategyStopPrice` after restart could queue a duplicate. Needs
+  durable per-leg idempotency independent of price.
+- A price crossing while the app is down, followed by a retrace before the first post-restart
+  snapshot, is not detected. Virtual TP evaluation samples only the latest snapshot quote. Inherent to
+  the polling design.
+- The closing-leg path still has no stop-regression guard. Only the reference paths do.
+
+### Zero KAL VIP trades on 2026-07-30: root cause was AutoTrading, not the app
+
+Worth recording because the first three diagnoses were all wrong, and the wrong ones are plausible
+enough to be repeated.
+
+The FTMO account `mt5-1514065673` executed nothing all day. Every `OPEN_TRADE` failed with:
+
+```
+retcode 10027  ->  TRADE_RETCODE_CLIENT_DISABLES_AT
+broker comment ->  "AutoTrading disabled by client"
+MQL error      ->  4752  (ERR_TRADE_DISABLED)
+```
+
+Eight of eight, 05:48 to 13:57. The Algo Trading toggle was off in that terminal. The EA was fully
+healthy throughout: polling, heartbeating, and posting reports. Nothing reached the broker.
+
+The other account `mt5-54945785` executed five KAL VIP entries the same day (`rc=10009`), which is
+what rules out the app, parser, queue, and EA path. When one account trades and another does not,
+check `retcode` on `execution_reports` before anything else.
+
+Ruled out, in the order they looked likely: Equity Guardian (both accounts `paused: false`,
+`enabled: false`, drawdown 0, last breach 2026-07-20 with a manual unpause on the 21st), Telegram
+capture (messages were captured normally), and the evidence gate (it held only 3 of the day's
+entries, all quoted re-entries).
+
+Two real signal-quality findings from the same day:
+
+- **KAL VIP posted `Tp 4999` on a sell at 4111** with `Sl 4117`. That target is 888 points the wrong
+  side of entry, above even the stop. Almost certainly a typo for 4099, which fits the descending
+  ladder. Posted three times (13:57, 14:00, 15:44).
+- **The evidence gate treats that geometry inconsistently.** The direct posts at 13:57 and 15:44
+  passed the gate and were rejected by the broker as `rc=10016 Invalid stops`. The same signal
+  quoted as a re-entry at 14:00 was held as `EVIDENCE_OPEN_GEOMETRY_INCOMPLETE`. A take-profit on the
+  wrong side of entry should never reach the broker. Validate TP direction against entry and stop
+  before queueing, on both the direct and quoted paths. Related to risk 3 above and to the naked-order
+  theme in the archived audit.
+
+The three `EVIDENCE_OPEN_GEOMETRY_INCOMPLETE` holds were all quoted re-entries whose prose order type
+contradicted the quoted structure ("Sell stop" / "Sell stops" against a quoted `sell limit`). Under
+"structure decides, prose never executes" those are correctly unresolvable, so the gate did its job.
+
+Operational note: the FTMO account requested 0.5 to 1.0 lots where the working account used 0.03.
+Check lot and risk config on that account before enabling AutoTrading, and against FTMO's own
+max-risk rules.
+
+### Unshipped backlog carried forward (2026-07-30)
+
+From `improvements-21-5.md`, since deleted (verified still unimplemented after two months):
+
+- Per-EA magic-number attribution on closed trades (`magic` is absent from `ClosedPositionsTable.tsx`).
+- Deep history backfill beyond 168h (no `history_deep_pull` anywhere in the tree).
+
+From the rolling `REVIEW.md` scratch pad, since deleted (real, scoped, none safety-critical):
+
+- Delta-driven dashboard updates, so the full snapshot stops rebuilding on every SSE event.
+- Chunk-coherent deploys before introducing route-level lazy loading.
+- `base.css` consolidation, gated behind per-route screenshots.
+- A currency-passthrough guard.
+- Verify `AlertsBanner` dismissal-pruning covers all mount states.
+- **The chart animation loop never stops.** `cartesian-canvas.tsx:114` calls
+  `raf = requestAnimationFrame(draw)` as the first statement of `draw`, before the
+  `if (!s.ready) return` guard, so it reschedules forever whether or not anything needs
+  painting. Every mounted chart burns a frame budget continuously. Restored to this list on
+  2026-07-31 after a review caught that the 07-30 archive pass dropped it: it was recorded in
+  the deleted `REVIEW.md` and had not been carried across. Still present in current source.
+
 ### Useful commands
 
 - Deploy: `bun run deploy` (backs up live DB, rsyncs, rebuilds, swaps container, verifies)
@@ -133,7 +619,7 @@ roughly 1 run in 5 and passes in isolation. Do not chase it and do not let it ma
 
 Branch `fix/vipgold-duplicate-open-prevention` @ `ef409994`, 13 commits ahead of main, PUSHED.
 Production is untouched on **v1.56.2**. Nothing from this branch is deployed.
-Full plan: `PLAN-evidence-gated-execution.md`. Gate: typecheck, lint, **598 tests**, build all green.
+Full plan: `PLAN-evidence-gated-execution.md` (deleted 2026-07-30, in git history at `e63717e7`). Gate: typecheck, lint, **598 tests**, build all green.
 
 ### Two things that are live risks RIGHT NOW on the production box
 1. **Orphan path in prod since v1.51.0.** The EA-reconnect auto-release requeues a held pending
