@@ -13,7 +13,7 @@ describe("MT5 Expert Advisor source", () => {
     // an EA nobody rebuilds is worse than one legitimately a patch behind.
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
-    expect(eaVersion).toBe("1.67.0");
+    expect(eaVersion).toBe("1.68.0");
     const line = (version: string) => version.split(".").slice(0, 2).join(".");
     expect(line(eaVersion!)).toBe(line(packageJson.version!));
   });
@@ -213,7 +213,7 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.67.0"');
+    expect(source).toContain('#property version   "1.68.0"');
     expect(source.match(/"1\.67\.0"/g)).toHaveLength(3);
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
@@ -642,6 +642,13 @@ describe("MT5 Expert Advisor source", () => {
     // guarding a live position expire.
     expect(reclaim).toMatch(
       /if\(\(lifecycleMarks\[index\]\.owned \|\| sameAccount\) && refreshDue[\s\S]{0,200}?GlobalVariableSet/,
+    );
+    // Position identifiers are issued per account, so the same number is live on two
+    // accounts routinely. The account check must therefore short-circuit ahead of the
+    // open-identifier lookup, or account B's position would read account A's mark as
+    // live and, worse, A's absence run would never accumulate against B's numbers.
+    expect(reclaim).toMatch(
+      /bool live = connected && sameAccount\s*\n\s*&& HoldsPositionIdentifier\(/,
     );
   });
 
