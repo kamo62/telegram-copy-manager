@@ -15315,6 +15315,47 @@ function snapshotMatchForTrade(
   };
 }
 
+/**
+ * Direction a snapshot position or order record claims, from its MT5 type code. Even codes
+ * are the buy side (0 buy, 2 buy limit, 4 buy stop, 6 buy stop limit) and odd codes the sell
+ * side. A record with no usable numeric type claims nothing, which reads as undefined rather
+ * than as a direction to compare against.
+ */
+function snapshotRecordDirection(record: Record<string, unknown>): Direction | undefined {
+  const raw = record.type;
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const type = Number(raw);
+  if (!Number.isInteger(type) || type < 0) return undefined;
+  return type % 2 === 0 ? "BUY" : "SELL";
+}
+
+/**
+ * Whether a snapshot record can be the logical trade's own broker record at all.
+ *
+ * The tests in matchedBrokerRecordForTrade all answer "was this row ever tagged with this
+ * trade" — a tracking comment the broker copies onto whatever it likes, or a ticket the app
+ * once recorded. Neither says the row still describes the same instrument on the same side.
+ * A stale or mis-tagged row that clears those tests otherwise hands another position's
+ * ticket, open price, stop or volume to a decision about this trade, and every caller
+ * spends the result on a live position.
+ *
+ * A mismatch has to be provable to count. An absent symbol on either side, or a record with
+ * no numeric type, leaves the record to the comment and ticket tests exactly as before.
+ */
+function brokerRecordIdentityMatchesTrade(record: Record<string, unknown>, trade: LogicalTrade) {
+  const expectedSymbol = (trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "").trim();
+  const recordSymbol = String(record.symbol ?? "").trim();
+  if (
+    expectedSymbol &&
+    recordSymbol &&
+    expectedSymbol.toUpperCase() !== recordSymbol.toUpperCase()
+  ) {
+    return false;
+  }
+  const recordDirection = snapshotRecordDirection(record);
+  return recordDirection === undefined || recordDirection === trade.direction;
+}
+
 function matchedBrokerRecordForTrade(
   records: unknown[],
   trade: LogicalTrade,
@@ -15323,6 +15364,7 @@ function matchedBrokerRecordForTrade(
   const shortId = shortLogicalTradeId(trade.id);
   for (const record of records) {
     if (!record || typeof record !== "object") continue;
+    if (!brokerRecordIdentityMatchesTrade(record as Record<string, unknown>, trade)) continue;
     const values = Object.values(record as Record<string, unknown>).map((value) =>
       value === undefined || value === null ? "" : String(value),
     );
