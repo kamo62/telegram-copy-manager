@@ -11682,7 +11682,7 @@ class AppStore {
    * repeatable: 116 of the 499 rows on the live database are of that shape, and a plain
    * unique index would have refused most of them. A partial index leaves them untouched.
    *
-   * Existing duplicates have to go before the index can exist at all — CREATE UNIQUE INDEX
+   * Existing duplicates have to go before the index can exist at all. CREATE UNIQUE INDEX
    * fails outright on a table that already violates it. The survivor is the row carrying P/L
    * and then the earliest, and every removed row is logged whole beforehand, so a collapse
    * leaves a readable trail rather than a silent deletion. Nothing on the live database
@@ -15477,12 +15477,12 @@ function snapshotRecordDirection(record: Record<string, unknown>): Direction | u
 /**
  * Whether a snapshot record can be the logical trade's own broker record at all.
  *
- * The tests in matchedBrokerRecordForTrade all answer "was this row ever tagged with this
- * trade" — a tracking comment the broker copies onto whatever it likes, or a ticket the app
- * once recorded. Neither says the row still describes the same instrument on the same side.
- * A stale or mis-tagged row that clears those tests otherwise hands another position's
- * ticket, open price, stop or volume to a decision about this trade, and every caller
- * spends the result on a live position.
+ * The tests in matchedBrokerRecordForTrade all answer one question: was this row ever tagged
+ * with this trade. They answer it from a tracking comment the broker copies onto whatever it
+ * likes, or from a ticket the app once recorded. Neither says the row still describes the same
+ * instrument on the same side. A stale or mis-tagged row that clears those tests otherwise
+ * hands another position's ticket, open price, stop or volume to a decision about this trade,
+ * and every caller spends the result on a live position.
  *
  * A mismatch has to be provable to count. An absent symbol on either side, or a record with
  * no numeric type, leaves the record to the comment and ticket tests exactly as before.
