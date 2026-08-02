@@ -1213,6 +1213,11 @@ ulong FindPositionTicket(SignalCommand &command)
 // Zero is never the answer: zero is the command-scoped name CANCEL_PENDING writes, so
 // two positions under one command would share a single mark and the second close would
 // be recorded as already done and silently skipped.
+//
+// The broker comment cannot serve as this key. It is per-trade, not per-position: every
+// position a plain open creates carries the same CompactTradeComment, and split legs only
+// differ under COMMENT_TAGGED, being identical under COMMENT_HIDDEN and COMMENT_CUSTOM.
+// Brokers also rewrite it. Keying on it would collapse a trade's positions onto one mark.
 ulong PositionMarkKey(ulong ticket)
 {
    ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
@@ -2067,10 +2072,12 @@ string LegacyLifecycleIdempotencyVariable(SignalCommand &command, ulong ticket =
 // second is that same format keyed by the position's current ticket, which is what
 // 1.67 wrote. The two numbers are equal for a position the server never re-opened, so
 // the second read is skipped entirely in the ordinary case and only does work after a
-// replacement. It cannot answer for the wrong position: MT5 issues order tickets from
-// one never-reused sequence per account and an identifier is a ticket from that same
-// sequence, so no live position's ticket can equal another's identifier. Both are
-// scoped to this account and this command before they are hashed.
+// replacement. Both are scoped to this account and this command before they are hashed,
+// so the only way the extra read can answer for the wrong position is if a replacement
+// ticket repeats a number already issued as some other position's opening ticket on the
+// same account. MT5 draws both from one per-account sequence and does not reuse within
+// it. If a server ever did, the extra read would report a close as already done and skip
+// it, which is why the read is temporary rather than permanent.
 //
 // The third is the pre-1.67 plaintext name, unchanged.
 //
