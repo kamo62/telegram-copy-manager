@@ -13,7 +13,7 @@ describe("MT5 Expert Advisor source", () => {
     // an EA nobody rebuilds is worse than one legitimately a patch behind.
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
-    expect(eaVersion).toBe("1.65.0");
+    expect(eaVersion).toBe("1.66.0");
     const line = (version: string) => version.split(".").slice(0, 2).join(".");
     expect(line(eaVersion!)).toBe(line(packageJson.version!));
   });
@@ -213,8 +213,8 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.65.0"');
-    expect(source.match(/"1\.65\.0"/g)).toHaveLength(3);
+    expect(source).toContain('#property version   "1.66.0"');
+    expect(source.match(/"1\.66\.0"/g)).toHaveLength(3);
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
@@ -300,6 +300,50 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("ManageTrailingStops()");
     expect(source).toMatch(/void\s+OnTimer\(\)[\s\S]*ManageTrailingStops\(\)/);
     expect(source).toContain("TrailingStopImproves");
+  });
+
+  test("recycles trailing-stop slots and never drops tracking silently", () => {
+    // The slot array is a lifetime budget unless finished positions give their
+    // slot back. Exhausting it used to make every later trailing stop a no-op,
+    // which leaves a live position with a stop nothing will ever move again.
+    const track = source.match(/bool TrackTrailingStop\([\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(track).toBeTruthy();
+    expect(track).toContain("if(freeSlot < 0 && !trailingStopStates[index].active)");
+    expect(track).toContain("trailingStopStates[freeSlot].positionTicket = ticket;");
+    // An existing ticket must still update in place: the reuse scan only settles
+    // on a free slot after the whole occupied range failed to match the ticket.
+    expect(track).toMatch(/positionTicket == ticket[\s\S]*?return true;[\s\S]*?freeSlot = index/);
+
+    // Releasing must clear identity, or a recycled slot trails a new ticket with a
+    // finished position's queue item, trade id, symbol, direction and distance.
+    const release =
+      source.match(/void ReleaseTrailingStopSlot\(int index\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    for (const cleared of [
+      "active = false",
+      'queueItemId = ""',
+      'logicalTradeId = ""',
+      'symbol = ""',
+      'direction = ""',
+      "positionTicket = 0",
+      "distance = 0.0",
+    ]) {
+      expect(release).toContain(cleared);
+    }
+
+    // ManageTrailingStops walks the array by index. Slots are recycled in place and
+    // the count is a high-water mark, so nothing shifts under that loop.
+    const manage = source.match(/void ManageTrailingStops\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(manage).toContain("ReleaseTrailingStopSlot(index);");
+    expect(source).not.toContain("trailingStopStateCount--");
+
+    // A genuinely full array is reported, not swallowed.
+    const executeTrailing = source.slice(
+      source.indexOf("void ExecuteTrailingStop("),
+      source.indexOf("void ReleaseTrailingStopSlot("),
+    );
+    expect(executeTrailing).toContain("if(!TrackTrailingStop(command, tickets[index], distance))");
+    expect(executeTrailing).toContain("untracked++;");
+    expect(executeTrailing).toContain('"Trailing stop tracking capacity exhausted"');
   });
 
   test("uses ticket-led close and modify execution across all matching broker positions and orders", () => {
