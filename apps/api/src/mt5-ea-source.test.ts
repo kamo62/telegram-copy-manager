@@ -586,7 +586,7 @@ describe("MT5 Expert Advisor source", () => {
     // Only MarkLifecycleExecuted may claim ownership.
     const mark =
       source.match(
-        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong identifier = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
     expect(mark).toContain(
       "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal())",
@@ -819,7 +819,7 @@ describe("MT5 Expert Advisor source", () => {
 
     const mark =
       source.match(
-        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong identifier = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
     expect(mark).toContain("string variable = LifecycleIdempotencyVariable(command, ticket);");
     expect(mark).not.toContain("Legacy");
@@ -867,7 +867,7 @@ describe("MT5 Expert Advisor source", () => {
     // every read, so a mark still being consulted survives.
     const mark =
       source.match(
-        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong identifier = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
     expect(mark).toMatch(/if\(ticket == 0\)\s*\n\s*return;/);
     expect(source).not.toContain("LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS");
@@ -886,7 +886,7 @@ describe("MT5 Expert Advisor source", () => {
     // the write.
     const mark =
       source.match(
-        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong identifier = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
     expect(mark).toMatch(/GlobalVariableSet\(variable[\s\S]*RegisterLifecycleMark\(variable/);
     const register =

@@ -124,7 +124,13 @@ struct LifecycleMark
    bool owned;
    string variable;
    string identity;        // full account identity this entry was registered under
-   ulong positionTicket;   // always > 0: only ticket-scoped marks are tracked
+   // POSITION_IDENTIFIER, never POSITION_TICKET. MQL5 documents the ticket as
+   // replaceable by a server service operation, swaps charged with a position
+   // re-opening being the named case, while the identifier "does not change
+   // throughout its life cycle". A mark keyed by the ticket therefore stopped
+   // matching its own position the moment the server replaced it, and a redelivered
+   // close read as never executed and closed the position a second time.
+   ulong positionIdentifier;  // always > 0: only position-scoped marks are tracked
    // Both clocks are TimeLocal. TimeCurrent is the last quote's server time and stops
    // advancing while the terminal is disconnected, which is exactly when a mark most
    // needs its expiry pushed back, so it cannot be what drives the refresh.
@@ -940,7 +946,8 @@ void ExecuteClose(SignalCommand &command)
    // A pending order may fill while the remove request is in flight. Re-scan
    // after cancellation so CLOSE_TRADE handles the newly-created position too.
    ulong positionTickets[];
-   int positionFound = CollectPositionTickets(command, positionTickets);
+   ulong positionIdentifiers[];
+   int positionFound = CollectPositionTargets(command, positionTickets, positionIdentifiers);
    int positionsClosed = 0;
    int positionFailures = 0;
    bool partialResult = false;
@@ -950,7 +957,7 @@ void ExecuteClose(SignalCommand &command)
    for(int index = 0; index < positionFound; index++)
    {
       ulong ticket = positionTickets[index];
-      if(LifecycleAlreadyExecuted(command, ticket))
+      if(LifecycleAlreadyExecuted(command, positionIdentifiers[index], ticket))
       {
          positionFailures++;
          lastPositionTicket = ticket;
@@ -976,11 +983,12 @@ void ExecuteClose(SignalCommand &command)
 
    ulong remainingPendingTickets[];
    ulong remainingPositionTickets[];
+   ulong remainingPositionIdentifiers[];
    int remainingPending = CollectPendingOrderTickets(command, remainingPendingTickets);
-   int remainingPositionMatches = CollectPositionTickets(command, remainingPositionTickets);
+   int remainingPositionMatches = CollectPositionTargets(command, remainingPositionTickets, remainingPositionIdentifiers);
    int remainingPositions = 0;
    for(int index = 0; index < remainingPositionMatches; index++)
-      if(!LifecycleAlreadyExecuted(command, remainingPositionTickets[index]))
+      if(!LifecycleAlreadyExecuted(command, remainingPositionIdentifiers[index], remainingPositionTickets[index]))
          remainingPositions++;
    string status = "UNKNOWN";
    if(remainingPending == 0 && remainingPositions == 0 && pendingFailures == 0 && positionFailures == 0 && !partialResult)
@@ -1017,7 +1025,8 @@ void ExecutePartialClose(SignalCommand &command)
       return;
    }
    ulong tickets[];
-   int found = CollectPositionTickets(command, tickets);
+   ulong identifiers[];
+   int found = CollectPositionTargets(command, tickets, identifiers);
    if(found <= 0)
    {
       ReportUnknown(command.queueItemId, "No matching position; reconcile broker snapshot/history", command.commandType);
@@ -1039,7 +1048,7 @@ void ExecutePartialClose(SignalCommand &command)
    for(int index = 0; index < found; index++)
    {
       ulong ticket = tickets[index];
-      if(LifecycleAlreadyExecuted(command, ticket))
+      if(LifecycleAlreadyExecuted(command, identifiers[index], ticket))
          continue;
       attempted++;
       MqlTradeResult result = {};
@@ -1103,6 +1112,11 @@ bool ClosePositionTicket(
       return false;
    }
 
+   // Captured here, before anything closes anything. The mark is written at the bottom
+   // of this function, by which point a full close has removed the position and there
+   // is no identifier left to read: PositionGetInteger would answer from whatever was
+   // selected last. The select above is the only moment this value is reliable.
+   ulong identifier = PositionMarkKey(ticket);
    string symbol = PositionGetString(POSITION_SYMBOL);
    long positionType = PositionGetInteger(POSITION_TYPE);
    double currentVolume = PositionGetDouble(POSITION_VOLUME);
@@ -1171,7 +1185,7 @@ bool ClosePositionTicket(
    // Full closes require the position gone. Slice closes require a DONE result
    // plus broker-confirmed volume, either from the deal or the observed delta.
    if(sent && result.retcode == TRADE_RETCODE_DONE && filledConfirmed && (positionGone || !fullClose))
-      MarkLifecycleExecuted(command, ticket);
+      MarkLifecycleExecuted(command, identifier);
    requestedVolume = request.volume;
    return sent && IsTradeSuccess(result.retcode);
 }
@@ -1192,13 +1206,34 @@ ulong FindPositionTicket(SignalCommand &command)
    return 0;
 }
 
-int CollectPositionTickets(SignalCommand &command, ulong &tickets[])
+// The one rule that turns a selected position into the number its mark is keyed by,
+// so the write side and the reclaim side cannot drift apart. A position with no
+// readable identifier falls back to its ticket, which is exactly the pre-1.68 key, so
+// the worst case is the behaviour this version replaces rather than something new.
+// Zero is never the answer: zero is the command-scoped name CANCEL_PENDING writes, so
+// two positions under one command would share a single mark and the second close would
+// be recorded as already done and silently skipped.
+ulong PositionMarkKey(ulong ticket)
+{
+   ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   return identifier == 0 ? ticket : identifier;
+}
+
+// Both numbers for a matched position, taken while it is selected. The ticket is what
+// a trade request addresses; the identifier is what a mark is keyed by, and the two
+// stop agreeing the moment the server replaces a ticket. Reading the identifier back
+// later would mean re-selecting a position that a close may already have removed, so
+// it is captured here, once, at the same instant as the ticket.
+int CollectPositionTargets(SignalCommand &command, ulong &tickets[], ulong &identifiers[])
 {
    ArrayResize(tickets, 0);
+   ArrayResize(identifiers, 0);
    if(command.targetPositionTicket > 0 && PositionSelectByTicket(command.targetPositionTicket))
    {
       ArrayResize(tickets, 1);
+      ArrayResize(identifiers, 1);
       tickets[0] = command.targetPositionTicket;
+      identifiers[0] = PositionMarkKey(command.targetPositionTicket);
       return 1;
    }
 
@@ -1211,9 +1246,20 @@ int CollectPositionTickets(SignalCommand &command, ulong &tickets[])
          continue;
       int next = ArraySize(tickets);
       ArrayResize(tickets, next + 1);
+      ArrayResize(identifiers, next + 1);
       tickets[next] = ticket;
+      identifiers[next] = PositionMarkKey(ticket);
    }
    return ArraySize(tickets);
+}
+
+// Ticket-only view for the callers that address positions and never key a mark:
+// MOVE_SL_TO_BE, MODIFY_SL, MODIFY_TP and TRAILING_STOP. One implementation, so a
+// matching rule can never differ between the paths that mark and the paths that do not.
+int CollectPositionTickets(SignalCommand &command, ulong &tickets[])
+{
+   ulong identifiers[];
+   return CollectPositionTargets(command, tickets, identifiers);
 }
 
 int CollectPendingOrderTickets(SignalCommand &command, ulong &tickets[])
@@ -1980,11 +2026,18 @@ uint LifecycleAccountTag()
 }
 
 // MQL5 caps a global variable name at 63 characters and silently keeps only the
-// first 63. Every component here is fixed-width except the ticket, which a ulong
-// bounds at 20 digits, so the name is 60 characters at absolute worst: 14 prefix,
-// 8 account tag, 16 hash, 2 separators, 20 ticket. No key the backend can send,
-// however long, can move that bound or make two distinct marks share a name.
-string LifecycleIdempotencyVariable(SignalCommand &command, ulong ticket = 0)
+// first 63. Every component here is fixed-width except the trailing position number,
+// which a ulong bounds at 20 digits, so the name is 60 characters at absolute worst:
+// 14 prefix, 8 account tag, 16 hash, 2 separators, 20 digits. No key the backend can
+// send, however long, can move that bound or make two distinct marks share a name.
+//
+// That number is POSITION_IDENTIFIER as of 1.68.0 and was POSITION_TICKET before it.
+// Both are ulong, so the bound is unchanged. It stays a bare number rather than
+// gaining a kind marker because the two agree for every position the server never
+// re-opened: an identifier is the ticket of the order that opened the position, so a
+// 1.67 name and a 1.68 name are the same string in the ordinary case and the upgrade
+// costs nothing.
+string LifecycleIdempotencyVariable(SignalCommand &command, ulong positionId = 0)
 {
    string scopedKey = LifecycleAccountIdentity() + "|" + LifecycleCommandKey(command);
    ulong hash = LifecycleKeyHash(scopedKey);
@@ -1993,7 +2046,7 @@ string LifecycleIdempotencyVariable(SignalCommand &command, ulong ticket = 0)
       LifecycleAccountTag(),
       (uint)((hash >> 32) & 0xFFFFFFFF),
       (uint)(hash & 0xFFFFFFFF),
-      ticket);
+      positionId);
 }
 
 // Marks written before this version used the truncated plaintext name. Nothing
@@ -2008,36 +2061,55 @@ string LegacyLifecycleIdempotencyVariable(SignalCommand &command, ulong ticket =
    return StringSubstr(LEGACY_LIFECYCLE_MARK_PREFIX + LifecycleCommandKey(command) + "." + IntegerToString(ticket), 0, 63);
 }
 
-bool LifecycleAlreadyExecuted(SignalCommand &command, ulong ticket = 0)
+// Three reads across two name formats, not three formats.
+//
+// The first is the name this version writes, keyed by the position identifier. The
+// second is that same format keyed by the position's current ticket, which is what
+// 1.67 wrote. The two numbers are equal for a position the server never re-opened, so
+// the second read is skipped entirely in the ordinary case and only does work after a
+// replacement. It cannot answer for the wrong position: MT5 issues order tickets from
+// one never-reused sequence per account and an identifier is a ticket from that same
+// sequence, so no live position's ticket can equal another's identifier. Both are
+// scoped to this account and this command before they are hashed.
+//
+// The third is the pre-1.67 plaintext name, unchanged.
+//
+// The second read can be dropped once no mark a 1.67 EA wrote can still be live, which
+// is four weeks after the last terminal on 1.67 is rebuilt.
+bool LifecycleAlreadyExecuted(SignalCommand &command, ulong identifier = 0, ulong ticket = 0)
 {
-   return GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket)) ||
-          GlobalVariableCheck(LegacyLifecycleIdempotencyVariable(command, ticket));
+   if(GlobalVariableCheck(LifecycleIdempotencyVariable(command, identifier)))
+      return true;
+   if(ticket != identifier && GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket)))
+      return true;
+   return GlobalVariableCheck(LegacyLifecycleIdempotencyVariable(command, ticket));
 }
 
-void MarkLifecycleExecuted(SignalCommand &command, ulong ticket = 0)
+void MarkLifecycleExecuted(SignalCommand &command, ulong identifier = 0)
 {
-   string variable = LifecycleIdempotencyVariable(command, ticket);
+   string variable = LifecycleIdempotencyVariable(command, identifier);
    datetime writtenAt = TimeCurrent();
    // Write the mark first and register it second. The mark is what stops a second
    // close on a live account, so a full registry must never prevent one being recorded.
    if(GlobalVariableSet(variable, (double)writtenAt) == 0)
    {
-      PrintFormat("Telegram TC lifecycle mark NOT recorded variable=%s queue=%s ticket=%I64u error=%d",
+      PrintFormat("Telegram TC lifecycle mark NOT recorded variable=%s queue=%s position=%I64u error=%d",
          variable,
          command.queueItemId,
-         ticket,
+         identifier,
          GetLastError());
       return;
    }
-   // Only ticket-scoped marks are tracked. A command-scoped mark (CANCEL_PENDING) has
-   // nothing observable to bound it: no ticket to watch, and no age at which the EA can
-   // prove the server will not ask again. It is left to the terminal's four-week expiry,
-   // which renews on every read, so one still being consulted survives and one nothing
-   // has asked about is discarded. That is the pre-1.67 behaviour for this one category.
-   if(ticket == 0)
+   // Only position-scoped marks are tracked. A command-scoped mark (CANCEL_PENDING) has
+   // nothing observable to bound it: no position to watch, and no age at which the EA
+   // can prove the server will not ask again. It is left to the terminal's four-week
+   // expiry, which renews on every read, so one still being consulted survives and one
+   // nothing has asked about is discarded. That is the pre-1.67 behaviour for this one
+   // category.
+   if(identifier == 0)
       return;
    // Just written, so its four-week clock starts now.
-   RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal());
+   RegisterLifecycleMark(variable, LifecycleAccountIdentity(), identifier, true, TimeLocal());
 }
 
 // Slots are recycled in place and lifecycleMarkCount is a high-water mark that only
@@ -2047,7 +2119,7 @@ void MarkLifecycleExecuted(SignalCommand &command, ulong ticket = 0)
 // Returns false when the mark could not be tracked. The caller must not treat that as
 // success: an untracked mark still guards its trade but is never refreshed, so it
 // expires at four weeks even though its position may still be open.
-bool RegisterLifecycleMark(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt)
+bool RegisterLifecycleMark(string variable, string identity, ulong identifier, bool owned, datetime refreshedAt)
 {
    int freeSlot = -1;
    int adoptedSlot = -1;
@@ -2059,7 +2131,7 @@ bool RegisterLifecycleMark(string variable, string identity, ulong ticket, bool 
          // writes to becomes owned; nothing may take that right away again.
          lifecycleMarks[index].owned = lifecycleMarks[index].owned || owned;
          lifecycleMarks[index].identity = identity;
-         lifecycleMarks[index].positionTicket = ticket;
+         lifecycleMarks[index].positionIdentifier = identifier;
          lifecycleMarks[index].refreshedAt = refreshedAt;
          lifecycleMarks[index].absentPasses = 0;
          return true;
@@ -2100,7 +2172,7 @@ bool RegisterLifecycleMark(string variable, string identity, ulong ticket, bool 
    lifecycleMarks[freeSlot].owned = owned;
    lifecycleMarks[freeSlot].variable = variable;
    lifecycleMarks[freeSlot].identity = identity;
-   lifecycleMarks[freeSlot].positionTicket = ticket;
+   lifecycleMarks[freeSlot].positionIdentifier = identifier;
    lifecycleMarks[freeSlot].refreshedAt = refreshedAt;
    lifecycleMarks[freeSlot].absentPasses = 0;
    return true;
@@ -2112,7 +2184,7 @@ void ReleaseLifecycleMarkSlot(int index)
    lifecycleMarks[index].owned = false;
    lifecycleMarks[index].variable = "";
    lifecycleMarks[index].identity = "";
-   lifecycleMarks[index].positionTicket = 0;
+   lifecycleMarks[index].positionIdentifier = 0;
    lifecycleMarks[index].refreshedAt = 0;
    lifecycleMarks[index].absentPasses = 0;
 }
@@ -2132,14 +2204,19 @@ bool IsHexRun(string text, int length)
    return true;
 }
 
-// A name this EA wrote is exactly prefix + 8 hex + '.' + 16 hex + '.' + decimal ticket.
-// Every segment is validated rather than assumed, so a variable that merely starts with
-// the reserved prefix is not adopted, and a mark is never reclaimed on a guess about
-// which account or which position it belongs to.
-bool ParseLifecycleMarkName(string variable, string &accountTagText, ulong &ticket)
+// A name this EA wrote is exactly prefix + 8 hex + '.' + 16 hex + '.' + a decimal
+// position identifier. Every segment is validated rather than assumed, so a variable
+// that merely starts with the reserved prefix is not adopted, and a mark is never
+// reclaimed on a guess about which account or which position it belongs to.
+//
+// A name a 1.67 EA wrote parses identically and yields a ticket where this reads an
+// identifier. That is harmless: the two are the same number unless the server replaced
+// the ticket, and an adopted entry is never deletable, so the worst outcome is that
+// such a mark stops being refreshed and falls back to the terminal's own expiry.
+bool ParseLifecycleMarkName(string variable, string &accountTagText, ulong &identifier)
 {
    accountTagText = "";
-   ticket = 0;
+   identifier = 0;
    int prefixLength = StringLen(LIFECYCLE_MARK_PREFIX);
    int tagEnd = StringFind(variable, ".", prefixLength);
    if(tagEnd != prefixLength + 8)
@@ -2152,8 +2229,8 @@ bool ParseLifecycleMarkName(string variable, string &accountTagText, ulong &tick
    string digits = StringSubstr(variable, hashEnd + 1);
    if(!IsHexRun(tagText, 8) || !IsHexRun(hashText, 16) || digits == "")
       return false;
-   ticket = (ulong)StringToInteger(digits);
-   if(IntegerToString((long)ticket) != digits)
+   identifier = (ulong)StringToInteger(digits);
+   if(IntegerToString((long)identifier) != digits)
       return false;
    accountTagText = tagText;
    return true;
@@ -2201,10 +2278,10 @@ void RehydrateLifecycleMarks()
       if(StringFind(name, LIFECYCLE_MARK_PREFIX) != 0)
          continue;
       string tagText = "";
-      ulong ticket = 0;
-      if(!ParseLifecycleMarkName(name, tagText, ticket))
+      ulong identifier = 0;
+      if(!ParseLifecycleMarkName(name, tagText, identifier))
          continue;
-      if(tagText != currentTag || ticket == 0)
+      if(tagText != currentTag || identifier == 0)
       {
          skipped++;
          continue;
@@ -2212,7 +2289,7 @@ void RehydrateLifecycleMarks()
       // refreshedAt 0 means the first sweep rewrites it. An adopted mark may already be
       // most of the way through its four weeks, so its expiry is pushed back on sight
       // rather than a refresh interval later.
-      if(RegisterLifecycleMark(name, identity, ticket, false, 0))
+      if(RegisterLifecycleMark(name, identity, identifier, false, 0))
          adopted++;
       else
          untracked++;
@@ -2249,9 +2326,39 @@ void RehydrateLifecycleMarks()
 // marks for that account, so anything it owns is its own.
 //
 // Within an account the old argument still carries the rest: a tracked mark is only
-// read for a ticket CollectPositionTickets returned, and that only returns positions
-// PositionSelectByTicket accepts, so once the position is gone the mark can never be
+// read for a position CollectPositionTargets returned, and that only returns positions
+// the terminal still holds open, so once the position is gone the mark can never be
 // consulted again and removing it cannot lose idempotency.
+
+// MQL5 offers no select-by-identifier, and PositionSelectByTicket is exactly what a
+// replaced ticket defeats, so liveness is answered from a list instead of a lookup.
+// Collected once per sweep rather than once per mark: 512 marks driving their own scans
+// would re-select every open position 512 times for the same answer.
+int CollectOpenPositionIdentifiers(ulong &identifiers[])
+{
+   ArrayResize(identifiers, 0);
+   int total = PositionsTotal();
+   for(int index = 0; index < total; index++)
+   {
+      ulong ticket = PositionGetTicket(index);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      int next = ArraySize(identifiers);
+      ArrayResize(identifiers, next + 1);
+      // The same rule the mark was written under, so the two sides cannot drift.
+      identifiers[next] = PositionMarkKey(ticket);
+   }
+   return ArraySize(identifiers);
+}
+
+bool HoldsPositionIdentifier(ulong &identifiers[], int count, ulong identifier)
+{
+   for(int index = 0; index < count; index++)
+      if(identifiers[index] == identifier)
+         return true;
+   return false;
+}
+
 void ReclaimLifecycleMarks()
 {
    string identity = LifecycleAccountIdentity();
@@ -2261,6 +2368,11 @@ void ReclaimLifecycleMarks()
    // most at risk of expiring, so the refresh arm runs either way and only the
    // removal arm is gated.
    bool connected = TerminalInfoInteger(TERMINAL_CONNECTED) != 0;
+   // Read only by the removal arm, which a disconnection stops anyway.
+   ulong openIdentifiers[];
+   int openIdentifierCount = 0;
+   if(connected)
+      openIdentifierCount = CollectOpenPositionIdentifiers(openIdentifiers);
    for(int index = 0; index < lifecycleMarkCount; index++)
    {
       if(!lifecycleMarks[index].active)
@@ -2268,7 +2380,7 @@ void ReclaimLifecycleMarks()
 
       bool sameAccount = lifecycleMarks[index].identity == identity;
       bool live = connected && sameAccount
-         && PositionSelectByTicket(lifecycleMarks[index].positionTicket);
+         && HoldsPositionIdentifier(openIdentifiers, openIdentifierCount, lifecycleMarks[index].positionIdentifier);
 
       // Anything this EA believes is its own gets its expiry pushed back, whether or
       // not the position can be seen right now. Refreshing only ever extends a mark's
