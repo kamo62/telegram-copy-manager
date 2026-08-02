@@ -2341,21 +2341,40 @@ void RehydrateLifecycleMarks()
 // replaced ticket defeats, so liveness is answered from a list instead of a lookup.
 // Collected once per sweep rather than once per mark: 512 marks driving their own scans
 // would re-select every open position 512 times for the same answer.
-int CollectOpenPositionIdentifiers(ulong &identifiers[])
+//
+// Reports whether the scan completed, not just how many it found, because a count
+// cannot tell the two apart. A scan that read three of five positions returns three,
+// exactly as an account holding three would, and the two missing marks then look absent.
+// Absence in a scan is not proof a position is gone; it is proof the scan did not see
+// it, and the caller must be able to tell the difference before deleting anything.
+//
+// A genuinely flat account is distinguishable and is reported complete: PositionsTotal
+// answers 0, the loop never runs, and there is nothing that could have failed. So the
+// safe reading does not cost anything on a flat account. Every other shortfall is a
+// failure, and any one of them fails the whole scan rather than skipping one entry:
+// the position that was missed is exactly the one whose mark would be deleted, so a
+// scan that is short by one is not a scan that is right about the rest.
+bool CollectOpenPositionIdentifiers(ulong &identifiers[], int &count)
 {
-   ArrayResize(identifiers, 0);
+   count = 0;
+   if(ArrayResize(identifiers, 0) < 0)
+      return false;
    int total = PositionsTotal();
    for(int index = 0; index < total; index++)
    {
+      // PositionGetTicket answers 0 on failure and ArrayResize answers -1, leaving the
+      // array unchanged. Neither may be written off as "no position here".
       ulong ticket = PositionGetTicket(index);
       if(ticket == 0 || !PositionSelectByTicket(ticket))
-         continue;
+         return false;
       int next = ArraySize(identifiers);
-      ArrayResize(identifiers, next + 1);
+      if(ArrayResize(identifiers, next + 1) < 0)
+         return false;
       // The same rule the mark was written under, so the two sides cannot drift.
       identifiers[next] = PositionMarkKey(ticket);
    }
-   return ArraySize(identifiers);
+   count = ArraySize(identifiers);
+   return true;
 }
 
 bool HoldsPositionIdentifier(ulong &identifiers[], int count, ulong identifier)
@@ -2376,17 +2395,24 @@ void ReclaimLifecycleMarks()
    // removal arm is gated.
    bool connected = TerminalInfoInteger(TERMINAL_CONNECTED) != 0;
    // Read only by the removal arm, which a disconnection stops anyway.
+   //
+   // positionsConfirmed, not connected, is what the removal arm is gated on from here.
+   // A disconnection is only one of the ways the terminal can fail to tell us what is
+   // open, and the others do not announce themselves: a scan that partly failed while
+   // connected returns a short list that reads as a set of closed positions. Both
+   // failures now have the same consequence, which is that this sweep does not remove
+   // anything. Refresh is unaffected and still runs either way.
    ulong openIdentifiers[];
    int openIdentifierCount = 0;
-   if(connected)
-      openIdentifierCount = CollectOpenPositionIdentifiers(openIdentifiers);
+   bool positionsConfirmed =
+      connected && CollectOpenPositionIdentifiers(openIdentifiers, openIdentifierCount);
    for(int index = 0; index < lifecycleMarkCount; index++)
    {
       if(!lifecycleMarks[index].active)
          continue;
 
       bool sameAccount = lifecycleMarks[index].identity == identity;
-      bool live = connected && sameAccount
+      bool live = positionsConfirmed && sameAccount
          && HoldsPositionIdentifier(openIdentifiers, openIdentifierCount, lifecycleMarks[index].positionIdentifier);
 
       // Anything this EA believes is its own gets its expiry pushed back, whether or
@@ -2404,11 +2430,16 @@ void ReclaimLifecycleMarks()
          && GlobalVariableSet(lifecycleMarks[index].variable, (double)TimeCurrent()) != 0)
          lifecycleMarks[index].refreshedAt = now;
 
-      // Everything below removes something. None of it may run without a connection to
-      // confirm the position is gone, nor against an account this entry was not
+      // Everything below removes something. None of it may run unless the terminal
+      // actually told us what is open, nor against an account this entry was not
       // registered under. The entry is kept rather than released so returning to that
       // account resumes exactly where it left off, with no reinitialisation required.
-      if(!connected || !sameAccount)
+      //
+      // Skipping here freezes the absence run rather than resetting it: this sweep
+      // neither saw the position nor failed to see it, so it is not evidence in either
+      // direction. The ten below therefore count consecutive real observations of
+      // absence, which is the property that matters, rather than consecutive sweeps.
+      if(!positionsConfirmed || !sameAccount)
          continue;
       if(live)
       {
@@ -2418,6 +2449,12 @@ void ReclaimLifecycleMarks()
       // One absent reading is not proof. The position must be absent on this many
       // consecutive sweeps, which a reconnect blip cannot span. Counting passes rather
       // than seconds keeps every clock out of the only path that deletes anything.
+      //
+      // Two races are absorbed here rather than prevented. A position that closes after
+      // the scan but before its mark is reached reads live and resets the run, which
+      // only delays reclamation. A position whose ticket is replaced mid-scan can be
+      // missed by the reindex and read absent for that one pass. Both need ten
+      // consecutive passes to reach a deletion, and neither can produce them.
       lifecycleMarks[index].absentPasses++;
       if(lifecycleMarks[index].absentPasses < LIFECYCLE_MARK_ABSENT_PASSES)
          continue;

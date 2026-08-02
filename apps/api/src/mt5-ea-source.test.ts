@@ -630,11 +630,11 @@ describe("MT5 Expert Advisor source", () => {
     const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(reclaim).toContain("string identity = LifecycleAccountIdentity();");
     expect(reclaim).toContain("bool sameAccount = lifecycleMarks[index].identity == identity;");
-    expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
+    expect(reclaim).toMatch(/if\(!positionsConfirmed \|\| !sameAccount\)\s*\n\s*continue;/);
     // An off-account entry must be skipped, never released: adoption cannot restore an
     // owned entry, so releasing it would strand its variable forever.
     const offAccount = reclaim.slice(
-      reclaim.indexOf("if(!connected || !sameAccount)"),
+      reclaim.indexOf("if(!positionsConfirmed || !sameAccount)"),
       reclaim.indexOf("if(live)"),
     );
     expect(offAccount).not.toContain("ReleaseLifecycleMarkSlot");
@@ -648,7 +648,7 @@ describe("MT5 Expert Advisor source", () => {
     // open-identifier lookup, or account B's position would read account A's mark as
     // live and, worse, A's absence run would never accumulate against B's numbers.
     expect(reclaim).toMatch(
-      /bool live = connected && sameAccount\s*\n\s*&& HoldsPositionIdentifier\(/,
+      /bool live = positionsConfirmed && sameAccount\s*\n\s*&& HoldsPositionIdentifier\(/,
     );
   });
 
@@ -692,10 +692,10 @@ describe("MT5 Expert Advisor source", () => {
     // No early return: the function must reach the refresh arm while disconnected.
     expect(reclaim).not.toMatch(/TERMINAL_CONNECTED\)[\s\S]{0,40}?\n\s*return;/);
     // Connectivity gates removal only, and it gates it together with the account check.
-    expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
+    expect(reclaim).toMatch(/if\(!positionsConfirmed \|\| !sameAccount\)\s*\n\s*continue;/);
     // The refresh arm sits before that gate.
     expect(reclaim.indexOf("GlobalVariableSet")).toBeLessThan(
-      reclaim.indexOf("if(!connected || !sameAccount)"),
+      reclaim.indexOf("if(!positionsConfirmed || !sameAccount)"),
     );
 
     // TimeCurrent is the last quote's server time and stops advancing while
@@ -715,7 +715,7 @@ describe("MT5 Expert Advisor source", () => {
     // correction would collapse the grace and delete a mark guarding a live position.
     // A three-week refresh window absorbs a jump; a five-minute grace does not.
     const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
-    const destructive = reclaim.slice(reclaim.indexOf("if(!connected || !sameAccount)"));
+    const destructive = reclaim.slice(reclaim.indexOf("if(!positionsConfirmed || !sameAccount)"));
     expect(destructive).toContain("GlobalVariableDel");
     for (const clock of ["TimeLocal", "TimeCurrent", "now", "SECONDS"]) {
       expect(destructive).not.toContain(clock);
@@ -901,11 +901,11 @@ describe("MT5 Expert Advisor source", () => {
     expect(reclaim.match(/CollectOpenPositionIdentifiers/g)).toHaveLength(1);
     // The scan is a removal-arm input, so it must not run while disconnected.
     expect(reclaim).toMatch(
-      /if\(connected\)\s*\n\s*openIdentifierCount = CollectOpenPositionIdentifiers\(openIdentifiers\);/,
+      /bool positionsConfirmed =\s*\n?\s*connected && CollectOpenPositionIdentifiers\(openIdentifiers, openIdentifierCount\);/,
     );
     const scan =
       source.match(
-        /int CollectOpenPositionIdentifiers\(ulong &identifiers\[\]\)[\s\S]*?\n}\n/,
+        /bool CollectOpenPositionIdentifiers\(ulong &identifiers\[\], int &count\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(scan).toContain("identifiers[next] = PositionMarkKey(ticket);");
     // The registry holds the identifier and nothing else, so no code path can reach a
@@ -914,6 +914,57 @@ describe("MT5 Expert Advisor source", () => {
     const markStruct = source.match(/struct LifecycleMark[\s\S]*?\n\s*\};/)?.[0] ?? "";
     expect(markStruct).toContain("ulong positionIdentifier;");
     expect(markStruct).not.toContain("positionTicket");
+  });
+
+  test("treats a scan that did not complete as no evidence, never as absence", () => {
+    // A count cannot separate "three positions are open" from "five are open and the
+    // scan read three". Both answer three, and under the second reading the two marks
+    // it missed start accumulating absent passes towards deletion. Ten of those delete
+    // an owned mark guarding a live position, which is the one outcome the whole
+    // ownership design exists to prevent, and the one that costs money.
+    const scan =
+      source.match(
+        /bool CollectOpenPositionIdentifiers\(ulong &identifiers\[\], int &count\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(scan).toBeTruthy();
+    // PositionGetTicket answers 0 on failure and ArrayResize answers -1. Every one of
+    // them fails the whole scan: skipping the entry instead would drop precisely the
+    // position whose mark is then deleted.
+    expect(scan).toMatch(/if\(ticket == 0 \|\| !PositionSelectByTicket\(ticket\)\)\s*\n\s*return false;/);
+    expect(scan).toMatch(/if\(ArrayResize\(identifiers, next \+ 1\) < 0\)\s*\n\s*return false;/);
+    expect(scan).toMatch(/if\(ArrayResize\(identifiers, 0\) < 0\)\s*\n\s*return false;/);
+    // No silent skip may survive anywhere in the scan.
+    expect(scan).not.toContain("continue;");
+    // The count is only published once the scan has run to the end.
+    expect(scan).toMatch(/count = ArraySize\(identifiers\);\s*\n\s*return true;/);
+    expect(scan.indexOf("count = 0;")).toBeLessThan(scan.indexOf("PositionsTotal()"));
+
+    // A flat account is genuinely distinguishable, so the safe reading costs nothing
+    // there: PositionsTotal answers 0, the loop never runs, nothing can have failed.
+    expect(scan).toContain("int total = PositionsTotal();");
+    expect(scan).toMatch(/for\(int index = 0; index < total; index\+\+\)/);
+
+    // The removal arm is gated on the scan having completed, not merely on the socket
+    // being up. A connected terminal that could not enumerate its positions must
+    // abstain exactly as a disconnected one does.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).toMatch(/if\(!positionsConfirmed \|\| !sameAccount\)\s*\n\s*continue;/);
+    const destructive = reclaim.slice(reclaim.indexOf("if(!positionsConfirmed || !sameAccount)"));
+    expect(destructive).toContain("GlobalVariableDel");
+    // Nothing below the gate may consult the raw connection flag and re-admit the case
+    // the gate exists to exclude.
+    expect(destructive).not.toContain("connected");
+    // Refresh still runs on an incomplete scan: it only ever extends a mark's life.
+    expect(reclaim.indexOf("GlobalVariableSet")).toBeLessThan(
+      reclaim.indexOf("if(!positionsConfirmed || !sameAccount)"),
+    );
+    // Skipping freezes the absence run rather than resetting it, so the ten count
+    // consecutive real observations of absence rather than consecutive sweeps.
+    const gate = reclaim.slice(
+      reclaim.indexOf("if(!positionsConfirmed || !sameAccount)"),
+      reclaim.indexOf("if(live)"),
+    );
+    expect(gate).not.toContain("absentPasses");
   });
 
   test("keeps a 1.67 ticket-keyed mark protecting its position through the upgrade", () => {
@@ -965,7 +1016,7 @@ describe("MT5 Expert Advisor source", () => {
     );
     // A single absent reading is never enough: a reconnect can hide an open position,
     // and no removal happens at all without a connection to confirm it.
-    expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
+    expect(reclaim).toMatch(/if\(!positionsConfirmed \|\| !sameAccount\)\s*\n\s*continue;/);
     expect(reclaim).toContain("lifecycleMarks[index].absentPasses++;");
     expect(reclaim).toContain(
       "if(lifecycleMarks[index].absentPasses < LIFECYCLE_MARK_ABSENT_PASSES)",
