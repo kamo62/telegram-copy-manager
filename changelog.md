@@ -2,28 +2,44 @@
 
 ## 1.67.1 - 2026-08-02 (Patch)
 
-Release impact: Patch. One new refusal on an existing endpoint. No API shape change, no database
-schema change, no parser change and no EA change, so the EA stays at 1.67.0 and no live terminal
-needs a recompile or reattach. Nothing in the deployment or environment changes.
+Release impact: Patch. One new refusal on an existing endpoint and one additive column, applied on
+boot by the existing `ensureColumn` migration with no manual step. No API shape change, no parser
+change and no EA change, so the EA stays at 1.67.0 and no live terminal needs a recompile or
+reattach. Nothing in the deployment or environment changes.
 
-- Requeueing a held close or cancel is now refused once the idempotency key it would replay is more
-  than 21 days old. `requeueQueueItem` mints a new queue row but keeps the payload's existing key,
-  and `recoverStaleLeases` sends every leased lifecycle command to `HELD/DELIVERY_UNKNOWN`, so an
-  operator could replay a key at any age. That key is the name of the EA's duplicate guard. Past the
-  guard's life the replay lands as a fresh command and the EA can close or cancel a second time.
-  1.67.0 left this open on the EA side deliberately, noting that the bound belongs in the app.
-- The 21 days are derived from the EA. MQL5 deletes a terminal global
-  variable four weeks after its last use, and a `CANCEL_PENDING` mark carries ticket 0, so the EA
-  never tracks, refreshes or adopts it and its whole life is those 28 days. Subtracting one 7-day
-  refresh cycle leaves 21 and gives the requeued command a week to reach a terminal that is off when
-  the operator clicks. The derivation sits next to the constant in `apps/api/src/app.ts`.
-- The ceiling covers only the three command types the EA actually marks: `CANCEL_PENDING`,
-  `CLOSE_TRADE` and `CLOSE_PARTIAL`. Stop management carries no mark and stays releasable at any
-  age, as do app-managed virtual-TP closes, which carry no key of their own and get a fresh one on
-  every requeue.
-- Age is measured from the queue row that minted the key. Requeue keeps the key while creating a
-  younger row, so measuring the held row would have let an operator walk a command past the ceiling
-  in a chain of shorter hops.
+- A requeued lifecycle command now always carries the same idempotency key the EA saw the first
+  time. The EA's effective key is `idempotencyKey ?? queueItemId`, and app-managed virtual-TP
+  partial closes are built with no explicit key, so their key was the queue row's id. Requeue mints
+  a new row, so the replay used to arrive under a different name, the EA's mark could not match it,
+  and the EA trimmed another slice off a position it had already trimmed. Requeue now writes the
+  origin row's id into the payload when there is no explicit key.
+- Requeueing a held close or cancel is refused once the EA's duplicate guard for the key it would
+  replay is more than 21 days old. `recoverStaleLeases` sends every leased lifecycle command to
+  `HELD/DELIVERY_UNKNOWN`, so an operator could replay a key at any age. That key is the name of the
+  guard. Past the guard's life the replay lands as a fresh command and the EA can close or cancel a
+  second time. 1.67.0 left this open on the EA side deliberately, noting that the bound belongs in
+  the app.
+- The 21 days are derived from the EA. MQL5 deletes a terminal global variable four weeks after its
+  last use, and a `CANCEL_PENDING` mark carries ticket 0, so the EA never tracks, refreshes or
+  adopts it and its whole life is those 28 days. Subtracting one 7-day refresh cycle leaves 21 and
+  gives the requeued command a week to reach a terminal that is off when the operator clicks. The
+  EA's other exit, `ReclaimLifecycleMarks` dropping a ticket-scoped mark after ten absent sweeps,
+  happens far sooner but does not lower the number: it only ever removes a mark whose position the
+  EA can no longer select, and a replay naming that ticket finds nothing to close. The derivation
+  sits next to the constant in `apps/api/src/app.ts`.
+- The ceiling covers the three command types the EA marks: `CANCEL_PENDING`, `CLOSE_TRADE` and
+  `CLOSE_PARTIAL`. Stop management carries no mark, executes on arrival at any key age, and stays
+  releasable at any age. App-managed virtual-TP closes are inside the ceiling now that their key
+  survives a requeue.
+- Age is measured from the earliest lease across every queue row that has carried the key, recorded
+  in a new `queue_items.first_leased_at` that is written once and never cleared. The EA writes its
+  mark at execution and cannot execute a row it was never handed, so the first lease is an upper
+  bound on the mark's age and the ceiling errs towards refusing early. The row's `created_at` is the
+  wrong clock: only `OPEN_TRADE` is expired out of `PENDING`, so a close queued while the terminal
+  is offline can wait weeks and then be leased, executed and marked in one minute, and measuring the
+  row would refuse a recovery that is entirely safe. Spanning the whole chain rather than the held
+  row is what stops an operator walking a command past the ceiling in a series of shorter hops.
+  Rows leased before the column existed are backfilled from `leased_at` or `created_at` on boot.
 - The refusal is a 409 naming the command type, the key's age and the limit, and it writes a
   `queue.requeue-refused` audit entry against the operator. Nothing is queued and the item stays
   `HELD`, so it can still be dismissed and reissued as a fresh command after reconciling the broker

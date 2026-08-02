@@ -309,23 +309,43 @@ const MARK_GUARDED_COMMAND_TYPES = new Set<CommandType>([
   "CLOSE_PARTIAL",
 ]);
 
-// How old the idempotency key a requeue would replay may be before the requeue is refused.
+// The string the EA will name its lifecycle mark after, which is what toMt5LinePayload puts on
+// the wire and what LifecycleCommandKey reads back: the explicit key when the payload carries
+// one, the queue row's own id when it does not. An item with no explicit key is still guarded,
+// under its id, so nothing that reasons about the mark may treat the absent key as "no key".
+function effectiveIdempotencyKey(payload: ExecutionQueueItem["payload"], queueItemId: string) {
+  return payload.idempotencyKey ?? queueItemId;
+}
+
+// How old the EA's lifecycle mark for a replayed idempotency key may be before the requeue that
+// would replay it is refused.
 //
-// requeueQueueItem mints a new queue row but keeps the payload's existing idempotencyKey, so
-// the EA sees the same key it saw the first time. The EA turns that key into a terminal
-// global variable and refuses any command whose variable is already set, which is what stops
-// a redelivered close running a second time. Once the variable is gone the refusal stops
-// happening, so the replay needs a ceiling on this side.
+// requeueQueueItem mints a new queue row but hands back the same effective key, so the EA sees
+// the key it saw the first time. The EA turns that key into a terminal global variable and
+// refuses any command whose variable is already set, which is what stops a redelivered close
+// running a second time. Once the variable is gone the refusal stops happening, so the replay
+// needs a ceiling on this side.
 //
-// The derivation, from the EA at v1.67.0:
-//   * MQL5 deletes a terminal global variable four weeks after its last use. 28 days is
-//     therefore the most any mark is worth on its own.
-//   * The EA rewrites ticket-scoped marks every LIFECYCLE_MARK_REFRESH_SECONDS (7 days) and
-//     re-adopts them after a restart, but only while it is running, only while its 512-slot
-//     registry has room for them, and only on the account that wrote them.
-//   * A CANCEL_PENDING mark carries ticket 0. MarkLifecycleExecuted returns before
-//     registering it, RehydrateLifecycleMarks skips it, and nothing ever rewrites it. Its
-//     whole life is those 28 days. That is the weakest class and it sets the budget.
+// The derivation, from the EA at v1.67.0. Two things end a mark, and only one of them bounds
+// this number:
+//   * Terminal expiry. MQL5 deletes a global variable four weeks after its last use, so 28 days
+//     is the most any mark is worth on its own. The EA rewrites ticket-scoped marks every
+//     LIFECYCLE_MARK_REFRESH_SECONDS (7 days) and re-adopts them after a restart, but only while
+//     it is running, only while its 512-slot registry has room, and only on the account that
+//     wrote them. A CANCEL_PENDING mark carries ticket 0: MarkLifecycleExecuted returns before
+//     registering it, RehydrateLifecycleMarks skips it, and nothing ever rewrites it, so its
+//     whole life is those 28 days with no refresh at all.
+//   * Absent-sweep reclamation. ReclaimLifecycleMarks deletes a ticket-scoped mark once
+//     PositionSelectByTicket has missed its position on LIFECYCLE_MARK_ABSENT_PASSES (10)
+//     consecutive sweeps, roughly five minutes at LIFECYCLE_MARK_SWEEP_SECONDS. That is far
+//     earlier than 28 days, so CANCEL_PENDING is not in fact the earliest-disappearing class.
+//
+// The sweep does not lower the number, because it only deletes a mark whose position the EA can
+// no longer select. A replayed CLOSE_TRADE or CLOSE_PARTIAL names that same ticket, and the EA
+// resolves it through FindPositionTicket and PositionSelectByTicket before building any request,
+// so a replay that outlived a swept mark finds nothing to act on and cannot double-close. The
+// marks that guard something still closeable are exactly the ones whose position is still live,
+// and those are held to terminal expiry. So the budget is set by the expiry arm.
 //
 // 28 days less one 7-day refresh cycle leaves 21. The slack has a job: a requeue only returns
 // the item to PENDING, and the EA collects it whenever it next polls, so a terminal that is
@@ -5258,7 +5278,6 @@ class AppStore {
       .query(
         `SELECT queue_items.id, queue_items.account_id, queue_items.logical_trade_id,
                 queue_items.status, queue_items.held_reason, queue_items.payload_json, queue_items.parsed_signal_id,
-                queue_items.created_at,
                 parsed_signals.provider_id, parsed_signals.result_json
          FROM queue_items
          LEFT JOIN parsed_signals ON parsed_signals.id = queue_items.parsed_signal_id
@@ -5303,10 +5322,13 @@ class AppStore {
     ) {
       return this.requeueHeldLifecycle(id, row, mode, selectedLogicalTradeId);
     }
-    // Everything below replays the payload as it stands, idempotency key included. Past the
-    // ceiling the EA's duplicate guard may already be gone, so a replay would land as a fresh
-    // command and could close or cancel a second time. Refuse instead, loudly.
-    const replayedKeyAgeMs = this.replayedIdempotencyKeyAgeMs(originalPayload, row);
+    // Everything below replays the payload as it stands. The EA's duplicate guard is named after
+    // the effective key, so the replay must carry that same key or the guard cannot recognise it,
+    // and the key must be young enough that the guard is still there. Past the ceiling the mark
+    // may already be gone, the replay would land as a fresh command, and the EA could close or
+    // cancel a second time. Refuse instead, loudly.
+    const replayedKey = effectiveIdempotencyKey(originalPayload, id);
+    const replayedKeyAgeMs = this.replayedMarkAgeMs(originalPayload, replayedKey);
     if (
       replayedKeyAgeMs !== undefined &&
       replayedKeyAgeMs > REQUEUE_REPLAYED_KEY_MAX_AGE_SECONDS * 1000
@@ -5322,7 +5344,7 @@ class AppStore {
           accountId: targetAccountId,
           logicalTradeId: logicalTradeId || undefined,
           commandType: originalPayload.commandType,
-          idempotencyKey: originalPayload.idempotencyKey,
+          idempotencyKey: replayedKey,
           keyAgeSeconds: Math.floor(replayedKeyAgeMs / 1000),
           maxKeyAgeSeconds: REQUEUE_REPLAYED_KEY_MAX_AGE_SECONDS,
           reason: "idempotency_key_past_ea_guard",
@@ -5334,10 +5356,20 @@ class AppStore {
         error: `Cannot requeue this ${originalPayload.commandType}: it would replay an idempotency key that is ${ageDays} days old, past the ${limitDays}-day window the EA's duplicate guard covers, so the EA could execute it a second time. Reconcile the broker position and issue a fresh command instead.`,
       };
     }
+    // The new row gets a new id, so a payload that relied on the id fallback would arrive under a
+    // different effective key and the EA's mark would not match it. Pin the key the EA already
+    // knows onto the payload before the row is minted. App-managed TP partial closes are the case
+    // that needs this: they carry no explicit key, and without it a requeued slice replays as a
+    // brand-new command and closes another slice of a position the EA already trimmed.
     const payload =
       mode === "market"
-        ? { ...originalPayload, orderType: "MARKET" as const, entry: undefined }
-        : originalPayload;
+        ? {
+            ...originalPayload,
+            orderType: "MARKET" as const,
+            entry: undefined,
+            idempotencyKey: replayedKey,
+          }
+        : { ...originalPayload, idempotencyKey: replayedKey };
     if (payload.executionMode !== "VIRTUAL_TP") payload.runner = undefined;
     return this.releaseTransaction(() => {
       const queueItemId = `queue_${nanoid(10)}`;
@@ -5376,30 +5408,41 @@ class AppStore {
     });
   }
 
-  // Age of the idempotency key a generic requeue would hand back to the EA, or undefined when
-  // the requeue replays no key that the EA could still be holding a mark for.
+  // Upper bound on the age of the EA's lifecycle mark for `key`, or undefined when no mark for
+  // it can exist.
   //
-  // buildExecutionCommand names every key after the queue row that minted it, and requeue keeps
-  // the key while minting a new row id, so the key still names the row it was born on and queue
-  // rows are never deleted. Measuring from that row rather than from the held row is what stops
-  // an operator walking a command past the ceiling in a chain of shorter hops: each hop makes a
-  // younger row, but the key, and therefore the mark, keeps its original age.
+  // Measured from the earliest first_leased_at across every queue row that has ever carried this
+  // key. The EA writes its mark at execution and cannot execute a row it was never handed, so
+  // the first lease of the chain is at or before the mark, and now-minus-that-lease is therefore
+  // at least the mark's real age. Refusing on an upper bound refuses early, never late.
   //
-  // The EA can only have written the mark once that row existed, so this age is at least the
-  // mark's age. Any error in it refuses early rather than late.
-  private replayedIdempotencyKeyAgeMs(payload: ExecutionQueueItem["payload"], heldRow: Row) {
-    // No key on the payload means toMt5LinePayload falls back to the new row's own id, which is
-    // brand new, so nothing is replayed. App-managed virtual-TP closes are built this way.
-    const key = payload.idempotencyKey;
-    if (!key) return undefined;
+  // The row's created_at is the wrong clock and was the earlier bug here. Only OPEN_TRADE has a
+  // PENDING expiry, so a close queued while the terminal is offline can sit for weeks, then be
+  // leased, executed and marked in the same minute. That row is weeks old and its mark is
+  // seconds old, and measuring the row refused a recovery that is entirely safe.
+  //
+  // The chain is matched on the key rather than walked through origin_queue_item_id, which keeps
+  // it whole when a hop is missing and keeps every hop in scope: each requeue mints a younger
+  // row, so measuring the held row alone would let an operator walk a command past the ceiling
+  // in a series of shorter hops. deleteMt5Account does hard-delete queue_items, so rows are not
+  // strictly permanent, but it deletes the held row in the same transaction and there is then
+  // nothing left to requeue.
+  //
+  // No lease anywhere in the chain means the EA was never handed the key and no mark exists, so
+  // the replay is not a replay at all and nothing is refused.
+  private replayedMarkAgeMs(payload: ExecutionQueueItem["payload"], key: string) {
     if (!MARK_GUARDED_COMMAND_TYPES.has(payload.commandType)) return undefined;
-    const origin = this.db
-      .query("SELECT created_at FROM queue_items WHERE id = ?")
-      .get(key) as Row | null;
-    const mintedAt = Date.parse(String(origin?.created_at ?? heldRow.created_at ?? ""));
+    const earliest = this.db
+      .query(
+        `SELECT MIN(first_leased_at) AS first_leased_at FROM queue_items
+          WHERE first_leased_at IS NOT NULL
+            AND (id = ? OR json_extract(payload_json, '$.idempotencyKey') = ?)`,
+      )
+      .get(key, key) as Row | null;
+    const firstLeasedAt = Date.parse(String(earliest?.first_leased_at ?? ""));
     // An unreadable timestamp must not block a close an operator genuinely needs.
-    if (!Number.isFinite(mintedAt)) return undefined;
-    return Date.now() - mintedAt;
+    if (!Number.isFinite(firstLeasedAt)) return undefined;
+    return Math.max(0, Date.now() - firstLeasedAt);
   }
 
   private requeueHeldOpen(id: string, row: Row, payload: ExecutionQueueItem["payload"]) {
@@ -6162,9 +6205,9 @@ class AppStore {
     const leasedAt = new Date().toISOString();
     this.db
       .query(
-        "UPDATE queue_items SET status = ?, leased_at = ?, lease_count = COALESCE(lease_count, 0) + 1, updated_at = ? WHERE id = ?",
+        "UPDATE queue_items SET status = ?, leased_at = ?, first_leased_at = COALESCE(first_leased_at, ?), lease_count = COALESCE(lease_count, 0) + 1, updated_at = ? WHERE id = ?",
       )
-      .run("LEASED", leasedAt, leasedAt, String(row.id));
+      .run("LEASED", leasedAt, leasedAt, leasedAt, String(row.id));
     return queueRow({ ...row, status: "LEASED", leased_at: leasedAt });
   }
 
@@ -11300,6 +11343,19 @@ class AppStore {
     this.ensureColumn("queue_items", "held_tier", "TEXT");
     this.ensureColumn("queue_items", "suggestion", "TEXT");
     this.ensureColumn("queue_items", "origin_queue_item_id", "TEXT");
+    // When this row first reached an EA. leased_at cannot answer that: every recovery path
+    // clears it, so by the time an operator is looking at a held item it is already NULL. This
+    // one is written once and never cleared, because it is the only bound the server has on how
+    // old the EA's lifecycle mark for this command can be.
+    this.ensureColumn("queue_items", "first_leased_at", "TEXT");
+    // Rows leased before the column existed would otherwise read as never delivered, and
+    // replayedMarkAgeMs would wave through a key whose mark is months old. lease_count is the
+    // only surviving proof they were handed out. created_at is the fallback because a recovered
+    // lease has already had leased_at cleared, and it errs old, which refuses early. Idempotent:
+    // every later lease writes both columns, so this matches nothing on subsequent boots.
+    this.db.run(
+      "UPDATE queue_items SET first_leased_at = COALESCE(leased_at, created_at) WHERE first_leased_at IS NULL AND COALESCE(lease_count, 0) > 0",
+    );
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_queue_items_parsed_signal_created ON queue_items(parsed_signal_id, created_at)",
     );
@@ -16102,7 +16158,7 @@ function toMt5LinePayload(item: ReturnType<typeof queueRow>, settings: AppSettin
     `partialCloseVolume=${item.payload.partialClose?.volume ?? ""}`,
     `partialCloseAllocation=${item.payload.partialClose?.allocationPercent ?? ""}`,
     `targetRemainingVolume=${item.payload.partialClose?.targetRemainingVolume ?? ""}`,
-    `idempotencyKey=${item.payload.idempotencyKey ?? item.id}`,
+    `idempotencyKey=${effectiveIdempotencyKey(item.payload, item.id)}`,
     `runnerEnabled=${item.payload.runner?.enabled ? "true" : "false"}`,
     `runnerVolume=${item.payload.runner?.lotSize ?? ""}`,
     `runnerSlBehavior=${item.payload.runner?.slBehavior ?? ""}`,
