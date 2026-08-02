@@ -36,6 +36,24 @@ no live terminal needs a recompile or reattach. Nothing in the deployment or env
   checked by doing it thirty times. The old check could not manage that: it was a grep whose pass
   condition was "no output", so a misspelt identifier and a clean codebase looked identical, and it
   reported clean for weeks with the banned pattern in the file.
+Release impact: Patch. Test-only, so no shipped code changed. The EA stays on 1.66.0, no terminal needs
+a recompile, and there is no API, database, parser, or protocol change.
+
+- Fixed the intermittent failure in `AccountHeader.test.tsx` that fired on a loaded machine and passed
+  in isolation. The cause was in the test, not the component. Both waits were written as
+  `waitFor(() => expect(view.queryByLabelText("Account name")).toBeNull())`, and `waitFor` runs its
+  first poll synchronously, before the microtask that commits the rename. That first poll therefore
+  always failed, and a failing bun matcher whose received value is a live happy-dom element serialises
+  the whole attached document into its failure message, which measures at about 2.7s of CPU per call.
+  The wasted poll, not the component, was the entire wait.
+- Both waits now drive the component's own async boundary with `act()` and assert synchronously
+  afterwards. The assertions are unchanged: after saving, the rename field is gone. Nothing now depends
+  on a clock, so machine load cannot move the result. The file went from 8 to 10 seconds, with observed
+  failures at 10.4s, 16.9s, 17.4s, 23.5s and one run of 200s, to a steady 0.8 to 1.1 seconds at a load
+  average of 530 on 8 cores.
+- Removed the 15 second per-test budget, which was the only per-test budget in the web suite. The test
+  no longer needs one, and a genuine regression now surfaces as the assertion that failed rather than
+  as an opaque timeout.
 
 ## 1.66.1 - 2026-08-02 (Patch)
 
