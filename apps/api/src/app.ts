@@ -105,6 +105,12 @@ const defaultGlobalAliases = {
 
 const defaultProviderAliases: Record<string, Record<string, string>> = {};
 const CLOSE_VOLUME_EPSILON = 0.000001;
+// A broker_orders row that stands for a real MT5 deal. The EA writes '0' where there is no
+// deal and the app writes '' for rows it synthesises, and both are repeatable by design, so
+// deal-ticket uniqueness applies to neither. Shared by the partial unique index and by the
+// collapse pass that has to find exactly what the index would refuse.
+const REAL_DEAL_TICKET_PREDICATE =
+  "deal_ticket IS NOT NULL AND deal_ticket <> '' AND deal_ticket <> '0'";
 const EQUITY_CURVE_RETENTION_DAYS = 90;
 // Wire cap for dashboard equity curves: charts render a few hundred columns at
 // most, while raw snapshot curves grow into the thousands and dominated the
@@ -7217,6 +7223,7 @@ class AppStore {
           )
           .run(tradeId, positionTicket);
       }
+      const brokerOrderId = `broker_${nanoid(10)}`;
       this.db
         .query(
           `INSERT INTO broker_orders
@@ -7225,7 +7232,7 @@ class AppStore {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
-          `broker_${nanoid(10)}`,
+          brokerOrderId,
           tradeId,
           historyDealLegId(deal),
           action,
@@ -7246,6 +7253,31 @@ class AppStore {
           source,
           createdAt,
         );
+      // The existing-row map was built once from the incoming tickets, so a deal repeated
+      // inside a single payload would otherwise miss the lookup twice and be inserted twice.
+      // Register the row just written and the repeat lands on the update branch instead.
+      existingByDealTicket.set(deal.dealTicket, {
+        id: brokerOrderId,
+        logical_trade_id: tradeId,
+        leg_id: historyDealLegId(deal),
+        action,
+        queue_item_id: "history",
+        account_id: input.accountId,
+        order_ticket: deal.orderTicket ?? "",
+        position_ticket: deal.positionTicket ?? "",
+        deal_ticket: deal.dealTicket,
+        requested_volume: null,
+        filled_volume: deal.volume ?? null,
+        requested_price: null,
+        filled_price: deal.price ?? null,
+        retcode: 0,
+        retcode_external: 0,
+        broker_comment: deal.comment ?? "MT5 history deal",
+        pnl_currency: pnlCurrency,
+        pnl_pips: pnlPips,
+        source,
+        created_at: createdAt,
+      });
       if (!trade) {
         this.recordExternalHistoryDeal(
           input.accountId,
@@ -11563,6 +11595,7 @@ class AppStore {
       "CREATE INDEX IF NOT EXISTS idx_parser_training_provider_fingerprint ON parser_training_examples(provider_id, fingerprint)",
     );
     const operatorStateBefore = this.operatorStateSnapshot();
+    this.ensureUniqueBrokerOrderDealTickets();
     this.backfillStuckOutOfSyncTrades();
     this.assertOperatorStatePreserved(
       "startup-maintenance",
@@ -11633,6 +11666,86 @@ class AppStore {
         protectedRows,
         counts: beforeCounts,
       });
+    }
+  }
+
+  /**
+   * One broker deal is one broker_orders row, enforced by the database rather than by every
+   * insert site remembering to check. Nothing enforced it before: the deal_ticket index was
+   * non-unique and the execution-report path always inserted. Both close-volume readers
+   * (closeVolumeBeforeDeal, coveringCloseForTrade) sum filled_volume across close rows, so a
+   * duplicated close row overstates how much of a position is already closed and pushes any
+   * remaining-volume check in the direction that passes.
+   *
+   * The constraint only covers rows with a real deal behind them. Pending opens, pending
+   * cancellations and the synthetic snapshot-diff closes carry '' or '0' and are genuinely
+   * repeatable: 116 of the 499 rows on the live database are of that shape, and a plain
+   * unique index would have refused most of them. A partial index leaves them untouched.
+   *
+   * Existing duplicates have to go before the index can exist at all — CREATE UNIQUE INDEX
+   * fails outright on a table that already violates it. The survivor is the row carrying P/L
+   * and then the earliest, and every removed row is logged whole beforehand, so a collapse
+   * leaves a readable trail rather than a silent deletion. Nothing on the live database
+   * matches today; this exists so a database that does still comes up.
+   *
+   * The index never has to reject a live insert. Both paths that can write a real deal ticket
+   * look the row up first, on the same key, and bun:sqlite runs those statements back to back
+   * on one thread, so no writer gets between the check and the insert. That leaves the index
+   * as the thing that catches a path nobody has found yet, where refusing the row is right
+   * anyway because the deal is already on file.
+   *
+   * If the index cannot be created the app still boots. The lookups carry the guarantee on
+   * their own, and a copier that will not start is worse than a copier missing a backstop.
+   */
+  private ensureUniqueBrokerOrderDealTickets() {
+    const groups = this.db
+      .query(
+        `SELECT account_id, deal_ticket, COUNT(*) AS row_count FROM broker_orders
+         WHERE ${REAL_DEAL_TICKET_PREDICATE}
+         GROUP BY account_id, deal_ticket
+         HAVING row_count > 1`,
+      )
+      .all() as Row[];
+    let collapsed = 0;
+    for (const group of groups) {
+      const accountId = String(group.account_id);
+      const dealTicket = String(group.deal_ticket);
+      const rows = this.db
+        .query(
+          `SELECT * FROM broker_orders
+           WHERE account_id = ? AND deal_ticket = ?
+           ORDER BY (pnl_currency IS NULL) ASC, created_at ASC, rowid ASC`,
+        )
+        .all(accountId, dealTicket) as Row[];
+      const survivor = rows[0];
+      if (!survivor) continue;
+      for (const row of rows.slice(1)) {
+        log("warn", "broker-orders.duplicate-deal.collapsed", {
+          accountId,
+          dealTicket,
+          keptBrokerOrderId: String(survivor.id),
+          removedRow: row,
+        });
+        this.db.query("DELETE FROM broker_orders WHERE id = ?").run(String(row.id));
+        collapsed += 1;
+      }
+    }
+    try {
+      this.db.run(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_broker_orders_account_deal_unique
+         ON broker_orders(account_id, deal_ticket)
+         WHERE ${REAL_DEAL_TICKET_PREDICATE}`,
+      );
+    } catch (error) {
+      log("error", "broker-orders.duplicate-deal.index-failed", { error: String(error) });
+    }
+    if (collapsed > 0) {
+      this.audit(
+        "broker-orders.duplicate-deal",
+        "warn",
+        `Collapsed ${collapsed} duplicate broker deal row${collapsed === 1 ? "" : "s"}`,
+        { collapsed, dealTickets: groups.length },
+      );
     }
   }
 
@@ -13415,6 +13528,38 @@ class AppStore {
       .get(input.queueItemId) as Row | null;
     const tradeId = row?.logical_trade_id ? String(row.logical_trade_id) : "";
     if (!row || !tradeId) return;
+
+    // /api/mt5/report carries no idempotency of its own, so a redelivered report used to
+    // write a second broker_orders row for one broker deal. Every close-volume reader sums
+    // filled_volume across rows, so a repeated close row overstates how much of a position
+    // is already closed, which is the unsafe direction for anything gated on what is left.
+    // The deal that arrived second is by definition the deal already on file, so keeping the
+    // first row loses no broker record. Reports with no deal behind them (a rejected order,
+    // a stop modification, a pending open) carry '' or '0' and are not deduplicated.
+    const dealTicket = input.dealTicket ?? "";
+    if (truthyBrokerTicket(dealTicket)) {
+      const recorded = this.db
+        .query(
+          "SELECT id, logical_trade_id FROM broker_orders WHERE account_id = ? AND deal_ticket = ? LIMIT 1",
+        )
+        .get(input.accountId, dealTicket) as Row | null;
+      if (recorded) {
+        this.audit(
+          "mt5.report.duplicate-deal",
+          "warn",
+          "Execution report repeated a broker deal that is already recorded",
+          {
+            accountId: input.accountId,
+            queueItemId: input.queueItemId,
+            dealTicket,
+            logicalTradeId: tradeId,
+            recordedBrokerOrderId: String(recorded.id),
+            recordedLogicalTradeId: String(recorded.logical_trade_id),
+          },
+        );
+        return;
+      }
+    }
 
     const payload = parseJson<ExecutionQueueItem["payload"]>(String(row.payload_json));
     const action = brokerActionForReport(payload, input);
