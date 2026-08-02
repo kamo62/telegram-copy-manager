@@ -70,8 +70,12 @@ function startCartesianLoop({
 
   const reduce = prefersReducedMotion();
   const EASE = reduce ? 1 : 0.18;
-  const animate = state.current.animate && !reduce;
-  const duration = state.current.animationDuration;
+  // Read per frame off the live context, never captured: a chart switched to
+  // `animate={false}` has to stop winking so the loop can park, and a duration
+  // change has to land mid-entrance. Rebuilding the loop on a settings change
+  // would do the same job but would also reset the eased surfaces, the hover
+  // lift and the canvas backing store — a visible jolt for a prop tweak.
+  const animating = () => state.current.animate && !reduce;
   const current: Record<string, Surface> = {};
 
   // `reveal` (0–1) sweeps the fill in left-to-right on first paint.
@@ -114,7 +118,7 @@ function startCartesianLoop({
   let animStart = 0;
   let lastProg = -1;
   let lastRevision = state.current.revision;
-  let entranceReported = !animate;
+  let entranceReported = !animating();
   let intensity = 0;
   let needsFill = true;
   let lastPaintSig = "";
@@ -138,7 +142,12 @@ function startCartesianLoop({
       entranceReported = false;
     }
     if (!animStart) animStart = now;
-    const prog = animate ? Math.min(1, (now - animStart) / duration) : 1;
+    const animate = animating();
+    const duration = s.animationDuration;
+    // Pinned to 1 once the reveal has been reported, so switching animation
+    // back on resumes the winking without re-wiping an already revealed chart.
+    // Only a revision bump replays the entrance.
+    const prog = animate && !entranceReported ? Math.min(1, (now - animStart) / duration) : 1;
     const progChanged = prog !== lastProg;
     // Tell the context the reveal is done so DOM markers fade in in sync.
     if (prog >= 1 && !entranceReported) {
@@ -210,11 +219,14 @@ function startCartesianLoop({
     const winkDue = winking && now - last >= 100;
     // Repaint when a tweak-driven paint input changes (variant, stacking,
     // series kind or colour) so the fill updates live — without resetting the
-    // entrance reveal.
+    // entrance reveal. Each entry carries its own key so the identity *and the
+    // order* of `configKeys` are covered: a layer's dither sparsity comes from
+    // its position in that list, so two series matching on kind, variant and
+    // colour still paint differently once they swap places.
     const paintSig = `${s.stackType}|${s.chartType}|${s.configKeys
       .map(
         (k) =>
-          `${s.seriesSpecs[k]?.kind ?? ""}:${s.seriesSpecs[k]?.variant ?? ""}:${s.config[k]?.color ?? ""}`,
+          `${k}:${s.seriesSpecs[k]?.kind ?? ""}:${s.seriesSpecs[k]?.variant ?? ""}:${s.config[k]?.color ?? ""}`,
       )
       .join(",")}`;
     const sigChanged = paintSig !== lastPaintSig;

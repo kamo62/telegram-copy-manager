@@ -3,7 +3,12 @@ import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:tes
 import { act, cleanup, render } from "@testing-library/react";
 import { StrictMode } from "react";
 import { CartesianCanvas } from "./cartesian-canvas";
-import { ChartContext, type ChartContextValue, useChartController } from "./chart-context";
+import {
+  type ChartConfig,
+  ChartContext,
+  type ChartContextValue,
+  useChartController,
+} from "./chart-context";
 import type { DitherColor } from "./palette";
 
 // happy-dom has no 2D canvas, so the paint calls are recorded through a stub
@@ -49,6 +54,18 @@ function flushFrame(now: number) {
 
 const paints = () => ops.filter((op) => op === "drawImage").length;
 
+/** Compact stand-in for "this canvas was painted exactly like that one". A
+ * settled two-series frame is a few thousand ops, so comparing digests keeps a
+ * failure readable while still comparing every painted pixel. */
+function digest(list: string[]) {
+  let hash = 0x811c9dc5;
+  for (const op of list) {
+    for (let i = 0; i < op.length; i += 1) hash = Math.imul(hash ^ op.charCodeAt(i), 0x01000193);
+    hash = Math.imul(hash ^ 0x7c, 0x01000193);
+  }
+  return `${list.length} ops / ${(hash >>> 0).toString(16)}`;
+}
+
 beforeEach(() => {
   ops = [];
   frames.clear();
@@ -79,6 +96,26 @@ const ROWS = [
   { x: 2, value: 9 },
 ];
 
+// Two series with clearly different shapes, so swapping their order swaps
+// which one is painted through the sparser dither.
+const TWO_SERIES_ROWS = [
+  { x: 0, alpha: 10, beta: 2 },
+  { x: 1, alpha: 4, beta: 15 },
+  { x: 2, alpha: 12, beta: 6 },
+];
+
+// Same kind, same variant, same colour — everything the paint signature used to
+// cover. The only difference between these two configs is the key order, which
+// is what picks each layer's dither sparsity.
+const ALPHA_FIRST: ChartConfig = {
+  alpha: { label: "Alpha", color: "grey" },
+  beta: { label: "Beta", color: "grey" },
+};
+const BETA_FIRST: ChartConfig = {
+  beta: { label: "Beta", color: "grey" },
+  alpha: { label: "Alpha", color: "grey" },
+};
+
 /** Drives the canvas straight off the real controller, with the measured size
  * supplied as a prop so readiness, resize and data changes are all scriptable. */
 function Harness({
@@ -86,14 +123,19 @@ function Harness({
   height,
   data = ROWS,
   color = "grey",
+  config,
   animate = false,
+  animationDuration,
   onReady,
 }: {
   width: number;
   height: number;
   data?: Record<string, unknown>[];
   color?: DitherColor;
+  /** Overrides the single-series default — used for the ordering tests. */
+  config?: ChartConfig;
   animate?: boolean;
+  animationDuration?: number;
   /** Hands the live controller out so a test can drive hover the way the
    * pointer handlers on the chart root would. */
   onReady?: (ctx: ChartContextValue) => void;
@@ -101,11 +143,12 @@ function Harness({
   const ctx = useChartController({
     chartType: "area",
     data,
-    config: { value: { label: "Equity", color } },
+    config: config ?? { value: { label: "Equity", color } },
     stackType: "default",
     dimensions: { width, height },
     margins: { top: 0, right: 0, bottom: 0, left: 0 },
     animate,
+    animationDuration,
   });
   onReady?.(ctx);
   return (
@@ -269,6 +312,84 @@ describe("CartesianCanvas paint loop", () => {
 
     view.unmount();
     expect(pending()).toBe(0);
+  });
+
+  test("repaints the fill when the series order changes behind identical specs", () => {
+    const view = render(
+      <Harness width={200} height={100} data={TWO_SERIES_ROWS} config={ALPHA_FIRST} />,
+    );
+    flushFrame(16);
+    expect(paints()).toBe(1);
+    expect(pending()).toBe(0);
+
+    // Nothing about the two series changes except their position in
+    // `configKeys` — same kind, same variant, same colour, same data, same
+    // targets. Only the per-series dither sparsity moves.
+    ops = [];
+    view.rerender(<Harness width={200} height={100} data={TWO_SERIES_ROWS} config={BETA_FIRST} />);
+    expect(pending()).toBe(1);
+    let guard = 0;
+    while (pending() > 0 && guard < 20) {
+      guard += 1;
+      flushFrame(32 + guard * 16);
+    }
+    expect(guard).toBeLessThan(20);
+    const afterSwap = [...ops];
+
+    // The reference is the same pair mounted in the swapped order from the
+    // start. Asserting against the painted ops (not the signature string)
+    // catches a re-blit of the stale offscreen fill.
+    cleanup();
+    ops = [];
+    frames.clear();
+    render(<Harness width={200} height={100} data={TWO_SERIES_ROWS} config={BETA_FIRST} />);
+    flushFrame(16);
+    expect(ops.filter((op) => op.startsWith("fillRect")).length).toBeGreaterThan(0);
+
+    expect(digest(afterSwap)).toBe(digest(ops));
+  });
+
+  test("parks when animation is switched off after mount", () => {
+    const view = render(<Harness width={200} height={100} animate />);
+    for (let i = 0; i < 4; i += 1) {
+      expect(pending()).toBe(1);
+      flushFrame(16 + i * 16);
+    }
+
+    // The backing grid is unchanged, so the loop is woken rather than rebuilt.
+    // Stars must stop winking anyway, otherwise the chart never parks.
+    view.rerender(<Harness width={200} height={100} animate={false} />);
+    let guard = 0;
+    while (pending() > 0 && guard < 20) {
+      guard += 1;
+      flushFrame(100 + guard * 16);
+    }
+    expect(guard).toBeLessThan(20);
+    expect(pending()).toBe(0);
+  });
+
+  test("picks up a shorter animation duration mid-entrance", () => {
+    // `entranceDone` flips when the loop reports its reveal complete, so it is
+    // the observable for "which duration is the loop actually running on".
+    let entranceDone = false;
+    const track = (value: ChartContextValue) => {
+      entranceDone = value.entranceDone;
+    };
+    const view = render(
+      <Harness width={200} height={100} animate animationDuration={10_000} onReady={track} />,
+    );
+    flushFrame(100);
+    flushFrame(200);
+    // 100ms into a 10s entrance.
+    expect(entranceDone).toBe(false);
+
+    view.rerender(
+      <Harness width={200} height={100} animate animationDuration={50} onReady={track} />,
+    );
+    flushFrame(300);
+    // 200ms into a 50ms entrance — the reveal is over and the DOM markers are
+    // released, instead of the loop holding the creation-time 10s duration.
+    expect(entranceDone).toBe(true);
   });
 
   test("leaves one live loop under the StrictMode double mount", () => {
