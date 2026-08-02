@@ -606,10 +606,13 @@ export function createApi(options: ApiOptions = {}) {
     const sessionId = provider ? store.connectedSessionIdForProfile(provider.profileId) : undefined;
     if (provider && sessionId) {
       try {
-        const { messages: captured } = await telegram.fetchRecentMessages(
-          sessionId,
-          provider.dialogId,
-          limit,
+        // Operator-triggered, so a wedged client would otherwise hold this
+        // request open forever and every retry would start another RPC. The
+        // timeout is the ingestion loop's, and its rejection lands in the same
+        // catch a fetch failure already does, so the fallback below is unchanged.
+        const { messages: captured } = await withTelegramRpcTimeout(
+          telegram.fetchRecentMessages(sessionId, provider.dialogId, limit),
+          effectiveTelegramRpcTimeoutMs,
         );
         if (captured.length > 0) {
           store.captureMessages(provider.id, captured);
