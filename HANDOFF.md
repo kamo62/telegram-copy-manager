@@ -81,30 +81,68 @@ teeth, because those items currently starve with perfect reliability.
 
 All four are pushed. None is merged. `main` is `fb397174`, v1.67.0, deployed and healthy.
 
-**`fix/requeue-age-ceiling`** (`3b03e7fa`, v1.67.1, app-only). Refuses a requeue that would replay an
-idempotency key older than the EA's mark can survive, and preserves the *effective* key so an
-app-managed TP close is not silently handed a new one. Two review rounds; the second found the ceiling
-wrongly refusing a legitimate recovery and the no-key path unsafe at any age. Both fixed. **A third
-review was in flight when work paused and its verdict is unknown.** It was asked whether the new
-`first_leased_at` backfill is correct on live data: the backfill falls back to `created_at` when
-`leased_at` has been nulled by a recovery path, which is the value the fix exists to stop trusting.
-Resolve that before merging. Per the priority list above, consider folding this into #21 and dropping
-the ceiling entirely rather than finishing it.
+**`fix/requeue-age-ceiling`** (`3b03e7fa`, v1.67.1, app-only). **Reviewed NO-GO twice. Do not merge.
+Strongly consider deleting this branch rather than finishing it.**
 
-**`fix/ea-position-identifier`** (`ac6c6347`, v1.68.0, needs recompile). Keys lifecycle idempotency
-marks by `POSITION_IDENTIFIER` instead of `POSITION_TICKET`, because MT5 can replace a ticket during a
-server service operation and leave the successor unguarded. **Reviewed NO-GO, fix in flight when work
-paused.** The blocker: to key by identifier the sweep could no longer use `PositionSelectByTicket` for
-liveness, so it now collects open identifiers and tests membership, and a *connected* partial or
-failed scan is treated as proof of absence. Ten such sweeps delete the mark guarding a live position.
-The fix is to make collection report completion and have an incomplete scan skip reclamation the way
-disconnection already does. Do not merge before that lands.
+It refuses a requeue that would replay an idempotency key older than the EA's mark can survive, and
+preserves the *effective* key so an app-managed TP close is not silently handed a new one. The
+key-preservation half is correct and worth keeping. The age ceiling is not.
 
-**`fix/broker-record-identity`** (`fa09301e`, app-only). Groundwork for #16: symbol and direction
-validation in `matchedBrokerRecordForTrade`, and deduplication for `broker_orders`, whose
-`deal_ticket` index is non-unique so duplicate reports overcount closes and make volume-based checks
-easier to pass in the unsafe direction. **In progress when work paused, 3 commits plus uncommitted
-work that was not preserved.** Treat the branch as partial; re-read its diff before continuing.
+Round-three findings, all verified in source: the boot backfill misses legacy `LEASED` rows, because
+leasing predates `lease_count` and those rows have `leased_at` set with `lease_count = 0`, so once
+recovery clears `leased_at` the age lookup returns nothing and the replay is allowed. The backfill's
+`COALESCE(leased_at, created_at)` permanently substitutes row-creation time for recovered rows, which
+is the exact value the fix exists to stop trusting. The age lookup has no `account_id` predicate. And
+the 21-day derivation is unsound: full closes deliberately carry no target ticket, and targeted
+partial closes fall back to matching every position by symbol, magic and comment, so after the
+original mark is swept a replay can close a *successor* position rather than finding nothing.
+
+The independent review's recommendation, which I agree with, is to fold the key-preservation piece
+into #21 and drop the ceiling. A mechanism that fights the operator on the recovery path, in a copier
+whose worst outcome is a missed close, is the wrong shape.
+
+**`fix/ea-position-identifier`** (`0911576c`, v1.68.0, needs recompile). **Complete and self-verified;
+the last blocking finding is fixed but that fix is unreviewed.**
+
+Keys lifecycle idempotency marks by `POSITION_IDENTIFIER` instead of `POSITION_TICKET`, because MT5
+can replace a ticket during a server service operation and leave the successor unguarded. MQL5
+documents that an identifier equals the opening order's ticket, so for any position never re-opened
+the old and new names are the same string and the upgrade is free.
+
+Reviewed NO-GO once: keying by identifier meant the sweep could no longer use `PositionSelectByTicket`
+for liveness, and the replacement treated a *connected* partial or failed scan as proof of absence, so
+ten such sweeps would delete the mark guarding a live position. Fixed by making the scan report
+completion separately from count and having an incomplete scan abstain from reclamation exactly as
+disconnection already does. A genuinely flat account is still distinguishable, because
+`PositionsTotal() == 0` means nothing could have failed.
+
+Harness is 47/47. One mutation survived the first run and exposed a real defect in its own test: an
+`indexOf(...)` assertion passed *because* the thing it checked had been deleted, returning `-1`, which
+satisfied `toBeLessThan`. Same shape as the tripwire lesson below.
+
+The first commit is still labelled WIP from the outage recovery and is superseded; squash or reword at
+merge.
+
+**`fix/broker-record-identity`** (`ea8f9f64`, v1.67.1, app-only). **Complete and self-verified,
+unreviewed.** Groundwork for #16.
+
+Adds symbol and direction validation to `matchedBrokerRecordForTrade`, where a mismatch must be
+*provable* so nothing that matches today stops matching, and deduplicates `broker_orders` by deal
+ticket. Verified against production before shipping: all four accounts flat, zero records that match
+today would stop matching, and zero duplicate deal tickets exist in 499 live rows.
+
+Three corrections it made that matter more than the code:
+
+- There are **four** callers, not three. `withAbsolutePartialCloseTarget` was missing from my list and
+  it is the one that actually reads volume.
+- **A plain unique index would have broken production.** 116 live rows legitimately carry `''` or `'0'`
+  as their deal ticket. The index is therefore partial, excluding those.
+- **My aggregation hypothesis was wrong.** `targetRemainingVolume` is consumed *per position* by the
+  EA, so a trade-wide sum would make the percent-close path worse, not better. The real fix is a
+  per-position target in the command contract, which needs the EA.
+
+It also found that `snapshotMatchForRecords` has the identical symbol/direction hole and left it
+alone, and that `brokerOrdersByDealTicket` has no account filter. Both want their own lane.
 
 **`fix/ea-lifecycle-marks`** (`3623da7c`) is already merged into `main` as `fb397174`. The branch is
 retained only for history.
