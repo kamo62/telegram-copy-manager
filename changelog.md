@@ -2,10 +2,23 @@
 
 ## 1.65.8 - 2026-08-01 (Patch)
 
-Release impact: Patch. A dashboard rendering lifecycle fix only. No API change, no database schema
-change, and no EA protocol change, so the EA stays on 1.65.0 and no live terminal needs a recompile
-and reattach.
+Release impact: Patch. A dashboard rendering lifecycle fix plus one virtual-TP leg accounting
+correction. No API change, no database schema change, and no EA protocol change, so the EA stays on
+1.65.0 and no live terminal needs a recompile and reattach.
 
+- Recorded a broker-rejected take-profit close on the leg it targeted. A virtual-TP leg is marked
+  `HIT` the moment its close is queued and `CLOSED` only when the broker confirms the fill, so an
+  `Invalid volume` or `Market closed` rejection used to leave the leg sitting in `HIT` with its
+  volume still on the position. `HIT` is what the dashboard, an unnumbered provider "TP hit"
+  message, cancellation, readopt and startup recovery all read as already dealt with, so the app
+  was booking volume the broker had explicitly refused to take off. A rejection is direct evidence
+  the close did not happen, and the leg now reads `FAILED`, with a `virtual-tp.close-rejected`
+  audit entry naming the trade, leg and position ticket alongside the execution-failed alert the
+  report already dispatches. This corrects the record rather than the stranding: a `FAILED` leg is
+  skipped by the monitor exactly as a `HIT` one is, and is recovered only once the trade reaches
+  `OUT_OF_SYNC` or an operator readopts it. It is deliberately not reopened, because re-queueing
+  against a broker that has just refused would send a close per EA round trip. The "position gone"
+  rejection keeps its existing terminal handling.
 - Parked the chart paint loop when there is nothing to paint. `startCartesianLoop` called
   `requestAnimationFrame(draw)` as the first statement of `draw`, ahead of the `if (!s.ready) return`
   guard, so every mounted chart held a frame at the display refresh rate for its whole life whether or

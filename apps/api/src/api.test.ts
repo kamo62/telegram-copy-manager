@@ -550,6 +550,15 @@ async function sendGoldSnapshot(
   });
 }
 
+async function tradeLegStatuses(app: ReturnType<typeof createApi>, tradeId: string) {
+  const dashboard = await json<{
+    logicalTrades: Array<{ id: string; legs: Array<{ leg: number; status: string }> }>;
+  }>(await app.request("/api/dashboard"));
+  return (dashboard.logicalTrades.find((item) => item.id === tradeId)?.legs ?? []).map(
+    (leg) => leg.status,
+  );
+}
+
 async function sendGoldPendingSnapshot(
   app: ReturnType<typeof createApi>,
   shortId: string,
@@ -4531,6 +4540,68 @@ describe("Telegram TC API", () => {
     expect(trade?.legs.find((leg) => leg.leg === 1)?.status).toBe("CLOSED");
 
     // A further snapshot beyond TP1 must not re-queue the vanished close.
+    await sendGoldSnapshot(app, { shortId: approved.shortId, bid: 4547 });
+    const noWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(noWork).toContain("status=NO_WORK");
+  });
+
+  test("records a rejected virtual-TP close on the leg instead of booking it as hit", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldBuyLimit(app);
+    await reportPendingAccepted(app, approved);
+    await reportGoldFill(app, approved);
+
+    await sendGoldSnapshot(app, { shortId: approved.shortId, bid: 4546.2 });
+    const lease = await json<{ item: { id: string } | null }>(
+      await app.request("/api/mt5/poll?accountId=mt5-63442826"),
+    );
+
+    // Not the "position gone" shape: the position is there and the broker refused the close, so
+    // the volume is provably still on.
+    await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: lease.item!.id,
+        status: "FAILED",
+        retcode: 10014,
+        retcodeExternal: 0,
+        brokerComment: "Invalid volume",
+        orderTicket: "0",
+        positionTicket: "247596888",
+        dealTicket: "0",
+        requestedPrice: 4546,
+        filledPrice: 0,
+        volume: 0.01,
+        errorText: "Invalid volume",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(await tradeLegStatuses(app, approved.logicalTradeId)).toEqual([
+      "FAILED",
+      "OPEN",
+      "OPEN",
+      "OPEN",
+    ]);
+
+    // The leg is not reopened, so the volume it was meant to close is stranded until an operator
+    // acts. Naming the leg in the audit trail is what makes that actionable.
+    const audit = await json<{
+      logs: Array<{ eventType: string; level: string; data: Record<string, unknown> }>;
+    }>(await app.request("/api/audit-logs?event=virtual-tp.close-rejected"));
+    expect(audit.logs).toHaveLength(1);
+    expect(audit.logs[0]).toMatchObject({
+      eventType: "virtual-tp.close-rejected",
+      level: "warn",
+      data: {
+        logicalTradeId: approved.logicalTradeId,
+        leg: 1,
+        positionTicket: "247596888",
+        brokerComment: "Invalid volume",
+      },
+    });
+
+    // And it is not retried on every snapshot against a broker that just refused.
     await sendGoldSnapshot(app, { shortId: approved.shortId, bid: 4547 });
     const noWork = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
     expect(noWork).toContain("status=NO_WORK");

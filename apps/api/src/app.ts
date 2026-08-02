@@ -13174,6 +13174,45 @@ class AppStore {
             : leg,
         );
         updated = { ...trade, status: virtualTpStatusAfterLegClose(trade, legs, payload), legs };
+      } else if (
+        payload.commandType === "CLOSE_PARTIAL" &&
+        payload.partialClose?.kind === "TP_LEG" &&
+        trade.legs.some((leg) => leg.leg === payload.partialClose?.value && leg.status === "HIT")
+      ) {
+        // A rejected close is direct evidence the close did not happen, so the volume is still
+        // on the position. The leg went HIT when the close was queued, and HIT is what the
+        // dashboard, `tpHitLegFromText`, cancellation, readopt and startup recovery all read as
+        // already dealt with, so leaving it there books volume the broker refused to take off.
+        //
+        // This corrects the record, not the stranding. On a trade that keeps matching its
+        // snapshot, FAILED is skipped by the virtual-TP monitor exactly as HIT is, and none of
+        // the paths that reopen a leg run on a healthy OPEN trade. The leg is recovered only
+        // once the trade reaches OUT_OF_SYNC, or by an operator readopt. Deliberately not
+        // reopened here: re-queueing against a broker that just refused would spin a close per
+        // EA round trip. The audit line below, plus the execution-failed alert the report
+        // already dispatches, is what an operator acts on.
+        const rejectedLeg = payload.partialClose.value;
+        updated = {
+          ...trade,
+          legs: trade.legs.map((leg) =>
+            leg.leg === rejectedLeg && leg.status === "HIT"
+              ? { ...leg, status: "FAILED" as const, brokerEvidence: evidence }
+              : leg,
+          ),
+        };
+        this.audit(
+          "virtual-tp.close-rejected",
+          "warn",
+          "Broker refused a take-profit close; the leg still holds its volume",
+          {
+            logicalTradeId: trade.id,
+            leg: rejectedLeg,
+            positionTicket: input.positionTicket ?? payload.targetPositionTicket ?? "",
+            queueItemId: input.queueItemId,
+            brokerComment: input.brokerComment,
+            retcode: input.retcode,
+          },
+        );
       }
       // Other failures (invalid stops, no money, autotrading disabled) leave the
       // trade unchanged so the operator can intervene.
