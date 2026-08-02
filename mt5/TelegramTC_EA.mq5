@@ -3,7 +3,7 @@
 //| Polls the Telegram TC backend for normalized trade instructions. |
 //+------------------------------------------------------------------+
 #property copyright "Telegram TC"
-#property version   "1.66.0"
+#property version   "1.67.0"
 #property strict
 
 input string BackendBaseUrl = "http://192.168.0.100:18787/api";
@@ -89,11 +89,42 @@ struct TrailingStopState
    double distance;
 };
 
+// Lifecycle idempotency marks live in terminal global variables so a redelivered
+// close cannot execute a second time, including after a terminal restart. This
+// registry is the bookkeeping that lets the EA hand those variables back; the
+// variables themselves remain the source of truth.
+#define LIFECYCLE_MARK_PREFIX "TelegramTC.lc."
+#define LEGACY_LIFECYCLE_MARK_PREFIX "TelegramTC.lifecycle."
+// How long a mark whose position has vanished is held before reclamation. Covers a
+// reconnect window in which PositionSelectByTicket can fail on a position that is
+// still open at the broker.
+#define LIFECYCLE_MARK_ABSENT_GRACE_SECONDS 300
+// Retention for command-scoped marks (CANCEL_PENDING), which have no ticket to
+// watch. Far beyond any queue redelivery window and far inside the terminal's
+// four-week expiry.
+#define LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS 86400
+// The terminal deletes a global variable four weeks after its last use, so a mark
+// guarding a still-open position is rewritten well inside that window.
+#define LIFECYCLE_MARK_REFRESH_SECONDS 604800
+#define LIFECYCLE_MARK_SWEEP_SECONDS 30
+
+struct LifecycleMark
+{
+   bool active;
+   string variable;
+   ulong positionTicket;   // 0 = command-scoped, no ticket to observe
+   datetime writtenAt;
+   datetime absentSince;
+};
+
 TrailingStopState trailingStopStates[100];
 int trailingStopStateCount = 0;
+LifecycleMark lifecycleMarks[512];
+int lifecycleMarkCount = 0;
 int CurrentPollSeconds = 0;
 datetime LastHeartbeatSentAt = 0;
 datetime LastHistoryBackfillAt = 0;
+datetime LastLifecycleReclaimAt = 0;
 string EaCapabilitiesJson = "[\"lane2-close-contract\",\"pending-close-flatten-v1\"]";
 
 int OnInit()
@@ -104,6 +135,7 @@ int OnInit()
    if(LinkCode == "")
       Print("Telegram TC: LinkCode is empty — registrations will land in an unlabelled slot. Paste the link code from the App's Linked Accounts page.");
    EventSetTimer(CurrentPollSeconds);
+   RehydrateLifecycleMarks();
    RegisterAccount();
    return(INIT_SUCCEEDED);
 }
@@ -123,6 +155,11 @@ void OnTimer()
    }
    SendSnapshot();
    ManageTrailingStops();
+   if(LastLifecycleReclaimAt == 0 || now - LastLifecycleReclaimAt >= LIFECYCLE_MARK_SWEEP_SECONDS)
+   {
+      ReclaimLifecycleMarks();
+      LastLifecycleReclaimAt = now;
+   }
    PollAndExecute();
    if(LastHistoryBackfillAt == 0 || now - LastHistoryBackfillAt >= MathMax(1, HistoryBackfillSeconds))
    {
@@ -161,7 +198,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_PROFIT),
       SymbolsJson(),
-      "1.66.0",
+      "1.67.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
@@ -1863,20 +1900,188 @@ void ReportWithVolumes(
    HttpPost("/mt5/report", body, response);
 }
 
+string LifecycleCommandKey(SignalCommand &command)
+{
+   return command.idempotencyKey == "" ? command.queueItemId : command.idempotencyKey;
+}
+
+// FNV-1a, 64-bit. The offset basis is assembled from its two 32-bit halves so the
+// value never depends on how the compiler types a 20-digit unsigned literal.
+ulong LifecycleKeyHash(string key)
+{
+   ulong hash = ((ulong)3421674724 << 32) | (ulong)2216829733;
+   ulong prime = 1099511628211;
+   int length = StringLen(key);
+   for(int index = 0; index < length; index++)
+   {
+      ushort code = StringGetCharacter(key, index);
+      hash = (hash ^ (ulong)(code & 0xFF)) * prime;
+      hash = (hash ^ (ulong)((code >> 8) & 0xFF)) * prime;
+   }
+   return hash;
+}
+
+// MQL5 caps a global variable name at 63 characters and silently keeps only the
+// first 63. Hashing the backend-supplied key holds the name to 55 characters even
+// at a 20-digit hash and a 20-digit ticket, so no key the backend can send, however
+// long, can ever make two distinct marks share a name.
 string LifecycleIdempotencyVariable(SignalCommand &command, ulong ticket = 0)
 {
-   string key = command.idempotencyKey == "" ? command.queueItemId : command.idempotencyKey;
-   return StringSubstr("TelegramTC.lifecycle." + key + "." + IntegerToString(ticket), 0, 63);
+   return StringFormat("%s%I64u.%I64u", LIFECYCLE_MARK_PREFIX, LifecycleKeyHash(LifecycleCommandKey(command)), ticket);
+}
+
+// Marks written before this version used the truncated plaintext name. Nothing
+// writes that name any more; it stays readable so a close executed just before the
+// recompile is still recognised, and the terminal's four-week expiry drains the rest.
+string LegacyLifecycleIdempotencyVariable(SignalCommand &command, ulong ticket = 0)
+{
+   return StringSubstr(LEGACY_LIFECYCLE_MARK_PREFIX + LifecycleCommandKey(command) + "." + IntegerToString(ticket), 0, 63);
 }
 
 bool LifecycleAlreadyExecuted(SignalCommand &command, ulong ticket = 0)
 {
-   return GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket));
+   return GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket)) ||
+          GlobalVariableCheck(LegacyLifecycleIdempotencyVariable(command, ticket));
 }
 
 void MarkLifecycleExecuted(SignalCommand &command, ulong ticket = 0)
 {
-   GlobalVariableSet(LifecycleIdempotencyVariable(command, ticket), (double)TimeCurrent());
+   string variable = LifecycleIdempotencyVariable(command, ticket);
+   datetime writtenAt = TimeCurrent();
+   // Write the mark first and register it second. The mark is what stops a second
+   // close on a live account, so a full registry must never prevent one being recorded.
+   if(!GlobalVariableSet(variable, (double)writtenAt))
+   {
+      PrintFormat("Telegram TC lifecycle mark NOT recorded variable=%s queue=%s ticket=%I64u error=%d",
+         variable,
+         command.queueItemId,
+         ticket,
+         GetLastError());
+      return;
+   }
+   RegisterLifecycleMark(variable, ticket, writtenAt);
+}
+
+// Slots are recycled in place and lifecycleMarkCount is a high-water mark that only
+// grows, so ReclaimLifecycleMarks can release an entry mid-pass without shifting
+// anything under its own index walk.
+void RegisterLifecycleMark(string variable, ulong ticket, datetime writtenAt)
+{
+   int freeSlot = -1;
+   for(int index = 0; index < lifecycleMarkCount; index++)
+   {
+      if(lifecycleMarks[index].active && lifecycleMarks[index].variable == variable)
+      {
+         lifecycleMarks[index].positionTicket = ticket;
+         lifecycleMarks[index].writtenAt = writtenAt;
+         lifecycleMarks[index].absentSince = 0;
+         return;
+      }
+      if(freeSlot < 0 && !lifecycleMarks[index].active)
+         freeSlot = index;
+   }
+   if(freeSlot < 0)
+   {
+      if(lifecycleMarkCount >= ArraySize(lifecycleMarks))
+      {
+         // Degrades to the old behaviour for this one mark: it still guards the trade,
+         // it just waits for the terminal's four-week expiry instead of the sweep.
+         PrintFormat("Telegram TC lifecycle mark registry full (%d) — %s is not tracked for reclamation",
+            ArraySize(lifecycleMarks),
+            variable);
+         return;
+      }
+      freeSlot = lifecycleMarkCount;
+      lifecycleMarkCount++;
+   }
+   lifecycleMarks[freeSlot].active = true;
+   lifecycleMarks[freeSlot].variable = variable;
+   lifecycleMarks[freeSlot].positionTicket = ticket;
+   lifecycleMarks[freeSlot].writtenAt = writtenAt;
+   lifecycleMarks[freeSlot].absentSince = 0;
+}
+
+void ReleaseLifecycleMarkSlot(int index)
+{
+   lifecycleMarks[index].active = false;
+   lifecycleMarks[index].variable = "";
+   lifecycleMarks[index].positionTicket = 0;
+   lifecycleMarks[index].writtenAt = 0;
+   lifecycleMarks[index].absentSince = 0;
+}
+
+ulong LifecycleMarkTicket(string variable)
+{
+   // The hash is decimal digits, so the first dot after the prefix is the ticket
+   // separator and the ticket is never truncated out of the name.
+   int separator = StringFind(variable, ".", StringLen(LIFECYCLE_MARK_PREFIX));
+   if(separator < 0)
+      return 0;
+   return (ulong)StringToInteger(StringSubstr(variable, separator + 1));
+}
+
+// A terminal restart keeps the global variables and loses this registry, so adopt
+// what an earlier session left behind or nothing would ever reclaim it. Legacy-named
+// marks are deliberately not adopted: their ticket may have been truncated away, so
+// the EA cannot tell whether their position is still open and must not guess.
+void RehydrateLifecycleMarks()
+{
+   int total = GlobalVariablesTotal();
+   int adopted = 0;
+   for(int index = 0; index < total; index++)
+   {
+      string name = GlobalVariableName(index);
+      if(StringFind(name, LIFECYCLE_MARK_PREFIX) != 0)
+         continue;
+      RegisterLifecycleMark(name, LifecycleMarkTicket(name), (datetime)GlobalVariableGet(name));
+      adopted++;
+   }
+   if(adopted > 0)
+      PrintFormat("Telegram TC adopted %d lifecycle idempotency mark(s) from a previous session", adopted);
+}
+
+// Every ticket-scoped mark is only ever read for a ticket CollectPositionTickets
+// returned, and that function only returns positions PositionSelectByTicket accepts.
+// Once the position is gone the mark can never be consulted again, so removing it
+// cannot lose idempotency. Command-scoped marks have no ticket to watch and are held
+// on a retention window instead.
+void ReclaimLifecycleMarks()
+{
+   if(!TerminalInfoInteger(TERMINAL_CONNECTED))
+      return;
+   datetime now = TimeCurrent();
+   for(int index = 0; index < lifecycleMarkCount; index++)
+   {
+      if(!lifecycleMarks[index].active)
+         continue;
+      if(lifecycleMarks[index].positionTicket > 0)
+      {
+         if(PositionSelectByTicket(lifecycleMarks[index].positionTicket))
+         {
+            lifecycleMarks[index].absentSince = 0;
+            if(now - lifecycleMarks[index].writtenAt >= LIFECYCLE_MARK_REFRESH_SECONDS)
+            {
+               GlobalVariableSet(lifecycleMarks[index].variable, (double)now);
+               lifecycleMarks[index].writtenAt = now;
+            }
+            continue;
+         }
+         // One absent reading is not proof. The position must stay absent for the
+         // whole grace window, which a reconnect blip cannot span.
+         if(lifecycleMarks[index].absentSince == 0)
+         {
+            lifecycleMarks[index].absentSince = now;
+            continue;
+         }
+         if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)
+            continue;
+      }
+      else if(now - lifecycleMarks[index].writtenAt < LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS)
+         continue;
+
+      GlobalVariableDel(lifecycleMarks[index].variable);
+      ReleaseLifecycleMarkSlot(index);
+   }
 }
 
 string AccountPayload()
@@ -1895,7 +2100,7 @@ string AccountPayload()
       AccountInfoDouble(ACCOUNT_PROFIT),
       marginMode,
       SymbolsJson(),
-      "1.66.0",
+      "1.67.0",
       EaCapabilitiesJson,
       JsonEscape(LinkCode)
    );
