@@ -40,8 +40,8 @@ const mutations: Mutation[] = [
   {
     id: "ownership/adoption-claims-ownership",
     breaks: "adopted marks become deletable, so another account's mark can be removed",
-    from: "if(RegisterLifecycleMark(name, identity, ticket, false, 0))",
-    to: "if(RegisterLifecycleMark(name, identity, ticket, true, 0))",
+    from: "if(RegisterLifecycleMark(name, identity, identifier, false, 0))",
+    to: "if(RegisterLifecycleMark(name, identity, identifier, true, 0))",
   },
   {
     id: "ownership/revocable",
@@ -52,8 +52,8 @@ const mutations: Mutation[] = [
   {
     id: "ownership/writer-disclaims",
     breaks: "the only writer stops claiming ownership, so nothing is ever reclaimed",
-    from: "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal());",
-    to: "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, false, TimeLocal());",
+    from: "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), identifier, true, TimeLocal());",
+    to: "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), identifier, false, TimeLocal());",
   },
   {
     id: "identity/login-only",
@@ -173,11 +173,11 @@ const mutations: Mutation[] = [
     id: "registry/adoption-counts-failures",
     breaks:
       "a failed adoption is counted as adopted, so the log reports success it did not achieve",
-    from: `      if(RegisterLifecycleMark(name, identity, ticket, false, 0))
+    from: `      if(RegisterLifecycleMark(name, identity, identifier, false, 0))
          adopted++;
       else
          untracked++;`,
-    to: `      RegisterLifecycleMark(name, identity, ticket, false, 0);
+    to: `      RegisterLifecycleMark(name, identity, identifier, false, 0);
       adopted++;`,
   },
   {
@@ -195,11 +195,11 @@ const mutations: Mutation[] = [
   {
     id: "reclaim/command-scoped-tracked",
     breaks: "CANCEL_PENDING marks are tracked again and reclaimed on a timer",
-    from: `   if(ticket == 0)
+    from: `   if(identifier == 0)
       return;
    // Just written, so its four-week clock starts now.
-   RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal());`,
-    to: "   RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal());",
+   RegisterLifecycleMark(variable, LifecycleAccountIdentity(), identifier, true, TimeLocal());`,
+    to: "   RegisterLifecycleMark(variable, LifecycleAccountIdentity(), identifier, true, TimeLocal());",
   },
   {
     id: "adoption/login-zero-guard-removed",
@@ -245,9 +245,9 @@ const mutations: Mutation[] = [
     to: 'if(!IsHexRun(tagText, 8) || digits == "")',
   },
   {
-    id: "name/ticket-roundtrip-dropped",
-    breaks: "a ticket that does not read back exactly is still trusted",
-    from: `   if(IntegerToString((long)ticket) != digits)
+    id: "name/position-number-roundtrip-dropped",
+    breaks: "a position number that does not read back exactly is still trusted",
+    from: `   if(IntegerToString((long)identifier) != digits)
       return false;
 `,
     to: "",
@@ -259,6 +259,87 @@ const mutations: Mutation[] = [
          return false;`,
     to: `      if(false)
          return false;`,
+  },
+  {
+    id: "identifier/mark-keyed-by-ticket",
+    breaks:
+      "the mark key goes back to the ticket, which a broker service operation replaces",
+    from: `   ulong identifier = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+   return identifier == 0 ? ticket : identifier;`,
+    to: "   return ticket;",
+  },
+  {
+    id: "identifier/zero-key-not-avoided",
+    breaks:
+      "a position with no readable identifier keys on zero, the command-scoped name, so two positions share one mark",
+    from: "   return identifier == 0 ? ticket : identifier;",
+    to: "   return identifier;",
+  },
+  {
+    id: "identifier/write-side-keys-by-ticket",
+    breaks: "the close writes its mark under the ticket while every read looks up the identifier",
+    from: "   ulong identifier = PositionMarkKey(ticket);\n   string symbol = PositionGetString(POSITION_SYMBOL);",
+    to: "   ulong identifier = ticket;\n   string symbol = PositionGetString(POSITION_SYMBOL);",
+  },
+  {
+    id: "identifier/collect-returns-tickets",
+    breaks: "the collect side reports tickets as identifiers, so the two sides key differently",
+    from: `      tickets[next] = ticket;
+      identifiers[next] = PositionMarkKey(ticket);`,
+    to: `      tickets[next] = ticket;
+      identifiers[next] = ticket;`,
+  },
+  {
+    id: "identifier/targeted-collect-returns-ticket",
+    breaks: "a command naming its position keys by the ticket, missing the replacement case entirely",
+    from: "      identifiers[0] = PositionMarkKey(command.targetPositionTicket);",
+    to: "      identifiers[0] = command.targetPositionTicket;",
+  },
+  {
+    id: "identifier/sweep-keys-by-ticket",
+    breaks: "the reclaim sweep keys by ticket, so a replacement makes a live mark look absent",
+    from: `      // The same rule the mark was written under, so the two sides cannot drift.
+      identifiers[next] = PositionMarkKey(ticket);`,
+    to: "      identifiers[next] = ticket;",
+  },
+  {
+    id: "identifier/liveness-back-to-select-by-ticket",
+    breaks:
+      "liveness returns to PositionSelectByTicket, the lookup a replaced ticket defeats, so a live position reads as gone",
+    from: "&& HoldsPositionIdentifier(openIdentifiers, openIdentifierCount, lifecycleMarks[index].positionIdentifier);",
+    to: "&& PositionSelectByTicket(lifecycleMarks[index].positionIdentifier);",
+  },
+  {
+    id: "identifier/liveness-ignores-account",
+    breaks:
+      "the open-identifier lookup runs before the account check, so another account's position number can mark this one live",
+    from: `      bool live = connected && sameAccount
+         && HoldsPositionIdentifier(openIdentifiers, openIdentifierCount, lifecycleMarks[index].positionIdentifier);`,
+    to: `      bool live = connected
+         && HoldsPositionIdentifier(openIdentifiers, openIdentifierCount, lifecycleMarks[index].positionIdentifier)
+         && sameAccount;`,
+  },
+  {
+    id: "identifier/sweep-scans-while-disconnected",
+    breaks: "the open-position scan runs disconnected, where an empty result is not evidence",
+    from: `   if(connected)
+      openIdentifierCount = CollectOpenPositionIdentifiers(openIdentifiers);`,
+    to: "   openIdentifierCount = CollectOpenPositionIdentifiers(openIdentifiers);",
+  },
+  {
+    id: "upgrade/ticket-keyed-fallback-dropped",
+    breaks:
+      "a mark 1.67 wrote after a ticket replacement stops answering, so the upgrade loses its protection",
+    from: `   if(ticket != identifier && GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket)))
+      return true;
+`,
+    to: "",
+  },
+  {
+    id: "upgrade/legacy-plaintext-fallback-dropped",
+    breaks: "the pre-1.67 plaintext name stops being read, so a close from before that rename repeats",
+    from: "   return GlobalVariableCheck(LegacyLifecycleIdempotencyVariable(command, ticket));",
+    to: "   return false;",
   },
   {
     id: "poll/interval-unclamped",
