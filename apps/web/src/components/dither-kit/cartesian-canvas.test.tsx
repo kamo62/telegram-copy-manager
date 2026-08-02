@@ -54,6 +54,14 @@ function flushFrame(now: number) {
 
 const paints = () => ops.filter((op) => op === "drawImage").length;
 
+/** Cells written into the offscreen fill on the current frame — everything
+ * before the offscreen is blitted across. Zero means the cached fill was
+ * re-blitted untouched; a small number means the reveal front cut it short. */
+const filledCells = () => {
+  const blit = ops.indexOf("drawImage");
+  return (blit < 0 ? ops : ops.slice(0, blit)).filter((op) => op.startsWith("fillRect")).length;
+};
+
 /** Compact stand-in for "this canvas was painted exactly like that one". A
  * settled two-series frame is a few thousand ops, so comparing digests keeps a
  * failure readable while still comparing every painted pixel. */
@@ -366,6 +374,23 @@ describe("CartesianCanvas paint loop", () => {
     }
     expect(guard).toBeLessThan(20);
     expect(pending()).toBe(0);
+  });
+
+  test("does not replay the reveal when animation is switched on", () => {
+    const view = render(<Harness width={200} height={100} color="grey" />);
+    flushFrame(100);
+    const revealed = filledCells();
+    expect(revealed).toBeGreaterThan(0);
+    expect(pending()).toBe(0);
+
+    // Animation switched on 100ms into what would be a 900ms entrance, with an
+    // accent change alongside it so the fill is definitely re-rendered. The
+    // reveal front must not run again — only a revision bump replays it — so
+    // the repaint covers the full width instead of wiping back to one column.
+    ops = [];
+    view.rerender(<Harness width={200} height={100} color="red" animate />);
+    flushFrame(200);
+    expect(filledCells()).toBeGreaterThanOrEqual(revealed);
   });
 
   test("picks up a shorter animation duration mid-entrance", () => {

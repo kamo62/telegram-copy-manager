@@ -27,6 +27,14 @@ and reattach.
   retry started another RPC. The timeout rejection lands in the existing `catch`, so the endpoint
   degrades exactly as it already did on a fetch failure. Capture semantics, the backlog cursor and
   `last_message_at` are untouched.
+- Closed the last two ways the parked loop could show stale pixels. The paint signature now carries
+  each series key, so reordering the chart config repaints: a layer's dither sparsity comes from its
+  position in the key list, and two series matching on kind, variant and colour used to produce a
+  byte-identical signature after a swap, leaving the cached fill painted in the old order. Animation
+  settings are also read per frame instead of being captured when the loop starts, so switching to
+  `animate={false}` stops the winking stars and lets the chart park, and a new `animationDuration`
+  lands mid-entrance. The entrance reveal stays pinned once it has finished, so turning animation
+  back on resumes the sparkle without re-wiping a revealed chart.
 
 ## 1.65.7 - 2026-08-01 (Patch)
 
