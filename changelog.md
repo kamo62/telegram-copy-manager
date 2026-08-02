@@ -32,6 +32,17 @@ window in which a position loses duplicate-close protection.
   once per mark, and checks membership. Only the removal arm reads it, so it is not collected while
   disconnected. Position identifiers are issued per account and the same number is routinely live
   on two accounts, so the account check short-circuits ahead of the membership test.
+- That scan reports whether it completed, and reclamation abstains for the sweep when it did not.
+  A count on its own cannot separate "three positions are open" from "five are open and the scan
+  managed to read three", so a partial scan on a connected terminal would have read as a set of
+  closed positions, advanced the absence count on every mark it missed, and deleted an owned mark
+  guarding a live position after ten such sweeps. `PositionGetTicket` returning zero, a refused
+  select and a failed `ArrayResize` now each fail the whole scan rather than skipping one entry,
+  because the position that was missed is exactly the one whose mark would be removed. A flat
+  account stays distinguishable and still reclaims normally: `PositionsTotal` answers zero, the
+  loop never runs, and nothing can have failed. Skipping freezes the absence run rather than
+  resetting it, so the ten count consecutive real observations of absence rather than consecutive
+  sweeps. Refresh is unaffected and still runs, since it only ever extends a mark's life.
 - Marks written by a 1.67 EA keep working. A close redelivered after the upgrade reads the
   identifier-keyed name first and, only when the two numbers differ, the same name keyed by the
   position's current ticket. An identifier is the ticket of the order that opened the position, so

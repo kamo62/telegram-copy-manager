@@ -72,9 +72,9 @@ const mutations: Mutation[] = [
   {
     id: "identity/off-account-entry-released",
     breaks: "an off-account entry is dropped, and only OnInit could ever restore it",
-    from: `      if(!connected || !sameAccount)
+    from: `      if(!positionsConfirmed || !sameAccount)
          continue;`,
-    to: `      if(!connected || !sameAccount)
+    to: `      if(!positionsConfirmed || !sameAccount)
       {
          ReleaseLifecycleMarkSlot(index);
          continue;
@@ -313,18 +313,63 @@ const mutations: Mutation[] = [
     id: "identifier/liveness-ignores-account",
     breaks:
       "the open-identifier lookup runs before the account check, so another account's position number can mark this one live",
-    from: `      bool live = connected && sameAccount
+    from: `      bool live = positionsConfirmed && sameAccount
          && HoldsPositionIdentifier(openIdentifiers, openIdentifierCount, lifecycleMarks[index].positionIdentifier);`,
-    to: `      bool live = connected
+    to: `      bool live = positionsConfirmed
          && HoldsPositionIdentifier(openIdentifiers, openIdentifierCount, lifecycleMarks[index].positionIdentifier)
          && sameAccount;`,
   },
   {
     id: "identifier/sweep-scans-while-disconnected",
     breaks: "the open-position scan runs disconnected, where an empty result is not evidence",
-    from: `   if(connected)
-      openIdentifierCount = CollectOpenPositionIdentifiers(openIdentifiers);`,
-    to: "   openIdentifierCount = CollectOpenPositionIdentifiers(openIdentifiers);",
+    from: `   bool positionsConfirmed =
+      connected && CollectOpenPositionIdentifiers(openIdentifiers, openIdentifierCount);`,
+    to: `   bool positionsConfirmed =
+      CollectOpenPositionIdentifiers(openIdentifiers, openIdentifierCount) || !connected;`,
+  },
+  {
+    id: "scan/partial-read-as-absence",
+    breaks:
+      "the removal arm is gated on the socket rather than on the scan, so a connected partial scan reads as a set of closed positions",
+    from: "      if(!positionsConfirmed || !sameAccount)",
+    to: "      if(!connected || !sameAccount)",
+  },
+  {
+    id: "scan/completion-not-reported",
+    breaks:
+      "the scan reports only a count, so a partial result is indistinguishable from a flat account",
+    from: `   count = ArraySize(identifiers);
+   return true;`,
+    to: `   count = ArraySize(identifiers);
+   return count > 0;`,
+  },
+  {
+    id: "scan/select-failure-skipped",
+    breaks:
+      "an unreadable position is skipped instead of failing the scan, dropping exactly the position whose mark is then deleted",
+    from: `      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         return false;`,
+    to: `      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;`,
+  },
+  {
+    id: "scan/resize-failure-ignored",
+    breaks: "a failed ArrayResize is ignored, so the list silently stops growing",
+    from: `      if(ArrayResize(identifiers, next + 1) < 0)
+         return false;`,
+    to: "      ArrayResize(identifiers, next + 1);",
+  },
+  {
+    id: "scan/count-published-on-failure",
+    breaks: "the count is published before the scan finishes, so a failed scan still reports one",
+    from: `   count = 0;
+   if(ArrayResize(identifiers, 0) < 0)
+      return false;
+   int total = PositionsTotal();`,
+    to: `   int total = PositionsTotal();
+   count = total;
+   if(ArrayResize(identifiers, 0) < 0)
+      return false;`,
   },
   {
     id: "upgrade/ticket-keyed-fallback-dropped",

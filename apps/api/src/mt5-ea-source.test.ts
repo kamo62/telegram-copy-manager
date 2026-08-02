@@ -930,14 +930,19 @@ describe("MT5 Expert Advisor source", () => {
     // PositionGetTicket answers 0 on failure and ArrayResize answers -1. Every one of
     // them fails the whole scan: skipping the entry instead would drop precisely the
     // position whose mark is then deleted.
-    expect(scan).toMatch(/if\(ticket == 0 \|\| !PositionSelectByTicket\(ticket\)\)\s*\n\s*return false;/);
+    expect(scan).toMatch(
+      /if\(ticket == 0 \|\| !PositionSelectByTicket\(ticket\)\)\s*\n\s*return false;/,
+    );
     expect(scan).toMatch(/if\(ArrayResize\(identifiers, next \+ 1\) < 0\)\s*\n\s*return false;/);
     expect(scan).toMatch(/if\(ArrayResize\(identifiers, 0\) < 0\)\s*\n\s*return false;/);
     // No silent skip may survive anywhere in the scan.
     expect(scan).not.toContain("continue;");
-    // The count is only published once the scan has run to the end.
+    // The count is only published once the scan has run to the end. It starts at zero
+    // and is assigned exactly once more, after the loop, so an early return can never
+    // leave an optimistic count behind for the caller to act on.
     expect(scan).toMatch(/count = ArraySize\(identifiers\);\s*\n\s*return true;/);
-    expect(scan.indexOf("count = 0;")).toBeLessThan(scan.indexOf("PositionsTotal()"));
+    expect(scan).toMatch(/\{\n {3}count = 0;\n/);
+    expect(scan.match(/\bcount = /g)).toHaveLength(2);
 
     // A flat account is genuinely distinguishable, so the safe reading costs nothing
     // there: PositionsTotal answers 0, the loop never runs, nothing can have failed.
