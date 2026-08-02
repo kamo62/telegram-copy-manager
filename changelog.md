@@ -54,6 +54,31 @@ a recompile, and there is no API, database, parser, or protocol change.
 - Removed the 15 second per-test budget, which was the only per-test budget in the web suite. The test
   no longer needs one, and a genuine regression now surfaces as the assertion that failed rather than
   as an opaque timeout.
+Release impact: Patch. App only. No EA protocol change and no parser change, so the EA stays on 1.66.0
+and no live terminal needs a recompile or reattach. One additive table, `provider_tp_announcements`,
+is created on startup; nothing existing is altered or backfilled. `GET /api/dashboard` gains a
+`providerAnnounced` boolean on each logical-trade leg. Trades already carrying a provider-announced
+`HIT` keep it: this release changes what new announcements write, and does not rewrite history.
+
+- Fixed a provider take-profit announcement marking a volume-closing leg `HIT` on message text alone.
+  `MARK_TP_HIT` queues no command, so nothing had closed, and `HIT` is what the virtual-TP monitor,
+  cancellation, readopt, archive and startup recovery all read as already dealt with. The leg left the
+  monitor's reach still holding its full volume, so when price later reached that target the app
+  queued no close and the volume rode on to the stop. Two announcements on a two-leg trade took both
+  legs out, and the position closed at a loss having reached both of its targets.
+- A volume-closing leg now stays `OPEN` when the provider announces it. The announcement is recorded
+  in its own ledger instead, and the price monitor stays the only thing that can retire the leg, so a
+  real crossing still produces a real close. A `0%`-allocation reference leg is unchanged: it closes
+  no volume, so its stop work being queued or already satisfied is still the completed work, and it is
+  still consumed once and only once.
+- Which leg a bare announcement lands on now comes from the announcement ledger rather than from leg
+  status. Leg status used to double as that pointer, which only worked because an announcement burned
+  a leg. A second bare announcement now advances to the next leg without anything having been
+  falsely recorded.
+- Also fixed a `Full TP` announcement pulling a leg that had a genuine broker close booked against it
+  back from `CLOSED` to `HIT`.
+- The dashboard reports each leg's announcement separately from its status, so an announcement that
+  correctly retires nothing is still visible on the trade.
 
 ## 1.66.1 - 2026-08-02 (Patch)
 
