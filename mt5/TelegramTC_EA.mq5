@@ -1950,7 +1950,7 @@ void MarkLifecycleExecuted(SignalCommand &command, ulong ticket = 0)
    datetime writtenAt = TimeCurrent();
    // Write the mark first and register it second. The mark is what stops a second
    // close on a live account, so a full registry must never prevent one being recorded.
-   if(!GlobalVariableSet(variable, (double)writtenAt))
+   if(GlobalVariableSet(variable, (double)writtenAt) == 0)
    {
       PrintFormat("Telegram TC lifecycle mark NOT recorded variable=%s queue=%s ticket=%I64u error=%d",
          variable,
@@ -1986,7 +1986,7 @@ void RegisterLifecycleMark(string variable, ulong ticket, datetime writtenAt)
       {
          // Degrades to the old behaviour for this one mark: it still guards the trade,
          // it just waits for the terminal's four-week expiry instead of the sweep.
-         PrintFormat("Telegram TC lifecycle mark registry full (%d) — %s is not tracked for reclamation",
+         PrintFormat("Telegram TC lifecycle mark registry full (%d slots). %s is not tracked for reclamation",
             ArraySize(lifecycleMarks),
             variable);
          return;
@@ -2010,14 +2010,19 @@ void ReleaseLifecycleMarkSlot(int index)
    lifecycleMarks[index].absentSince = 0;
 }
 
-ulong LifecycleMarkTicket(string variable)
+// The hash is decimal digits, so the first dot after the prefix is the ticket
+// separator and the ticket is never truncated out of the name. Returns false when
+// the segment does not read back exactly, so a mark is never reclaimed on a guess
+// about which position it belongs to.
+bool LifecycleMarkTicket(string variable, ulong &ticket)
 {
-   // The hash is decimal digits, so the first dot after the prefix is the ticket
-   // separator and the ticket is never truncated out of the name.
+   ticket = 0;
    int separator = StringFind(variable, ".", StringLen(LIFECYCLE_MARK_PREFIX));
    if(separator < 0)
-      return 0;
-   return (ulong)StringToInteger(StringSubstr(variable, separator + 1));
+      return false;
+   string digits = StringSubstr(variable, separator + 1);
+   ticket = (ulong)StringToInteger(digits);
+   return IntegerToString((long)ticket) == digits;
 }
 
 // A terminal restart keeps the global variables and loses this registry, so adopt
@@ -2033,7 +2038,15 @@ void RehydrateLifecycleMarks()
       string name = GlobalVariableName(index);
       if(StringFind(name, LIFECYCLE_MARK_PREFIX) != 0)
          continue;
-      RegisterLifecycleMark(name, LifecycleMarkTicket(name), (datetime)GlobalVariableGet(name));
+      ulong ticket = 0;
+      if(!LifecycleMarkTicket(name, ticket))
+         continue;
+      // An unreadable stored time starts the clock now rather than treating the mark
+      // as ancient, which would reclaim a command-scoped mark on the first sweep.
+      datetime writtenAt = (datetime)(long)GlobalVariableGet(name);
+      if(writtenAt <= 0)
+         writtenAt = TimeCurrent();
+      RegisterLifecycleMark(name, ticket, writtenAt);
       adopted++;
    }
    if(adopted > 0)

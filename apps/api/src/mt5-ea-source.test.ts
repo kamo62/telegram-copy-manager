@@ -539,6 +539,133 @@ describe("MT5 Expert Advisor source", () => {
     );
   });
 
+  test("builds lifecycle idempotency names that MQL5 cannot truncate", () => {
+    // MQL5 caps a global variable name at 63 characters and keeps only the first 63.
+    // The old name pasted the backend's idempotency key in plaintext and cut the
+    // result to 63, so a longer key would have pushed the ticket out of the name and
+    // made two tickets share one mark - a close silently skipped on a live account.
+    const variable =
+      source.match(
+        /string LifecycleIdempotencyVariable\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(variable).toContain("LifecycleKeyHash(LifecycleCommandKey(command))");
+    expect(variable).toContain("LIFECYCLE_MARK_PREFIX");
+    expect(variable).not.toContain("StringSubstr");
+    expect(variable).not.toContain("63");
+
+    // 64-bit FNV-1a. Both constants matter: a wrong offset basis still hashes, it
+    // just stops being the function whose collision behaviour is being relied on.
+    const hash = source.match(/ulong LifecycleKeyHash\(string key\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(hash).toContain("((ulong)3421674724 << 32) | (ulong)2216829733");
+    expect(hash).toContain("ulong prime = 1099511628211;");
+    expect(hash).toContain("hash = (hash ^ (ulong)(code & 0xFF)) * prime;");
+
+    // Prefix plus a 20-digit hash, a dot and a 20-digit ticket is 55 characters, so
+    // no key the backend can send reaches the cap.
+    expect(source).toContain('#define LIFECYCLE_MARK_PREFIX "TelegramTC.lc."');
+    expect("TelegramTC.lc.".length + 20 + 1 + 20).toBeLessThan(64);
+  });
+
+  test("keeps reading marks written under the pre-1.67 name and never writes that name again", () => {
+    // The recompile changes the name every mark is stored under. Without this read a
+    // close executed just before the upgrade would lose its mark and could run twice.
+    expect(source).toContain('#define LEGACY_LIFECYCLE_MARK_PREFIX "TelegramTC.lifecycle."');
+    const already =
+      source.match(
+        /bool LifecycleAlreadyExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(already).toContain("GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket))");
+    expect(already).toContain(
+      "GlobalVariableCheck(LegacyLifecycleIdempotencyVariable(command, ticket))",
+    );
+
+    const mark =
+      source.match(
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(mark).toContain("string variable = LifecycleIdempotencyVariable(command, ticket);");
+    expect(mark).not.toContain("Legacy");
+    // A legacy mark's ticket may have been truncated out of its name, so the EA cannot
+    // tell whether its position is still open and must leave it to the terminal.
+    expect(source).not.toContain("GlobalVariableDel(LegacyLifecycleIdempotencyVariable");
+    const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(rehydrate).toContain("StringFind(name, LIFECYCLE_MARK_PREFIX) != 0");
+    expect(rehydrate).not.toContain("LEGACY_LIFECYCLE_MARK_PREFIX");
+  });
+
+  test("reclaims a lifecycle mark only once its position is gone for good", () => {
+    // Nothing ever called GlobalVariableDel, so the mark set grew with history and
+    // drained only on the terminal's four-week expiry. Dropping a mark early is the
+    // worse failure though: it puts double-close back on a live account.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).toBeTruthy();
+    expect(reclaim).toContain("GlobalVariableDel(lifecycleMarks[index].variable);");
+    expect(reclaim).toContain("ReleaseLifecycleMarkSlot(index);");
+
+    // A live position keeps its mark and resets the absence clock.
+    expect(reclaim).toMatch(
+      /PositionSelectByTicket\(lifecycleMarks\[index\]\.positionTicket\)[\s\S]*?absentSince = 0;/,
+    );
+    // A single absent reading is never enough: a reconnect can hide an open position.
+    expect(reclaim).toContain("if(!TerminalInfoInteger(TERMINAL_CONNECTED))");
+    expect(reclaim).toContain("if(lifecycleMarks[index].absentSince == 0)");
+    expect(reclaim).toContain(
+      "if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)",
+    );
+    // A mark guarding a runner that outlives the four-week expiry is rewritten.
+    expect(reclaim).toContain("LIFECYCLE_MARK_REFRESH_SECONDS");
+    expect(reclaim).toContain("GlobalVariableSet(lifecycleMarks[index].variable, (double)now);");
+    // CANCEL_PENDING marks carry no ticket, so they run on a retention window instead.
+    expect(reclaim).toContain(
+      "else if(now - lifecycleMarks[index].writtenAt < LIFECYCLE_MARK_COMMAND_RETENTION_SECONDS)",
+    );
+    expect(source).toMatch(/void\s+OnTimer\(\)[\s\S]*ReclaimLifecycleMarks\(\)/);
+  });
+
+  test("never lets mark bookkeeping stop a mark being recorded, and survives a restart", () => {
+    // The global variable is what protects the account. Registry state is only how the
+    // EA hands it back, so the write must come first and a full registry must not fail
+    // the write.
+    const mark =
+      source.match(
+        /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
+      )?.[0] ?? "";
+    expect(mark).toMatch(/GlobalVariableSet\(variable[\s\S]*RegisterLifecycleMark\(variable/);
+    const register =
+      source.match(
+        /void RegisterLifecycleMark\(string variable, ulong ticket, datetime writtenAt\)[\s\S]*?\n}\n/,
+      )?.[0] ?? "";
+    expect(register).toContain("if(lifecycleMarkCount >= ArraySize(lifecycleMarks))");
+    expect(register).toContain("is not tracked for reclamation");
+    expect(register).toContain("if(freeSlot < 0 && !lifecycleMarks[index].active)");
+    expect(register).toMatch(/variable == variable[\s\S]*?return;[\s\S]*?freeSlot = index/);
+
+    // Global variables outlive the process; the registry does not. Adopt what an
+    // earlier session left or nothing would ever reclaim it.
+    expect(source).toMatch(/int OnInit\(\)[\s\S]*RehydrateLifecycleMarks\(\)/);
+    // A ticket that does not read back exactly means the mark is left alone, never
+    // reclaimed against a position it may not belong to.
+    expect(source).toContain("bool LifecycleMarkTicket(string variable, ulong &ticket)");
+    expect(source).toContain("return IntegerToString((long)ticket) == digits;");
+    expect(source).toContain("if(!LifecycleMarkTicket(name, ticket))");
+    // OnDeinit must not clear marks: a reattach has to keep them.
+    const deinit = source.match(/void OnDeinit\(const int reason\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(deinit).not.toContain("GlobalVariable");
+
+    const release =
+      source.match(/void ReleaseLifecycleMarkSlot\(int index\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    for (const cleared of [
+      "active = false",
+      'variable = ""',
+      "positionTicket = 0",
+      "writtenAt = 0",
+      "absentSince = 0",
+    ]) {
+      expect(release).toContain(cleared);
+    }
+    expect(source).not.toContain("lifecycleMarkCount--");
+  });
+
   test("aggregates partial-close slices so a failed slice cannot be masked", () => {
     const partialBody = source.slice(
       source.indexOf("void ExecutePartialClose("),
