@@ -37,7 +37,19 @@ while the new EA still reads the old names, prefer recompiling when the account 
   left off without needing a reinitialisation, and an owned mark keeps being refreshed even while
   the terminal sits on another account.
 - Nothing is adopted when the terminal reports no account login yet, which would otherwise have
-  matched every mark written under the same blank identity.
+  matched every mark written under the same blank identity. `OnInit` runs before the terminal has
+  necessarily resolved an account, so adoption now retries on the timer until a real login appears
+  instead of being skipped for the whole session, which would have left every mark from the
+  previous session unrefreshed until it expired.
+- A disconnection no longer stops marks being refreshed. Rewriting a terminal global needs no
+  server connection; only deciding that a position is gone does. Both were behind the same gate, so
+  a long disconnection stopped every refresh, and the refresh clock itself ran on server time,
+  which stops advancing while disconnected. Refresh now runs on local time and is not gated on
+  connectivity; reclamation still requires both a connection and a live-position check.
+- The poll interval is clamped in the EA. It drives the only timer, so it is also the refresh
+  cadence, and a startup value beyond the four-week expiry meant the sweep never ran in time to
+  save a mark. The backend caps what it sends but cannot correct the interval before the first
+  timer event.
 - `CANCEL_PENDING` marks are no longer reclaimed on a timer. They carry no ticket to watch, and a
   held item can be requeued by an operator at any age carrying its original idempotency key, so
   there is no age at which the EA can say the mark is finished with. They keep the pre-1.67

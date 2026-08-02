@@ -589,16 +589,16 @@ describe("MT5 Expert Advisor source", () => {
         /void MarkLifecycleExecuted\(SignalCommand &command, ulong ticket = 0\)[\s\S]*?\n}/,
       )?.[0] ?? "";
     expect(mark).toContain(
-      "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, writtenAt, true)",
+      "RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal())",
     );
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
-    expect(rehydrate).toContain("RegisterLifecycleMark(name, identity, ticket, writtenAt, false)");
+    expect(rehydrate).toContain("RegisterLifecycleMark(name, identity, ticket, false, 0);");
     expect(rehydrate).not.toContain("GlobalVariableDel");
     // Ownership ratchets up only, so an adopted entry this session writes to becomes
     // deletable, and nothing can strip the right once granted.
     const register =
       source.match(
-        /void RegisterLifecycleMark\(string variable, string identity, ulong ticket, datetime writtenAt, bool owned\)[\s\S]*?\n}\n/,
+        /void RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(register).toContain(
       "lifecycleMarks[index].owned = lifecycleMarks[index].owned || owned;",
@@ -624,33 +624,90 @@ describe("MT5 Expert Advisor source", () => {
     const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(reclaim).toContain("string identity = LifecycleAccountIdentity();");
     expect(reclaim).toContain("bool sameAccount = lifecycleMarks[index].identity == identity;");
-    expect(reclaim).toMatch(/if\(!sameAccount\)\s*\n\s*continue;/);
-    // An off-account entry must be skipped, never released: rehydration only runs from
-    // OnInit, so releasing it would drop state nothing could restore without a reinit.
+    expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
+    // An off-account entry must be skipped, never released: adoption cannot restore an
+    // owned entry, so releasing it would strand its variable forever.
     const offAccount = reclaim.slice(
-      reclaim.indexOf("if(!sameAccount)"),
+      reclaim.indexOf("if(!connected || !sameAccount)"),
       reclaim.indexOf("if(live)"),
     );
     expect(offAccount).not.toContain("ReleaseLifecycleMarkSlot");
     // An owned mark is still refreshed off-account, so a long switch cannot let a mark
     // guarding a live position expire.
     expect(reclaim).toMatch(
-      /if\(\(lifecycleMarks\[index\]\.owned \|\| live\)[\s\S]{0,200}?GlobalVariableSet/,
+      /if\(\(lifecycleMarks\[index\]\.owned \|\| sameAccount\) && refreshDue[\s\S]{0,200}?GlobalVariableSet/,
     );
   });
 
-  test("refuses to adopt anything when the terminal has no account login yet", () => {
-    // A login of zero is not an account. Adopting against it would sweep up every mark
-    // written under the same blank identity.
+  test("defers adoption when there is no account login and retries until there is", () => {
+    // A login of zero is not an account. Adopting against it would match every mark
+    // written under the same blank identity. But OnInit is not the only chance: it runs
+    // before the terminal has necessarily resolved an account, and skipping adoption
+    // for the whole session leaves every prior mark unrefreshed until it expires.
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(rehydrate).toMatch(
-      /if\(AccountInfoInteger\(ACCOUNT_LOGIN\) == 0\)\s*\n\s*\{[\s\S]{0,220}?return;\s*\n\s*\}/,
+      /if\(AccountInfoInteger\(ACCOUNT_LOGIN\) == 0\)\s*\n\s*\{[\s\S]{0,240}?return;\s*\n\s*\}/,
     );
-    // The guard must sit before any adoption work.
+    // The guard must precede both the clearing and the adoption, or a retry with no
+    // login would wipe a registry it cannot rebuild.
+    expect(rehydrate.indexOf("ACCOUNT_LOGIN) == 0")).toBeLessThan(
+      rehydrate.indexOf("ReleaseLifecycleMarkSlot"),
+    );
     expect(rehydrate.indexOf("ACCOUNT_LOGIN) == 0")).toBeLessThan(
       rehydrate.indexOf("GlobalVariablesTotal()"),
     );
-    expect(rehydrate).toContain("lifecycleMarkCount = 0;");
+    expect(rehydrate).toContain("LifecycleMarksAdopted = true;");
+    // The timer retries while adoption has not happened.
+    expect(source).toMatch(
+      /void\s+OnTimer\(\)[\s\S]*if\(!LifecycleMarksAdopted\)\s*\n\s*RehydrateLifecycleMarks\(\);/,
+    );
+
+    // A retry must not destroy owned entries: re-adoption can only produce undeletable
+    // ones, so clearing an owned entry would strand its variable forever.
+    expect(rehydrate).toMatch(
+      /if\(lifecycleMarks\[index\]\.active && !lifecycleMarks\[index\]\.owned\)\s*\n\s*ReleaseLifecycleMarkSlot\(index\);/,
+    );
+    expect(rehydrate).not.toContain("lifecycleMarkCount = 0;");
+  });
+
+  test("keeps refreshing marks while the terminal is disconnected", () => {
+    // Rewriting a terminal global needs no server connection; only deciding a position
+    // is gone does. Gating both meant a long disconnection stopped every refresh, and a
+    // mark guarding a live position expired at four weeks with a replay still possible.
+    const reclaim = source.match(/void ReclaimLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(reclaim).toContain("bool connected = TerminalInfoInteger(TERMINAL_CONNECTED) != 0;");
+    // No early return: the function must reach the refresh arm while disconnected.
+    expect(reclaim).not.toMatch(/TERMINAL_CONNECTED\)[\s\S]{0,40}?\n\s*return;/);
+    // Connectivity gates removal only, and it gates it together with the account check.
+    expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
+    // The refresh arm sits before that gate.
+    expect(reclaim.indexOf("GlobalVariableSet")).toBeLessThan(
+      reclaim.indexOf("if(!connected || !sameAccount)"),
+    );
+
+    // TimeCurrent is the last quote's server time and stops advancing while
+    // disconnected, so it cannot be the clock that decides a refresh is due.
+    expect(reclaim).toContain("datetime now = TimeLocal();");
+    expect(reclaim).toContain(
+      "|| now - lifecycleMarks[index].refreshedAt >= LIFECYCLE_MARK_REFRESH_SECONDS;",
+    );
+    // An adopted mark may already be near its expiry, so it refreshes on sight rather
+    // than a full interval after adoption.
+    expect(reclaim).toContain("lifecycleMarks[index].refreshedAt == 0");
+  });
+
+  test("clamps the poll interval so the sweep cannot be starved", () => {
+    // The timer drives the sweep, so the poll interval is the refresh cadence. The
+    // backend caps what it sends but cannot correct a startup value before the first
+    // timer event, and an interval beyond the four-week expiry means no sweep in time.
+    expect(source).toContain("#define MAX_POLL_SECONDS 300");
+    const clamp = source.match(/int ClampPollSeconds\(int seconds\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(clamp).toContain("MathMax(1, MathMin(MAX_POLL_SECONDS, seconds))");
+    // Both entry points clamp: the operator input at init and the backend value later.
+    expect(source).toContain("CurrentPollSeconds = ClampPollSeconds(PollSeconds);");
+    expect(source).toContain("CurrentPollSeconds = ClampPollSeconds(nextPollSeconds);");
+    expect(source).not.toContain("CurrentPollSeconds = MathMax(1, PollSeconds);");
+    expect(source).not.toContain("CurrentPollSeconds = MathMax(1, nextPollSeconds);");
   });
 
   test("validates every segment of a mark name before adopting it", () => {
@@ -720,8 +777,9 @@ describe("MT5 Expert Advisor source", () => {
     expect(reclaim).toMatch(
       /PositionSelectByTicket\(lifecycleMarks\[index\]\.positionTicket\)[\s\S]*?absentSince = 0;/,
     );
-    // A single absent reading is never enough: a reconnect can hide an open position.
-    expect(reclaim).toContain("if(!TerminalInfoInteger(TERMINAL_CONNECTED))");
+    // A single absent reading is never enough: a reconnect can hide an open position,
+    // and no removal happens at all without a connection to confirm it.
+    expect(reclaim).toMatch(/if\(!connected \|\| !sameAccount\)\s*\n\s*continue;/);
     expect(reclaim).toContain("if(lifecycleMarks[index].absentSince == 0)");
     expect(reclaim).toContain(
       "if(now - lifecycleMarks[index].absentSince < LIFECYCLE_MARK_ABSENT_GRACE_SECONDS)",
@@ -730,7 +788,7 @@ describe("MT5 Expert Advisor source", () => {
     // only a rewrite the terminal confirmed may advance the clock. Advancing it on a
     // failed write records a refresh that did not happen and lets the mark expire.
     expect(reclaim).toMatch(
-      /now - lifecycleMarks\[index\]\.writtenAt >= LIFECYCLE_MARK_REFRESH_SECONDS\s*\n\s*&& GlobalVariableSet\(lifecycleMarks\[index\]\.variable, \(double\)now\) != 0\)\s*\n\s*lifecycleMarks\[index\]\.writtenAt = now;/,
+      /&& GlobalVariableSet\(lifecycleMarks\[index\]\.variable, \(double\)TimeCurrent\(\)\) != 0\)\s*\n\s*lifecycleMarks\[index\]\.refreshedAt = now;/,
     );
     expect(source).toMatch(/void\s+OnTimer\(\)[\s\S]*ReclaimLifecycleMarks\(\)/);
   });
@@ -766,7 +824,7 @@ describe("MT5 Expert Advisor source", () => {
     expect(mark).toMatch(/GlobalVariableSet\(variable[\s\S]*RegisterLifecycleMark\(variable/);
     const register =
       source.match(
-        /void RegisterLifecycleMark\(string variable, string identity, ulong ticket, datetime writtenAt, bool owned\)[\s\S]*?\n}\n/,
+        /void RegisterLifecycleMark\(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt\)[\s\S]*?\n}\n/,
       )?.[0] ?? "";
     expect(register).toContain("if(lifecycleMarkCount >= ArraySize(lifecycleMarks))");
     expect(register).toContain("is not tracked for reclamation");
@@ -788,7 +846,7 @@ describe("MT5 Expert Advisor source", () => {
       "owned = false",
       'identity = ""',
       "positionTicket = 0",
-      "writtenAt = 0",
+      "refreshedAt = 0",
       "absentSince = 0",
     ]) {
       expect(release).toContain(cleared);

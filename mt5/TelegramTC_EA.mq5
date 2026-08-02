@@ -103,6 +103,11 @@ struct TrailingStopState
 // guarding a still-open position is rewritten well inside that window.
 #define LIFECYCLE_MARK_REFRESH_SECONDS 604800
 #define LIFECYCLE_MARK_SWEEP_SECONDS 30
+// The timer drives the sweep, so the poll interval is also the refresh cadence. The
+// backend caps what it sends at 30 seconds but cannot correct a startup value before
+// the first timer event, and an interval beyond the four-week expiry would mean the
+// sweep never runs in time to save a mark.
+#define MAX_POLL_SECONDS 300
 
 struct LifecycleMark
 {
@@ -114,7 +119,10 @@ struct LifecycleMark
    string variable;
    string identity;        // full account identity this entry was registered under
    ulong positionTicket;   // always > 0: only ticket-scoped marks are tracked
-   datetime writtenAt;
+   // Both clocks are TimeLocal. TimeCurrent is the last quote's server time and stops
+   // advancing while the terminal is disconnected, which is exactly when a mark most
+   // needs its expiry pushed back, so it cannot be what drives the refresh.
+   datetime refreshedAt;   // 0 = never refreshed by this session, refresh on sight
    datetime absentSince;
 };
 
@@ -126,11 +134,20 @@ int CurrentPollSeconds = 0;
 datetime LastHeartbeatSentAt = 0;
 datetime LastHistoryBackfillAt = 0;
 datetime LastLifecycleReclaimAt = 0;
+bool LifecycleMarksAdopted = false;
 string EaCapabilitiesJson = "[\"lane2-close-contract\",\"pending-close-flatten-v1\"]";
+
+int ClampPollSeconds(int seconds)
+{
+   int clamped = MathMax(1, MathMin(MAX_POLL_SECONDS, seconds));
+   if(clamped != seconds)
+      PrintFormat("Telegram TC: poll interval %d s clamped to %d s", seconds, clamped);
+   return clamped;
+}
 
 int OnInit()
 {
-   CurrentPollSeconds = MathMax(1, PollSeconds);
+   CurrentPollSeconds = ClampPollSeconds(PollSeconds);
    if(StringFind(BackendBaseUrl, "your-api-host.example.com") >= 0 || BackendBaseUrl == "")
       Print("Telegram TC: set BackendBaseUrl to your deployed API /api URL before enabling live polling.");
    if(LinkCode == "")
@@ -158,6 +175,12 @@ void OnTimer()
    ManageTrailingStops();
    if(LastLifecycleReclaimAt == 0 || now - LastLifecycleReclaimAt >= LIFECYCLE_MARK_SWEEP_SECONDS)
    {
+      // OnInit runs before the terminal has necessarily resolved an account, and it is
+      // the only other caller, so adoption has to be able to catch up here. Without
+      // this a startup with no login left the registry empty for the whole session and
+      // every mark from the previous one unrefreshed.
+      if(!LifecycleMarksAdopted)
+         RehydrateLifecycleMarks();
       ReclaimLifecycleMarks();
       LastLifecycleReclaimAt = now;
    }
@@ -1564,7 +1587,7 @@ void ApplyPollConfig(string body)
    if(nextPollSeconds <= 0 || nextPollSeconds == CurrentPollSeconds)
       return;
 
-   CurrentPollSeconds = MathMax(1, nextPollSeconds);
+   CurrentPollSeconds = ClampPollSeconds(nextPollSeconds);
    EventSetTimer(CurrentPollSeconds);
 }
 
@@ -2001,13 +2024,14 @@ void MarkLifecycleExecuted(SignalCommand &command, ulong ticket = 0)
    // has asked about is discarded. That is the pre-1.67 behaviour for this one category.
    if(ticket == 0)
       return;
-   RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, writtenAt, true);
+   // Just written, so its four-week clock starts now.
+   RegisterLifecycleMark(variable, LifecycleAccountIdentity(), ticket, true, TimeLocal());
 }
 
 // Slots are recycled in place and lifecycleMarkCount is a high-water mark that only
 // grows, so ReclaimLifecycleMarks can release an entry mid-pass without shifting
 // anything under its own index walk.
-void RegisterLifecycleMark(string variable, string identity, ulong ticket, datetime writtenAt, bool owned)
+void RegisterLifecycleMark(string variable, string identity, ulong ticket, bool owned, datetime refreshedAt)
 {
    int freeSlot = -1;
    for(int index = 0; index < lifecycleMarkCount; index++)
@@ -2019,7 +2043,7 @@ void RegisterLifecycleMark(string variable, string identity, ulong ticket, datet
          lifecycleMarks[index].owned = lifecycleMarks[index].owned || owned;
          lifecycleMarks[index].identity = identity;
          lifecycleMarks[index].positionTicket = ticket;
-         lifecycleMarks[index].writtenAt = writtenAt;
+         lifecycleMarks[index].refreshedAt = refreshedAt;
          lifecycleMarks[index].absentSince = 0;
          return;
       }
@@ -2045,7 +2069,7 @@ void RegisterLifecycleMark(string variable, string identity, ulong ticket, datet
    lifecycleMarks[freeSlot].variable = variable;
    lifecycleMarks[freeSlot].identity = identity;
    lifecycleMarks[freeSlot].positionTicket = ticket;
-   lifecycleMarks[freeSlot].writtenAt = writtenAt;
+   lifecycleMarks[freeSlot].refreshedAt = refreshedAt;
    lifecycleMarks[freeSlot].absentSince = 0;
 }
 
@@ -2056,7 +2080,7 @@ void ReleaseLifecycleMarkSlot(int index)
    lifecycleMarks[index].variable = "";
    lifecycleMarks[index].identity = "";
    lifecycleMarks[index].positionTicket = 0;
-   lifecycleMarks[index].writtenAt = 0;
+   lifecycleMarks[index].refreshedAt = 0;
    lifecycleMarks[index].absentSince = 0;
 }
 
@@ -2114,19 +2138,24 @@ bool ParseLifecycleMarkName(string variable, string &accountTagText, ulong &tick
 // a while longer.
 void RehydrateLifecycleMarks()
 {
-   // Rebuild from scratch so an account switch cannot carry the previous account's
-   // entries into this one, even if MQL5 left the registry in place.
-   for(int index = 0; index < lifecycleMarkCount; index++)
-      ReleaseLifecycleMarkSlot(index);
-   lifecycleMarkCount = 0;
-
    // A login of zero means the terminal has not resolved an account yet. Adopting
-   // against that identity would sweep up every mark written under the same blank.
+   // against that identity would match every mark written under the same blank, so
+   // nothing is adopted and nothing is cleared: the timer retries until a real login
+   // appears. This runs before any clearing so a retry cannot destroy a good registry.
    if(AccountInfoInteger(ACCOUNT_LOGIN) == 0)
    {
-      Print("Telegram TC: no account login at startup, lifecycle marks left for the next initialisation");
+      Print("Telegram TC: no account login yet, lifecycle mark adoption deferred to the next sweep");
       return;
    }
+   LifecycleMarksAdopted = true;
+
+   // Drop adopted entries and rebuild them, so an account switch cannot carry the
+   // previous account's guesses into this one. Owned entries are kept: this session
+   // wrote them, re-adoption could only downgrade them to undeletable, and the
+   // per-pass identity check already neutralises any that belong to another account.
+   for(int index = 0; index < lifecycleMarkCount; index++)
+      if(lifecycleMarks[index].active && !lifecycleMarks[index].owned)
+         ReleaseLifecycleMarkSlot(index);
 
    string currentTag = StringFormat("%08X", LifecycleAccountTag());
    string identity = LifecycleAccountIdentity();
@@ -2147,11 +2176,10 @@ void RehydrateLifecycleMarks()
          skipped++;
          continue;
       }
-      // An unreadable stored time starts the clock now rather than reading as ancient.
-      datetime writtenAt = (datetime)(long)GlobalVariableGet(name);
-      if(writtenAt <= 0)
-         writtenAt = TimeCurrent();
-      RegisterLifecycleMark(name, identity, ticket, writtenAt, false);
+      // refreshedAt 0 means the first sweep rewrites it. An adopted mark may already be
+      // most of the way through its four weeks, so its expiry is pushed back on sight
+      // rather than a refresh interval later.
+      RegisterLifecycleMark(name, identity, ticket, false, 0);
       adopted++;
    }
    if(adopted > 0 || skipped > 0)
@@ -2179,33 +2207,38 @@ void RehydrateLifecycleMarks()
 // consulted again and removing it cannot lose idempotency.
 void ReclaimLifecycleMarks()
 {
-   if(!TerminalInfoInteger(TERMINAL_CONNECTED))
-      return;
    string identity = LifecycleAccountIdentity();
-   datetime now = TimeCurrent();
+   datetime now = TimeLocal();
+   // Only deciding that a position is gone needs a live connection. Rewriting a
+   // terminal global does not, and a long disconnection is precisely when a mark is
+   // most at risk of expiring, so the refresh arm runs either way and only the
+   // removal arm is gated.
+   bool connected = TerminalInfoInteger(TERMINAL_CONNECTED) != 0;
    for(int index = 0; index < lifecycleMarkCount; index++)
    {
       if(!lifecycleMarks[index].active)
          continue;
 
       bool sameAccount = lifecycleMarks[index].identity == identity;
-      bool live = sameAccount && PositionSelectByTicket(lifecycleMarks[index].positionTicket);
+      bool live = connected && sameAccount
+         && PositionSelectByTicket(lifecycleMarks[index].positionTicket);
 
-      // Refreshing only ever extends a mark's life, so it needs no account check. An
-      // owned mark is refreshed even while the terminal sits on another account,
-      // because this EA wrote that exact name and knows the position it guards.
+      // Anything this EA believes is its own gets its expiry pushed back, whether or
+      // not the position can be seen right now. Refreshing only ever extends a mark's
+      // life, so a wrong guess here leaks; refusing to refresh loses a live guard.
       // Only a rewrite the terminal confirmed may advance the clock: recording a
-      // refresh that did not happen would let the mark quietly expire.
-      if((lifecycleMarks[index].owned || live)
-         && now - lifecycleMarks[index].writtenAt >= LIFECYCLE_MARK_REFRESH_SECONDS
-         && GlobalVariableSet(lifecycleMarks[index].variable, (double)now) != 0)
-         lifecycleMarks[index].writtenAt = now;
+      // refresh that did not happen would let the mark quietly expire anyway.
+      bool refreshDue = lifecycleMarks[index].refreshedAt == 0
+         || now - lifecycleMarks[index].refreshedAt >= LIFECYCLE_MARK_REFRESH_SECONDS;
+      if((lifecycleMarks[index].owned || sameAccount) && refreshDue
+         && GlobalVariableSet(lifecycleMarks[index].variable, (double)TimeCurrent()) != 0)
+         lifecycleMarks[index].refreshedAt = now;
 
-      // Everything below removes something. None of it may run against an account
-      // this entry was not registered under, and the entry is kept rather than
-      // released so returning to that account resumes exactly where it left off,
-      // with no reinitialisation required.
-      if(!sameAccount)
+      // Everything below removes something. None of it may run without a connection to
+      // confirm the position is gone, nor against an account this entry was not
+      // registered under. The entry is kept rather than released so returning to that
+      // account resumes exactly where it left off, with no reinitialisation required.
+      if(!connected || !sameAccount)
          continue;
       if(live)
       {
