@@ -214,7 +214,7 @@ describe("MT5 Expert Advisor source", () => {
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
     expect(source).toContain('#property version   "1.68.0"');
-    expect(source.match(/"1\.67\.0"/g)).toHaveLength(3);
+    expect(source.match(/"1\.68\.0"/g)).toHaveLength(3);
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
