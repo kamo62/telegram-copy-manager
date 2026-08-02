@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.67.0 - 2026-08-02 (Minor)
+
+Release impact: Minor because EA behaviour changed. This release requires an EA recompile and
+reattach. Build `mt5/TelegramTC_EA.mq5` from this commit in MetaEditor and reattach it to the
+chart. The command contract, capability strings, API shape, parser and database schema are all
+unchanged, so an old EA keeps working exactly as it does today, including the leak below. There
+is one upgrade note: the recompile changes the name every idempotency mark is stored under, and
+while the new EA still reads the old names, prefer recompiling when the account is flat.
+
+- **EA recompile and reattach required.** Until a terminal is rebuilt it keeps the old behaviour.
+- Lifecycle idempotency marks are now reclaimed. `MarkLifecycleExecuted` writes a terminal global
+  variable per lifecycle command and per ticket so a redelivered close cannot close twice, and
+  nothing ever deleted one: the set grew with trading history and drained only on the terminal's
+  own four-week expiry. A mark is now deleted once the position it guards has been absent from the
+  broker for five minutes, which bounds the set by live work instead of by history.
+- Reclamation cannot drop a mark that is still needed. A ticket-scoped mark is only ever read for a
+  ticket `CollectPositionTickets` returned, and that function only returns positions the terminal
+  can still select, so a mark for a closed position can never be consulted again. The five-minute
+  window and a connection check keep a reconnect blip from reading as a closed position.
+  `CANCEL_PENDING` marks carry no ticket to watch and are held for 24 hours instead.
+- The mark name can no longer be truncated. MQL5 caps a global variable name at 63 characters and
+  keeps only the first 63; the name was built by pasting the backend's idempotency key in plaintext
+  and cutting the result to 63. Today's keys are 16 characters and cannot reach the cap, but a
+  close or cancel carrying one of the longer app-managed keys, which are already 48 to 50
+  characters and today only ever attach to `MODIFY_SL`, would have pushed the ticket out of the
+  name entirely and made every position under one command share a single mark. The first close
+  would then have been recorded and every other position silently skipped, and a silently skipped
+  close is an unmanaged position. The key is now a 64-bit FNV-1a hash, which holds the name to 55
+  characters at absolute worst whatever the backend sends.
+- A mark guarding a position that stays open for more than four weeks, a runner for example, is
+  rewritten weekly so the terminal's inactivity expiry cannot delete it while it is still needed.
+- Marks survive a terminal restart as they always did, and the EA now adopts the ones a previous
+  session left behind on startup so they are reclaimed rather than orphaned. Marks written by an
+  EA older than 1.67.0 are still read, so a close executed just before the recompile keeps its
+  protection; nothing writes that older name again and the terminal expires what remains.
+- A full mark registry no longer stops a mark being recorded. The global variable is written first
+  and the bookkeeping second, so the worst case is that one mark waits for the terminal's expiry
+  instead of the sweep, which is exactly the old behaviour.
+
 ## 1.66.1 - 2026-08-02 (Patch)
 
 Release impact: Patch. App only, so the EA stays on 1.66.0 and no terminal needs a recompile beyond the one 1.66.0 already requires. A Telegram disconnect now takes effect against anything that would restore the
