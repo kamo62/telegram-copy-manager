@@ -58,7 +58,9 @@ function switchableAdapter(state: { mode: AdapterMode; calls: number }): Telegra
   };
 }
 
-async function settleWithin<T>(label: string, work: Promise<T>): Promise<T> {
+// `app.request` is typed as `Response | Promise<Response>`, and a synchronous
+// Response would settle the race immediately, which is the passing case anyway.
+async function settleWithin<T>(label: string, work: T | Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const guard = new Promise<never>((_, reject) => {
     timer = setTimeout(

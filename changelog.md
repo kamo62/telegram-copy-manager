@@ -21,6 +21,12 @@ and reattach.
   and line kept the old fill. Previously masked by the loop repainting unconditionally.
 - Cancel the outstanding animation frame on teardown rather than a stale handle, and ignore wake
   requests after the loop has stopped.
+- Bounded `GET /api/providers/:id/messages` with the same Telegram RPC timeout the ingestion loop
+  uses. It called `fetchRecentMessages` unwrapped, so against a wedged client the await never
+  settled: the request hung open indefinitely, its own error fallback never ran, and each operator
+  retry started another RPC. The timeout rejection lands in the existing `catch`, so the endpoint
+  degrades exactly as it already did on a fetch failure. Capture semantics, the backlog cursor and
+  `last_message_at` are untouched.
 
 ## 1.65.7 - 2026-08-01 (Patch)
 
