@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.67.1 - 2026-08-02 (Patch)
+
+Release impact: Patch. One new refusal on an existing endpoint. No API shape change, no database
+schema change, no parser change and no EA change, so the EA stays at 1.67.0 and no live terminal
+needs a recompile or reattach. Nothing in the deployment or environment changes.
+
+- Requeueing a held close or cancel is now refused once the idempotency key it would replay is more
+  than 21 days old. `requeueQueueItem` mints a new queue row but keeps the payload's existing key,
+  and `recoverStaleLeases` sends every leased lifecycle command to `HELD/DELIVERY_UNKNOWN`, so an
+  operator could replay a key at any age. That key is the name of the EA's duplicate guard. Past the
+  guard's life the replay lands as a fresh command and the EA can close or cancel a second time.
+  1.67.0 left this open on the EA side deliberately, noting that the bound belongs in the app.
+- The 21 days come from the EA rather than from a round number. MQL5 deletes a terminal global
+  variable four weeks after its last use, and a `CANCEL_PENDING` mark carries ticket 0, so the EA
+  never tracks, refreshes or adopts it and its whole life is those 28 days. Subtracting one 7-day
+  refresh cycle leaves 21 and gives the requeued command a week to reach a terminal that is off when
+  the operator clicks. The derivation sits next to the constant in `apps/api/src/app.ts`.
+- The ceiling covers only the three command types the EA actually marks: `CANCEL_PENDING`,
+  `CLOSE_TRADE` and `CLOSE_PARTIAL`. Stop management carries no mark and stays releasable at any
+  age, as do app-managed virtual-TP closes, which carry no key of their own and get a fresh one on
+  every requeue.
+- Age is measured from the queue row that minted the key, not from the held row. Requeue keeps the
+  key while creating a younger row, so measuring the held row would have let an operator walk a
+  command past the ceiling in a chain of shorter hops.
+- The refusal is a 409 naming the command type, the key's age and the limit, and it writes a
+  `queue.requeue-refused` audit entry against the operator. Nothing is queued and the item stays
+  `HELD`, so it can still be dismissed and reissued as a fresh command after reconciling the broker
+  position. Auto-release on guardian unpause and on EA reconnect is unaffected: both cap age at 60
+  and 15 minutes respectively, far inside this ceiling.
+
 ## 1.67.0 - 2026-08-02 (Minor)
 
 Release impact: Minor because EA behaviour changed. This release requires an EA recompile and
