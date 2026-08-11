@@ -43,8 +43,15 @@ function lifecycle(
   status: LifecycleResolutionEvidence["status"] = "MATCHED",
   activeTradeCount = 1,
   suggestion?: string,
+  reason?: string,
 ): LifecycleResolutionEvidence {
-  return { method, status, activeTradeCount, ...(suggestion ? { suggestion } : {}) };
+  return {
+    method,
+    status,
+    activeTradeCount,
+    ...(reason ? { reason } : {}),
+    ...(suggestion ? { suggestion } : {}),
+  };
 }
 
 function simulatedCorpusResolution(
@@ -343,6 +350,57 @@ describe("evaluateExecutionEvidence", () => {
       }),
     );
     expect(forwarded.verdict).toBe("HOLD");
+  });
+
+  test("drops only reply-linked lifecycle commands with terminal inactive origins", () => {
+    const close = parsed("CLOSED - XAUUSD Buy # 306947863");
+    expect(
+      evaluateExecutionEvidence(
+        evidence(close, {
+          lifecycleResolution: lifecycle(
+            "reply-link",
+            "UNMATCHED",
+            0,
+            undefined,
+            "inactive-origin",
+          ),
+        }),
+      ),
+    ).toMatchObject({
+      verdict: "DROP",
+      reason: "LIFECYCLE_NO_TRADE_EXISTS:inactive-origin",
+    });
+    expect(
+      evaluateExecutionEvidence(
+        evidence(close, {
+          lifecycleResolution: lifecycle(
+            "reply-link",
+            "UNMATCHED",
+            0,
+            undefined,
+            "chain-ended-no-origin",
+          ),
+        }),
+      ),
+    ).toMatchObject({ verdict: "HOLD", reason: "LIFECYCLE_RESOLUTION_REQUIRED" });
+  });
+
+  test("keeps inconclusive lifecycle resolutions held", () => {
+    const close = parsed("CLOSED - XAUUSD Buy # 306947863");
+    for (const resolution of [
+      lifecycle("none", "UNMATCHED", 0, undefined, "no-evidence"),
+      lifecycle("reply-link", "UNMATCHED", 0, undefined, "gap-in-graph"),
+      lifecycle("reply-link", "UNMATCHED", 0, undefined, "nonterminal-origin"),
+      lifecycle("reply-link", "UNMATCHED", 0, undefined, "origin-unavailable"),
+      lifecycle("reply-link", "AMBIGUOUS", 2, undefined, "multiple-origins"),
+    ]) {
+      expect(
+        evaluateExecutionEvidence(evidence(close, { lifecycleResolution: resolution })),
+      ).toMatchObject({
+        verdict: "HOLD",
+        reason: "LIFECYCLE_RESOLUTION_REQUIRED",
+      });
+    }
   });
 
   test("holds every risk-off inflection so a misclassified close is never silently dropped", () => {

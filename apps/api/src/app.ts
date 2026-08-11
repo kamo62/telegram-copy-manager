@@ -34,7 +34,6 @@ import { nanoid } from "nanoid";
 import {
   type EvidenceTier,
   type ExecutionEvidenceProviderConfig,
-  type ExecutionEvidenceVerdict,
   evaluateExecutionEvidence,
   type LifecycleResolutionEvidence,
 } from "./execution-evidence";
@@ -296,27 +295,6 @@ const EQUITY_GUARDIAN_HEARTBEAT_MAX_AGE_SECONDS = 30;
 const GUARDIAN_AUTO_RELEASE_MAX_AGE_SECONDS = 60 * 60;
 const EA_OFFLINE_RELEASE_MAX_AGE_SECONDS = 15 * 60;
 
-type EvidenceTarget = {
-  accountId: string;
-  signal: ParsedSignal;
-  verdict: ExecutionEvidenceVerdict;
-};
-
-export function normalizeEvidenceTargets(targets: EvidenceTarget[]) {
-  if (!targets.some((target) => target.verdict.verdict !== "DROP")) return targets;
-  return targets.map((target) =>
-    target.verdict.verdict === "DROP"
-      ? {
-          ...target,
-          verdict: {
-            ...target.verdict,
-            verdict: "HOLD" as const,
-            tier: "action-required" as const,
-          },
-        }
-      : target,
-  );
-}
 const ALERT_DEDUP_MS = 30 * 60 * 1000;
 const MANUAL_PUSH_DEDUP_SECONDS = 10;
 const OPEN_SIGNAL_DEDUP_SECONDS = 24 * 60 * 60;
@@ -2580,11 +2558,24 @@ class AppStore {
           };
         }
         visited.add(telegramMessageId);
+        const alias = this.db
+          .query(
+            `SELECT raw_messages.telegram_message_id, raw_messages.reply_to_message_id
+             FROM raw_message_aliases
+             JOIN raw_messages ON raw_messages.id = raw_message_aliases.raw_message_id
+             WHERE raw_message_aliases.provider_id = ?
+               AND raw_message_aliases.telegram_message_id = ?
+               AND raw_messages.provider_id = ?`,
+          )
+          .get(providerId, telegramMessageId, providerId) as Row | null;
+        const canonicalTelegramMessageId = alias?.telegram_message_id
+          ? String(alias.telegram_message_id)
+          : telegramMessageId;
         const origins = this.db
           .query(
-            "SELECT logical_trade_id FROM trade_origins WHERE provider_id = ? AND account_id = ? AND telegram_message_id = ?",
+            "SELECT logical_trade_id FROM trade_origins WHERE provider_id = ? AND account_id = ? AND telegram_message_id IN (?, ?)",
           )
-          .all(providerId, accountId, telegramMessageId) as Row[];
+          .all(providerId, accountId, telegramMessageId, canonicalTelegramMessageId) as Row[];
         const tradeIds = [...new Set(origins.map((origin) => String(origin.logical_trade_id)))];
         if (tradeIds.length > 1) {
           return {
@@ -2609,19 +2600,14 @@ class AppStore {
             method: "reply-link",
             status: "UNMATCHED",
             activeTradeCount: 0,
-            reason: "inactive-origin",
+            reason:
+              trade && this.isTerminalLogicalTrade(trade.id)
+                ? "inactive-origin"
+                : trade
+                  ? "nonterminal-origin"
+                  : "origin-unavailable",
           };
         }
-        const alias = this.db
-          .query(
-            `SELECT raw_messages.reply_to_message_id
-             FROM raw_message_aliases
-             JOIN raw_messages ON raw_messages.id = raw_message_aliases.raw_message_id
-             WHERE raw_message_aliases.provider_id = ?
-               AND raw_message_aliases.telegram_message_id = ?
-               AND raw_messages.provider_id = ?`,
-          )
-          .get(providerId, telegramMessageId, providerId) as Row | null;
         if (!alias) {
           return {
             method: "reply-link",
@@ -2690,11 +2676,17 @@ class AppStore {
           tradeId: activeTradeIds[0],
         };
       }
+      const trade = this.logicalTrade(tradeIds[0]!);
       return {
         method: "inline-quote",
         status: "UNMATCHED",
         activeTradeCount: 0,
-        reason: "inactive-origin",
+        reason:
+          trade && this.isTerminalLogicalTrade(trade.id)
+            ? "inactive-origin"
+            : trade
+              ? "nonterminal-origin"
+              : "origin-unavailable",
       };
     }
 
@@ -2714,6 +2706,11 @@ class AppStore {
   private isActiveLogicalTrade(tradeId: string) {
     const status = this.logicalTrade(tradeId)?.status;
     return status === "OPEN" || status === "PENDING" || status === "PLANNED";
+  }
+
+  private isTerminalLogicalTrade(tradeId: string) {
+    const status = this.logicalTrade(tradeId)?.status;
+    return status === "CLOSED" || status === "CANCELLED" || status === "ARCHIVED";
   }
 
   private shadowLifecycleCorrelation(
@@ -3999,6 +3996,7 @@ class AppStore {
           logicalTradeIds?: string[];
           queuedCount?: number;
           fanoutCount?: number;
+          droppedQueueItems?: string[];
           status: string;
         };
       }
@@ -4043,7 +4041,7 @@ class AppStore {
       providerId,
       signal.accountId ?? this.defaultParserAccountId(providerId),
     );
-    const targetAccountIds = options.targetAccountId
+    let targetAccountIds = options.targetAccountId
       ? linkedAccountIds.filter((accountId) => accountId === options.targetAccountId)
       : linkedAccountIds;
     const executionMode = options.executionMode ?? "VIRTUAL_TP";
@@ -4067,97 +4065,110 @@ class AppStore {
       this.alertHeldQueueItem(queueItemId, "NO_ACCOUNT");
       return { body: { queueItemId, status: "HELD" } };
     }
-    const accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
+    let accountId = targetAccountIds[0] ?? this.defaultParserAccountId(providerId);
     const provider = this.providerDetails(providerId);
     const defaultTakeProfit = { value: settings.defaultTakeProfitPips, unit: "PIPS" as const };
+    const evidenceHeldQueueItems: string[] = [];
+    const evidenceDroppedQueueItems: string[] = [];
     if (options.trigger !== "operator") {
-      const evidenceTargets = normalizeEvidenceTargets(
-        targetAccountIds.map((targetAccountId) => {
-          const targetConfig = this.providerConfig(providerId, targetAccountId);
-          const targetSignal = applyProviderExecutionConfig(
-            targetAccountId === signal.accountId
-              ? signal
-              : this.reparseSignalForAccount(signal, providerId, targetAccountId),
-            targetConfig,
-            { defaultTakeProfit },
-          );
-          const resolution =
-            targetSignal.commandType !== "OPEN_TRADE" &&
-            targetSignal.commandType !== "NO_SIGNAL" &&
-            targetSignal.commandType !== "TRADE_SETUP"
-              ? this.resolveLifecycleTarget(
-                  providerId,
-                  targetAccountId,
-                  source?.rawMessageId ?? "",
-                  targetSignal,
-                )
-              : undefined;
-          const suggestion = resolution
-            ? matchLifecycleCommandToTrade(
-                targetSignal,
-                this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
-              )
-            : undefined;
-          const lifecycleResolution: LifecycleResolutionEvidence | undefined = resolution
-            ? {
-                method: resolution.method,
-                status: resolution.status,
-                activeTradeCount: resolution.activeTradeCount,
-                ...(suggestion?.status === "MATCHED" && suggestion.tradeId
-                  ? { suggestion: `same-symbol trade ${suggestion.tradeId}` }
-                  : {}),
-              }
-            : undefined;
-          const verdict = evaluateExecutionEvidence({
-            parsedSignal: targetSignal,
-            providerConfig: { openEvidence: targetConfig.openEvidence ?? "prose-complete" },
-            lifecycleResolution,
-            orderIdNovelty: {
-              providerOrderIdNeverSeen: !this.hasDuplicateProviderOrderId(
+      const evidenceTargets = targetAccountIds.map((targetAccountId) => {
+        const targetConfig = this.providerConfig(providerId, targetAccountId);
+        const targetSignal = applyProviderExecutionConfig(
+          targetAccountId === signal.accountId
+            ? signal
+            : this.reparseSignalForAccount(signal, providerId, targetAccountId),
+          targetConfig,
+          { defaultTakeProfit },
+        );
+        const resolution =
+          targetSignal.commandType !== "OPEN_TRADE" &&
+          targetSignal.commandType !== "NO_SIGNAL" &&
+          targetSignal.commandType !== "TRADE_SETUP"
+            ? this.resolveLifecycleTarget(
                 providerId,
                 targetAccountId,
+                source?.rawMessageId ?? "",
                 targetSignal,
-              ),
-            },
-            forwarded: this.forwardedForParsedSignal(parsedSignalId),
-          });
-          return { accountId: targetAccountId, signal: targetSignal, verdict };
-        }),
-      );
-      const failed = evidenceTargets.find((target) => target.verdict.verdict !== "EXECUTE");
-      if (failed) {
-        if (failed.verdict.verdict === "DROP") {
-          const queueItemId = this.dropForEvidence(
-            parsedSignalId,
-            failed.signal,
-            accountId,
-            executionMode,
-            settings,
-            failed.verdict.reason,
+              )
+            : undefined;
+        const suggestion = resolution
+          ? matchLifecycleCommandToTrade(
+              targetSignal,
+              this.logicalTrades().filter((trade) => trade.accountId === targetAccountId),
+            )
+          : undefined;
+        const lifecycleResolution: LifecycleResolutionEvidence | undefined = resolution
+          ? {
+              method: resolution.method,
+              status: resolution.status,
+              activeTradeCount: resolution.activeTradeCount,
+              ...(resolution.reason ? { reason: resolution.reason } : {}),
+              ...(suggestion?.status === "MATCHED" && suggestion.tradeId
+                ? { suggestion: `same-symbol trade ${suggestion.tradeId}` }
+                : {}),
+            }
+          : undefined;
+        const verdict = evaluateExecutionEvidence({
+          parsedSignal: targetSignal,
+          providerConfig: { openEvidence: targetConfig.openEvidence ?? "prose-complete" },
+          lifecycleResolution,
+          orderIdNovelty: {
+            providerOrderIdNeverSeen: !this.hasDuplicateProviderOrderId(
+              providerId,
+              targetAccountId,
+              targetSignal,
+            ),
+          },
+          forwarded: this.forwardedForParsedSignal(parsedSignalId),
+        });
+        return { accountId: targetAccountId, signal: targetSignal, verdict };
+      });
+      for (const target of evidenceTargets) {
+        if (target.verdict.verdict === "HOLD") {
+          evidenceHeldQueueItems.push(
+            this.holdForEvidence(
+              parsedSignalId,
+              target.signal,
+              target.accountId,
+              executionMode,
+              settings,
+              target.verdict.reason,
+              target.verdict.suggestion,
+              target.verdict.tier,
+            ),
           );
-          return { body: { queueItemId, status: "IGNORED" } };
+        } else if (target.verdict.verdict === "DROP") {
+          evidenceDroppedQueueItems.push(
+            this.dropForEvidence(
+              parsedSignalId,
+              target.signal,
+              target.accountId,
+              executionMode,
+              settings,
+              target.verdict.reason,
+            ),
+          );
         }
-        const heldQueueItems = evidenceTargets.map((target) =>
-          this.holdForEvidence(
-            parsedSignalId,
-            target.signal,
-            target.accountId,
-            executionMode,
-            settings,
-            target.verdict.verdict === "HOLD" ? target.verdict.reason : failed.verdict.reason,
-            target.verdict.suggestion,
-            target.verdict.verdict === "HOLD" ? target.verdict.tier : failed.verdict.tier,
-          ),
-        );
+      }
+      targetAccountIds = evidenceTargets
+        .filter((target) => target.verdict.verdict === "EXECUTE")
+        .map((target) => target.accountId);
+      if (targetAccountIds.length === 0) {
+        const status = evidenceHeldQueueItems.length > 0 ? "HELD" : "IGNORED";
+        this.db
+          .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+          .run(status, parsedSignalId);
         return {
           body: {
-            queueItemId: heldQueueItems[0],
-            heldQueueItems,
+            queueItemId: evidenceHeldQueueItems[0] ?? evidenceDroppedQueueItems[0],
+            heldQueueItems: evidenceHeldQueueItems,
+            droppedQueueItems: evidenceDroppedQueueItems,
             queuedCount: 0,
-            status: "HELD",
+            status,
           },
         };
       }
+      accountId = targetAccountIds[0]!;
     }
     if (signal.commandType === "OPEN_TRADE" && openTradeSourceExpired(source, settings)) {
       const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, signal, "HELD", {
@@ -4338,32 +4349,36 @@ class AppStore {
       const queueableCleanTargets = queueableTargets.filter(
         (target) => !duplicateTargets.includes(target),
       );
-      const heldQueueItems = mappingHolds.map((target) => {
-        const heldReason = `SYMBOL_MAPPING_${target.signal.mappingStatus.toUpperCase()}`;
-        const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, target.signal, "HELD", {
-          accountId: target.accountId,
-          executionMode,
-          settings,
-          heldReason,
-        });
-        this.audit(
-          "signal.symbol-mapping",
-          "warn",
-          "Signal held for one account's symbol mapping",
-          {
-            parsedSignalId,
-            providerId,
+      const heldQueueItems = [
+        ...evidenceHeldQueueItems,
+        ...mappingHolds.map((target) => {
+          const heldReason = `SYMBOL_MAPPING_${target.signal.mappingStatus.toUpperCase()}`;
+          const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, target.signal, "HELD", {
             accountId: target.accountId,
-            rawSymbol: target.signal.rawSymbol,
-            canonicalSymbol: target.signal.canonicalSymbol,
-            mappingStatus: target.signal.mappingStatus,
-            queueItemId,
+            executionMode,
+            settings,
             heldReason,
-          },
-        );
-        this.alertHeldQueueItem(queueItemId, `${heldReason}:${target.accountId}`);
-        return queueItemId;
-      });
+          });
+          this.audit(
+            "signal.symbol-mapping",
+            "warn",
+            "Signal held for one account's symbol mapping",
+            {
+              parsedSignalId,
+              providerId,
+              accountId: target.accountId,
+              rawSymbol: target.signal.rawSymbol,
+              canonicalSymbol: target.signal.canonicalSymbol,
+              mappingStatus: target.signal.mappingStatus,
+              queueItemId,
+              heldReason,
+            },
+          );
+          this.alertHeldQueueItem(queueItemId, `${heldReason}:${target.accountId}`);
+          return queueItemId;
+        }),
+      ];
+      const droppedQueueItems = [...evidenceDroppedQueueItems];
       for (const target of duplicateOrderIdTargets) {
         const queueItemId = this.insertNonLeasedQueueItem(parsedSignalId, target.signal, "HELD", {
           accountId: target.accountId,
@@ -4460,6 +4475,7 @@ class AppStore {
             queueItemId: heldQueueItems[0],
             queueItems: heldQueueItems,
             heldQueueItems,
+            droppedQueueItems,
             queuedCount: 0,
             status: "HELD",
           },
@@ -4511,6 +4527,7 @@ class AppStore {
           parsedSignalId,
           queueItems,
           heldQueueItems,
+          droppedQueueItems,
           logicalTradeIds,
         },
         "operator",
@@ -4521,7 +4538,9 @@ class AppStore {
           logicalTradeId: logicalTradeIds[0],
           queueItems,
           heldQueueItems,
+          droppedQueueItems,
           logicalTradeIds,
+          queuedCount: queueItems.length,
           status: "PENDING",
         },
       };
@@ -4601,7 +4620,7 @@ class AppStore {
         };
       });
 
-      const lifecycleFailure = lifecycleTargets.find((target) => {
+      const lifecycleFailures = lifecycleTargets.filter((target) => {
         const unsafeMissingFields = target.signal.missingFields.filter(
           (field) => field !== "symbol" && field !== "brokerSymbol",
         );
@@ -4611,38 +4630,76 @@ class AppStore {
           !target.match.tradeId
         );
       });
-      if (lifecycleFailure) {
-        const heldQueueItems = lifecycleTargets.map((target) =>
-          this.holdLifecycleForReconciliation(
+      const queueableLifecycleTargets = lifecycleTargets.filter(
+        (target) => !lifecycleFailures.includes(target),
+      );
+      const heldQueueItems = [
+        ...evidenceHeldQueueItems,
+        ...lifecycleFailures.map((target) => {
+          const missingFields = target.signal.missingFields.filter(
+            (field) => field !== "symbol" && field !== "brokerSymbol",
+          );
+          return this.holdLifecycleForReconciliation(
             parsedSignalId,
             target.signal,
             target.accountId,
             executionMode,
             settings,
             target.runner,
-            lifecycleFailure.match.reason ??
-              `missing ${lifecycleFailure.signal.missingFields.filter((field) => field !== "symbol" && field !== "brokerSymbol").join(", ")}`,
-          ),
-        );
+            target.match.reason ?? `missing ${missingFields.join(", ")}`,
+          );
+        }),
+      ];
+      const droppedQueueItems = [...evidenceDroppedQueueItems];
+      if (queueableLifecycleTargets.length === 0) {
+        const status = heldQueueItems.length > 0 ? "HELD" : "IGNORED";
+        this.db
+          .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+          .run(status, parsedSignalId);
         return {
           body: {
-            queueItemId: heldQueueItems[0],
+            queueItemId: heldQueueItems[0] ?? droppedQueueItems[0],
             heldQueueItems,
+            droppedQueueItems,
             queuedCount: 0,
-            status: "HELD",
+            status,
           },
         };
       }
 
       if (signal.commandType === "MARK_TP_HIT") {
         const logicalTradeIds: string[] = [];
-        for (const target of lifecycleTargets) {
+        for (const target of queueableLifecycleTargets) {
           const trade = this.logicalTrade(target.match.tradeId!);
           if (!trade) {
-            return { statusCode: 422, error: "Matched logical trade could not be loaded" };
+            const queueItemId = this.holdLifecycleForReconciliation(
+              parsedSignalId,
+              target.signal,
+              target.accountId,
+              executionMode,
+              settings,
+              target.runner,
+              "matched-logical-trade-could-not-be-loaded",
+            );
+            heldQueueItems.push(queueItemId);
+            continue;
           }
           this.recordProviderTpHit(trade.id, target.signal);
           logicalTradeIds.push(trade.id);
+        }
+        if (logicalTradeIds.length === 0) {
+          this.db
+            .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+            .run("HELD", parsedSignalId);
+          return {
+            body: {
+              queueItemId: heldQueueItems[0],
+              heldQueueItems,
+              droppedQueueItems,
+              queuedCount: 0,
+              status: "HELD",
+            },
+          };
         }
         this.db
           .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
@@ -4655,6 +4712,9 @@ class AppStore {
           body: {
             logicalTradeId: logicalTradeIds[0],
             logicalTradeIds,
+            heldQueueItems,
+            droppedQueueItems,
+            queuedCount: logicalTradeIds.length,
             status: "RECORDED",
           },
         };
@@ -4662,7 +4722,7 @@ class AppStore {
 
       const queueItems: string[] = [];
       const logicalTradeIds: string[] = [];
-      for (const target of lifecycleTargets) {
+      for (const target of queueableLifecycleTargets) {
         const tradeIds = target.match.tradeIds ?? [target.match.tradeId!];
         for (const tradeId of tradeIds) {
           const trade = this.logicalTrade(tradeId);
@@ -4676,7 +4736,8 @@ class AppStore {
               target.runner,
               "matched-logical-trade-could-not-be-loaded",
             );
-            return { body: { queueItemId, heldQueueItems: [queueItemId], status: "HELD" } };
+            heldQueueItems.push(queueItemId);
+            continue;
           }
           const targetQueueId = `queue_${nanoid(10)}`;
           const actionState = evaluateLifecycleActionState(target.signal.commandType, trade.status);
@@ -4690,7 +4751,8 @@ class AppStore {
               target.runner,
               `${actionState.reason}:trade-${trade.status}`,
             );
-            return { body: { queueItemId, heldQueueItems: [queueItemId], status: "HELD" } };
+            heldQueueItems.push(queueItemId);
+            continue;
           }
           const routedSignal =
             actionState.verdict === "cancel"
@@ -4716,7 +4778,8 @@ class AppStore {
               target.runner,
               "percentage-close-needs-current-broker-position-snapshot",
             );
-            return { body: { queueItemId, heldQueueItems: [queueItemId], status: "HELD" } };
+            heldQueueItems.push(queueItemId);
+            continue;
           }
           this.appendTradeCommand(trade.id, target.signal);
           const queueItem = buildExecutionCommand(enrichedSignal, {
@@ -4746,12 +4809,28 @@ class AppStore {
           logicalTradeIds.push(trade.id);
         }
       }
+      if (queueItems.length === 0) {
+        this.db
+          .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
+          .run("HELD", parsedSignalId);
+        return {
+          body: {
+            queueItemId: heldQueueItems[0],
+            heldQueueItems,
+            droppedQueueItems,
+            queuedCount: 0,
+            status: "HELD",
+          },
+        };
+      }
       this.db
         .query("UPDATE parsed_signals SET status = ? WHERE id = ?")
         .run("APPROVED", parsedSignalId);
       this.audit("signal.approve", "info", "Signal approved for MT5 queue", {
         parsedSignalId,
         queueItems,
+        heldQueueItems,
+        droppedQueueItems,
         logicalTradeIds,
       });
       log("info", "signal.approve", {
@@ -4768,7 +4847,10 @@ class AppStore {
           queueItemId: queueItems[0],
           logicalTradeId: logicalTradeIds[0],
           queueItems,
+          heldQueueItems,
+          droppedQueueItems,
           logicalTradeIds,
+          queuedCount: queueItems.length,
           status: "PENDING",
         },
       };

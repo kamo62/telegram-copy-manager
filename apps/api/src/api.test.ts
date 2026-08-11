@@ -3,13 +3,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseSignalText } from "@telegram-tc/core";
 import {
   brokerOrderSourceForDealReason,
   createApi,
   evaluateLifecycleActionState,
   hasExitVocabularyForDropAudit,
-  normalizeEvidenceTargets,
 } from "./app";
 import { corpusMessages } from "./fixtures/provider-messages";
 import type { TelegramAdapter, TelegramCapturedMessage, TelegramDialog } from "./telegram";
@@ -4130,45 +4128,6 @@ describe("Telegram TC API", () => {
       await app.request("/api/audit-logs?event=telegram.ingest.queue-failed"),
     );
     expect(audit.logs).toHaveLength(0);
-  });
-
-  test("demotes a real-corpus target DROP when linked-account evidence disagrees", () => {
-    const fixture = corpusMessages.find((message) => message.telegramMessageId === "15226")!;
-    const signal = parseSignalText(fixture.rawText, {
-      providerId: fixture.providerId,
-      accountId: "account-a",
-      accountMappings: {
-        "account-a": {
-          accountId: "account-a",
-          includeSymbols: ["XAUUSD"],
-          availableBrokerSymbols: ["XAUUSD"],
-        },
-      },
-    });
-    const targets = normalizeEvidenceTargets([
-      {
-        accountId: "account-a",
-        signal,
-        verdict: { verdict: "DROP", reason: "NO_EXECUTABLE_SIGNAL" },
-      },
-      {
-        accountId: "account-b",
-        signal,
-        verdict: { verdict: "EXECUTE", reason: "COMPLETE_PROSE_OPEN_EVIDENCE" },
-      },
-    ]);
-
-    expect(targets[0]?.verdict).toMatchObject({
-      verdict: "HOLD",
-      reason: "NO_EXECUTABLE_SIGNAL",
-      tier: "action-required",
-    });
-    expect(targets[1]?.verdict.verdict).toBe("EXECUTE");
-    expect(
-      normalizeEvidenceTargets([targets[0]!, targets[0]!]).every(
-        (target) => target.verdict.verdict === "HOLD",
-      ),
-    ).toBe(true);
   });
 
   test("reconciles MT5 execution reports back into logical trade TP leg state", async () => {
@@ -16523,6 +16482,514 @@ describe("step 3 evidence gate wiring", () => {
         }),
       ]),
     );
+  });
+
+  test("holds a folded-constituent close when the canonical anchor has no origin", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-folded-lifecycle-no-origin-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages: TelegramCapturedMessage[] = [
+      {
+        telegramMessageId: "folded-anchor-no-origin",
+        messageDate: "2026-08-11T08:00:00.000Z",
+        rawText: "BUY XAUUSD @ 2300",
+      },
+      {
+        telegramMessageId: "folded-fragment-no-origin",
+        messageDate: "2026-08-11T08:00:05.000Z",
+        rawText: "SL 2290 TP 2320",
+      },
+    ];
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD"],
+      });
+      expect(await app.runTelegramIngestionOnce()).toMatchObject({ errors: 0, queued: 1 });
+
+      const db = new Database(databasePath);
+      expect(
+        db
+          .query(
+            "SELECT logical_trade_id FROM trade_origins WHERE provider_id = ? AND telegram_message_id = ?",
+          )
+          .get(providerId, "folded-anchor-no-origin"),
+      ).toBeTruthy();
+      db.query("DELETE FROM trade_origins WHERE provider_id = ? AND telegram_message_id = ?").run(
+        providerId,
+        "folded-anchor-no-origin",
+      );
+      db.close();
+
+      messages.push({
+        telegramMessageId: "folded-close-no-origin",
+        replyToMessageId: "folded-fragment-no-origin",
+        messageDate: "2026-08-11T08:01:00.000Z",
+        rawText: "CLOSED - XAUUSD Buy",
+      });
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion).toMatchObject({ errors: 0, parsed: 1, queued: 0 });
+
+      const verify = new Database(databasePath, { readonly: true });
+      try {
+        const parsed = verify
+          .query("SELECT id, status FROM parsed_signals WHERE raw_message_id = ?")
+          .get(`raw_${providerId}_folded-close-no-origin`) as { id: string; status: string };
+        expect(parsed.status).toBe("HELD");
+        expect(
+          verify
+            .query("SELECT status, held_reason FROM queue_items WHERE parsed_signal_id = ?")
+            .all(parsed.id),
+        ).toEqual([{ status: "HELD", held_reason: "EVIDENCE_LIFECYCLE_RESOLUTION_REQUIRED" }]);
+      } finally {
+        verify.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves a folded-constituent close through the canonical anchor origin", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-folded-lifecycle-origin-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages: TelegramCapturedMessage[] = [
+      {
+        telegramMessageId: "folded-anchor-origin",
+        messageDate: "2026-08-11T08:10:00.000Z",
+        rawText: "BUY XAUUSD @ 2300",
+      },
+      {
+        telegramMessageId: "folded-fragment-origin",
+        messageDate: "2026-08-11T08:10:05.000Z",
+        rawText: "SL 2290 TP 2320",
+      },
+    ];
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD"],
+      });
+      expect(await app.runTelegramIngestionOnce()).toMatchObject({ errors: 0, queued: 1 });
+
+      messages.push({
+        telegramMessageId: "folded-close-origin",
+        replyToMessageId: "folded-fragment-origin",
+        messageDate: "2026-08-11T08:11:00.000Z",
+        rawText: "CLOSED - XAUUSD Buy",
+      });
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion).toMatchObject({ errors: 0, parsed: 1, queued: 1 });
+
+      const verify = new Database(databasePath, { readonly: true });
+      try {
+        const parsed = verify
+          .query("SELECT id, status FROM parsed_signals WHERE raw_message_id = ?")
+          .get(`raw_${providerId}_folded-close-origin`) as { id: string; status: string };
+        expect(parsed.status).toBe("APPROVED");
+        const rows = verify
+          .query("SELECT status, payload_json FROM queue_items WHERE parsed_signal_id = ?")
+          .all(parsed.id) as Array<{ status: string; payload_json: string }>;
+        expect(rows).toHaveLength(1);
+        expect(rows[0]?.status).toBe("PENDING");
+        expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({
+          commandType: "CLOSE_TRADE",
+        });
+      } finally {
+        verify.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("holds a reply-linked lifecycle command for an OUT_OF_SYNC trade", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-out-of-sync-lifecycle-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages: TelegramCapturedMessage[] = [
+      {
+        telegramMessageId: "out-of-sync-open",
+        messageDate: "2026-08-11T08:20:00.000Z",
+        rawText: "BUY XAUUSD @ 2300\nSL 2290\nTP 2320",
+      },
+    ];
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, {
+        availableSymbols: ["XAUUSD"],
+      });
+      expect(await app.runTelegramIngestionOnce()).toMatchObject({ errors: 0, queued: 1 });
+
+      const db = new Database(databasePath);
+      const trade = db
+        .query("SELECT id, data_json FROM logical_trades WHERE provider_id = ? LIMIT 1")
+        .get(providerId) as { id: string; data_json: string };
+      db.query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?").run(
+        "OUT_OF_SYNC",
+        JSON.stringify({ ...JSON.parse(trade.data_json), status: "OUT_OF_SYNC" }),
+        trade.id,
+      );
+      db.close();
+
+      messages.push({
+        telegramMessageId: "out-of-sync-close",
+        replyToMessageId: "out-of-sync-open",
+        messageDate: "2026-08-11T08:21:00.000Z",
+        rawText: "CLOSED - XAUUSD Buy",
+      });
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion).toMatchObject({ errors: 0, parsed: 1, queued: 0 });
+
+      const verify = new Database(databasePath, { readonly: true });
+      try {
+        const parsed = verify
+          .query("SELECT id, status FROM parsed_signals WHERE raw_message_id = ?")
+          .get(`raw_${providerId}_out-of-sync-close`) as { id: string; status: string };
+        expect(parsed.status).toBe("HELD");
+        expect(
+          verify.query("SELECT status FROM queue_items WHERE parsed_signal_id = ?").all(parsed.id),
+        ).toEqual([{ status: "HELD" }]);
+      } finally {
+        verify.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("drops reply-linked lifecycle commands only for CLOSED and CANCELLED origins", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-terminal-lifecycle-drop-"));
+    try {
+      for (const terminalStatus of ["CLOSED", "CANCELLED"] as const) {
+        const databasePath = join(tempDir, `${terminalStatus}.db`);
+        const messages: TelegramCapturedMessage[] = [
+          {
+            telegramMessageId: `terminal-open-${terminalStatus}`,
+            messageDate: "2026-08-11T08:30:00.000Z",
+            rawText: "BUY XAUUSD @ 2300\nSL 2290\nTP 2320",
+          },
+        ];
+        const app = createApi({
+          databasePath,
+          seedDemoData: false,
+          telegram: createQueuedTelegramAdapter(messages),
+          telegramPollingEnabled: false,
+        });
+        const providerId = await configureProviderWithAccount(app, {
+          availableSymbols: ["XAUUSD"],
+        });
+        expect(await app.runTelegramIngestionOnce()).toMatchObject({ errors: 0, queued: 1 });
+
+        const db = new Database(databasePath);
+        const trade = db
+          .query("SELECT id, data_json FROM logical_trades WHERE provider_id = ? LIMIT 1")
+          .get(providerId) as { id: string; data_json: string };
+        db.query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?").run(
+          terminalStatus,
+          JSON.stringify({ ...JSON.parse(trade.data_json), status: terminalStatus }),
+          trade.id,
+        );
+        db.close();
+
+        messages.push({
+          telegramMessageId: `terminal-close-${terminalStatus}`,
+          replyToMessageId: `terminal-open-${terminalStatus}`,
+          messageDate: "2026-08-11T08:31:00.000Z",
+          rawText: "CLOSED - XAUUSD Buy",
+        });
+        const ingestion = await app.runTelegramIngestionOnce();
+        expect(ingestion).toMatchObject({ errors: 0, parsed: 1, queued: 0 });
+
+        const verify = new Database(databasePath, { readonly: true });
+        try {
+          const parsed = verify
+            .query("SELECT id, status FROM parsed_signals WHERE raw_message_id = ?")
+            .get(`raw_${providerId}_terminal-close-${terminalStatus}`) as {
+            id: string;
+            status: string;
+          };
+          expect(parsed.status).toBe("IGNORED");
+          expect(
+            verify
+              .query("SELECT status FROM queue_items WHERE parsed_signal_id = ?")
+              .all(parsed.id),
+          ).toEqual([{ status: "IGNORED" }]);
+        } finally {
+          verify.close();
+        }
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps a clean lifecycle cancel queued when a sibling account is unmatched", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-independent-lifecycle-fanout-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages: TelegramCapturedMessage[] = [];
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ openEvidence: "structured-id" }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442827",
+          server: "HFMarkets-Real",
+          company: "HF Markets",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+          eaVersion: "1.57.2",
+          eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-63442827/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+
+      const open = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText:
+              "NEW ORDER - XAUUSD Buy Stop # 320610613 Entry: 4051.30 SL: 4045.30 TP: 4060.30",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const openApproval = await json<{ queueItems: string[] }>(
+        await app.request(`/api/signals/${open.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(openApproval.queueItems).toHaveLength(2);
+
+      const db = new Database(databasePath);
+      const trades = db
+        .query("SELECT id, account_id, data_json FROM logical_trades")
+        .all() as Array<{ id: string; account_id: string; data_json: string }>;
+      for (const trade of trades) {
+        const status = trade.account_id === "mt5-63442826" ? "PENDING" : "CANCELLED";
+        db.query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?").run(
+          status,
+          JSON.stringify({ ...JSON.parse(trade.data_json), status }),
+          trade.id,
+        );
+      }
+
+      messages.push({
+        telegramMessageId: "cancel-320610613",
+        messageDate: new Date().toISOString(),
+        rawText: "❌ Deleted Buy Stop on XAUUSD\n# 320610613",
+      });
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion).toMatchObject({ errors: 0, queued: 1 });
+      const cancel = db
+        .query(
+          "SELECT id FROM parsed_signals WHERE result_json LIKE '%320610613%' ORDER BY created_at DESC LIMIT 1",
+        )
+        .get() as { id: string };
+
+      const rows = db
+        .query(
+          "SELECT account_id, status, held_reason, payload_json FROM queue_items WHERE parsed_signal_id = ?",
+        )
+        .all(cancel.id) as Array<{
+        account_id: string;
+        status: string;
+        held_reason: string | null;
+        payload_json: string;
+      }>;
+      expect(rows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ account_id: "mt5-63442826", status: "PENDING" }),
+          expect.objectContaining({
+            account_id: "mt5-63442827",
+            status: "HELD",
+            held_reason: "EVIDENCE_LIFECYCLE_RESOLUTION_REQUIRED",
+          }),
+        ]),
+      );
+      expect(
+        JSON.parse(rows.find((row) => row.account_id === "mt5-63442826")!.payload_json),
+      ).toMatchObject({ commandType: "CANCEL_PENDING" });
+      db.close();
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps a clean lifecycle cancel queued when a sibling account is ambiguous", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-ambiguous-lifecycle-fanout-"));
+    const databasePath = join(tempDir, "app.db");
+    const messages: TelegramCapturedMessage[] = [];
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegram: createQueuedTelegramAdapter(messages),
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request(`/api/account-provider-links/mt5-63442826/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/providers/${providerId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ openEvidence: "structured-id" }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          accountNumber: "63442827",
+          server: "HFMarkets-Real",
+          company: "HF Markets",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          availableSymbols: ["XAUUSD"],
+          eaVersion: "1.57.2",
+          eaCapabilities: ["lane2-close-contract", "pending-close-flatten-v1"],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request(`/api/account-provider-links/mt5-63442827/${providerId}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: true }),
+        headers: { "content-type": "application/json" },
+      });
+
+      const open = await json<{ parsedSignalId: string }>(
+        await app.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText:
+              "NEW ORDER - XAUUSD Buy Stop # 320610614 Entry: 4051.30 SL: 4045.30 TP: 4060.30",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const openApproval = await json<{ queueItems: string[] }>(
+        await app.request(`/api/signals/${open.parsedSignalId}/approve`, { method: "POST" }),
+      );
+      expect(openApproval.queueItems).toHaveLength(2);
+
+      const db = new Database(databasePath);
+      const trades = db
+        .query("SELECT id, account_id, provider_id, data_json, created_at FROM logical_trades")
+        .all() as Array<{
+        id: string;
+        account_id: string;
+        provider_id: string;
+        data_json: string;
+        created_at: string;
+      }>;
+      for (const trade of trades) {
+        const data = { ...JSON.parse(trade.data_json), status: "PENDING" };
+        db.query("UPDATE logical_trades SET status = ?, data_json = ? WHERE id = ?").run(
+          "PENDING",
+          JSON.stringify(data),
+          trade.id,
+        );
+      }
+      const ambiguousTrade = trades.find((trade) => trade.account_id === "mt5-63442827")!;
+      const duplicate = {
+        ...JSON.parse(ambiguousTrade.data_json),
+        id: "trade_ambiguous-sibling",
+        status: "PENDING",
+      };
+      db.query(
+        "INSERT INTO logical_trades (id, provider_id, account_id, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      ).run(
+        duplicate.id,
+        ambiguousTrade.provider_id,
+        ambiguousTrade.account_id,
+        "PENDING",
+        JSON.stringify(duplicate),
+        ambiguousTrade.created_at,
+      );
+      db.close();
+
+      messages.push({
+        telegramMessageId: "cancel-320610614",
+        messageDate: new Date().toISOString(),
+        rawText: "❌ Deleted Buy Stop on XAUUSD\n# 320610614",
+      });
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion).toMatchObject({ errors: 0, parsed: 1, queued: 1 });
+      const verify = new Database(databasePath, { readonly: true });
+      try {
+        const cancel = verify
+          .query("SELECT id FROM parsed_signals WHERE raw_message_id = ?")
+          .get(`raw_${providerId}_cancel-320610614`) as { id: string };
+        const rows = verify
+          .query(
+            "SELECT account_id, status, held_reason, payload_json FROM queue_items WHERE parsed_signal_id = ?",
+          )
+          .all(cancel.id) as Array<{
+          account_id: string;
+          status: string;
+          held_reason: string | null;
+          payload_json: string;
+        }>;
+        expect(rows).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ account_id: "mt5-63442826", status: "PENDING" }),
+            expect.objectContaining({
+              account_id: "mt5-63442827",
+              status: "HELD",
+              held_reason: "EVIDENCE_LIFECYCLE_RESOLUTION_REQUIRED",
+            }),
+          ]),
+        );
+        expect(
+          JSON.parse(rows.find((row) => row.account_id === "mt5-63442826")!.payload_json),
+        ).toMatchObject({ commandType: "CANCEL_PENDING" });
+      } finally {
+        verify.close();
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   test("uses real KAL fixtures for prose entry, inline TP/cancel, and quoted chatter", async () => {
