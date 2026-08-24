@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { createApi } from "./app";
-import type { TelegramAdapter, TelegramFetchOptions, TelegramFetchResult } from "./telegram";
+import {
+  type TelegramAdapter,
+  TelegramDialogUnavailableError,
+  type TelegramFetchOptions,
+  type TelegramFetchResult,
+} from "./telegram";
 
 const json = async <T>(response: Response) => (await response.json()) as T;
 
@@ -386,5 +391,65 @@ describe("Telegram ingestion resilience", () => {
       await app.request("/api/audit-logs?event=telegram.provider.stalled"),
     );
     expect(stalled.logs.filter((log) => log.level === "error")).toHaveLength(0);
+  });
+
+  test("an unreachable channel is reported once and then backed off, not retried every tick", async () => {
+    let fetchCalls = 0;
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: adapter(async (_sessionId, dialogId) => {
+        if (dialogId === "dialog-stuck") {
+          fetchCalls += 1;
+          throw new TelegramDialogUnavailableError(dialogId);
+        }
+        return { messages: [], gap: undefined };
+      }),
+      telegramPollingEnabled: false,
+    });
+    await enableProviders(app);
+
+    for (let tick = 0; tick < 5; tick += 1) await app.runTelegramIngestionOnce();
+
+    // One attempt, then the back-off window holds it off. Before this, a channel the
+    // account had left produced an error-level row on every single poll.
+    expect(fetchCalls).toBe(1);
+    const unreachable = await json<{
+      logs: Array<{ level: string; data: { providerId: string; dialogId: string } }>;
+    }>(await app.request("/api/audit-logs?event=telegram.provider.unreachable"));
+    expect(unreachable.logs).toHaveLength(1);
+    expect(unreachable.logs[0]).toMatchObject({ level: "error" });
+    expect(unreachable.logs[0]?.data).toMatchObject({ dialogId: "dialog-stuck" });
+
+    // The generic ingestion error must not also fire; the whole point is that this
+    // reads as an access problem rather than a transport failure.
+    const generic = await json<{ logs: unknown[] }>(
+      await app.request("/api/audit-logs?event=telegram.ingest.error"),
+    );
+    expect(generic.logs).toHaveLength(0);
+  });
+
+  test("a reachable channel is never held off by the unreachable back-off", async () => {
+    let stuckCalls = 0;
+    let slowCalls = 0;
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: adapter(async (_sessionId, dialogId) => {
+        if (dialogId === "dialog-stuck") {
+          stuckCalls += 1;
+          throw new TelegramDialogUnavailableError(dialogId);
+        }
+        slowCalls += 1;
+        return { messages: [], gap: undefined };
+      }),
+      telegramPollingEnabled: false,
+    });
+    await enableProviders(app);
+
+    for (let tick = 0; tick < 4; tick += 1) await app.runTelegramIngestionOnce();
+
+    expect(stuckCalls).toBe(1);
+    expect(slowCalls).toBe(4);
   });
 });
