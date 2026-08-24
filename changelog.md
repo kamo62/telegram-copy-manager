@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.68.0 - 2026-08-24 (Minor)
+
+Release impact: Minor because parser output changes, which changes what gets executed. No EA protocol
+change, no database schema change and no API contract change, so no live terminal needs a recompile or
+reattach. Nothing in the deployment or environment changes.
+
+- **Take-profit legs are no longer silently capped at four.** A signal listing five targets returned
+  four legs at 25% each with `confidence 0.99`, no warning and nothing in `missingFields`, so the
+  fifth target was dropped with no trace. Three separate caps caused it: the labelled-leg regex only
+  matched `TP1` through `TP4`, the dash-separated target-line branch sliced to four, and the final
+  result sliced to four. The limit is now a named `MAX_TAKE_PROFIT_LEGS` of 10.
+- **Truncation can never be silent again.** A message carrying more than ten distinct targets keeps
+  the first ten and adds a `Take-profit list was truncated at 10 legs` warning, and that warning now
+  forces manual review the same way conflicting stop-loss geometry does. Verified against the real
+  case that surfaced this: a five-target gold signal now returns five legs, a labelled `TP1`..`TP10`
+  list returns ten with `TP 10` correctly read as leg ten rather than leg one, and a twelve-target
+  message returns ten plus the warning.
+- **Index instruments can reach these brokers.** `NAS100` resolved only to `NAS100`, `USTEC` and their
+  `#`/`.raw`/`.r` forms, so neither Exness `USTECm` nor HF Markets `US100.F` matched and every NASDAQ
+  signal was held unmapped. The `m` suffix was already applied to FX and metals but never to indices,
+  and the `.F` suffix appeared nowhere. Both conventions are now covered for `NAS100`, `US30`,
+  `DJI30`, `SPX500`, `GER40`, `UK100` and `JP225`.
+- **`US100` now canonicalises to `NAS100`.** It previously canonicalised to itself while `USTEC`,
+  `NDX`, `NASDAQ` and `NASDAQ100` all resolved to `NAS100`, and no broker variants existed for
+  `US100`, so a `US100` signal was unmappable by construction.
+- Broker symbol resolution stays exact-string matching. Exness also lists the leveraged `USTEC_x100m`
+  and `US30_x10m`, and matching one of those would size a trade catastrophically wrong, so no prefix,
+  suffix or fuzzy matching was introduced anywhere in the resolution path.
+
+Considered and deliberately not shipped: forcing manual review whenever a signal carries a take-profit
+leg the provider configuration does not define. Retaining and rescaling those legs is existing
+intended behaviour with tests that name it (`retains unconfigured Telegram TP legs instead of silently
+dropping them`), and gating it would have held ordinary traffic. Capturing the extra legs is closer to
+what the provider actually posted, which is the point of the fix above.
+
 ## 1.67.1 - 2026-08-24 (Patch)
 
 Release impact: Patch. API and web only. No database schema change, no API contract change, no parser

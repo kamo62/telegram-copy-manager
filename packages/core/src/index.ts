@@ -258,7 +258,6 @@ const DEFAULT_CANONICAL_SYMBOLS = new Set([
   "NAS100",
   "NZDUSD",
   "US30",
-  "US100",
   "SPX500",
   "GER40",
   "UK100",
@@ -282,7 +281,7 @@ const BUILT_IN_ALIASES: Record<string, string> = {
   WS30: "DJI30",
   NASDAQ: "NAS100",
   NAS100: "NAS100",
-  US100: "US100",
+  US100: "NAS100",
   USTEC: "NAS100",
   NDX: "NAS100",
   NASDAQ100: "NAS100",
@@ -313,11 +312,103 @@ const BUILT_IN_ALIASES: Record<string, string> = {
 
 const BROKER_SYMBOL_VARIANTS: Record<string, string[]> = {
   BTCUSD: ["BTCUSD", "BTCUSD#", "BTCUSDm", "BTCUSD.raw", "BTCUSD.r", "BTCUSD.pro"],
-  DJI30: ["DJI30", "DJI30#", "DJI30.raw", "DJI30.r", "US30", "US30#", "US30.raw", "US30.r"],
+  DJI30: [
+    "DJI30",
+    "DJI30#",
+    "DJI30m",
+    "DJI30.raw",
+    "DJI30.r",
+    "DJI30.F",
+    "US30",
+    "US30#",
+    "US30m",
+    "US30.raw",
+    "US30.r",
+    "US30.F",
+  ],
   EURUSD: ["EURUSD", "EURUSD#", "EURUSDm", "EURUSD.raw", "EURUSD.r", "EURUSD.pro"],
   GBPUSD: ["GBPUSD", "GBPUSD#", "GBPUSDm", "GBPUSD.raw", "GBPUSD.r", "GBPUSD.pro"],
-  NAS100: ["NAS100", "NAS100#", "NAS100.raw", "NAS100.r", "USTEC", "USTEC#", "USTEC.raw"],
-  US30: ["US30", "US30#", "US30.raw", "US30.r", "DJI30", "DJI30#", "DJI30.raw", "DJI30.r"],
+  NAS100: [
+    "NAS100",
+    "NAS100#",
+    "NAS100m",
+    "NAS100.raw",
+    "NAS100.r",
+    "NAS100.F",
+    "US100",
+    "US100.F",
+    "USTEC",
+    "USTEC#",
+    "USTECm",
+    "USTEC.raw",
+  ],
+  SPX500: [
+    "SPX500",
+    "SPX500#",
+    "SPX500m",
+    "SPX500.raw",
+    "SPX500.r",
+    "SPX500.F",
+    "US500",
+    "US500#",
+    "US500m",
+    "US500.raw",
+    "US500.r",
+    "US500.F",
+  ],
+  GER40: [
+    "GER40",
+    "GER40#",
+    "GER40m",
+    "GER40.raw",
+    "GER40.r",
+    "GER40.F",
+    "GER30",
+    "DE40",
+    "DE40#",
+    "DE40m",
+    "DE40.raw",
+    "DE40.r",
+    "DE40.F",
+    "DE30",
+    "DE30m",
+  ],
+  UK100: [
+    "UK100",
+    "UK100#",
+    "UK100m",
+    "UK100.raw",
+    "UK100.r",
+    "UK100.F",
+    "FTSE100",
+    "FTSE100m",
+    "FTSE100.F",
+  ],
+  JP225: [
+    "JP225",
+    "JP225#",
+    "JP225m",
+    "JP225.raw",
+    "JP225.r",
+    "JP225.F",
+    "JPN225",
+    "JPN225m",
+    "JPN225.F",
+  ],
+  US30: [
+    "US30",
+    "US30#",
+    "US30m",
+    "US30.raw",
+    "US30.r",
+    "US30.F",
+    "DJI30",
+    "DJI30#",
+    "DJI30m",
+    "DJI30.raw",
+    "DJI30.r",
+    "DJI30.F",
+  ],
   XAGUSD: ["XAGUSD", "XAGUSD#", "XAGUSDm", "XAGUSD.raw", "XAGUSD.r", "SILVER", "SILVER#"],
   XAUUSD: [
     "XAUUSD",
@@ -560,7 +651,8 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   let entry = commandType === "OPEN_TRADE" ? extractEntry(text, direction, orderType) : undefined;
   const stopLossResult = extractStopLoss(text);
   const stopLoss = stopLossResult.value;
-  const takeProfits = extractTakeProfits(text);
+  const takeProfitExtraction = extractTakeProfits(text);
+  const takeProfits = takeProfitExtraction.targets;
   let geometryInferred = false;
   if (
     commandType === "NO_SIGNAL" &&
@@ -706,6 +798,9 @@ export function parseSignalText(originalText: string, context: ParserContext = {
   }
   if (stopLossResult.conflict) {
     warnings.push("Conflicting stop-loss values found; using the explicit STOP LOSS value");
+  }
+  if (takeProfitExtraction.truncated) {
+    warnings.push(`Take-profit list was truncated at ${MAX_TAKE_PROFIT_LEGS} legs`);
   }
 
   if (commandType === "OPEN_TRADE") {
@@ -860,6 +955,7 @@ export function shouldRequireManualReview(signal: ParsedSignal, aggressive = fal
     signal.commandType === "TRADE_SETUP" ||
     signal.commandType === "NO_SIGNAL" ||
     signal.warnings.some((warning) => warning.startsWith("Conflicting stop-loss values")) ||
+    signal.warnings.some((warning) => warning.startsWith("Take-profit list was truncated")) ||
     (!aggressive && signal.warnings.some((warning) => warning.startsWith("Geometry-inferred"))) ||
     (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol"))
   );
@@ -2063,9 +2159,24 @@ function extractLifecyclePrice(text: string, token: string): number | undefined 
   return numbers.at(-1);
 }
 
-function extractTakeProfits(text: string): TakeProfitTarget[] {
+export const MAX_TAKE_PROFIT_LEGS = 10;
+
+type TakeProfitExtraction = {
+  targets: TakeProfitTarget[];
+  truncated: boolean;
+};
+
+const TAKE_PROFIT_LEG_PATTERN = Array.from(
+  { length: MAX_TAKE_PROFIT_LEGS },
+  (_, index) => MAX_TAKE_PROFIT_LEGS - index,
+).join("|");
+
+function extractTakeProfits(text: string): TakeProfitExtraction {
   const targets = new Map<number, number>();
-  const tpRegex = /\bTP\s*([1-4])\b\s*(?:[:@]|-|=)?\s*(\d+(?:\.\d+)?)/gi;
+  const tpRegex = new RegExp(
+    `\\bTP\\s*(${TAKE_PROFIT_LEG_PATTERN})\\b\\s*(?:[:@]|-|=)?\\s*(\\d+(?:\\.\\d+)?)`,
+    "gi",
+  );
   let match = tpRegex.exec(text);
   while (match) {
     const leg = Number(match[1]);
@@ -2073,7 +2184,10 @@ function extractTakeProfits(text: string): TakeProfitTarget[] {
     match = tpRegex.exec(text);
   }
 
-  const unlabeledTpRegex = /\bTP\b\s*(?:[:@]|-|=)?\s*(\d+(?:\.\d+)?)/gi;
+  const unlabeledTpRegex = new RegExp(
+    `\\bTP\\b(?!\\s*(?:${TAKE_PROFIT_LEG_PATTERN})\\b(?=\\s*(?:[:@=-]|\\d|$)))\\s*(?:[:@]|-|=)?\\s*(\\d+(?:\\.\\d+)?)`,
+    "gi",
+  );
   match = unlabeledTpRegex.exec(text);
   while (match) {
     const leg = targets.size + 1;
@@ -2088,25 +2202,30 @@ function extractTakeProfits(text: string): TakeProfitTarget[] {
     targets.set(1, Number(takeProfit[1]));
   }
 
-  const targetLine = text.match(/\bTP\b\s*([\d.]+(?:\s*-\s*[\d.]+){1,6})/i);
+  const targetLine = text.match(/\bTP\b\s*([\d.]+(?:\s*-\s*[\d.]+)+)/i);
+  let truncated = false;
   if (targetLine?.[1] && targets.size <= 1) {
-    targetLine[1]
-      .split(/\s*-\s*/)
-      .slice(0, 4)
-      .forEach((value, index) => {
-        targets.set(index + 1, Number(value));
-      });
+    const values = targetLine[1].split(/\s*-\s*/);
+    truncated = values.length > MAX_TAKE_PROFIT_LEGS;
+    values.slice(0, MAX_TAKE_PROFIT_LEGS).forEach((value, index) => {
+      targets.set(index + 1, Number(value));
+    });
   }
 
-  const modifyTp = text.match(/\bTP\s*([1-4])\b.*?(\d+(?:\.\d+)?)/i);
+  const modifyTp = text.match(
+    new RegExp(`\\bTP\\s*(${TAKE_PROFIT_LEG_PATTERN})\\b.*?(\\d+(?:\\.\\d+)?)`, "i"),
+  );
   if (modifyTp?.[1] && modifyTp[2] && targets.size === 0) {
     targets.set(Number(modifyTp[1]), Number(modifyTp[2]));
   }
 
-  return [...targets.entries()]
-    .sort(([a], [b]) => a - b)
-    .slice(0, 4)
-    .map(([leg, price]) => ({ leg, price, allocationPercent: 25 }));
+  const sortedTargets = [...targets.entries()].sort(([a], [b]) => a - b);
+  return {
+    targets: sortedTargets
+      .slice(0, MAX_TAKE_PROFIT_LEGS)
+      .map(([leg, price]) => ({ leg, price, allocationPercent: 25 })),
+    truncated: truncated || sortedTargets.length > MAX_TAKE_PROFIT_LEGS,
+  };
 }
 
 function extractLotSize(text: string): number | undefined {
