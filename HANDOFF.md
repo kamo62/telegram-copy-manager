@@ -1,6 +1,6 @@
 # Handoff
 
-Updated: 2026-08-24 19:15 on Kamogelos-MacBook-Pro
+Updated: 2026-08-24 20:05 on Kamogelos-MacBook-Pro
 
 ## START HERE — 2026-08-24
 
@@ -63,45 +63,239 @@ the same trap.
 back after a container swap `connected: true` with no login prompt. That is PR #26 verified against
 real Telegram, not just tests.
 
-### The app being slow is NOT the auth path — measure before changing anything
+### OPEN ISSUE: the dashboard is slow because every audit log write re-sends 724 KB
 
-Measured on the live box with one user. `/api/telegram/status` answers in **2ms** and `/api/health` in
-~1.4ms. The slowness is one endpoint: **`GET /api/dashboard` returns 632 KB** in 0.5 to 1.7s, and over
-95% of it is completed history that can never change.
+This is the highest-value work outstanding. **Not started.** Everything below was measured on the live
+box on 2026-08-24 or read from current source, not inferred.
 
-| key | bytes | items |
+#### The mechanism, end to end
+
+This is the part that matters, and it is not obvious from any single file:
+
+1. `AppStore.audit(...)` writes a row **and** calls `emitEvent({type:"audit", ...})` (`app.ts`, end of
+   the `audit` method).
+2. `emitEvent` calls **`invalidateDashboardCaches()` on its very first line** (`app.ts:14177-14178`),
+   which does `storeRevision += 1`, clears `dashboardPerformanceCache`, and clears
+   `providerScoreCache`.
+3. It then pushes an SSE `audit` event to every subscriber.
+4. The web client subscribes to `audit` among six event types (`App.tsx:900-902`) and every one of them
+   is wired to `scheduleLoad()`, a 200 ms debounce onto `loadDashboard()` — **a full re-fetch of the
+   entire snapshot**. There is no patching for these events.
+5. That refetch hits `dashboard()`, misses the cache that step 2 just cleared, and recomputes
+   `accountPerformance` for the aggregate *and once per account*, each of which walks
+   `equity_curve_points` and downsamples to 500 points.
+6. 724 KB is serialized, transferred, `JSON.parse`d, and then **recursively deep-compared field by
+   field** against the previous snapshot by `dashboardSnapshotsEqual` (`App.tsx:557-579`, called at
+   `App.tsx:756`) purely to decide whether to re-render.
+
+**So one audit row costs a full recompute plus a full 724 KB round trip plus a full structural walk.**
+`audit()` is called from dozens of write paths. During the NYAKALLO error flood earlier today that was
+roughly **twelve audit rows per minute**, so twelve of these cycles per minute, which is exactly why
+the app felt slow while it was happening. Fixing the flood (v1.67.2) removed the worst of it; the
+amplifier is still there.
+
+Only `heartbeat` avoids the full refetch, and only when the heartbeat status is unchanged
+(`App.tsx:886-898`, patcher at `App.tsx:610-694`). Of the six subscribed event types the server only
+ever emits three (`heartbeat`, `reconciliation`, `audit`); `queue`, `trade`, `snapshot` and `score` are
+subscribed but never sent.
+
+#### The logs table
+
+| | |
+|---|---|
+| `audit_logs` rows | **81,861** |
+| approximate size | **20.8 MB** of a 102 MB database |
+| oldest row | 2026-05-17, nothing is ever pruned |
+| top event type | `telegram.ingest.error` at **43,379 rows**, over half the table |
+| second | `mt5.report` at 26,648 |
+
+**`audit_logs` has no index on `created_at`** — only `sqlite_autoindex_audit_logs_1` from the primary
+key. Every read is `... ORDER BY created_at DESC LIMIT ?` (`listAuditLogs`), so it full-scans 81,861
+rows and sorts them. Measured: `ORDER BY created_at DESC LIMIT 500` takes **513 ms**, which is *slower*
+than an unordered full scan of the same table at 174 ms, because the sort dominates.
+
+`ActivityFeed` calls `/api/audit-logs?limit=50` on the dashboard (`components/ActivityFeed.tsx:16`), so
+that 513 ms class of query is on a user-facing path.
+
+**This is the one place where the user's instinct about indexes is exactly right.** An index on
+`audit_logs(created_at DESC)`, and probably `(event_type, created_at DESC)` for the filtered variant,
+turns that scan-and-sort into a bounded index walk. It is a small, safe, high-value change and it
+should be done first because it is independent of everything else here.
+
+Also worth doing: prune or roll off `audit_logs`. Half the table is a single error type from one
+incident.
+
+#### The equity curve
+
+| | |
+|---|---|
+| `equity_curve_points` rows | **171,431** |
+| approximate size | **23.1 MB** |
+| `provider/mt5-54945785` | 90,303 points |
+| `account/mt5-54945785` | 45,212 points |
+| `account/mt5-296083557` | 19,477 points |
+| `provider/mt5-296083557` | 16,439 points |
+
+Every cache miss reads from this table and downsamples to 500 points via `capEquityCurve`
+(`app.ts:9211`, `9317`). Because `emitEvent` invalidates the cache, an ordinary stream of audit writes
+means this is recomputed continuously rather than being the once-per-revision cost it was designed to
+be.
+
+Then the 500-point result is **serialized three times** in one payload: once in `accountPerformance`
+and once per account in `accountPerformanceByAccount`. That is 23.8 KB per copy, **71.4 KB total for
+two accounts**, growing linearly with account count.
+
+Worse, one of those copies is **byte-identical duplication**:
+`accountPerformanceByAccount["mt5-54945785"]` is exactly equal to the top-level `accountPerformance`,
+verified by comparing the serialized strings, because with a single primary account the aggregate *is*
+that account.
+
+And the client throws most of it away: `GrowthChart.tsx:64` downsamples again to 240 points for a
+256px-high chart that renders six axis labels.
+
+#### Where the 724 KB is
+
+| key | size | rows | note |
+|---|---|---|---|
+| `signalQueue` | **216.4 KB** | 1,819 | **100% terminal.** 122 bytes/row, so this is row *count*, not row size |
+| `mt5Accounts` | **216.3 KB** | 2 | see split below |
+| `logicalTrades` | **196.6 KB** | 259 | **100% terminal.** `source` 74.6 KB, `legs` 57.2 KB |
+| `accountPerformanceByAccount` | 48.5 KB | | two 500-point equity curves |
+| `accountPerformance` | 24.3 KB | | a third 500-point equity curve |
+| everything else | ~20 KB | | |
+
+Inside `mt5Accounts`, one account is almost all of it:
+
+| field | `mt5-54945785` | `mt5-296083557` |
 |---|---|---|
-| `mt5Accounts` | 222 KB | 2 accounts |
-| `logicalTrades` | 201 KB | 259 |
-| `signalQueue` | 112 KB | 915 |
-| `accountPerformanceByAccount` | 50 KB | |
+| `externalCloses` | **117.6 KB** (193 rows) | 4.2 KB (7) |
+| `closedTrades` | **69.9 KB** (99 rows) | 12.5 KB (16) |
+| `availableSymbols` | 4.2 KB (388) | 3.2 KB (356) |
+| account total | **194.0 KB** | 22.3 KB |
 
-Not one of the 915 `signalQueue` rows is actionable: 338 IGNORED, 180 DISMISSED, 35 FAILED, 362
-EXECUTED, zero PENDING/HELD/LEASED. 255 of 259 `logicalTrades` are terminal. `mt5-54945785` alone is
-199 KB, of which 72 KB is 99 `closedTrades`. `/api/mt5/accounts` has the same shape at 223 KB.
+Growth is unbounded and observable: `signalQueue` went from 915 rows to 1,819 in one day when a channel
+was backfilled. Steady-state trading adds 40 to 70 `queue_items` per day (measured 08-10 to 08-19), so
+roughly +6 KB/day of permanent payload weight, forever. Nothing ages out.
 
-**Indexes and views cannot fix this, and that was measured rather than assumed.** Warm,
-`SELECT * FROM queue_items` across all 915 rows takes **3.9ms**; narrowed to live statuses and the
-columns actually needed, **0.3ms**. An earlier 301ms reading was purely a cold page cache on the first
-read after container start. An index speeds up *finding* a subset, but the dashboard issues `SELECT *`
-with no `WHERE`, so there is no subset to narrow and nothing for an index to do. A view is a saved
-query and returns the same rows over the same wire.
+#### Why indexes and views cannot fix the payload (but see the logs section above)
 
-The cost is everything after the query: building the JS objects, `JSON.stringify`, transfer, the
-browser's `JSON.parse`, and React re-rendering against the result, on a box at load average 5 to 10
-running a dozen other containers.
+Measure before touching anything. `/api/telegram/status` answers in **2 ms** and `/api/health` in
+**1.4 ms**. SQLite is not the bottleneck for the dashboard collections either:
 
-Fix direction: add the `WHERE` clause the dashboard is missing so it returns live work rather than 915
-terminal rows (at which point the existing `idx_queue_items_*` indexes finally earn their keep), and
-cap or paginate the terminal-state collections the way equity curves were capped at 500 points in
-v1.38.1, or move history to its own lazily-fetched endpoint. The v1.39.0 SSE delta work reduced how
-often the snapshot is fetched but never shrank it. **Not started.** Minor housekeeping, not the cause:
-the WAL sits at 27MB against a 102MB DB and is never checkpointed.
+| query | warm |
+|---|---|
+| `SELECT * FROM queue_items` (all 1,819 rows) | **3.9 ms** |
+| same, narrowed to live statuses and needed columns | **0.3 ms** |
 
-**Timing hazard:** a first pass showed `/api/dashboard` timing out at 60s three times running. The box
-turned out to be 17 minutes post-boot at load average 10.86, and the same endpoint answered in 0.54s
-once it settled. Check `uptime` before trusting any measurement. Note `uptime` prints local time
-(UTC+2) while audit logs are UTC.
+An earlier 301 ms reading was a cold page cache on first read after container start, not steady state.
+An index speeds up *finding* a subset, and the dashboard asks for no subset: it runs `SELECT *` with no
+`WHERE`, so nothing can engage. `idx_queue_items_parsed_signal_created` already exists and goes unused.
+A view is a saved query and returns the same rows over the same wire.
+
+The payload cost is everything *after* the query: building the JS objects, `JSON.stringify`, transfer,
+the browser's `JSON.parse`, the recursive deep-compare, and the React re-render, on a box at load
+average 5 to 10 running a dozen other containers.
+
+`audit_logs` is the exception and genuinely does want an index, because that query *does* have an
+`ORDER BY` and a `LIMIT` over 81k rows.
+
+#### What each collection is actually used for
+
+Mapped across `apps/web/src`. There are no selector hooks and no memoized store; one `useState` holds
+the whole snapshot (`App.tsx:697`) and it is prop-drilled, so every consumer reads `snapshot.X`
+directly.
+
+- **`logicalTrades` is used for exactly one thing: `OUT_OF_SYNC` rows.** Both consumers filter to that
+  status before doing anything (`App.tsx:2221`, `pages/HistoryPage.tsx:49`). **`legs[]` is never read
+  anywhere in `apps/web/src`** — grep returns only the type declaration and a different `ClosedTradeRow.legs`.
+  57.2 KB on the wire for nothing.
+- **`signalQueue` is needed only for a count in the always-visible status bar.** `App.tsx:1241` computes
+  `queuePending = signalQueue.filter(i => i.status === "PENDING").length`. The full list renders only in
+  `pages/LogsPage.tsx:229`, inside a panel that is `collapsible defaultOpen={false}`, and `Panel.tsx:98`
+  does `{collapsed ? null : children}`, so all 1,819 rows are shipped and **never mounted** by default.
+- **`closedTrades` / `externalCloses` are route-gated to History** (`showTrades = dashTab("history")`,
+  `App.tsx:2068`) and flattened in `ClosedPositionsTable.tsx:99`. Not on the default dashboard.
+- **`availableSymbols` is route-gated to Symbols**, and `SymbolSettingsPage.tsx:49` **already lazily
+  fetches** the near-identical `/api/accounts/:id/symbol-metadata`.
+- **`accountPerformanceByAccount` is needed on the default route for only `currency` and `today`**
+  (`pages/OperationsPage.tsx:97-99`). Its `equityCurve` is charted for one focused account at a time on
+  the Performance tab only (`App.tsx:1244-1248`).
+- **Leave `appPositions` / `appOrders` / `externalPositions` / `externalOrders` alone.** They are
+  non-terminal by nature, small, and feed the always-visible `ExposurePanel` plus several `reduce`
+  totals.
+
+#### The aggregation trap: numbers computed client-side from the full array
+
+**This is the one real risk in the whole change.** Trimming any of these silently changes a number the
+operator reads:
+
+| file:line | Renders | Computed over |
+|---|---|---|
+| `ClosedPositionsTable.tsx:119` | "Realized P/L" | ALL `closedTrades` + `externalCloses` |
+| `ClosedPositionsTable.tsx:121` | "N winning" | same |
+| `ClosedPositionsTable.tsx:122` | "N losing" | same |
+| `ClosedPositionsTable.tsx:140` | "N closed trades" | same |
+| `ClosedPositionsTable.tsx:117-118` | whether a total is shown at all (`canTotal`, mixed-currency set) | same |
+| `App.tsx:1241` | StatusBar "Queue" chip, **always visible** | ALL `signalQueue` |
+| `OpenPositionsTable.tsx:185-189` | "Floating P/L", EA vs external counts | open positions (safe, do not trim) |
+| `lib/exposure.ts:29-58` | total lots, per-symbol pip risk | open positions (safe) |
+| `LinkedAccountsPage.tsx:232` | external floating P/L | `externalPositions` (safe) |
+
+So: paginating `closedTrades` **requires** moving those five header numbers server-side first, as
+something like `closedTradesSummary: { count, wins, losses, realizedPnl, currencies[] }`. And trimming
+`signalQueue` **requires** either guaranteeing every `PENDING` row survives the trim or sending a
+server-computed `pendingCount`.
+
+Encouragingly, `logicalTrades` has **no** whole-array aggregation: every `.length` is taken on the
+already-filtered `OUT_OF_SYNC` subset.
+
+#### Recommended order of work
+
+1. **Index `audit_logs(created_at DESC)`** and `(event_type, created_at DESC)`, and prune the table.
+   Independent of everything else, small, and fixes a measured 513 ms user-facing query.
+2. **Stop `emitEvent` invalidating the performance cache on every `audit`.** An audit row does not
+   change account performance. Either scope invalidation to event types that actually affect the
+   projection, or drop `audit` from the client's full-refetch list (`App.tsx:900-902`) and let the 60 s
+   poll pick it up. This is the single biggest win and it costs almost no code.
+3. **`logicalTrades` → non-terminal only, drop `legs`** (~197 KB → ~2 KB). Zero UI risk. The cost lands
+   in `api.test.ts`, whose `legStatuses` helpers (`:553-565`) assert on `legs` in ~44 tests and would
+   need repointing at a different projection.
+4. **`signalQueue` → non-terminal rows plus a server-computed `pendingCount`** (~216 KB → ~1 KB).
+5. **Strip `equityCurve` from `accountPerformanceByAccount`** (~48 KB → ~2 KB) and serve it per account
+   from its own endpoint on the Performance tab. The heartbeat delta patcher at `App.tsx:681-690`
+   spreads the existing object, so removing a field is delta-safe.
+6. **Move `closedTrades` / `externalCloses` behind a lazy endpoint** — but only after step's worth of
+   summary work above.
+7. **Drop `availableSymbols`**, reusing `/api/accounts/:id/symbol-metadata`, with a fallback for
+   `ManualSignalModal.tsx:177`.
+
+Measured target: stripping terminal history and the symbol lists alone takes the payload from **724 KB
+to 98.8 KB**. Doing the equity-curve work as well lands it near **26 KB**.
+
+#### House patterns to follow
+
+Server-side limit clamping already exists: `optionalPositiveInteger(c.req.query("limit"), 500)`
+(`app.ts:1162`, `app.ts:16214-16220`). Client-side the pattern is a self-loading child component with
+`apiGet` in a `useEffect` and an `AbortController` — copy `pages/PerformancePage.tsx:143-160`. Response
+keys are named after the collection (`{ logs: [...] }`, `{ symbols: [...] }`, `{ items: [...] }`).
+
+**There is no `offset`, `page` or cursor anywhere in the codebase** — every list endpoint is
+limit-only, newest-N. Introducing real paging means introducing a new convention deliberately.
+
+Note that **`GET /api/signals` has the same unbounded problem**: it returns `store.queueItems()` and
+`store.parsedSignals()` with no limit at all. Fix it in the same pass or it becomes the next bottleneck.
+
+**No test anywhere asserts on payload byte size or `content-length`**, so nothing will catch a size
+regression, and equally nothing blocks the change on size grounds.
+
+#### Measurement hazards, both of which caught me out
+
+- **Check `uptime` first.** A first pass showed `/api/dashboard` timing out at 60 s three times running.
+  The box was 17 minutes post-boot at load average 10.86; once settled the same call answered in 0.54 s.
+- **The box prints local time (UTC+2) while audit logs are UTC.** A four-hour apparent gap was a
+  timezone difference, not an outage.
+- The WAL sits at 27 MB against a 102 MB database and is never checkpointed. Minor, unrelated to the
+  payload, but worth a periodic `wal_checkpoint(TRUNCATE)`.
 
 ### NYAKALLO MILLIONS VIP is the best channel measured
 
@@ -341,9 +535,11 @@ Background jobs still running: none.
 - **NYAKALLO VIP is disabled because the account no longer has access to the channel.** Not a code
   bug; rejoin or resubscribe, confirm it reappears in `GET /api/telegram/dialogs`, then re-enable.
   v1.67.2 makes the failure legible and backs off rather than flooding.
-- **The dashboard payload is unfixed and has grown to 742 KB** (was 632 KB before NYAKALLO's 885
-  parsed signals landed). It is the actual cause of the app feeling slow, and it scales with history,
-  which is the whole point. See the measurement section above. Highest-value remaining work.
+- **The dashboard payload is the top open item.** 724 KB re-sent on every audit log write, because
+  `emitEvent` invalidates the performance cache and the client refetches the whole snapshot on the
+  `audit` SSE event. Full analysis, measurements, consumer map and a ranked plan are in the OPEN ISSUE
+  section above. Start with the `audit_logs(created_at)` index and the cache-invalidation scoping;
+  those two are small and independent.
 - **The remaining 13 candidate channels are still un-analysed.** `/tmp/onboard-channels.sh` on the box
   handles them; NYAKALLO VIP was done by hand and validates the approach. Read the enabling caveat
   above before running it.
