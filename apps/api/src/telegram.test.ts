@@ -406,6 +406,7 @@ describe("teleproto adapter encapsulation", () => {
     expect(Object.getOwnPropertyNames(Object.getPrototypeOf(adapter))).toEqual([
       "constructor",
       "startLogin",
+      "probeStoredSession",
       "submitCode",
       "submitPassword",
       "disconnect",

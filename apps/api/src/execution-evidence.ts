@@ -11,6 +11,7 @@ export interface LifecycleResolutionEvidence {
   method: "provider-order-id" | "reply-link" | "inline-quote" | "same-symbol-fallback" | "none";
   status: "MATCHED" | "AMBIGUOUS" | "UNMATCHED";
   activeTradeCount: number;
+  reason?: string;
   suggestion?: string;
 }
 
@@ -105,6 +106,14 @@ function evaluateLifecycle(input: ExecutionEvidenceInput): ExecutionEvidenceVerd
     resolution.activeTradeCount === 1
   ) {
     return execute(`LIFECYCLE_${resolution.method.toUpperCase()}`);
+  }
+
+  if (
+    resolution?.method === "reply-link" &&
+    resolution.status === "UNMATCHED" &&
+    resolution.reason === "inactive-origin"
+  ) {
+    return drop(`LIFECYCLE_NO_TRADE_EXISTS:${resolution.reason}`);
   }
 
   return {

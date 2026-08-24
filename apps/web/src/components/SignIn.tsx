@@ -1,4 +1,4 @@
-import { Send } from "lucide-react";
+import { RefreshCw, Send } from "lucide-react";
 import type { SetupFormState, SetupStep } from "./SetupFlow";
 
 export function SignIn({
@@ -6,6 +6,7 @@ export function SignIn({
   busy = false,
   error = "",
   onReset,
+  onRetry,
   setupStep,
   setForm,
   startTelegramConnection,
@@ -16,6 +17,7 @@ export function SignIn({
   busy?: boolean;
   error?: string;
   onReset?: () => Promise<void> | void;
+  onRetry?: () => void;
   setupStep: SetupStep;
   setForm: React.Dispatch<React.SetStateAction<SetupFormState>>;
   startTelegramConnection: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
@@ -40,6 +42,10 @@ export function SignIn({
       subtitle: "Your account has two-factor enabled. Enter your password to finish signing in.",
     },
     connected: { title: "Connected", subtitle: "" },
+    unavailable: {
+      title: "Cannot reach the server",
+      subtitle: "Telegram status could not be loaded. We have not treated this as a logout.",
+    },
   };
 
   const copy = stepCopy[setupStep];
@@ -73,6 +79,15 @@ export function SignIn({
           <div className="signin-loading" role="status">
             <span className="signin-loading-dot" aria-hidden="true" />
             <span>Checking server session</span>
+          </div>
+        ) : null}
+
+        {setupStep === "unavailable" ? (
+          <div className="signin-loading">
+            <button className="signin-cta" onClick={onRetry} type="button">
+              <RefreshCw aria-hidden="true" size={14} />
+              Retry
+            </button>
           </div>
         ) : null}
 

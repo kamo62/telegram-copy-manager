@@ -1,4 +1,4 @@
-import { ArrowRight, CheckCircle2, Link2, LogOut, ShieldCheck } from "lucide-react";
+import { ArrowRight, CheckCircle2, Link2, LogOut, RefreshCw, ShieldCheck } from "lucide-react";
 import { NumberField } from "./FormControls";
 
 export interface SetupFormState {
@@ -11,13 +11,20 @@ export interface SetupFormState {
   profileId: string;
 }
 
-export type SetupStep = "checking" | "credentials" | "code" | "password" | "connected";
+export type SetupStep =
+  | "checking"
+  | "credentials"
+  | "code"
+  | "password"
+  | "connected"
+  | "unavailable";
 
 export function SetupFlow({
   form,
   busy = false,
   error = "",
   onReset,
+  onRetry,
   setupStep,
   setForm,
   startTelegramConnection,
@@ -28,6 +35,7 @@ export function SetupFlow({
   busy?: boolean;
   error?: string;
   onReset?: () => Promise<void> | void;
+  onRetry?: () => void;
   setupStep: SetupStep;
   setForm: React.Dispatch<React.SetStateAction<SetupFormState>>;
   startTelegramConnection: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
@@ -62,6 +70,28 @@ export function SetupFlow({
           <button className="btn btn-ghost btn-destructive-subtle" onClick={onReset} type="button">
             <LogOut aria-hidden="true" size={13} />
             Log out Telegram
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (setupStep === "unavailable") {
+    return (
+      <div className="connected-state" role="status">
+        <span className="connected-state-glyph" aria-hidden="true">
+          <RefreshCw size={18} />
+        </span>
+        <div className="connected-state-body">
+          <strong>Cannot reach the server</strong>
+          <span>
+            Telegram status could not be loaded. Your session has not been treated as logged out.
+          </span>
+        </div>
+        {onRetry ? (
+          <button className="btn btn-ghost" onClick={onRetry} type="button">
+            <RefreshCw aria-hidden="true" size={13} />
+            Retry
           </button>
         ) : null}
       </div>
