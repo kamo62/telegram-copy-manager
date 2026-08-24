@@ -1,20 +1,37 @@
 # Handoff
 
-Updated: 2026-08-24 13:05 on Kamogelos-MacBook-Pro
+Updated: 2026-08-24 18:45 on Kamogelos-MacBook-Pro
 
 ## START HERE — 2026-08-24
 
-An operations and diagnosis pass against the live box, then two code fixes. **Both are merged to
-`main` and neither is deployed.** Deploying is the next action.
+An operations and diagnosis pass against the live box, two code fixes, and a deploy.
 
 ### State
-- Branch: `main` @ `78cbdacf`, clean, everything pushed
-- Package version **1.68.0**
+- Branch: `main`, clean, everything pushed
+- Package version **1.68.0**, and **v1.68.0 IS DEPLOYED** (`main@f28f4190` verified live)
 - **PR #26 merged** (v1.67.1): Telegram session restore, stops the spurious re-auth prompt
 - **PR #27 merged** (v1.68.0): take-profit leg cap and index symbol mapping
+- **PR #28 merged**: handoff docs
 - Also pushed: `fix/held-queue-fanout-and-lifecycle-drop` @ `28a2fbf5`, unmerged, separate work
-- **Not deployed.** Production runs the previous build, so neither fix is live yet. No EA recompile
-  needed for either; no schema change and no API contract change.
+
+### Live state after the deploy
+
+`/api/health` is **ok**, 2/2 providers ready, 0 stalled. Held queue empty. Zero `PENDING`/`LEASED`.
+
+**The boot-time session restore is confirmed working in production.** `telegram.session.restored` for
+`tg_epuJC69Dpl` was audited at 2026-08-24T14:39:31Z, and the app came back after the container swap
+`connected: true` with no login prompt. That is PR #26 doing its job against real Telegram.
+
+**NYAKALLO VIP is DISABLED again, deliberately.** See the blocker below; it could not ingest and was
+erroring 12 times a minute. Its config is otherwise correct and ready: `lot_size` 0.03, `riskAmount`
+0.03, `openEvidence` `prose-complete`, four equal TP legs.
+
+**`openEvidence` was silently wrong on it and is worth knowing about.** `providerConfig` picks the
+evidence mode by *title substring*: a title containing `vip gold` gets `structured-id`. The title
+"NYAKALLO MILLIONS VIP GOLD NASDAQ" matched, so a prose channel with no order IDs was being held under
+`EVIDENCE_STRUCTURED_OPEN_EVIDENCE_REQUIRED` and could never have auto-traded. Fixed by setting
+`openEvidence` explicitly on the provider, which overrides the heuristic. Any new provider whose title
+contains `vip gold` or `kal` will hit the same trap.
 
 ### v1.68.0 — take-profit leg cap and index symbols (PR #27)
 
@@ -338,10 +355,22 @@ Background jobs still running: none.
 
 ### Blockers and open items
 
-- **Neither fix is deployed.** `main` is at v1.68.0; production runs the previous build. Deploy with
-  `bun run deploy`. Until then NYAKALLO's NAS100 signals still hold unmapped.
-- **The 632 KB dashboard payload is unfixed** and is the actual cause of the app feeling slow. See the
-  measurement section above. Highest-value remaining work.
+- **A newly added channel cannot be polled at all. Open bug, top of the list.** Enabling NYAKALLO
+  produced `Could not find the input entity for {"channelId":"3377857085","className":"PeerChannel"}`
+  about 12 times a minute, forever, and it never ingested a live message while the channel was
+  actively posting. teleproto needs an `access_hash` to build an `InputPeer`, and a channel added
+  after the session was created is not in the session's entity state. The two original providers are
+  unaffected because they have been resolved in that session for months.
+  `POST /api/providers/:id/import-messages` works only because it calls `await
+  telegram.listDialogs(sessionId)` immediately before fetching; the ingestion loop has no such
+  warm-up. **Calling `/api/telegram/dialogs` out of band does NOT fix it** — tried, succeeded in 7.8s,
+  errors continued at the same rate. Mitigated by disabling the provider, which cleared the errors
+  within one poll cycle and returned health to `ok`. Fix direction, untried: warm the entity once per
+  provider per process inside the ingestion path, or persist the channel's `access_hash` at provider
+  creation and build the `InputPeerChannel` directly.
+- **The dashboard payload is unfixed and has grown to 742 KB** (was 632 KB before NYAKALLO's 885
+  parsed signals landed). It is the actual cause of the app feeling slow, and it scales with history,
+  which is the whole point. See the measurement section above. Highest-value remaining work.
 - **The remaining 13 candidate channels are still un-analysed.** `/tmp/onboard-channels.sh` on the box
   handles them; NYAKALLO VIP was done by hand and validates the approach. Read the enabling caveat
   above before running it.
