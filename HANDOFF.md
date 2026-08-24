@@ -1,84 +1,67 @@
 # Handoff
 
-Updated: 2026-08-24 18:45 on Kamogelos-MacBook-Pro
+Updated: 2026-08-24 19:15 on Kamogelos-MacBook-Pro
 
 ## START HERE — 2026-08-24
 
-An operations and diagnosis pass against the live box, two code fixes, and a deploy.
+An operations pass, three code fixes, and two deploys. **v1.67.2 is deployed and green.**
 
 ### State
-- Branch: `main`, clean, everything pushed
-- Package version **1.68.0**, and **v1.68.0 IS DEPLOYED** (`main@f28f4190` verified live)
-- **PR #26 merged** (v1.67.1): Telegram session restore, stops the spurious re-auth prompt
-- **PR #27 merged** (v1.68.0): take-profit leg cap and index symbol mapping
-- **PR #28 merged**: handoff docs
-- Also pushed: `fix/held-queue-fanout-and-lifecycle-drop` @ `28a2fbf5`, unmerged, separate work
+- Branch `main`, clean. Package version **1.67.2**, deployed (`main@983b0c15` verified live).
+- `/api/health` **ok**, 2/2 providers ready, 0 stalled, held queue empty, Telegram connected.
+- Merged today: **#26** (session restore), **#27** (TP leg cap + index symbols), **#28**/**#29** (handoff),
+  **#30** (unreachable-channel back-off + revert of a gate that shipped by accident).
+- Also pushed, unmerged, separate work: `fix/held-queue-fanout-and-lifecycle-drop` @ `28a2fbf5`.
 
-### Live state after the deploy
+### Read this before trusting any commit: verify the STAGED tree
 
-`/api/health` is **ok**, 2/2 providers ready, 0 stalled. Held queue empty. Zero `PENDING`/`LEASED`.
+A backgrounded Codex task-worker kept rewriting files in this checkout **after reporting completion**.
+It did this at least three times in one session: it reverted a committed changelog entry, a version
+bump, and — the costly one — it restored its own `app.ts` and `api.test.ts` between a green gate run
+and the `git add`. That shipped a gate I had explicitly rejected all the way to production, and two
+tests pinning the intended behaviour were left failing on `main`.
 
-**The boot-time session restore is confirmed working in production.** `telegram.session.restored` for
-`tg_epuJC69Dpl` was audited at 2026-08-24T14:39:31Z, and the app came back after the container swap
-`connected: true` with no login prompt. That is PR #26 doing its job against real Telegram.
+Killing the `codex-companion.mjs task-worker` was not enough; the idle `codex app-server` processes
+were still writing and had to be killed too.
 
-**NYAKALLO VIP is DISABLED again, deliberately.** See the blocker below; it could not ingest and was
-erroring 12 times a minute. Its config is otherwise correct and ready: `lot_size` 0.03, `riskAmount`
-0.03, `openEvidence` `prose-complete`, four equal TP legs.
+So: a green gate proves nothing about what you are about to commit. After `git add`, verify the staged
+content directly (`git show :path | grep -c <invariant>`) and run the gate **after** the version bump,
+not before. A version bump is what broke the `mt5-ea-source` guard, which pins the EA's major.minor
+line to the app's; 1.68.0 asserted an EA rebuild that release did not need, so it is now 1.67.2.
 
-**`openEvidence` was silently wrong on it and is worth knowing about.** `providerConfig` picks the
-evidence mode by *title substring*: a title containing `vip gold` gets `structured-id`. The title
-"NYAKALLO MILLIONS VIP GOLD NASDAQ" matched, so a prose channel with no order IDs was being held under
-`EVIDENCE_STRUCTURED_OPEN_EVIDENCE_REQUIRED` and could never have auto-traded. Fixed by setting
-`openEvidence` explicitly on the provider, which overrides the heuristic. Any new provider whose title
-contains `vip gold` or `kal` will hit the same trap.
+### The NYAKALLO channel is gone from the account, and that was the real bug
 
-### v1.68.0 — take-profit leg cap and index symbols (PR #27)
+`Could not find the input entity for {"channelId":"3377857085","className":"PeerChannel"}` fired about
+twelve times a minute, forever, and the provider never ingested a live message. The cause was **not**
+that the channel was newly added: dialog `-1003377857085` was in the account's dialog list in the
+morning and gone by the afternoon, while the free `NYAKALLO MILLIONS` channel `-1002211922727` from the
+same provider remained. A lapsed VIP subscription or a removal.
 
-- **Take-profits were silently capped at 4 legs.** Five targets returned four legs at 25% each with
-  `confidence 0.99`, no warning and nothing in `missingFields`. Three separate caps: the labelled-leg
-  regex matched only `TP1`..`TP4`, the dash-separated target-line branch sliced to four, and the final
-  result sliced to four. `MAX_TAKE_PROFIT_LEGS` is now 10 and the alternation is built descending so
-  `TP 10` reads as leg ten. Past the new limit it warns and the warning forces manual review.
-- **Index instruments could not reach either broker.** `NAS100` resolved only to `NAS100`/`USTEC` and
-  their `#`/`.raw`/`.r` forms, so Exness `USTECm` and HF `US100.F` both missed. The `m` suffix was
-  applied to FX and metals but never indices; `.F` appeared nowhere. Both now cover `NAS100`, `US30`,
-  `DJI30`, `SPX500`, `GER40`, `UK100`, `JP225`. `US100` now canonicalises to `NAS100` instead of to
-  itself, which had no broker variants at all.
-- **Exact-string matching is a safety constraint, not a style choice.** Exness lists the leveraged
-  `USTEC_x100m` and `US30_x10m`; matching one would size a trade catastrophically wrong. Do not
-  introduce prefix, suffix or fuzzy matching in the resolution path.
-- **Deliberately not shipped:** forcing review whenever a signal carries a leg the provider config
-  does not define. Retaining and rescaling those legs is intended behaviour with tests naming it
-  (`retains unconfigured Telegram TP legs instead of silently dropping them`). Gating it held ordinary
-  traffic; the attempt failed those tests and was reverted rather than the tests being rewritten.
+Check this first next time with `GET /api/telegram/dialogs?profileId=<id>` and see whether the dialog
+id is actually in the list. Calling that endpoint out of band does **not** work around the error; that
+was tried and measured.
 
-Gate: 766 pass 0 fail, typecheck, lint, build, `git diff --check` clean.
+v1.67.2 makes the failure legible: `resolveDialogEntity` no longer falls back to a bare dialog id, it
+throws `TelegramDialogUnavailableError`, and `ingestProvider` audits `telegram.provider.unreachable`
+once then backs the provider off for 15 minutes instead of hammering. To restore the channel, rejoin
+or resubscribe on the Telegram account, confirm it reappears in the dialog list, then re-enable
+`provider_wlgsny`. Its config is already correct: `lot_size` 0.03, `riskAmount` 0.03, `openEvidence`
+`prose-complete`, four equal TP legs. **It is currently disabled.**
 
-### v1.67.1 — Telegram session restore (PR #26, merged? check before deploying)
+### `openEvidence` is picked by title substring
 
-Fixes all three defects behind the re-auth prompt described below. Gate: `bun test` 763 pass 0 fail,
-typecheck, lint, build and `git diff --check` all clean.
+`providerConfig` chooses the evidence mode by matching the provider title: one containing `vip gold`
+gets `structured-id`, one containing `kal` gets `prose-complete`. "NYAKALLO MILLIONS VIP GOLD NASDAQ"
+matched the first, so a prose channel with no order ids was being held under
+`EVIDENCE_STRUCTURED_OPEN_EVIDENCE_REQUIRED` and could never have auto-traded. Setting `openEvidence`
+explicitly on the provider overrides it. Any new provider whose title contains those substrings hits
+the same trap.
 
-- `probeStoredSession` restores an authorized session at boot and promotes the row to `CONNECTED`
-  before the UI asks. It reuses the adapter's epoch, restore-admission and publication machinery
-  rather than dialling beside it, and never downgrades an already-`CONNECTED` row. Audited as
-  `telegram.session.restored`.
-- **The bound is the part to review.** Gating ingestion on the restore is a regression hazard, because
-  `connect()` runs with `connectionRetries` at `POSITIVE_INFINITY` and restore admission waits on open
-  teardowns with no deadline. An unbounded wait would hold ingestion shut for the process lifetime on
-  one wedged session, which is strictly worse than the bug being fixed. It is therefore bounded twice:
-  each probe runs under the RPC timeout, and the ingestion gate is a deadline, not a handle. Pinned by
-  `a stored-session probe that never settles cannot hold the ingestion gate shut`, mutation-checked to
-  fail with `this test timed out after 5000ms` when either bound is removed.
-- `startTelegramSession` reuses the existing session and profile for a phone number instead of minting
-  new ones. This is what keeps provider bindings attached.
-- Legacy adoption no longer bails when the session directory holds more than one `.json`; it takes the
-  newest, which is safe because the login path validates it against the requested phone.
-- The web client uses the default 15s status timeout, retries on failure with 1s/2s/4s/8s backoff
-  while staying in `checking`, and on exhaustion shows a "cannot reach the server" panel with a retry
-  instead of the phone form. A stale `telegram-tc.pending-auth` key no longer renders the code form
-  before the server has confirmed anything.
+### The boot-time session restore works in production
+
+`telegram.session.restored` for `tg_epuJC69Dpl` was audited at 2026-08-24T14:39:31Z, and the app came
+back after a container swap `connected: true` with no login prompt. That is PR #26 verified against
+real Telegram, not just tests.
 
 ### The app being slow is NOT the auth path — measure before changing anything
 
@@ -355,19 +338,9 @@ Background jobs still running: none.
 
 ### Blockers and open items
 
-- **A newly added channel cannot be polled at all. Open bug, top of the list.** Enabling NYAKALLO
-  produced `Could not find the input entity for {"channelId":"3377857085","className":"PeerChannel"}`
-  about 12 times a minute, forever, and it never ingested a live message while the channel was
-  actively posting. teleproto needs an `access_hash` to build an `InputPeer`, and a channel added
-  after the session was created is not in the session's entity state. The two original providers are
-  unaffected because they have been resolved in that session for months.
-  `POST /api/providers/:id/import-messages` works only because it calls `await
-  telegram.listDialogs(sessionId)` immediately before fetching; the ingestion loop has no such
-  warm-up. **Calling `/api/telegram/dialogs` out of band does NOT fix it** — tried, succeeded in 7.8s,
-  errors continued at the same rate. Mitigated by disabling the provider, which cleared the errors
-  within one poll cycle and returned health to `ok`. Fix direction, untried: warm the entity once per
-  provider per process inside the ingestion path, or persist the channel's `access_hash` at provider
-  creation and build the `InputPeerChannel` directly.
+- **NYAKALLO VIP is disabled because the account no longer has access to the channel.** Not a code
+  bug; rejoin or resubscribe, confirm it reappears in `GET /api/telegram/dialogs`, then re-enable.
+  v1.67.2 makes the failure legible and backs off rather than flooding.
 - **The dashboard payload is unfixed and has grown to 742 KB** (was 632 KB before NYAKALLO's 885
   parsed signals landed). It is the actual cause of the app feeling slow, and it scales with history,
   which is the whole point. See the measurement section above. Highest-value remaining work.
