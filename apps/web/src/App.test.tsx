@@ -690,6 +690,72 @@ describe("App dashboard", () => {
     await view.findByRole("heading", { level: 1, name: "Operations" });
   });
 
+  test("keeps a stale pending-auth marker in checking until status confirms it", () => {
+    localStorage.setItem(
+      "telegram-tc.pending-auth",
+      JSON.stringify({
+        phone: "+27821234567",
+        sessionId: "stale-session",
+        profileId: "stale-profile",
+      }),
+    );
+    try {
+      const view = render(<App />);
+      expect(view.getByRole("heading", { name: "Checking Telegram session" })).toBeTruthy();
+      expect(view.queryByRole("heading", { name: "Enter the verification code" })).toBeNull();
+      expect(view.queryByLabelText("Telegram code")).toBeNull();
+    } finally {
+      localStorage.clear();
+    }
+  });
+
+  test("retries status transport failures without showing phone login and offers retry", async () => {
+    const source = await Bun.file(new URL("./App.tsx", import.meta.url)).text();
+    expect(source).not.toContain("timeoutMs: 5_000");
+
+    const disconnectedSnapshot = { ...snapshot, telegramSessions: [] };
+    let statusCalls = 0;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url) === "/api/telegram/status") {
+        statusCalls += 1;
+        if (statusCalls < 6) throw new Error("server unavailable");
+        return Response.json({
+          connected: true,
+          telegramAdapter: "mock",
+          telegramSessions: snapshot.telegramSessions,
+        });
+      }
+      return Response.json(disconnectedSnapshot);
+    }) as typeof fetch;
+
+    const originalSetTimeout = window.setTimeout;
+    window.setTimeout = ((handler: TimerHandler, ...args: unknown[]) => {
+      if (typeof handler === "function") {
+        queueMicrotask(() => handler(...args));
+      }
+      return 0;
+    }) as typeof window.setTimeout;
+    let view: ReturnType<typeof render>;
+    try {
+      view = render(<App />);
+      await act(async () => {
+        for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+      });
+    } finally {
+      window.setTimeout = originalSetTimeout;
+    }
+
+    expect(statusCalls).toBe(5);
+    expect(view!.getByRole("heading", { name: "Cannot reach the server" })).toBeTruthy();
+    expect(view!.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(view!.queryByLabelText("Phone number")).toBeNull();
+    expect(view!.queryByRole("heading", { name: "Sign in to Telegram" })).toBeNull();
+
+    fireEvent.click(view!.getByRole("button", { name: "Retry" }));
+    await view!.findByRole("heading", { level: 1, name: "Operations" });
+    expect(statusCalls).toBe(6);
+  });
+
   test("secondary routes do not repeat the account summary", () => {
     const view = render(<App initialSnapshot={snapshot} />);
 

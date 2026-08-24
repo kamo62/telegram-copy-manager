@@ -1086,7 +1086,7 @@ describe("Telegram TC API", () => {
     const second = await json<{ profileId: string; sessionId: string }>(
       await app.request("/api/telegram/start", {
         method: "POST",
-        body: JSON.stringify({ apiId: "12345", apiHash: "hash", phone: "+27821234567" }),
+        body: JSON.stringify({ apiId: "12345", apiHash: "hash", phone: "+27821111111" }),
         headers: { "content-type": "application/json" },
       }),
     );
@@ -6403,7 +6403,7 @@ describe("Telegram TC API", () => {
     const secondSession = await json<{ profileId: string; sessionId: string }>(
       await app.request("/api/telegram/start", {
         method: "POST",
-        body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27820000000" }),
+        body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27821111111" }),
         headers: { "content-type": "application/json" },
       }),
     );
@@ -6587,7 +6587,7 @@ describe("Telegram TC API", () => {
     const secondSession = await json<{ profileId: string; sessionId: string }>(
       await app.request("/api/telegram/start", {
         method: "POST",
-        body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27820000000" }),
+        body: JSON.stringify({ apiId: "12345", apiHash: "secret", phone: "+27821111111" }),
         headers: { "content-type": "application/json" },
       }),
     );

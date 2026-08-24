@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Logger } from "teleproto";
 import type { Session } from "teleproto/sessions";
@@ -70,6 +70,11 @@ export interface TelegramLoginStartInput {
 
 export interface TelegramAdapter {
   name: string;
+  probeStoredSession?(
+    sessionId: string,
+    apiId: string,
+    apiHash: string,
+  ): Promise<"CONNECTED" | "DISCONNECTED">;
   startLogin(input: TelegramLoginStartInput): Promise<{
     status: TelegramSessionStatus;
     isCodeViaApp?: boolean;
@@ -238,6 +243,10 @@ export function createTelegramAdapter(
 
 class MockTelegramAdapter implements TelegramAdapter {
   name = "mock";
+
+  async probeStoredSession() {
+    return "DISCONNECTED" as const;
+  }
 
   async startLogin() {
     return { status: "CODE_REQUIRED" as const, isCodeViaApp: true };
@@ -601,6 +610,42 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
       if (this.#sessionMoved(input.appSessionId, epoch)) {
         throw new Error(LOGIN_CANCELLED_MESSAGE);
       }
+      throw error;
+    }
+  }
+
+  async probeStoredSession(sessionId: string, apiId: string, apiHash: string) {
+    const published = await this.#publishedClient(sessionId);
+    if (published) {
+      return (await published.isUserAuthorized()) ? "CONNECTED" : "DISCONNECTED";
+    }
+
+    const epoch = await this.#admitRestore(sessionId);
+    const successor = await this.#publishedClient(sessionId);
+    if (successor) {
+      return (await successor.isUserAuthorized()) ? "CONNECTED" : "DISCONNECTED";
+    }
+
+    const sessionString = await this.#readSession(sessionId, epoch, false);
+    if (!sessionString) return "DISCONNECTED";
+
+    const client = await this.#createClientFor(sessionString, Number(apiId), apiHash);
+    try {
+      await client.connect();
+      const authorized = await client.isUserAuthorized();
+      if (!authorized) {
+        await client.disconnect().catch(() => undefined);
+        return "DISCONNECTED";
+      }
+      if (this.#sessionMoved(sessionId, epoch)) throw new Error(SESSION_RETIRED_MESSAGE);
+      // Load-bearing ordering: nothing may await between this check and the
+      // clients.set/trackClient publication, so disconnect() cannot miss this client.
+      this.#clients.set(sessionId, client);
+      this.#trackClient(sessionId, client);
+      this.markContact(sessionId);
+      return "CONNECTED";
+    } catch (error) {
+      await client.disconnect().catch(() => undefined);
       throw error;
     }
   }
@@ -986,11 +1031,11 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
   // `<sessionId>.json`, so both of these are a way to put a session file back for
   // an id a disconnect has already cleared, and an optional parameter is how the
   // polling path came to reach them with no guard at all.
-  async #readSession(sessionId: string, epoch: number) {
+  async #readSession(sessionId: string, epoch: number, allowImport = true) {
     try {
       return await readFile(join(this.#sessionDir, `${sessionId}.json`), "utf8");
     } catch {
-      return await this.#importExistingSession(sessionId, epoch);
+      return allowImport ? await this.#importExistingSession(sessionId, epoch) : "";
     }
   }
 
@@ -1006,8 +1051,16 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
 
     try {
       const files = (await readdir(this.#sessionDir)).filter((file) => file.endsWith(".json"));
-      if (files.length !== 1) return "";
-      const sessionString = (await readFile(join(this.#sessionDir, files[0]!), "utf8")).trim();
+      const newest = (
+        await Promise.all(
+          files.map(async (file) => ({
+            file,
+            mtimeMs: (await stat(join(this.#sessionDir, file))).mtimeMs,
+          })),
+        )
+      ).sort((a, b) => b.mtimeMs - a.mtimeMs || b.file.localeCompare(a.file))[0]?.file;
+      if (!newest) return "";
+      const sessionString = (await readFile(join(this.#sessionDir, newest), "utf8")).trim();
       await this.#writeSession(sessionId, sessionString, epoch);
       return sessionString;
     } catch {
@@ -1164,6 +1217,6 @@ export function demoMessages(): TelegramCapturedMessage[] {
   }));
 }
 
-function normalizePhone(phone: string) {
+export function normalizePhone(phone: string) {
   return phone.replace(/\D/g, "").replace(/^00/, "");
 }

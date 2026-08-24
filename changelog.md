@@ -1,5 +1,47 @@
 # Changelog
 
+## 1.67.1 - 2026-08-24 (Patch)
+
+Release impact: Patch. API and web only. No database schema change, no API contract change, no parser
+change and no EA protocol change, so no live terminal needs a recompile or reattach. Nothing in the
+deployment or environment changes.
+
+Fixes the app demanding a fresh Telegram login on startup while a perfectly good session sat on disk,
+and stops each spurious prompt leaking an orphan profile. Production had accumulated five profiles and
+five sessions for one phone number, only one of which owned any providers, so completing one of those
+logins would have produced a connected session with zero channels attached.
+
+- **Stored sessions are now restored at boot.** `probeStoredSession` reads the saved session, connects
+  and calls `isUserAuthorized()`, and a session that comes back authorized is promoted to `CONNECTED`
+  before the UI ever asks. It reuses the adapter's existing epoch, restore-admission and client
+  publication machinery rather than dialling beside it, so it cannot race a concurrent disconnect or
+  login, and it never downgrades a row that is already `CONNECTED`. Restoration is audited as
+  `telegram.session.restored`.
+- **The restore is bounded in two places, deliberately.** Each probe runs under the Telegram RPC
+  timeout, and the ingestion loop waits on a deadline rather than on the restore itself. `connect()`
+  runs with `connectionRetries` at `POSITIVE_INFINITY` and restore admission waits on open teardowns
+  without a deadline, so an unbounded wait here would have held ingestion shut for the lifetime of the
+  process on a single wedged session. Missing a restore costs one skipped pass; blocking on it would
+  cost every signal until the next restart.
+- **A login no longer mints a fresh profile every time.** `startTelegramSession` reuses the existing
+  session and profile for a phone number, preferring a `CONNECTED` row and otherwise the most recently
+  updated one, and only creates a new profile when that phone has never been seen. This is what keeps
+  the provider bindings attached.
+- **Legacy session adoption works again.** It previously gave up unless the session directory held
+  exactly one `.json`, and adoption itself writes a second file, so the fallback disabled itself
+  permanently after first use. It now adopts the most recently modified file, which is safe because
+  the login path immediately validates the adopted session against the requested phone and discards a
+  mismatch.
+- **The web client no longer reads "slow" as "logged out".** The status fetch used a 5s timeout
+  against a 15s default and its error path fell through to the login form, so ordinary load on the
+  box was indistinguishable from being unauthenticated. It now uses the default timeout, retries on
+  failure with 1s/2s/4s/8s backoff while staying in the checking state, and on exhaustion shows a
+  distinct "cannot reach the server" panel with a retry action that explicitly does not present the
+  phone-number form.
+- **A stale `telegram-tc.pending-auth` key no longer renders the code form.** The phone-code step was
+  seeded synchronously from local storage before any network call; it is now entered only after a
+  status response confirms that session is genuinely awaiting a code or password.
+
 ## 1.67.0 - 2026-08-02 (Minor)
 
 Release impact: Minor because EA behaviour changed. This release requires an EA recompile and

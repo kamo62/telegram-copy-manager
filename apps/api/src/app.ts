@@ -41,6 +41,7 @@ import {
   createTelegramAdapter,
   demoDialogs,
   demoMessages,
+  normalizePhone,
   type TelegramAdapter,
   type TelegramCapturedMessage,
   type TelegramDialog,
@@ -375,6 +376,36 @@ export function archiveStaticAssets(
   return { archived, pruned: pruned.length, retained: archivedEntries.length - pruned.length };
 }
 
+async function restoreTelegramSessions(
+  store: AppStore,
+  telegram: TelegramAdapter,
+  timeoutMs: number,
+) {
+  const apiId = process.env.TELEGRAM_API_ID;
+  const apiHash = process.env.TELEGRAM_API_HASH;
+  const probe = telegram.probeStoredSession;
+  if (!apiId || !apiHash || !probe) return;
+
+  for (const session of store.telegramSessionSummaries()) {
+    try {
+      // Bounded deliberately. probeStoredSession dials with connectionRetries at
+      // POSITIVE_INFINITY and #admitRestore waits on open teardowns with no
+      // deadline, so an unbounded await here would hold the ingestion gate shut
+      // for the lifetime of the process on a single wedged session.
+      const status = await withTelegramRpcTimeout(
+        probe.call(telegram, session.id, apiId, apiHash),
+        timeoutMs,
+      );
+      if (status === "CONNECTED") store.restoreTelegramSession(session.id);
+    } catch (error) {
+      log("error", "telegram.session.restore.failed", {
+        sessionId: session.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
 export function createApi(options: ApiOptions = {}) {
   const shouldSeedDemoData = options.seedDemoData ?? process.env.SEED_DEMO_DATA === "true";
   const effectiveTelegramRpcTimeoutMs = telegramRpcTimeoutMs(options.telegramRpcTimeoutMs);
@@ -392,6 +423,29 @@ export function createApi(options: ApiOptions = {}) {
     store.seedDemoData();
   }
   store.refreshTelegramIngestionExpectations();
+  const telegramRestoreRun = restoreTelegramSessions(
+    store,
+    telegram,
+    effectiveTelegramRpcTimeoutMs,
+  ).catch((error) => {
+    log("error", "telegram.session.restore.failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+  // The ingestion loop waits on this, so it is a deadline and not just a
+  // handle: restore keeps running in the background, but ingestion starts
+  // regardless once the budget expires. Missing the restore costs one skipped
+  // pass, while blocking on it costs every signal until the next restart.
+  // The ingestion loop waits on this, so it is a deadline and not just a
+  // handle: restore keeps running in the background, but ingestion starts
+  // regardless once the budget expires. Missing the restore costs one skipped
+  // pass, while blocking on it costs every signal until the next restart.
+  const telegramRestore = Promise.race([
+    telegramRestoreRun,
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, effectiveTelegramRpcTimeoutMs).unref?.();
+    }),
+  ]);
 
   const app = new Hono();
   app.use("/api/*", cors());
@@ -1210,6 +1264,7 @@ export function createApi(options: ApiOptions = {}) {
       (process.env.NODE_ENV !== "test" && options.databasePath !== ":memory:"),
     intervalMs: options.telegramPollingIntervalMs,
     rpcTimeoutMs: effectiveTelegramRpcTimeoutMs,
+    ready: telegramRestore,
   });
 
   return Object.assign(app, ingestion);
@@ -1270,7 +1325,12 @@ function pickOlderIso(a: unknown, b: unknown): string | undefined {
 function createTelegramIngestionLoop(
   store: AppStore,
   telegram: TelegramAdapter,
-  options: { enabled: boolean; intervalMs?: number; rpcTimeoutMs?: number },
+  options: {
+    enabled: boolean;
+    intervalMs?: number;
+    rpcTimeoutMs?: number;
+    ready?: Promise<void>;
+  },
 ) {
   let activeRun: Promise<TelegramIngestionResult> | undefined;
   const runTelegramIngestionOnce = async (): Promise<TelegramIngestionResult> => {
@@ -1286,11 +1346,16 @@ function createTelegramIngestionLoop(
         skipped: true,
       };
     }
-    activeRun = store
-      .ingestEnabledProviders(telegram, 50, telegramRpcTimeoutMs(options.rpcTimeoutMs))
-      .finally(() => {
-        activeRun = undefined;
-      });
+    activeRun = (async () => {
+      await options.ready;
+      return await store.ingestEnabledProviders(
+        telegram,
+        50,
+        telegramRpcTimeoutMs(options.rpcTimeoutMs),
+      );
+    })().finally(() => {
+      activeRun = undefined;
+    });
     return activeRun;
   };
   const intervalMs =
@@ -1693,9 +1758,44 @@ class AppStore {
   }
 
   startTelegramSession(input: { apiId: string; apiHash: string; phone: string }) {
+    const now = nowIso();
+    const normalizedPhone = normalizePhone(input.phone);
+    const existing = (
+      this.db
+        .query("SELECT id, profile_id, phone, status, updated_at FROM telegram_sessions")
+        .all() as Row[]
+    )
+      .filter((row) => normalizePhone(String(row.phone)) === normalizedPhone)
+      .sort((a, b) => {
+        const connectedRank = (row: Row) => (String(row.status) === "CONNECTED" ? 0 : 1);
+        return (
+          connectedRank(a) - connectedRank(b) ||
+          String(b.updated_at).localeCompare(String(a.updated_at)) ||
+          String(b.id).localeCompare(String(a.id))
+        );
+      })[0];
+
+    if (existing) {
+      this.db
+        .query(
+          "UPDATE telegram_sessions SET phone = ?, api_id_hint = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(input.phone, hashHint(input.apiId), now, String(existing.id));
+      this.audit("telegram.start", "info", "Telegram login code requested", {
+        profileId: String(existing.profile_id),
+        phone: maskPhone(input.phone),
+        sessionId: String(existing.id),
+        reused: true,
+      });
+      return {
+        profileId: String(existing.profile_id),
+        sessionId: String(existing.id),
+        status: String(existing.status) as TelegramSessionStatus,
+      };
+    }
+
     const profileId = `profile_${nanoid(10)}`;
     const sessionId = `tg_${nanoid(10)}`;
-    const now = nowIso();
     this.db
       .query("INSERT INTO profiles (id, display_name, created_at) VALUES (?, ?, ?)")
       .run(profileId, `Telegram ${maskPhone(input.phone)}`, now);
@@ -1741,6 +1841,20 @@ class AppStore {
       phone: maskPhone(String(session.phone)),
       status,
     };
+  }
+
+  restoreTelegramSession(sessionId: string) {
+    const session = this.db
+      .query("SELECT status FROM telegram_sessions WHERE id = ?")
+      .get(sessionId) as Row | null;
+    if (!session) return false;
+    if (String(session.status) !== "CONNECTED") {
+      this.updateTelegramSession(sessionId, "CONNECTED");
+    }
+    this.audit("telegram.session.restored", "info", "Telegram session restored from disk", {
+      sessionId,
+    });
+    return true;
   }
 
   dialogs(_profileId?: string): TelegramDialog[] {

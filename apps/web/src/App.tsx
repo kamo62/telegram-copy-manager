@@ -396,6 +396,7 @@ export interface ClosedTradeRow {
 export type { TelegramDialogSummary };
 
 const telegramAuthStorageKey = "telegram-tc.pending-auth";
+const TELEGRAM_STATUS_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000] as const;
 
 const emptySnapshot: DashboardSnapshot = {
   health: { status: "loading", database: "loading", telegramAdapter: "mock" },
@@ -761,12 +762,11 @@ export function App({
   const [setupStep, setSetupStep] = useState<SetupStep>(
     initialSnapshot?.telegramSessions.some((session) => session.status === "CONNECTED")
       ? "connected"
-      : initialPendingAuth.sessionId
-        ? "code"
-        : initialSnapshot
-          ? "credentials"
-          : "checking",
+      : initialSnapshot
+        ? "credentials"
+        : "checking",
   );
+  const [telegramStatusRetry, setTelegramStatusRetry] = useState(0);
   const [form, setForm] = useState<SetupFormState>({
     ...emptySetupForm(),
     ...initialPendingAuth,
@@ -940,61 +940,77 @@ export function App({
     void refreshHeldItems().catch(() => undefined);
   }, [refreshHeldItems, telegramConnected]);
 
+  const retryTelegramStatus = useCallback(() => {
+    setSetupError("");
+    setSetupStep("checking");
+    setTelegramStatusRetry((current) => current + 1);
+  }, []);
+
   useEffect(() => {
     if (initialSnapshot) return;
     let active = true;
     async function loadTelegramStatus() {
-      try {
-        const data = await apiGet<TelegramStatusSnapshot>("/api/telegram/status", {
-          timeoutMs: 5_000,
-        });
-        if (!active) return;
-        setSnapshot((current) => ({
-          ...current,
-          health: {
-            ...current.health,
-            telegramAdapter: data.telegramAdapter || current.health.telegramAdapter,
-          },
-          telegramSessions: data.telegramSessions,
-        }));
-        if (
-          data.connected ||
-          data.telegramSessions.some((session) => session.status === "CONNECTED")
-        ) {
-          setSetupStep("connected");
-          clearPendingAuth();
-          return;
-        }
-        const storedPending = readPendingAuth();
-        const pending = storedPending.sessionId
-          ? data.telegramSessions.find(
-              (session) =>
-                session.id === storedPending.sessionId &&
-                (session.status === "CODE_REQUIRED" || session.status === "PASSWORD_REQUIRED"),
-            )
-          : undefined;
-        if (pending) {
-          setForm((current) => ({
-            ...current,
-            phone: storedPending.phone ?? pending.phone,
-            sessionId: pending.id,
-            profileId: pending.profileId ?? "",
-          }));
-          setSetupStep(pending.status === "PASSWORD_REQUIRED" ? "password" : "code");
-          return;
-        }
-        setSetupStep((current) => (current === "checking" ? "credentials" : current));
-      } catch {
-        if (active) {
-          setSetupStep((current) => (current === "checking" ? "credentials" : current));
+      let data: TelegramStatusSnapshot | undefined;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          data = await apiGet<TelegramStatusSnapshot>("/api/telegram/status");
+          break;
+        } catch {
+          const delay = TELEGRAM_STATUS_RETRY_DELAYS_MS[attempt];
+          if (delay === undefined) {
+            if (active) {
+              setSetupError("");
+              setSetupStep("unavailable");
+            }
+            return;
+          }
+          await new Promise((resolve) => window.setTimeout(resolve, delay));
+          if (!active) return;
         }
       }
+      if (!active || !data) return;
+      setSetupError("");
+      setSnapshot((current) => ({
+        ...current,
+        health: {
+          ...current.health,
+          telegramAdapter: data.telegramAdapter || current.health.telegramAdapter,
+        },
+        telegramSessions: data.telegramSessions,
+      }));
+      if (
+        data.connected ||
+        data.telegramSessions.some((session) => session.status === "CONNECTED")
+      ) {
+        setSetupStep("connected");
+        clearPendingAuth();
+        return;
+      }
+      const storedPending = readPendingAuth();
+      const pending = storedPending.sessionId
+        ? data.telegramSessions.find(
+            (session) =>
+              session.id === storedPending.sessionId &&
+              (session.status === "CODE_REQUIRED" || session.status === "PASSWORD_REQUIRED"),
+          )
+        : undefined;
+      if (pending) {
+        setForm((current) => ({
+          ...current,
+          phone: storedPending.phone ?? pending.phone,
+          sessionId: pending.id,
+          profileId: pending.profileId ?? "",
+        }));
+        setSetupStep(pending.status === "PASSWORD_REQUIRED" ? "password" : "code");
+        return;
+      }
+      setSetupStep((current) => (current === "checking" ? "credentials" : current));
     }
     void loadTelegramStatus();
     return () => {
       active = false;
     };
-  }, [initialSnapshot]);
+  }, [initialSnapshot, telegramStatusRetry]);
 
   useEffect(() => {
     const hasConnectedSession = snapshot.telegramSessions.some(
@@ -1013,16 +1029,20 @@ export function App({
             (session.status === "CODE_REQUIRED" || session.status === "PASSWORD_REQUIRED"),
         )
       : undefined;
-    if (pending && !form.sessionId) {
-      setForm((current) => ({
-        ...current,
-        phone: storedPending.phone ?? pending.phone,
-        sessionId: pending.id,
-        profileId: pending.profileId ?? "",
-      }));
-      setSetupStep(pending.status === "PASSWORD_REQUIRED" ? "password" : "code");
+    if (pending) {
+      if (!form.sessionId) {
+        setForm((current) => ({
+          ...current,
+          phone: storedPending.phone ?? pending.phone,
+          sessionId: pending.id,
+          profileId: pending.profileId ?? "",
+        }));
+      }
+      if (setupStep === "checking" || setupStep === "credentials" || setupStep === "unavailable") {
+        setSetupStep(pending.status === "PASSWORD_REQUIRED" ? "password" : "code");
+      }
     }
-  }, [form.sessionId, snapshot.telegramSessions]);
+  }, [form.sessionId, setupStep, snapshot.telegramSessions]);
 
   // Guard: a URL pointing at a deleted/unknown account falls back to the overview.
   useEffect(() => {
@@ -2119,6 +2139,7 @@ export function App({
         busy={setupBusy}
         error={setupError}
         onReset={resetTelegramConnection}
+        onRetry={retryTelegramStatus}
         setForm={setForm}
         setupStep={displayedSetupStep}
         startTelegramConnection={startTelegramConnection}
@@ -2299,6 +2320,7 @@ export function App({
                   busy={setupBusy}
                   error={setupError}
                   onReset={resetTelegramConnection}
+                  onRetry={retryTelegramStatus}
                   setForm={setForm}
                   setupStep={setupStep}
                   startTelegramConnection={startTelegramConnection}

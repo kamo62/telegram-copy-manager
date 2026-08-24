@@ -13,6 +13,7 @@ export function TelegramSetupPage({
   submitCode,
   submitPassword,
   onReset,
+  onRetry,
   dialogs,
   onRefreshDialogs,
   onResyncProviders,
@@ -29,6 +30,7 @@ export function TelegramSetupPage({
   submitCode: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
   submitPassword: (event: React.FormEvent<HTMLFormElement>) => Promise<void>;
   onReset: () => Promise<void>;
+  onRetry?: () => void;
   dialogs: TelegramDialogSummary[];
   onRefreshDialogs: () => Promise<void>;
   onResyncProviders?: () => Promise<void>;
@@ -56,6 +58,7 @@ export function TelegramSetupPage({
         busy={busy}
         error={error}
         onReset={onReset}
+        onRetry={onRetry}
         setForm={setForm}
         setupStep={setupStep}
         startTelegramConnection={startTelegramConnection}
