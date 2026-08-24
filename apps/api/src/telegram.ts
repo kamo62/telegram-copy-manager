@@ -116,6 +116,22 @@ export class TelegramRpcTimeoutError extends Error {
   }
 }
 
+// Raised when a provider's dialog is absent from the account's own dialog list.
+// That is an access problem, not a transport problem: the account has left the
+// channel, been removed, or the channel is gone. Retrying cannot recover it, so
+// it is a distinct type the ingestion loop can back off on.
+export class TelegramDialogUnavailableError extends Error {
+  readonly dialogId: string;
+
+  constructor(dialogId: string) {
+    super(
+      `Telegram dialog ${dialogId} is not in this account's dialog list, so the account has left the channel or lost access to it`,
+    );
+    this.name = "TelegramDialogUnavailableError";
+    this.dialogId = dialogId;
+  }
+}
+
 // The client must keep trying after a network blip. Keep this helper exported
 // for the existing resilience tests, while refusing finite overrides that can
 // silently stop live signal capture.
@@ -918,7 +934,14 @@ class TeleprotoTelegramAdapter implements TelegramAdapter {
         dialog.entity ?? dialog.inputEntity ?? dialog,
       );
     }
-    return this.dialogEntities.get(key) ?? dialogId;
+    const resolved = this.dialogEntities.get(key);
+    if (resolved) return resolved;
+    // Falling back to the bare id used to hand iterMessages a PeerChannel with no
+    // access hash, which fails inside teleproto as "Could not find the input entity"
+    // — once per poll, forever, naming a numeric channel id and nothing else. The
+    // account is simply not in that dialog any more, so say so and let the caller
+    // back off instead of rediscovering it every two seconds.
+    throw new TelegramDialogUnavailableError(dialogId);
   }
 
   async #connectedClient(sessionId: string) {

@@ -295,6 +295,35 @@ describe("Telegram stored-session recovery", () => {
     }
   });
 
+  test("a dialog missing from the account's list is named, not passed to teleproto as a bare id", async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), "telegram-missing-dialog-"));
+    try {
+      await writeFile(join(sessionDir, "tg-stored.json"), "stored-session");
+      process.env.TELEGRAM_API_ID = "12345";
+      process.env.TELEGRAM_API_HASH = "hash";
+      const restored = probeClient(true);
+      const iterCalls: unknown[] = [];
+      restored.client.getDialogs = async () => [];
+      restored.client.iterMessages = async function* (entity: unknown) {
+        iterCalls.push(entity);
+        yield* [];
+      };
+      const adapter = createTelegramAdapter("gramjs", {
+        sessionDir,
+        createClient: async () => restored.client,
+      });
+
+      await expect(adapter.fetchRecentMessages("tg-stored", "-1003377857085", 10)).rejects.toThrow(
+        /not in this account's dialog list/,
+      );
+      // The old fallback handed iterMessages the raw id, which teleproto turned into
+      // a PeerChannel with no access hash and rejected with an opaque entity error.
+      expect(iterCalls).toHaveLength(0);
+    } finally {
+      await rm(sessionDir, { recursive: true, force: true });
+    }
+  });
+
   test("a stored-session probe that never settles cannot hold the ingestion gate shut", async () => {
     const databasePath = join(await mkdtemp(join(tmpdir(), "telegram-gate-db-")), "test.db");
     try {

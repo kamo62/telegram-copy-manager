@@ -45,6 +45,7 @@ import {
   type TelegramAdapter,
   type TelegramCapturedMessage,
   type TelegramDialog,
+  TelegramDialogUnavailableError,
   type TelegramFetchGap,
   TelegramRpcTimeoutError,
   type TelegramSessionHealth,
@@ -251,6 +252,10 @@ const fallbackAccountId = process.env.DEFAULT_MT5_ACCOUNT_ID ?? demoAccountId;
 const MAX_PROVIDER_TP_LEVELS = 4;
 const PROVIDER_UNCONFIGURED_TP_WARNING_PREFIX = "Provider TP configuration has no leg";
 const REFERENCE_PRICE_MAX_AGE_SECONDS = 60;
+// How long to leave a provider alone after its channel proved unreachable. Long
+// enough that a lapsed subscription stops costing a poll every few seconds, short
+// enough that rejoining the channel recovers without a restart.
+const DIALOG_UNAVAILABLE_RETRY_MS = 15 * 60 * 1000;
 
 const defaultAppSettings: AppSettings = {
   defaultLotSize: 0.1,
@@ -1671,6 +1676,11 @@ class AppStore {
   // Telegram session" state, so we log once per offline→online edge instead
   // of once per poll. Reset when a session connects.
   private readonly providersWithoutSession = new Set<string>();
+  // Provider id -> epoch ms before which ingestion should not retry, set when the
+  // provider's channel is unreachable. Without it a lost channel is retried on
+  // every poll tick, which on the live box meant an error-level audit row roughly
+  // every five seconds indefinitely.
+  private readonly providerDialogRetryAfter = new Map<string, number>();
   // Last known Telegram session health per session id, recorded by the capture
   // loop and surfaced in the dashboard so a silent stall is visible.
   private readonly telegramHealth = new Map<string, TelegramSessionHealth>();
@@ -3032,6 +3042,10 @@ class AppStore {
     }
 
     this.providersWithoutSession.delete(provider.id);
+
+    const retryAfter = this.providerDialogRetryAfter.get(provider.id);
+    if (retryAfter !== undefined && Date.now() < retryAfter) return result;
+
     let recordedHealth = false;
     try {
       const startedAt = Date.now();
@@ -3090,6 +3104,9 @@ class AppStore {
         }),
         rpcTimeoutMs,
       );
+      // Reachable again, so drop any back-off left from a previous outage and let
+      // the next unreachable stretch alert afresh.
+      this.providerDialogRetryAfter.delete(provider.id);
       capturePass(live.messages);
       if (live.gap) recordGap(live.gap, originalLastMessageAt);
 
@@ -3207,6 +3224,39 @@ class AppStore {
       }
     } catch (error) {
       result.errors += 1;
+      if (error instanceof TelegramDialogUnavailableError) {
+        // Audited once per back-off window, not once per poll. Retrying cannot fix
+        // an account that is no longer in the channel, and the old behaviour buried
+        // every other event under a repeating teleproto entity error.
+        const alreadyLatched = this.providerDialogRetryAfter.has(provider.id);
+        this.providerDialogRetryAfter.set(provider.id, Date.now() + DIALOG_UNAVAILABLE_RETRY_MS);
+        if (!alreadyLatched) {
+          this.audit(
+            "telegram.provider.unreachable",
+            "error",
+            "Telegram provider channel is no longer reachable from this account",
+            {
+              providerId: provider.id,
+              dialogId: error.dialogId,
+              retryAfterMs: DIALOG_UNAVAILABLE_RETRY_MS,
+              error: error.message,
+            },
+          );
+          log("error", "telegram.provider.unreachable", {
+            providerId: provider.id,
+            dialogId: error.dialogId,
+          });
+          this.dispatchAlert(
+            "telegram-provider-unreachable",
+            provider.id,
+            `Telegram TC can no longer reach ${provider.title}: the account has left the channel or lost access to it.`,
+            "alertOnTelegramStall",
+          );
+        }
+        this.recordProviderHealth(telegram, provider, sessionId, error);
+        return result;
+      }
+      this.providerDialogRetryAfter.delete(provider.id);
       this.audit(
         "telegram.ingest.error",
         error instanceof TelegramRpcTimeoutError ? "warn" : "error",
@@ -4223,25 +4273,19 @@ class AppStore {
                 : {}),
             }
           : undefined;
-        const verdict = providerExecutionConfigRequiresManualReview(targetSignal)
-          ? {
-              verdict: "HOLD" as const,
-              reason: "UNCONFIGURED_TP_LEG_REQUIRES_MANUAL_REVIEW",
-              tier: "action-required" as const,
-            }
-          : evaluateExecutionEvidence({
-              parsedSignal: targetSignal,
-              providerConfig: { openEvidence: targetConfig.openEvidence ?? "prose-complete" },
-              lifecycleResolution,
-              orderIdNovelty: {
-                providerOrderIdNeverSeen: !this.hasDuplicateProviderOrderId(
-                  providerId,
-                  targetAccountId,
-                  targetSignal,
-                ),
-              },
-              forwarded: this.forwardedForParsedSignal(parsedSignalId),
-            });
+        const verdict = evaluateExecutionEvidence({
+          parsedSignal: targetSignal,
+          providerConfig: { openEvidence: targetConfig.openEvidence ?? "prose-complete" },
+          lifecycleResolution,
+          orderIdNovelty: {
+            providerOrderIdNeverSeen: !this.hasDuplicateProviderOrderId(
+              providerId,
+              targetAccountId,
+              targetSignal,
+            ),
+          },
+          forwarded: this.forwardedForParsedSignal(parsedSignalId),
+        });
         return { accountId: targetAccountId, signal: targetSignal, verdict };
       });
       for (const target of evidenceTargets) {
@@ -4429,8 +4473,7 @@ class AppStore {
         }
         if (
           inferred.commandType !== "OPEN_TRADE" ||
-          shouldRequireManualReview(inferred, target.config.parserMode === "aggressive") ||
-          providerExecutionConfigRequiresManualReview(inferred)
+          shouldRequireManualReview(inferred, target.config.parserMode === "aggressive")
         ) {
           return {
             statusCode: 422,
@@ -15307,13 +15350,6 @@ function normalizeTakeProfitStrategy(
 function strategyOffsetPips(value: string) {
   const match = value.match(/([+-]?\s*\d+(?:\.\d+)?)\s*pips?/i);
   return match?.[1] ? Math.max(0, Number(match[1].replace(/\s+/g, "")) || 0) : 0;
-}
-
-function providerExecutionConfigRequiresManualReview(signal: ParsedSignal) {
-  return (
-    signal.commandType === "OPEN_TRADE" &&
-    signal.warnings.some((warning) => warning.startsWith(PROVIDER_UNCONFIGURED_TP_WARNING_PREFIX))
-  );
 }
 
 function applyProviderExecutionConfig(

@@ -1,10 +1,12 @@
 # Changelog
 
-## 1.68.0 - 2026-08-24 (Minor)
+## 1.67.2 - 2026-08-24 (Patch)
 
-Release impact: Minor because parser output changes, which changes what gets executed. No EA protocol
-change, no database schema change and no API contract change, so no live terminal needs a recompile or
-reattach. Nothing in the deployment or environment changes.
+Release impact: Patch. Parser and API only. No EA protocol change, no database schema change and no
+API contract change, so no live terminal needs a recompile or reattach. Nothing in the deployment or
+environment changes. This was first cut as 1.68.0, which was wrong: the `mt5-ea-source` guard pins the
+EA's major.minor line to the app's, so a minor bump asserts an EA rebuild that this release does not
+need and did not ship.
 
 - **Take-profit legs are no longer silently capped at four.** A signal listing five targets returned
   four legs at 25% each with `confidence 0.99`, no warning and nothing in `missingFields`, so the
@@ -34,6 +36,15 @@ leg the provider configuration does not define. Retaining and rescaling those le
 intended behaviour with tests that name it (`retains unconfigured Telegram TP legs instead of silently
 dropping them`), and gating it would have held ordinary traffic. Capturing the extra legs is closer to
 what the provider actually posted, which is the point of the fix above.
+
+Correction, same day: that rejected gate did briefly ship. The 1.68.0 build deployed at 12:44 UTC
+contained it, because a background tool restored its own copy of `app.ts` and `api.test.ts` between the
+green test run and the commit, and the commit was made without re-running the gate on the exact tree
+being staged. Live effect while it was deployed: an `OPEN_TRADE` carrying a take-profit leg the
+provider configuration does not define was held as
+`EVIDENCE_UNCONFIGURED_TP_LEG_REQUIRES_MANUAL_REVIEW` instead of executing. It failed closed, so it
+could only miss trades and never place a wrong one, and no such hold reached a live account. Removed
+here, and both tests that pin the intended behaviour pass again.
 
 ## 1.67.1 - 2026-08-24 (Patch)
 
