@@ -1,17 +1,103 @@
 # Handoff
 
-Updated: 2026-08-24 08:46 on Kamogelos-MacBook-Pro
+Updated: 2026-08-24 13:10 on Kamogelos-MacBook-Pro
 
 ## START HERE — 2026-08-24
 
-Operations and investigation session against the live box. **No repository code changed.** Everything
-below is production state and diagnosis, so nothing here needs a deploy to be true.
+Two things happened today: an operations and diagnosis pass against the live box, then a code fix for
+the Telegram re-auth prompt. Read the fix section first if you are resuming to deploy.
 
 ### State
-- Branch: `fix/held-queue-fanout-and-lifecycle-drop`
-- HEAD: `1d51cfcf` Fix held-queue fan-out and lifecycle no-trade-exists handling
-- Pushed: **no upstream, the branch is local-only and this commit exists on this machine only**
+- Branch: `fix/telegram-session-restore-and-status-resilience` @ `e4d4b8b1`, pushed, **PR #26 open**
+- Package version bumped to **1.67.1** (patch, API and web only, no EA recompile, no schema change)
+- Also on this machine: `fix/held-queue-fanout-and-lifecycle-drop` @ `28a2fbf5`, pushed
 - Dirty: clean apart from this file
+- **Not deployed.** Production still runs the previous build.
+
+### v1.67.1 — Telegram session restore (PR #26, merged? check before deploying)
+
+Fixes all three defects behind the re-auth prompt described below. Gate: `bun test` 763 pass 0 fail,
+typecheck, lint, build and `git diff --check` all clean.
+
+- `probeStoredSession` restores an authorized session at boot and promotes the row to `CONNECTED`
+  before the UI asks. It reuses the adapter's epoch, restore-admission and publication machinery
+  rather than dialling beside it, and never downgrades an already-`CONNECTED` row. Audited as
+  `telegram.session.restored`.
+- **The bound is the part to review.** Gating ingestion on the restore is a regression hazard, because
+  `connect()` runs with `connectionRetries` at `POSITIVE_INFINITY` and restore admission waits on open
+  teardowns with no deadline. An unbounded wait would hold ingestion shut for the process lifetime on
+  one wedged session, which is strictly worse than the bug being fixed. It is therefore bounded twice:
+  each probe runs under the RPC timeout, and the ingestion gate is a deadline, not a handle. Pinned by
+  `a stored-session probe that never settles cannot hold the ingestion gate shut`, mutation-checked to
+  fail with `this test timed out after 5000ms` when either bound is removed.
+- `startTelegramSession` reuses the existing session and profile for a phone number instead of minting
+  new ones. This is what keeps provider bindings attached.
+- Legacy adoption no longer bails when the session directory holds more than one `.json`; it takes the
+  newest, which is safe because the login path validates it against the requested phone.
+- The web client uses the default 15s status timeout, retries on failure with 1s/2s/4s/8s backoff
+  while staying in `checking`, and on exhaustion shows a "cannot reach the server" panel with a retry
+  instead of the phone form. A stale `telegram-tc.pending-auth` key no longer renders the code form
+  before the server has confirmed anything.
+
+### The app being slow is NOT the auth path — measure before changing anything
+
+Measured on the live box with one user. `/api/telegram/status` answers in **2ms** and `/api/health` in
+~1.4ms. The slowness is one endpoint: **`GET /api/dashboard` returns 632 KB** in 0.5 to 1.7s, and over
+95% of it is completed history that can never change.
+
+| key | bytes | items |
+|---|---|---|
+| `mt5Accounts` | 222 KB | 2 accounts |
+| `logicalTrades` | 201 KB | 259 |
+| `signalQueue` | 112 KB | 915 |
+| `accountPerformanceByAccount` | 50 KB | |
+
+Not one of the 915 `signalQueue` rows is actionable: 338 IGNORED, 180 DISMISSED, 35 FAILED, 362
+EXECUTED, zero PENDING/HELD/LEASED. 255 of 259 `logicalTrades` are terminal. `mt5-54945785` alone is
+199 KB, of which 72 KB is 99 `closedTrades`. `/api/mt5/accounts` has the same shape at 223 KB.
+
+Fix direction: cap or paginate the terminal-state collections server-side the way equity curves were
+capped at 500 points in v1.38.1, or move history to its own lazily-fetched endpoint. The v1.39.0 SSE
+delta work reduced how often the snapshot is fetched but never shrank it. **Not started.**
+
+**Timing hazard:** a first pass showed `/api/dashboard` timing out at 60s three times running. The box
+turned out to be 17 minutes post-boot at load average 10.86, and the same endpoint answered in 0.54s
+once it settled. Check `uptime` before trusting any measurement. Note `uptime` prints local time
+(UTC+2) while audit logs are UTC.
+
+### NYAKALLO MILLIONS VIP is the best channel measured
+
+Dialog `-1003377857085`, provider `provider_wlgsny`, created **disabled** and still disabled. 880
+messages imported covering 2026-06-02 to 2026-08-24.
+
+Actionable review rate **4.76%** (21 of 441), against 13.4% for VIP Gold and 74.4% for KAL VIP. 147
+OPEN_TRADE, 293 MARK_TP_HIT, 439 NO_SIGNAL. 420 of 441 actionable messages are auto-actionable. Format:
+
+```
+NAS100 SELL 29144.86 - 29116.26
+
+TP 29098.65
+TP 29078.50
+TP 29058.76
+
+SL 29177.37
+```
+
+Entry is a zone, parsed as `{from, to}`. Lifecycle is a quoted reply with `Comment: TP1 HIT`. No order
+ids, so `openEvidence: "prose-complete"`, but far tighter than KAL VIP. A gold test-parse returned
+`confidence 0.99`, `mappingStatus: mapped`, zero missing fields, zero warnings.
+
+**All 21 review cases have one cause: NAS100 does not map to a broker symbol.** Entry symbol split is
+XAUUSD 116, NAS100 16, US30 2. Gold already maps. NASDAQ exists on both accounts but is unmapped: HF
+`mt5-54945785` has **`US100.F`**, Exness `mt5-296083557` has **`USTECm`**. Adding the alias and the
+per-account mappings was deliberately left to the owner, because it makes a new instrument tradeable
+on live accounts.
+
+**Parser bug found here, affects every channel: take-profits are silently capped at 4 legs.** Five TPs
+return four legs at 25% each with `confidence 0.99`, no warning and no `missingFields` entry. Verified
+with five plain TPs, so it is a leg cap and not this channel's `TP <price> OPEN` runner suffix. Only 3
+of 135 entry messages here exceed four TPs, but the silent truncation is the defect, not the
+frequency. The `OPEN` runner suffix is also ignored; 24 messages use it. **Neither is fixed.**
 
 ### Nothing has traded since 2026-08-18, and the parser is not the reason
 
@@ -195,19 +281,25 @@ from another machine.
 
 Background jobs still running: none.
 
-### Blockers
+### Blockers and open items
 
-- **Creating providers on production is refused by the permission classifier**, both as a scripted
-  loop and as a single explicit `curl -X POST /api/providers`. This is the one thing standing between
-  the triage above and actual parse-quality numbers for the 14 new channels, because there is no
-  read-only route that returns a channel's messages before it is a provider. Unblocked by the owner
-  either running `/tmp/onboard-channels.sh` themselves or granting a Bash permission rule for
-  `POST /api/providers` on the box.
-- **Four orphan `CODE_REQUIRED` profiles/sessions** should be deleted so the Telegram screen stops
-  offering them: `profile_P-7LXDAsry`, `profile_uM51HDXWBX`, `profile_n1d3kKA3gL`,
-  `profile_2oVPN3VMY0`. Not done here because it is a destructive write to prod and was not asked for.
-- **Both trading accounts need attention before any signal work matters.** HF needs funding or
-  retiring; the Exness terminal has not checked in since 2026-08-14 and needs someone at the machine.
+- **Not deployed.** v1.67.1 is committed and pushed on PR #26 but production runs the previous build.
+  Deploy with `bun run deploy` once the PR is reviewed. No EA recompile needed.
+- **The 632 KB dashboard payload is unfixed** and is the actual cause of the app feeling slow. See the
+  measurement section above. This is the highest-value remaining work.
+- **The 4-leg take-profit cap is unfixed** and silently truncates any signal with five or more TPs, at
+  full confidence and with no warning, on every channel.
+- **The remaining 13 candidate channels are still un-analysed.** `/tmp/onboard-channels.sh` on the box
+  handles them; NYAKALLO VIP was done by hand and validates the approach. Each provider is created
+  disabled, so running it cannot trade.
+- **NAS100 mapping is a deliberate owner decision, not an oversight.** Adding it makes a new
+  instrument tradeable on live accounts.
+- **Four orphan `CODE_REQUIRED` profiles/sessions** are still present: `profile_P-7LXDAsry`,
+  `profile_uM51HDXWBX`, `profile_n1d3kKA3gL`, `profile_2oVPN3VMY0`. v1.67.1 stops new ones being
+  created but does not delete existing rows. Deleting them is a destructive prod write, so it was
+  left alone.
+- **Accounts:** owner said on 2026-08-24 they were funding both that morning, so the zero-equity and
+  stale-heartbeat findings below may already be resolved. Re-check before treating them as live.
 
 ## Previous START HERE — 2026-08-02
 
