@@ -1,18 +1,42 @@
 # Handoff
 
-Updated: 2026-08-24 13:10 on Kamogelos-MacBook-Pro
+Updated: 2026-08-24 13:05 on Kamogelos-MacBook-Pro
 
 ## START HERE — 2026-08-24
 
-Two things happened today: an operations and diagnosis pass against the live box, then a code fix for
-the Telegram re-auth prompt. Read the fix section first if you are resuming to deploy.
+An operations and diagnosis pass against the live box, then two code fixes. **Both are merged to
+`main` and neither is deployed.** Deploying is the next action.
 
 ### State
-- Branch: `fix/telegram-session-restore-and-status-resilience` @ `e4d4b8b1`, pushed, **PR #26 open**
-- Package version bumped to **1.67.1** (patch, API and web only, no EA recompile, no schema change)
-- Also on this machine: `fix/held-queue-fanout-and-lifecycle-drop` @ `28a2fbf5`, pushed
-- Dirty: clean apart from this file
-- **Not deployed.** Production still runs the previous build.
+- Branch: `main` @ `78cbdacf`, clean, everything pushed
+- Package version **1.68.0**
+- **PR #26 merged** (v1.67.1): Telegram session restore, stops the spurious re-auth prompt
+- **PR #27 merged** (v1.68.0): take-profit leg cap and index symbol mapping
+- Also pushed: `fix/held-queue-fanout-and-lifecycle-drop` @ `28a2fbf5`, unmerged, separate work
+- **Not deployed.** Production runs the previous build, so neither fix is live yet. No EA recompile
+  needed for either; no schema change and no API contract change.
+
+### v1.68.0 — take-profit leg cap and index symbols (PR #27)
+
+- **Take-profits were silently capped at 4 legs.** Five targets returned four legs at 25% each with
+  `confidence 0.99`, no warning and nothing in `missingFields`. Three separate caps: the labelled-leg
+  regex matched only `TP1`..`TP4`, the dash-separated target-line branch sliced to four, and the final
+  result sliced to four. `MAX_TAKE_PROFIT_LEGS` is now 10 and the alternation is built descending so
+  `TP 10` reads as leg ten. Past the new limit it warns and the warning forces manual review.
+- **Index instruments could not reach either broker.** `NAS100` resolved only to `NAS100`/`USTEC` and
+  their `#`/`.raw`/`.r` forms, so Exness `USTECm` and HF `US100.F` both missed. The `m` suffix was
+  applied to FX and metals but never indices; `.F` appeared nowhere. Both now cover `NAS100`, `US30`,
+  `DJI30`, `SPX500`, `GER40`, `UK100`, `JP225`. `US100` now canonicalises to `NAS100` instead of to
+  itself, which had no broker variants at all.
+- **Exact-string matching is a safety constraint, not a style choice.** Exness lists the leveraged
+  `USTEC_x100m` and `US30_x10m`; matching one would size a trade catastrophically wrong. Do not
+  introduce prefix, suffix or fuzzy matching in the resolution path.
+- **Deliberately not shipped:** forcing review whenever a signal carries a leg the provider config
+  does not define. Retaining and rescaling those legs is intended behaviour with tests naming it
+  (`retains unconfigured Telegram TP legs instead of silently dropping them`). Gating it held ordinary
+  traffic; the attempt failed those tests and was reverted rather than the tests being rewritten.
+
+Gate: 766 pass 0 fail, typecheck, lint, build, `git diff --check` clean.
 
 ### v1.67.1 — Telegram session restore (PR #26, merged? check before deploying)
 
@@ -56,9 +80,23 @@ Not one of the 915 `signalQueue` rows is actionable: 338 IGNORED, 180 DISMISSED,
 EXECUTED, zero PENDING/HELD/LEASED. 255 of 259 `logicalTrades` are terminal. `mt5-54945785` alone is
 199 KB, of which 72 KB is 99 `closedTrades`. `/api/mt5/accounts` has the same shape at 223 KB.
 
-Fix direction: cap or paginate the terminal-state collections server-side the way equity curves were
-capped at 500 points in v1.38.1, or move history to its own lazily-fetched endpoint. The v1.39.0 SSE
-delta work reduced how often the snapshot is fetched but never shrank it. **Not started.**
+**Indexes and views cannot fix this, and that was measured rather than assumed.** Warm,
+`SELECT * FROM queue_items` across all 915 rows takes **3.9ms**; narrowed to live statuses and the
+columns actually needed, **0.3ms**. An earlier 301ms reading was purely a cold page cache on the first
+read after container start. An index speeds up *finding* a subset, but the dashboard issues `SELECT *`
+with no `WHERE`, so there is no subset to narrow and nothing for an index to do. A view is a saved
+query and returns the same rows over the same wire.
+
+The cost is everything after the query: building the JS objects, `JSON.stringify`, transfer, the
+browser's `JSON.parse`, and React re-rendering against the result, on a box at load average 5 to 10
+running a dozen other containers.
+
+Fix direction: add the `WHERE` clause the dashboard is missing so it returns live work rather than 915
+terminal rows (at which point the existing `idx_queue_items_*` indexes finally earn their keep), and
+cap or paginate the terminal-state collections the way equity curves were capped at 500 points in
+v1.38.1, or move history to its own lazily-fetched endpoint. The v1.39.0 SSE delta work reduced how
+often the snapshot is fetched but never shrank it. **Not started.** Minor housekeeping, not the cause:
+the WAL sits at 27MB against a 102MB DB and is never checkpointed.
 
 **Timing hazard:** a first pass showed `/api/dashboard` timing out at 60s three times running. The box
 turned out to be 17 minutes post-boot at load average 10.86, and the same endpoint answered in 0.54s
@@ -281,25 +319,45 @@ from another machine.
 
 Background jobs still running: none.
 
+### Live production state as left on 2026-08-24
+
+- Held queue **empty**, zero `PENDING`/`LEASED` queue items app-wide, `/api/health` reports 3/3
+  providers ready and 0 stalled.
+- **NYAKALLO VIP (`provider_wlgsny`) is ENABLED**, 885 parsed signals, `lot_size` 0.1 (the other two
+  run 0.03).
+- **It has no `account_provider_links` row, which does NOT make it inert.**
+  `targetAccountIdsForProvider` (`app.ts` ~8584) returns `links.length ? [] : [fallback]`, so a
+  provider with links that are all disabled routes nowhere, but a provider with *no link rows at all*
+  falls back to a live account. NYAKALLO is therefore aimed at `mt5-54945785`. Link it deliberately or
+  confirm the fallback is what you want.
+- Enabling it replayed all 880 imported historical messages through the signal path over about five
+  minutes, producing 469 held items against that account. Nothing executed; the evidence gate held or
+  dropped every one and `PENDING`/`LEASED` stayed at zero throughout. All 469 were dismissed. If you
+  onboard the remaining channels, either clear the imported `raw_messages` before enabling or plan for
+  the bulk dismissal.
+
 ### Blockers and open items
 
-- **Not deployed.** v1.67.1 is committed and pushed on PR #26 but production runs the previous build.
-  Deploy with `bun run deploy` once the PR is reviewed. No EA recompile needed.
+- **Neither fix is deployed.** `main` is at v1.68.0; production runs the previous build. Deploy with
+  `bun run deploy`. Until then NYAKALLO's NAS100 signals still hold unmapped.
 - **The 632 KB dashboard payload is unfixed** and is the actual cause of the app feeling slow. See the
-  measurement section above. This is the highest-value remaining work.
-- **The 4-leg take-profit cap is unfixed** and silently truncates any signal with five or more TPs, at
-  full confidence and with no warning, on every channel.
+  measurement section above. Highest-value remaining work.
 - **The remaining 13 candidate channels are still un-analysed.** `/tmp/onboard-channels.sh` on the box
-  handles them; NYAKALLO VIP was done by hand and validates the approach. Each provider is created
-  disabled, so running it cannot trade.
-- **NAS100 mapping is a deliberate owner decision, not an oversight.** Adding it makes a new
-  instrument tradeable on live accounts.
+  handles them; NYAKALLO VIP was done by hand and validates the approach. Read the enabling caveat
+  above before running it.
+- **The `TP <price> OPEN` runner suffix is still ignored.** 24 of NYAKALLO's messages use it to mark a
+  leg as a runner; those legs currently take an ordinary allocation. Not fixed.
 - **Four orphan `CODE_REQUIRED` profiles/sessions** are still present: `profile_P-7LXDAsry`,
   `profile_uM51HDXWBX`, `profile_n1d3kKA3gL`, `profile_2oVPN3VMY0`. v1.67.1 stops new ones being
-  created but does not delete existing rows. Deleting them is a destructive prod write, so it was
-  left alone.
+  created but does not delete existing rows. Deleting them is a destructive prod write, left alone.
 - **Accounts:** owner said on 2026-08-24 they were funding both that morning, so the zero-equity and
   stale-heartbeat findings below may already be resolved. Re-check before treating them as live.
+
+### Tooling hazard worth knowing
+
+A backgrounded Codex task keeps writing to the invoking checkout after it appears to have finished. On
+2026-08-24 one silently reverted a committed changelog entry mid-session. If files change under you,
+check `ps aux | grep codex` for a `codex-companion.mjs task-worker` and kill it before continuing.
 
 ## Previous START HERE — 2026-08-02
 
