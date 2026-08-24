@@ -17032,6 +17032,44 @@ describe("step 3 evidence gate wiring", () => {
     ).toHaveLength(2);
   });
 
+  test("holds an open signal with TP legs beyond the provider configuration", async () => {
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: false,
+      telegram: createQueuedTelegramAdapter([
+        {
+          telegramMessageId: "unconfigured-tp-leg",
+          messageDate: "2026-08-24T08:00:00.000Z",
+          rawText:
+            "BUY EURUSD @ 1.1000\nSL 1.0900\nTP1 1.1100\nTP2 1.1200\nTP3 1.1300\nTP4 1.1400\nTP5 1.1500\nTP6 1.1600",
+        },
+      ]),
+      telegramPollingEnabled: false,
+    });
+    await configureProviderWithAccount(app, { availableSymbols: ["EURUSD"] });
+
+    const ingestion = await app.runTelegramIngestionOnce();
+    expect(ingestion).toMatchObject({ parsed: 1, queued: 0, errors: 0 });
+
+    const held = await json<{
+      items: Array<{ status: string; heldReason: string }>;
+    }>(await app.request("/api/queue-items/held"));
+    expect(held.items).toContainEqual(
+      expect.objectContaining({
+        heldReason: "EVIDENCE_UNCONFIGURED_TP_LEG_REQUIRES_MANUAL_REVIEW",
+      }),
+    );
+
+    const signals = await json<{
+      queue: Array<{ status: string; payload: { commandType: string } }>;
+    }>(await app.request("/api/signals"));
+    expect(
+      signals.queue.filter(
+        (item) => item.status === "PENDING" && item.payload.commandType === "OPEN_TRADE",
+      ),
+    ).toHaveLength(0);
+  });
+
   test("releases a real corpus evidence-held OPEN through trade materialization", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-evidence-open-release-"));
     const databasePath = join(tempDir, "app.db");

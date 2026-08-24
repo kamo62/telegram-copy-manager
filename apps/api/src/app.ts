@@ -249,6 +249,7 @@ type ProviderTakeProfitLevelInput = {
 
 const fallbackAccountId = process.env.DEFAULT_MT5_ACCOUNT_ID ?? demoAccountId;
 const MAX_PROVIDER_TP_LEVELS = 4;
+const PROVIDER_UNCONFIGURED_TP_WARNING_PREFIX = "Provider TP configuration has no leg";
 const REFERENCE_PRICE_MAX_AGE_SECONDS = 60;
 
 const defaultAppSettings: AppSettings = {
@@ -4222,19 +4223,25 @@ class AppStore {
                 : {}),
             }
           : undefined;
-        const verdict = evaluateExecutionEvidence({
-          parsedSignal: targetSignal,
-          providerConfig: { openEvidence: targetConfig.openEvidence ?? "prose-complete" },
-          lifecycleResolution,
-          orderIdNovelty: {
-            providerOrderIdNeverSeen: !this.hasDuplicateProviderOrderId(
-              providerId,
-              targetAccountId,
-              targetSignal,
-            ),
-          },
-          forwarded: this.forwardedForParsedSignal(parsedSignalId),
-        });
+        const verdict = providerExecutionConfigRequiresManualReview(targetSignal)
+          ? {
+              verdict: "HOLD" as const,
+              reason: "UNCONFIGURED_TP_LEG_REQUIRES_MANUAL_REVIEW",
+              tier: "action-required" as const,
+            }
+          : evaluateExecutionEvidence({
+              parsedSignal: targetSignal,
+              providerConfig: { openEvidence: targetConfig.openEvidence ?? "prose-complete" },
+              lifecycleResolution,
+              orderIdNovelty: {
+                providerOrderIdNeverSeen: !this.hasDuplicateProviderOrderId(
+                  providerId,
+                  targetAccountId,
+                  targetSignal,
+                ),
+              },
+              forwarded: this.forwardedForParsedSignal(parsedSignalId),
+            });
         return { accountId: targetAccountId, signal: targetSignal, verdict };
       });
       for (const target of evidenceTargets) {
@@ -4422,7 +4429,8 @@ class AppStore {
         }
         if (
           inferred.commandType !== "OPEN_TRADE" ||
-          shouldRequireManualReview(inferred, target.config.parserMode === "aggressive")
+          shouldRequireManualReview(inferred, target.config.parserMode === "aggressive") ||
+          providerExecutionConfigRequiresManualReview(inferred)
         ) {
           return {
             statusCode: 422,
@@ -15301,6 +15309,13 @@ function strategyOffsetPips(value: string) {
   return match?.[1] ? Math.max(0, Number(match[1].replace(/\s+/g, "")) || 0) : 0;
 }
 
+function providerExecutionConfigRequiresManualReview(signal: ParsedSignal) {
+  return (
+    signal.commandType === "OPEN_TRADE" &&
+    signal.warnings.some((warning) => warning.startsWith(PROVIDER_UNCONFIGURED_TP_WARNING_PREFIX))
+  );
+}
+
 function applyProviderExecutionConfig(
   signal: ParsedSignal,
   config: ProviderExecutionConfig,
@@ -15724,7 +15739,12 @@ function reviewReasons(signal: ParsedSignal) {
   if (signal.mappingStatus !== "mapped") reasons.push(`mapping-${signal.mappingStatus}`);
   for (const field of signal.missingFields) reasons.push(`missing-${field}`);
   for (const warning of signal.warnings) {
-    if (warning.startsWith("Geometry-inferred")) reasons.push(warning);
+    if (
+      warning.startsWith("Geometry-inferred") ||
+      warning.startsWith(PROVIDER_UNCONFIGURED_TP_WARNING_PREFIX)
+    ) {
+      reasons.push(warning);
+    }
   }
   if (signal.commandType !== "OPEN_TRADE" && signal.missingFields.includes("symbol")) {
     reasons.push("lifecycle-missing-symbol");

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   createLogicalTradeFromSignal,
+  MAX_TAKE_PROFIT_LEGS,
   matchLifecycleCommandToTrade,
   type ParserContext,
   parseSignalText,
@@ -66,6 +67,54 @@ describe("deterministic signal parser", () => {
     expect(result.matchedPatternIds).toContain("open.direction-symbol-entry");
     expect(result.confidence).toBeGreaterThanOrEqual(0.85);
     expect(shouldRequireManualReview(result)).toBe(false);
+  });
+
+  test("extracts ten labelled TP legs, including TP 10, without treating it as TP 1", () => {
+    const labels = Array.from(
+      { length: MAX_TAKE_PROFIT_LEGS },
+      (_, index) => `TP${index + 1} ${1.2 + index / 100}`,
+    );
+    const result = parseSignalText(
+      ["BUY EUR/USD @ 1.1000", "SL 1.0900", ...labels].join("\n"),
+      context,
+    );
+
+    expect(result.takeProfits).toHaveLength(MAX_TAKE_PROFIT_LEGS);
+    expect(result.takeProfits.at(-1)).toMatchObject({ leg: 10, price: 1.29 });
+    expect(result.warnings).not.toContainEqual(expect.stringContaining("truncated"));
+
+    const spaced = parseSignalText(
+      "BUY EUR/USD @ 1.1000\nSL 1.0900\nTP 2: 1.2200\nTP 10: 1.3000",
+      context,
+    );
+    expect(spaced.takeProfits).toEqual([
+      { leg: 2, price: 1.22, allocationPercent: 25 },
+      { leg: 10, price: 1.3, allocationPercent: 25 },
+    ]);
+  });
+
+  test("keeps dash-separated targets through the ten-leg cap and warns on truncation", () => {
+    const dashTargets = parseSignalText(
+      "BUY EUR/USD @ 1.1000\nSL 1.0900\nTP 1.20 - 1.21 - 1.22 - 1.23 - 1.24 - 1.25",
+      context,
+    );
+    expect(dashTargets.takeProfits.map((target) => target.price)).toEqual([
+      1.2, 1.21, 1.22, 1.23, 1.24, 1.25,
+    ]);
+
+    const elevenTargets = parseSignalText(
+      [
+        "BUY EUR/USD @ 1.1000",
+        "SL 1.0900",
+        ...Array.from({ length: MAX_TAKE_PROFIT_LEGS + 1 }, (_, index) => `TP 1.${20 + index}`),
+      ].join("\n"),
+      context,
+    );
+    expect(elevenTargets.takeProfits).toHaveLength(MAX_TAKE_PROFIT_LEGS);
+    expect(elevenTargets.warnings).toContainEqual(
+      expect.stringMatching(/^Take-profit list was truncated/),
+    );
+    expect(shouldRequireManualReview(elevenTargets)).toBe(true);
   });
 
   test("maps provider-specific Gold text through an account override before prefix or suffix fallback", () => {
@@ -928,6 +977,78 @@ describe("symbol resolver", () => {
     expect(unavailable.mappingStatus).toBe("unavailable");
   });
 
+  test("maps index m and .F variants without selecting leveraged instruments", () => {
+    expect(
+      resolveSymbol("NAS100", {
+        accountId: "mt5-exness-index",
+        accountMappings: {
+          "mt5-exness-index": {
+            accountId: "mt5-exness-index",
+            availableBrokerSymbols: ["USTEC_x100m", "USTECm"],
+          },
+        },
+      }),
+    ).toMatchObject({ canonicalSymbol: "NAS100", brokerSymbol: "USTECm", mappingStatus: "mapped" });
+    expect(
+      resolveSymbol("US30", {
+        accountId: "mt5-exness-dow",
+        accountMappings: {
+          "mt5-exness-dow": {
+            accountId: "mt5-exness-dow",
+            availableBrokerSymbols: ["US30_x10m", "US30m"],
+          },
+        },
+      }),
+    ).toMatchObject({ canonicalSymbol: "US30", brokerSymbol: "US30m", mappingStatus: "mapped" });
+
+    for (const [rawSymbol, availableBrokerSymbol, canonicalSymbol] of [
+      ["US100", "US100.F", "NAS100"],
+      ["US30", "US30.F", "US30"],
+      ["US500", "US500.F", "SPX500"],
+      ["DE30", "DE30m", "GER40"],
+      ["GER40", "GER40.F", "GER40"],
+    ] as const) {
+      expect(
+        resolveSymbol(rawSymbol, {
+          accountId: `mt5-${rawSymbol}`,
+          accountMappings: {
+            [`mt5-${rawSymbol}`]: {
+              accountId: `mt5-${rawSymbol}`,
+              availableBrokerSymbols: [availableBrokerSymbol],
+            },
+          },
+        }),
+      ).toMatchObject({
+        canonicalSymbol,
+        brokerSymbol: availableBrokerSymbol,
+        mappingStatus: "mapped",
+      });
+    }
+
+    expect(
+      resolveSymbol("NAS100", {
+        accountId: "mt5-leveraged-nas",
+        accountMappings: {
+          "mt5-leveraged-nas": {
+            accountId: "mt5-leveraged-nas",
+            availableBrokerSymbols: ["USTEC_x100m"],
+          },
+        },
+      }),
+    ).toMatchObject({ mappingStatus: "unavailable" });
+    expect(
+      resolveSymbol("US30", {
+        accountId: "mt5-leveraged-dow",
+        accountMappings: {
+          "mt5-leveraged-dow": {
+            accountId: "mt5-leveraged-dow",
+            availableBrokerSymbols: ["US30_x10m"],
+          },
+        },
+      }),
+    ).toMatchObject({ mappingStatus: "unavailable" });
+  });
+
   test("maps HF-style XAUUSDr gold symbols from the EA inventory", () => {
     const hfContext: ParserContext = {
       accountId: "mt5-hf",
@@ -1540,7 +1661,10 @@ describe("stock index symbol recognition", () => {
       // the shared test context maps US30 -> DJI30 via globalAliases (alias wins).
       ["US30 BUY 39000\nSL 38900\nTP 39200", "DJI30"],
       ["NAS100 SELL 18000\nSL 18100\nTP 17800", "NAS100"],
-      ["US100 BUY 18000\nSL 17900\nTP 18200", "US100"],
+      // US100 is the US Tech 100, the same instrument as NAS100/USTEC/NDX. It used to
+      // canonicalise to itself, which had no broker variants at all, so every US100
+      // signal was unmappable by construction.
+      ["US100 BUY 18000\nSL 17900\nTP 18200", "NAS100"],
       ["SPX500 SELL 5100\nSL 5130\nTP 5050", "SPX500"],
       ["GER40 BUY 18500\nSL 18400\nTP 18700", "GER40"],
       ["UK100 BUY 8100\nSL 8050\nTP 8200", "UK100"],
