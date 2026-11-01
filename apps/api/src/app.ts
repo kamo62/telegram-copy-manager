@@ -1687,6 +1687,10 @@ class AppStore {
   // durable content changed. mt5_snapshots.updated_at moves only on structural
   // change, so this map is what answers "are snapshots flowing".
   private readonly mt5SnapshotReceivedAt = new Map<string, string>();
+  // History deals that matched their stored broker_orders row, keyed by
+  // account:dealTicket. The EA resends ~7 days of deals every minute, so
+  // unchanged deals skip the full per-deal reconciliation for a short window.
+  private readonly unchangedHistoryDeals = new Map<string, { signature: string; at: number }>();
   // A pending order can be absent from one broker snapshot while remaining live.
   // This state is deliberately in memory so snapshot polling does not create a
   // durable write for every absence or reset the snapshot content deduplication.
@@ -7346,12 +7350,24 @@ class AppStore {
     let updated = 0;
     let repairedPnlDelta = 0;
     const deals = this.relevantHistoryDeals(input.accountId, input.deals);
+    const openPositionTickets = new Set(
+      (this.mt5SnapshotsByAccount()[input.accountId]?.positions ?? []).map((record) =>
+        brokerTicketFromSnapshot(record),
+      ),
+    );
+    const isOpen = (ticket: string) => Boolean(ticket) && openPositionTickets.has(ticket);
     const existingByDealTicket = this.brokerOrdersByDealTicket(
       deals.map((deal) => deal.dealTicket).filter((ticket): ticket is string => Boolean(ticket)),
     );
     for (const deal of deals) {
       if (!deal.dealTicket) continue;
       const exists = existingByDealTicket.get(deal.dealTicket) ?? null;
+      const cacheKey = `${input.accountId}:${deal.dealTicket}`;
+      const signature = `${JSON.stringify(deal)}|${isOpen(String(deal.positionTicket ?? ""))}`;
+      const cached = this.unchangedHistoryDeals.get(cacheKey);
+      if (exists && cached?.signature === signature && Date.now() - cached.at < 10 * 60_000) {
+        continue;
+      }
       const source = brokerOrderSourceForDealReason(deal.reason);
       const pnlCurrency = historyDealCurrencyPnl(deal);
       const createdAt = historyDealTimestamp(deal);
@@ -7360,7 +7376,7 @@ class AppStore {
       if (!tradeId || !deal.symbol || !deal.volume) continue;
       const open = this.openBrokerOrderForDeal(tradeId, deal);
       const positionTicket = String(deal.positionTicket || open?.position_ticket || "");
-      const positionStillOpen = this.positionStillOpen(input.accountId, positionTicket);
+      const positionStillOpen = isOpen(positionTicket);
       const trade = this.logicalTrade(tradeId);
       const inferredAction = trade
         ? this.historyDealActionForTrade(
@@ -7400,6 +7416,8 @@ class AppStore {
           createdAt,
         };
         if (brokerHistoryRowMatches(exists, next)) {
+          if (this.unchangedHistoryDeals.size > 20_000) this.unchangedHistoryDeals.clear();
+          this.unchangedHistoryDeals.set(cacheKey, { signature, at: Date.now() });
           continue;
         }
         const oldPnl = nullableNumber(exists.pnl_currency);
@@ -13036,6 +13054,18 @@ class AppStore {
           })
         : snapshotSyncTradeState(trade, match);
       if (JSON.stringify(updated) === JSON.stringify(trade)) continue;
+      // Snapshots arrive every ~2s; skip rewriting a trade whose only change
+      // is a fresh lastSnapshotAt unless the stored stamp is over a minute old.
+      if (
+        !missingPendingOpen &&
+        JSON.stringify({ ...updated, lastSnapshotAt: undefined }) ===
+          JSON.stringify({ ...trade, lastSnapshotAt: undefined }) &&
+        trade.lastSnapshotAt &&
+        updated.lastSnapshotAt &&
+        Date.parse(updated.lastSnapshotAt) - Date.parse(trade.lastSnapshotAt) < 60_000
+      ) {
+        continue;
+      }
       if (missingPendingOpen) {
         this.clearPendingOpenMissingForTrade(accountId, trade.id);
       }
@@ -13974,15 +14004,6 @@ class AppStore {
         "SELECT * FROM broker_orders WHERE logical_trade_id = ? AND action = 'OPEN' ORDER BY created_at ASC LIMIT 1",
       )
       .get(tradeId) as Row | null;
-  }
-
-  private positionStillOpen(accountId: string, positionTicket: string) {
-    if (!positionTicket) return false;
-    const snapshot = this.mt5SnapshotsByAccount()[accountId];
-    return (
-      snapshot?.positions.some((record) => brokerTicketFromSnapshot(record) === positionTicket) ??
-      false
-    );
   }
 
   private brokerOrderTicketsForTrade(tradeId: string) {

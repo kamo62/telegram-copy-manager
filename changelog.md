@@ -5,6 +5,7 @@
 - Added a compact dashboard response for the web client, 30-day audit retention with supporting indexes, and reconciliation-only full reloads without changing the legacy dashboard response.
 - Tightened dashboard refreshes, performance loading, Parser Lab stale-state messaging, locale-aware lot formatting, and Equity Guardian validation while keeping persisted operator settings unchanged.
 - Indexed `parsed_signals.raw_message_id` and `raw_messages(provider_id, message_date)` so the unparsed-message lookup on every Telegram poll no longer scans both tables (about 190 ms per poll on production data).
+- MT5 history uploads load the account snapshot once per upload instead of once per deal, and skip deals unchanged since the last upload for 10 minutes. Snapshot syncs no longer rewrite a trade whose only change is its snapshot timestamp (refreshed at most once a minute).
 
 ## 1.67.2 - 2026-08-24 (Patch)
 
