@@ -255,7 +255,7 @@ function ExternalPositionsBlock({ account, locale }: { account: LinkedAccount; l
                 {position.type === 0 ? "BUY" : "SELL"}
               </span>
               <strong className="external-position-symbol">{position.symbol}</strong>
-              <span className="external-position-vol">{formatLot(position.volume)}</span>
+              <span className="external-position-vol">{formatLot(position.volume, locale)}</span>
               <span className="external-position-price">
                 @ {formatNumber(position.openPrice, { locale, maximumFractionDigits: 5 })}
               </span>
@@ -304,7 +304,7 @@ function ExternalPositionsBlock({ account, locale }: { account: LinkedAccount; l
                 {order.type % 2 === 0 ? "BUY" : "SELL"}
               </span>
               <strong className="external-position-symbol">{order.symbol}</strong>
-              <span className="external-position-vol">{formatLot(order.volume)}</span>
+              <span className="external-position-vol">{formatLot(order.volume, locale)}</span>
               <span className="external-position-price">
                 @ {formatNumber(order.openPrice, { locale, maximumFractionDigits: 5 })}
               </span>

@@ -1,6 +1,6 @@
 import "../test-setup";
 import { afterEach, describe, expect, test } from "bun:test";
-import { cleanup, render, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import {
   formatGrowthChartTime,
   formatGrowthChartValue,
@@ -23,6 +23,43 @@ const growthData: GrowthSeries = {
   totalProfit: -82.5,
   numberOfTrades: 3,
 };
+
+function statsPayload(totalPnl: number, range: string) {
+  return {
+    scope: "account",
+    range,
+    currency: "USD",
+    generatedAt: "2026-05-21T10:00:00.000Z",
+    profitReturn: { totalPnl, roiPercent: 2, bestDay: totalPnl, worstDay: -1 },
+    winLoss: {
+      wins: 2,
+      losses: 1,
+      breakEven: 0,
+      winRate: 0.66,
+      averageWin: totalPnl,
+      averageLoss: -1,
+    },
+    riskDrawdown: {
+      maxDrawdown: 1,
+      maxDrawdownPct: 1,
+      currentDrawdown: 0,
+      currentDrawdownPct: 0,
+      averageActiveDrawdown: 1,
+      averageActiveDrawdownPct: 1,
+      recoveryFactor: 2,
+    },
+    quality: {
+      profitFactor: 2,
+      grossProfit: totalPnl,
+      grossLoss: -1,
+      averageTrade: totalPnl,
+      expectancy: totalPnl,
+    },
+    streaks: { current: "2 wins", maxWins: 2, maxLosses: 1 },
+    timing: { averageTradeMinutes: 5, bestWeekday: "Monday", worstWeekday: "Friday" },
+    riskThresholds: { warnPct: 10, dangerPct: 20 },
+  };
+}
 
 describe("PerformancePage", () => {
   test("renders account attribution in the overview without adding another tab", async () => {
@@ -124,6 +161,48 @@ describe("PerformancePage", () => {
     expect(view.getByText("Provider: KAL VIP")).toBeTruthy();
     const table = view.getByRole("table", { name: "Largest attribution trades" });
     expect(within(table).getAllByText("XAUUSD").length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("does not let an older statistics request replace the current range", async () => {
+    const resolvers: Array<(response: Response) => void> = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("/stats?")) {
+        return new Promise<Response>((resolve) => resolvers.push(resolve));
+      }
+      return Response.json({
+        accountId: "mt5-63442826",
+        range: "30d",
+        currency: "USD",
+        generatedAt: "2026-05-21T10:00:00.000Z",
+        totals: { totalPnl: 0, providerPnl: 0, manualExternalPnl: 0, unknownEaPnl: 0 },
+        attributionRows: [],
+        sourceBreakdown: [],
+        topTrades: [],
+      });
+    }) as typeof fetch;
+
+    const view = render(
+      <PerformancePage
+        accounts={[{ id: "mt5-63442826", accountNumber: "63442826" }]}
+        currency="USD"
+        data={growthData}
+      />,
+    );
+    fireEvent.click(view.getByRole("tab", { name: "Statistics" }));
+    await waitFor(() => expect(resolvers).toHaveLength(1));
+
+    fireEvent.change(view.getByLabelText("Statistics date range"), {
+      target: { value: "all" },
+    });
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+    resolvers[1]?.(Response.json(statsPayload(200, "all")));
+    await waitFor(() => expect(view.getAllByText("$200.00").length).toBeGreaterThan(0));
+
+    resolvers[0]?.(Response.json(statsPayload(100, "30d")));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(view.getAllByText("$200.00").length).toBeGreaterThan(0);
   });
 
   test("describes sampled time-series points as samples instead of trades", () => {

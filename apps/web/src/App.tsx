@@ -276,6 +276,7 @@ export interface DashboardSnapshot {
     volume?: number | null;
     riskPercent?: number | null;
   }>;
+  signalQueuePendingCount?: number;
   logicalTrades: Array<{
     id: string;
     symbol: string;
@@ -287,7 +288,7 @@ export interface DashboardSnapshot {
     matchedBrokerTickets?: string[];
     brokerComment?: string;
     lastSnapshotAt?: string;
-    legs: Array<{
+    legs?: Array<{
       leg: number;
       targetPrice?: number;
       targetSource?: string;
@@ -732,8 +733,8 @@ export function App({
     window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [location.pathname]);
   const dashboardUrl = selectedAccountId
-    ? `/api/dashboard?accountId=${encodeURIComponent(selectedAccountId)}`
-    : "/api/dashboard";
+    ? `/api/dashboard?compact=1&accountId=${encodeURIComponent(selectedAccountId)}`
+    : "/api/dashboard?compact=1";
   const dashboardRequest = useRef<{ url: string; promise: Promise<DashboardSnapshot> } | undefined>(
     undefined,
   );
@@ -856,8 +857,8 @@ export function App({
     }
     void load();
 
-    // Real-time refresh: subscribe to the server event stream and reload on any
-    // delta. Polling stays as a fallback — a slow safety poll while SSE is
+    // Real-time refresh: patch stable heartbeat deltas and reload on
+    // reconciliation. Polling stays as a fallback — a slow safety poll while SSE is
     // connected, reverting to the fast 15s poll if SSE is unavailable or drops.
     // EventSource is feature-detected so non-browser/test environments (which
     // lack it) keep the original polling behaviour.
@@ -894,9 +895,7 @@ export function App({
           }
           setSnapshot((current) => applyHeartbeatDelta(current, delta) ?? current);
         };
-        for (const type of ["queue", "trade", "snapshot", "audit", "reconciliation", "score"]) {
-          source.addEventListener(type, onEvent);
-        }
+        source.addEventListener("reconciliation", onEvent);
         source.addEventListener("heartbeat", onHeartbeat);
         source.onopen = () => {
           pollMs = 60_000;
@@ -1238,13 +1237,14 @@ export function App({
     snapshot.telegramSessions.find((session) => session.status === "CONNECTED")?.profileId ||
     "";
 
-  const queuePending = snapshot.signalQueue.filter((item) => item.status === "PENDING").length;
+  const queuePending =
+    snapshot.signalQueuePendingCount ??
+    snapshot.signalQueue.filter((item) => item.status === "PENDING").length;
   const growthData = useMemo(() => {
     const performance = focusedAccount
-      ? (snapshot.accountPerformanceByAccount?.[focusedAccount.id] ??
-        (snapshot.accountPerformance?.accountId === focusedAccount.id
-          ? snapshot.accountPerformance
-          : undefined))
+      ? snapshot.accountPerformance?.accountId === focusedAccount.id
+        ? snapshot.accountPerformance
+        : snapshot.accountPerformanceByAccount?.[focusedAccount.id]
       : snapshot.accountPerformance;
     const series = performance?.equityCurve;
     if (!series?.length) {
@@ -1492,7 +1492,6 @@ export function App({
       announce("Provider Telegram links resynced");
     } catch (error) {
       setSetupError(error instanceof Error ? error.message : "Provider resync failed");
-      setLastPollError(true);
     } finally {
       setSetupBusy(false);
     }
@@ -1515,8 +1514,8 @@ export function App({
         dialogId: dialog.id,
         title: dialog.title,
       });
-    } catch {
-      setLastPollError(true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Provider could not be added");
       return;
     }
     await refreshDashboard();
@@ -1950,11 +1949,15 @@ export function App({
 
   async function saveGuardian(accountId: string, formElement: HTMLFormElement) {
     const data = new FormData(formElement);
-    await apiPatch(`/api/equity-guardian/${accountId}`, {
-      threshold: Number(data.get("threshold")),
-      enabled: data.get("enabled") === "on",
-    });
-    await refreshDashboard();
+    try {
+      await apiPatch(`/api/equity-guardian/${accountId}`, {
+        threshold: Number(data.get("threshold")),
+        enabled: data.get("enabled") === "on",
+      });
+      await refreshDashboard();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save Equity Guardian");
+    }
   }
 
   async function unpauseGuardian(accountId: string, requeueHeld: boolean) {
@@ -2376,7 +2379,7 @@ export function App({
                   parseRecentBusy={parseRecentBusy}
                   parseRecentResults={parseRecentResults}
                   parserLoading={initialLoading}
-                  parserLoadError={lastPollError}
+                  dashboardLoadError={lastPollError}
                   snapshot={snapshot}
                   fixtureClassifications={fixtureClassifications}
                   onClassify={(rawMessageId, classification) =>

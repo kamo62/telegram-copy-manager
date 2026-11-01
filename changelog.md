@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.67.3 - 2026-08-24 (Patch)
+
+- Added a compact dashboard response for the web client, 30-day audit retention with supporting indexes, and reconciliation-only full reloads without changing the legacy dashboard response.
+- Tightened dashboard refreshes, performance loading, Parser Lab stale-state messaging, locale-aware lot formatting, and Equity Guardian validation while keeping persisted operator settings unchanged.
+- Indexed `parsed_signals.raw_message_id` and `raw_messages(provider_id, message_date)` so the unparsed-message lookup on every Telegram poll no longer scans both tables (about 190 ms per poll on production data).
+
 ## 1.67.2 - 2026-08-24 (Patch)
 
 Release impact: Patch. Parser and API only. No EA protocol change, no database schema change and no

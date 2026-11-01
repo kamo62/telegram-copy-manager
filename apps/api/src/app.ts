@@ -117,6 +117,11 @@ const MAX_EXECUTION_LOG_LIMIT = 500;
 const QUOTE_FRESHNESS_MAX_AGE_MS = 5 * 60_000;
 const LANE2_CLOSE_CAPABILITY = "lane2-close-contract";
 const PENDING_CLOSE_FLATTEN_CAPABILITY = "pending-close-flatten-v1";
+const OBSERVATIONAL_AUDIT_EVENT_TYPES = new Set([
+  "telegram.ingest.error",
+  "correlation.shadow",
+  "correlation.shadow-error",
+]);
 
 function capEquityCurve<T extends { equity: number }>(points: T[]): T[] {
   return downsampleSeries(points, EQUITY_CURVE_MAX_POINTS, (point) => point.equity);
@@ -465,7 +470,9 @@ export function createApi(options: ApiOptions = {}) {
 
   app.get("/api/telegram/status", (c) => c.json(store.telegramStatus(telegram.name)));
   app.get("/api/dashboard", (c) =>
-    c.json(store.dashboard(telegram.name, c.req.query("accountId"))),
+    c.json(
+      store.dashboard(telegram.name, c.req.query("accountId"), c.req.query("compact") === "1"),
+    ),
   );
   app.get("/api/settings", (c) => c.json({ settings: store.settingsProjection() }));
   app.patch("/api/settings", async (c) => {
@@ -980,6 +987,18 @@ export function createApi(options: ApiOptions = {}) {
   app.patch("/api/equity-guardian/:accountId", async (c) => {
     const body = await c.req.json<{ threshold?: number; enabled?: boolean; paused?: boolean }>();
     const accountId = c.req.param("accountId");
+    if (!store.mt5AccountExists(accountId)) {
+      return c.json({ error: "Account not found" }, 404);
+    }
+    if (
+      Object.hasOwn(body, "threshold") &&
+      (typeof body.threshold !== "number" ||
+        !Number.isFinite(body.threshold) ||
+        body.threshold <= 0 ||
+        body.threshold > 100)
+    ) {
+      return c.json({ error: "Threshold must be greater than 0 and no more than 100" }, 400);
+    }
     const guardian = store.updateEquityGuardian(accountId, {
       threshold: body.threshold,
       enabled: body.enabled,
@@ -1702,16 +1721,17 @@ class AppStore {
   private deferredAlerts: DeferredAlert[] | undefined;
   private storeRevision = 0;
   private observedDataVersion: number | undefined;
-  private dashboardPerformanceCache:
-    | {
-        revision: number;
-        heartbeatStatusKey: string;
-        accountPerformance: ReturnType<AppStore["accountPerformance"]>;
-        accountPerformanceByAccount: Record<string, ReturnType<AppStore["accountPerformance"]>>;
-        providerPerformance: ReturnType<AppStore["providerPerformance"]>;
-        providerPerformanceByAccount: Record<string, ReturnType<AppStore["providerPerformance"]>>;
-      }
-    | undefined;
+  private readonly dashboardPerformanceCache = new Map<
+    string,
+    {
+      revision: number;
+      heartbeatStatusKey: string;
+      accountPerformance: ReturnType<AppStore["accountPerformance"]>;
+      accountPerformanceByAccount: Record<string, ReturnType<AppStore["accountPerformance"]>>;
+      providerPerformance: ReturnType<AppStore["providerPerformance"]>;
+      providerPerformanceByAccount: Record<string, ReturnType<AppStore["providerPerformance"]>>;
+    }
+  >();
   private readonly providerScoreCache = new Map<
     string,
     {
@@ -5350,12 +5370,15 @@ class AppStore {
     return { parsedSignalId, review, model };
   }
 
-  queueItems() {
+  queueItems(compact = false) {
     this.expireStaleOpenTradeQueueItems();
     return (
       this.db
         .query(
-          "SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, held_tier, suggestion, origin_queue_item_id, leased_at, created_at FROM queue_items ORDER BY created_at DESC",
+          `SELECT id, account_id, logical_trade_id, status, payload_json, held_reason, held_tier, suggestion, origin_queue_item_id, leased_at, created_at
+           FROM queue_items
+           ${compact ? "WHERE status IN ('PENDING', 'LEASED', 'HELD', 'DUPLICATE')" : ""}
+           ORDER BY created_at DESC`,
         )
         .all() as Row[]
     ).map(queueRow);
@@ -8529,6 +8552,10 @@ class AppStore {
     });
   }
 
+  mt5AccountExists(accountId: string) {
+    return Boolean(this.db.query("SELECT 1 FROM mt5_accounts WHERE id = ? LIMIT 1").get(accountId));
+  }
+
   updateAccountNickname(accountId: string, value: string | null) {
     if (!this.mt5Accounts().some((account) => account.id === accountId)) {
       return { statusCode: 404 as const, error: "MT5 account not found" };
@@ -9145,14 +9172,14 @@ class AppStore {
     };
   }
 
-  accountPerformance(accounts = this.mt5Accounts()) {
+  accountPerformance(accounts = this.mt5Accounts(), includeSeries = true) {
     const settings = this.appSettings();
     if (usesMixedCurrencies(accounts)) {
-      return this.aggregateAccountPerformance(accounts, settings);
+      return this.aggregateAccountPerformance(accounts, settings, includeSeries);
     }
     const primary = this.primaryAccount(accounts);
     if (!primary) {
-      return {
+      const summary = {
         currency: settings.reportingCurrency,
         heartbeatStatus: "offline",
         lastHeartbeatAt: null,
@@ -9167,9 +9194,8 @@ class AppStore {
         today: null,
         thisWeek: null,
         thisMonth: null,
-        equityCurve: [],
-        monthlyReturns: [],
       };
+      return includeSeries ? { ...summary, equityCurve: [], monthlyReturns: [] } : summary;
     }
     const initial = primary.initialBalance || primary.balance;
     const accountOrders = this.brokerOrdersForAccount(primary.id);
@@ -9192,7 +9218,7 @@ class AppStore {
     const today = sumPnl(accountOrders.filter((order) => withinCurrentDay(order.createdAt)));
     const thisWeek = sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 7)));
     const thisMonth = sumPnl(accountOrders.filter((order) => withinCurrentMonth(order.createdAt)));
-    return {
+    const summary = {
       accountId: primary.id,
       currency: primary.currency,
       heartbeatStatus: primary.heartbeatStatus,
@@ -9208,14 +9234,20 @@ class AppStore {
       today,
       thisWeek,
       thisMonth,
-      equityCurve: capEquityCurve(this.equityCurve(primary.id, initial, accountOrders)),
-      monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders, floatingPnl ?? 0),
     };
+    return includeSeries
+      ? {
+          ...summary,
+          equityCurve: capEquityCurve(this.equityCurve(primary.id, initial, accountOrders)),
+          monthlyReturns: this.monthlyReturns(primary.id, initial, accountOrders, floatingPnl ?? 0),
+        }
+      : summary;
   }
 
   private aggregateAccountPerformance(
     accounts: ReturnType<AppStore["mt5Accounts"]>,
     settings: AppSettings,
+    includeSeries = true,
   ) {
     const currency = settings.reportingCurrency;
     const heartbeatStatus = aggregateHeartbeatStatus(
@@ -9230,7 +9262,7 @@ class AppStore {
       .map((account) => normalizedMoneyCurrency(account.currency))
       .filter((accountCurrency) => !canConvertMoneyCurrency(accountCurrency));
     if (unsupportedCurrencies.length > 0) {
-      return {
+      const summary = {
         accountId: "aggregate",
         currency,
         heartbeatStatus,
@@ -9246,9 +9278,8 @@ class AppStore {
         today: null,
         thisWeek: null,
         thisMonth: null,
-        equityCurve: [],
-        monthlyReturns: [],
       };
+      return includeSeries ? { ...summary, equityCurve: [], monthlyReturns: [] } : summary;
     }
     const convert = (value: number | null | undefined, fromCurrency: string) =>
       convertMoney(value, fromCurrency, currency, settings.usdZarRate);
@@ -9298,7 +9329,7 @@ class AppStore {
       allOnline && currentEquity !== null && totalProfit !== null
         ? roundCurrency(currentEquity - initial - totalProfit)
         : null;
-    return {
+    const summary = {
       accountId: "aggregate",
       currency,
       heartbeatStatus,
@@ -9314,9 +9345,16 @@ class AppStore {
       today: sumPnl(accountOrders.filter((order) => withinCurrentDay(order.createdAt))),
       thisWeek: sumPnl(accountOrders.filter((order) => withinDays(order.createdAt, 7))),
       thisMonth: sumPnl(accountOrders.filter((order) => withinCurrentMonth(order.createdAt))),
-      equityCurve: capEquityCurve(aggregateEquityCurve(initial, accountOrders, floatingPnl ?? 0)),
-      monthlyReturns: aggregateMonthlyReturns(initial, accountOrders, floatingPnl ?? 0),
     };
+    return includeSeries
+      ? {
+          ...summary,
+          equityCurve: capEquityCurve(
+            aggregateEquityCurve(initial, accountOrders, floatingPnl ?? 0),
+          ),
+          monthlyReturns: aggregateMonthlyReturns(initial, accountOrders, floatingPnl ?? 0),
+        }
+      : summary;
   }
 
   providerPerformance(accountId?: string, accounts = this.mt5Accounts()) {
@@ -9455,7 +9493,9 @@ class AppStore {
     const scope: EquityCurveScope =
       input.scope === "provider" && providerId ? "provider" : "account";
     const from = statsRangeStart(range);
-    const account = this.mt5Accounts().find((item) => item.id === accountId);
+    const account = this.db
+      .query("SELECT currency, initial_balance, balance FROM mt5_accounts WHERE id = ?")
+      .get(accountId) as Row | null;
     const trades = this.closedTradeStats(accountId, { from, providerId, scope });
     const totalPnl = roundCurrency(trades.reduce((sum, trade) => sum + trade.pnl, 0));
     const wins = trades.filter((trade) => trade.pnl > 0);
@@ -9471,7 +9511,7 @@ class AppStore {
     const risk = this.curveRiskStats(scope, accountId, scope === "provider" ? providerId : "");
     risk.recoveryFactor =
       risk.maxDrawdown > 0 ? Number((totalPnl / risk.maxDrawdown).toFixed(2)) : 0;
-    const initial = account?.initialBalance || account?.balance || 0;
+    const initial = Number(account?.initial_balance || account?.balance || 0);
     const durations = trades
       .map((trade) => trade.durationMinutes)
       .filter((value): value is number => value !== undefined && Number.isFinite(value));
@@ -9480,7 +9520,7 @@ class AppStore {
       providerId: scope === "provider" ? providerId : undefined,
       scope,
       range,
-      currency: account?.currency ?? "$",
+      currency: String(account?.currency ?? "$"),
       generatedAt: nowIso(),
       profitReturn: {
         totalPnl,
@@ -9524,7 +9564,9 @@ class AppStore {
   accountAttribution(accountId: string, input: { range?: string } = {}) {
     const range = normalizeStatsRange(input.range);
     const from = statsRangeStart(range);
-    const account = this.mt5Accounts().find((item) => item.id === accountId);
+    const account = this.db
+      .query("SELECT currency FROM mt5_accounts WHERE id = ?")
+      .get(accountId) as Row | null;
     const logicalTrades = new Map(this.logicalTrades().map((trade) => [trade.id, trade]));
     const providers = new Map(this.providers().map((provider) => [provider.id, provider.title]));
     const externalRows = new Map(
@@ -11064,13 +11106,30 @@ class AppStore {
     };
   }
 
-  dashboard(telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock", previewAccountId?: string) {
+  dashboard(
+    telegramAdapter = process.env.TELEGRAM_ADAPTER ?? "mock",
+    previewAccountId?: string,
+    compact = false,
+  ) {
     this.syncExternalStoreRevision();
     const providers = this.providers();
-    const queue = this.queueItems();
+    const queue = this.queueItems(compact);
+    const signalQueuePendingCount = compact
+      ? Number(
+          (
+            this.db
+              .query("SELECT COUNT(*) AS count FROM queue_items WHERE status = 'PENDING'")
+              .get() as Row | null
+          )?.count ?? 0,
+        )
+      : undefined;
     const parsed = this.parsedSignals(8);
     const accounts = this.mt5Accounts();
-    const performance = this.dashboardPerformance(accounts);
+    const performance = this.dashboardPerformance(
+      accounts,
+      compact,
+      compact ? previewAccountId : undefined,
+    );
     return {
       health: this.ingestionHealth(telegramAdapter),
       appSettings: this.settingsProjection(),
@@ -11171,7 +11230,8 @@ class AppStore {
         volume: item.payload.volume ?? null,
         riskPercent: item.payload.riskPercent ?? null,
       })),
-      logicalTrades: this.logicalTradesForDashboard(),
+      ...(compact ? { signalQueuePendingCount } : {}),
+      logicalTrades: this.logicalTradesForDashboard(compact),
       symbolMappings: this.symbolMappings(previewAccountId ?? accounts[0]?.id).preview,
       executionLogs: this.executionLogs(undefined, 10).map((log) => ({
         id: log.id,
@@ -11192,30 +11252,42 @@ class AppStore {
     };
   }
 
-  private dashboardPerformance(accounts: ReturnType<AppStore["mt5Accounts"]>) {
+  private dashboardPerformance(
+    accounts: ReturnType<AppStore["mt5Accounts"]>,
+    compact = false,
+    focusedAccountId?: string,
+  ) {
     const heartbeatStatusKey = accounts
       .map((account) => `${account.id}:${account.heartbeatStatus}`)
       .sort()
       .join("|");
+    const focusedAccount = focusedAccountId
+      ? accounts.find((account) => account.id === focusedAccountId)
+      : undefined;
+    const cacheKey = `${compact ? "compact" : "legacy"}:${focusedAccount?.id ?? ""}`;
+    const cached = this.dashboardPerformanceCache.get(cacheKey);
     if (
-      this.dashboardPerformanceCache?.revision === this.storeRevision &&
-      this.dashboardPerformanceCache.heartbeatStatusKey === heartbeatStatusKey
+      cached?.revision === this.storeRevision &&
+      cached.heartbeatStatusKey === heartbeatStatusKey
     ) {
-      return this.dashboardPerformanceCache;
+      return cached;
     }
     const projections = {
       revision: this.storeRevision,
       heartbeatStatusKey,
-      accountPerformance: this.accountPerformance(accounts),
+      accountPerformance: this.accountPerformance(
+        focusedAccount ? [focusedAccount] : accounts,
+        !compact || Boolean(focusedAccount),
+      ),
       accountPerformanceByAccount: Object.fromEntries(
-        accounts.map((account) => [account.id, this.accountPerformance([account])]),
+        accounts.map((account) => [account.id, this.accountPerformance([account], !compact)]),
       ),
       providerPerformance: this.providerPerformance(undefined, accounts),
       providerPerformanceByAccount: Object.fromEntries(
         accounts.map((account) => [account.id, this.providerPerformance(account.id, accounts)]),
       ),
     };
-    this.dashboardPerformanceCache = projections;
+    this.dashboardPerformanceCache.set(cacheKey, projections);
     return projections;
   }
 
@@ -11451,6 +11523,12 @@ class AppStore {
     this.ensureColumn("queue_items", "origin_queue_item_id", "TEXT");
     this.db.run(
       "CREATE INDEX IF NOT EXISTS idx_queue_items_parsed_signal_created ON queue_items(parsed_signal_id, created_at)",
+    );
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_parsed_signals_raw_message ON parsed_signals(raw_message_id)",
+    );
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_raw_messages_provider_date ON raw_messages(provider_id, message_date)",
     );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS reference_stop_actions (
@@ -11780,6 +11858,12 @@ class AppStore {
         created_at TEXT NOT NULL
       );
     `);
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_audit_logs_created_id ON audit_logs(created_at DESC, id DESC)",
+    );
+    this.db.run(
+      "CREATE INDEX IF NOT EXISTS idx_audit_logs_event_created_id ON audit_logs(event_type, created_at DESC, id DESC)",
+    );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS symbol_metadata (
         account_id TEXT NOT NULL,
@@ -13166,44 +13250,56 @@ class AppStore {
     return coveringClose;
   }
 
-  private logicalTradesForDashboard() {
+  private logicalTradesForDashboard(compact = false) {
     // A provider-announced volume leg stays OPEN, so leg status no longer carries the fact
     // that the provider called it. Surface the announcement separately or the operator loses
     // the only trace of it that the trade view ever showed.
-    const announced = new Set(
-      (
-        this.db.query("SELECT logical_trade_id, leg FROM provider_tp_announcements").all() as Row[]
-      ).map((row) => `${String(row.logical_trade_id)}:${Number(row.leg)}`),
-    );
-    return this.logicalTrades().map((trade) => {
-      const matchedBrokerTickets =
-        trade.status === "OUT_OF_SYNC"
-          ? this.reconcilerCandidateBrokerTickets(trade)
-          : (trade.matchedBrokerTickets ?? []);
-      return {
-        id: trade.id,
-        symbol: trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "unmapped",
-        direction: trade.direction,
-        status: trade.status,
-        executionMode: trade.executionMode,
-        source: trade.source,
-        outOfSyncReason: trade.outOfSyncReason,
-        livePositionExists: trade.livePositionExists,
-        matchedBrokerTickets,
-        brokerComment: trade.brokerComment,
-        lastSnapshotAt: trade.lastSnapshotAt,
-        legs: trade.legs.map((leg) => ({
-          leg: leg.leg,
-          targetPrice: leg.targetPrice,
-          targetSource: leg.targetSource,
-          defaultDistance: leg.defaultDistance,
-          allocationPercent: leg.allocationPercent,
-          volume: leg.volume,
-          status: leg.status,
-          providerAnnounced: announced.has(`${trade.id}:${leg.leg}`),
-        })),
-      };
-    });
+    const announced = compact
+      ? undefined
+      : new Set(
+          (
+            this.db
+              .query("SELECT logical_trade_id, leg FROM provider_tp_announcements")
+              .all() as Row[]
+          ).map((row) => `${String(row.logical_trade_id)}:${Number(row.leg)}`),
+        );
+    return this.logicalTrades()
+      .filter(
+        (trade) => !compact || ["PLANNED", "PENDING", "OPEN", "OUT_OF_SYNC"].includes(trade.status),
+      )
+      .map((trade) => {
+        const matchedBrokerTickets =
+          trade.status === "OUT_OF_SYNC"
+            ? this.reconcilerCandidateBrokerTickets(trade)
+            : (trade.matchedBrokerTickets ?? []);
+        const dashboardTrade = {
+          id: trade.id,
+          symbol: trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "unmapped",
+          direction: trade.direction,
+          status: trade.status,
+          executionMode: trade.executionMode,
+          ...(compact ? {} : { source: trade.source }),
+          outOfSyncReason: trade.outOfSyncReason,
+          livePositionExists: trade.livePositionExists,
+          matchedBrokerTickets,
+          brokerComment: trade.brokerComment,
+          lastSnapshotAt: trade.lastSnapshotAt,
+        };
+        if (compact) return dashboardTrade;
+        return {
+          ...dashboardTrade,
+          legs: trade.legs.map((leg) => ({
+            leg: leg.leg,
+            targetPrice: leg.targetPrice,
+            targetSource: leg.targetSource,
+            defaultDistance: leg.defaultDistance,
+            allocationPercent: leg.allocationPercent,
+            volume: leg.volume,
+            status: leg.status,
+            providerAnnounced: announced!.has(`${trade.id}:${leg.leg}`),
+          })),
+        };
+      });
   }
 
   private logicalTrades() {
@@ -14175,7 +14271,11 @@ class AppStore {
 
   /** Broadcast a delta to every subscriber. A broken listener never blocks a write. */
   emitEvent(event: AppStoreEvent) {
-    this.invalidateDashboardCaches();
+    const observationalAudit =
+      event.type === "audit" &&
+      typeof event.event === "string" &&
+      OBSERVATIONAL_AUDIT_EVENT_TYPES.has(event.event);
+    if (!observationalAudit) this.invalidateDashboardCaches();
     for (const listener of this.eventSubscribers) {
       try {
         listener(event);
@@ -14187,7 +14287,7 @@ class AppStore {
 
   private invalidateDashboardCaches() {
     this.storeRevision += 1;
-    this.dashboardPerformanceCache = undefined;
+    this.dashboardPerformanceCache.clear();
     this.providerScoreCache.clear();
   }
 
@@ -14228,6 +14328,8 @@ class AppStore {
         JSON.stringify(payload),
         new Date().toISOString(),
       );
+    const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    this.db.query("DELETE FROM audit_logs WHERE created_at < ?").run(cutoff);
     this.emitEvent({ type: "audit", event: eventType, level, actor });
   }
 
@@ -14239,17 +14341,23 @@ class AppStore {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
     const event = opts.event?.trim();
     const rows = (
-      event
+      event?.endsWith("*")
         ? this.db
             .query(
               "SELECT id, event_type, level, message, data_json, created_at FROM audit_logs WHERE event_type LIKE ? ORDER BY created_at DESC, id DESC LIMIT ?",
             )
-            .all(event.endsWith("*") ? `${event.slice(0, -1)}%` : event, limit)
-        : this.db
-            .query(
-              "SELECT id, event_type, level, message, data_json, created_at FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ?",
-            )
-            .all(limit)
+            .all(`${event.slice(0, -1)}%`, limit)
+        : event
+          ? this.db
+              .query(
+                "SELECT id, event_type, level, message, data_json, created_at FROM audit_logs WHERE event_type = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+              )
+              .all(event, limit)
+          : this.db
+              .query(
+                "SELECT id, event_type, level, message, data_json, created_at FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ?",
+              )
+              .all(limit)
     ) as Row[];
     return rows.map((row) => {
       const data = parseJson<Record<string, unknown>>(String(row.data_json)) ?? {};

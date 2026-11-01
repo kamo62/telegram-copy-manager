@@ -147,7 +147,7 @@ export function ProvidersTable({
                   {provider.parserMode} · {formatRelativeTime(provider.lastMessageAt, locale)}
                 </span>
               </th>
-              <td className="num-cell">{formatLot(provider.lotSize)}</td>
+              <td className="num-cell">{formatLot(provider.lotSize, locale)}</td>
               <td className="num-cell">{formatPips(provider.pips, locale)}</td>
               <td className="num-cell">
                 {provider.winRate === undefined ? (

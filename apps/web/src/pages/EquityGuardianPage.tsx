@@ -53,6 +53,11 @@ export function EquityGuardianPage({
           />
         ) : null}
         {guardians.map((guardian) => {
+          const thresholdValid =
+            Number.isFinite(guardian.threshold) &&
+            guardian.threshold >= 0.1 &&
+            guardian.threshold <= 100;
+          const thresholdHelpId = `guardian-threshold-help-${guardian.accountId}`;
           const tone = guardian.enabled
             ? severity(guardian.currentDrawdown, guardian.threshold)
             : "ok";
@@ -127,13 +132,21 @@ export function EquityGuardianPage({
                 </label>
                 <NumberField
                   aria-label="Threshold percent"
-                  defaultValue={guardian.threshold || 10}
-                  min="0"
+                  aria-describedby={!thresholdValid ? thresholdHelpId : undefined}
+                  aria-invalid={!thresholdValid}
+                  defaultValue={guardian.threshold}
+                  max="100"
+                  min="0.1"
                   name="threshold"
                   required={guardian.enabled}
                   step="0.1"
                   unit="%"
                 />
+                {!thresholdValid ? (
+                  <span className="guardian-field-error" id={thresholdHelpId}>
+                    Stored threshold must be between 0.1% and 100%. Correct it before enabling.
+                  </span>
+                ) : null}
                 <button className="btn btn-primary btn-small" type="submit">
                   Save
                 </button>
