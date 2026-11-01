@@ -1,11 +1,9 @@
-const lotFormatter = new Intl.NumberFormat("en-US", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-export function formatLot(value: number | null | undefined): string {
+export function formatLot(value: number | null | undefined, locale?: string): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
-  return lotFormatter.format(value);
+  return new Intl.NumberFormat(locale ?? undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 }
 
 export function formatNumber(

@@ -48,4 +48,14 @@ describe("ActivityFeed", () => {
     const { getByText } = view as ReturnType<typeof render>;
     expect(getByText("No activity yet")).toBeDefined();
   });
+
+  test("shows a rejection state when activity cannot be loaded", async () => {
+    let view: ReturnType<typeof render> | undefined;
+    await act(async () => {
+      view = render(<ActivityFeed load={async () => Promise.reject(new Error("offline"))} />);
+      await Promise.resolve();
+    });
+    const { getByText } = view as ReturnType<typeof render>;
+    expect(getByText("Activity could not be loaded: offline")).toBeDefined();
+  });
 });

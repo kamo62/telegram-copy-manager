@@ -12,9 +12,10 @@ import {
 } from "./format";
 
 describe("format", () => {
-  test("formatLot always uses dot separator regardless of locale", () => {
-    expect(formatLot(0.2)).toBe("0.20");
-    expect(formatLot(1.234)).toBe("1.23");
+  test("formatLot respects locale decimal conventions", () => {
+    expect(formatLot(0.2, "en-US")).toBe("0.20");
+    expect(formatLot(1.234, "en-US")).toBe("1.23");
+    expect(formatLot(0.2, "de-DE")).toBe("0,20");
     expect(formatLot(null)).toBe("—");
     expect(formatLot(Number.NaN)).toBe("—");
   });

@@ -332,3 +332,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   data_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created_id
+  ON audit_logs(created_at DESC, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_event_created_id
+  ON audit_logs(event_type, created_at DESC, id DESC);

@@ -381,7 +381,7 @@ function PositionRowComponent({
       <td>
         <strong className="open-positions-symbol">{position.symbol}</strong>
       </td>
-      <td className="num-cell">{formatLot(position.volume)}</td>
+      <td className="num-cell">{formatLot(position.volume, locale)}</td>
       <td className="num-cell">
         {formatNumber(position.openPrice, { locale, maximumFractionDigits: 5 })}
       </td>
@@ -458,7 +458,7 @@ function PendingOrderRow({
       <td>
         <strong className="open-positions-symbol">{order.symbol}</strong>
       </td>
-      <td className="num-cell">{formatLot(order.volume)}</td>
+      <td className="num-cell">{formatLot(order.volume, locale)}</td>
       <td className="num-cell">
         {formatNumber(order.openPrice, { locale, maximumFractionDigits: 5 })}
       </td>

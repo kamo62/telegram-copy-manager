@@ -143,6 +143,8 @@ export function PerformancePage({
   useEffect(() => {
     if (view !== "statistics" || !account?.id) return;
     const controller = new AbortController();
+    let active = true;
+    setStats(null);
     setStatsLoading(true);
     setStatsError("");
     const params = new URLSearchParams({ range, scope });
@@ -150,28 +152,48 @@ export function PerformancePage({
     apiGet<AccountStatsData>(`/api/accounts/${account.id}/stats?${params.toString()}`, {
       signal: controller.signal,
     })
-      .then((payload) => setStats(payload))
-      .catch((error) => {
-        if ((error as Error).name !== "AbortError") setStatsError((error as Error).message);
+      .then((payload) => {
+        if (active) setStats(payload);
       })
-      .finally(() => setStatsLoading(false));
-    return () => controller.abort();
+      .catch((error) => {
+        if (active && (error as Error).name !== "AbortError") {
+          setStatsError((error as Error).message);
+        }
+      })
+      .finally(() => {
+        if (active) setStatsLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [account?.id, effectiveProviderId, range, scope, view]);
 
   useEffect(() => {
     if (view !== "overview" || !account?.id) return;
     const controller = new AbortController();
+    let active = true;
+    setAttribution(null);
     setAttributionLoading(true);
     setAttributionError("");
     apiGet<AccountAttributionData>(`/api/accounts/${account.id}/attribution?range=${range}`, {
       signal: controller.signal,
     })
-      .then((payload) => setAttribution(payload))
-      .catch((error) => {
-        if ((error as Error).name !== "AbortError") setAttributionError((error as Error).message);
+      .then((payload) => {
+        if (active) setAttribution(payload);
       })
-      .finally(() => setAttributionLoading(false));
-    return () => controller.abort();
+      .catch((error) => {
+        if (active && (error as Error).name !== "AbortError") {
+          setAttributionError((error as Error).message);
+        }
+      })
+      .finally(() => {
+        if (active) setAttributionLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [account?.id, range, view]);
 
   return (

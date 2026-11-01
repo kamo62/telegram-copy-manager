@@ -18,7 +18,7 @@ export function LogsPage({
   parseRecentBusy,
   parseRecentResults,
   parserLoading,
-  parserLoadError,
+  dashboardLoadError,
   snapshot,
   fixtureClassifications,
   onClassify,
@@ -51,7 +51,7 @@ export function LogsPage({
     error?: string;
   }>;
   parserLoading: boolean;
-  parserLoadError: boolean;
+  dashboardLoadError: boolean;
   snapshot: DashboardSnapshot;
   fixtureClassifications: Record<string, "entry" | "management" | "noise" | "unknown">;
   onClassify: (
@@ -136,12 +136,17 @@ export function LogsPage({
             ) : null}
             <div className="parser-grid">
               {parserLoading ? <p className="load-state">Loading ParseLab…</p> : null}
-              {!parserLoading && parserLoadError ? (
+              {!parserLoading && dashboardLoadError && snapshot.parserResults.length === 0 ? (
                 <p className="load-state load-state-error">
                   ParseLab could not be loaded. Retry refresh.
                 </p>
               ) : null}
-              {!parserLoading && !parserLoadError && snapshot.parserResults.length === 0 ? (
+              {!parserLoading && dashboardLoadError && snapshot.parserResults.length > 0 ? (
+                <p className="load-state load-state-error">
+                  Refresh failed; showing last loaded results.
+                </p>
+              ) : null}
+              {!parserLoading && !dashboardLoadError && snapshot.parserResults.length === 0 ? (
                 <EmptyState
                   body={
                     providersLength === 0

@@ -345,7 +345,7 @@ function ClosedTradeDetail({
       <header className="closed-positions-detail-head">
         <strong className="closed-positions-detail-trade">trade_{row.shortId}</strong>
         <span className="closed-positions-detail-meta">
-          {row.symbol} {row.direction} {formatLot(row.volume)} · entry @{" "}
+          {row.symbol} {row.direction} {formatLot(row.volume, locale)} · entry @{" "}
           {formatNumber(row.openPrice, { locale, maximumFractionDigits: 5 })}
         </span>
         <span className="closed-positions-detail-meta">
@@ -370,7 +370,7 @@ function ClosedTradeDetail({
                 </span>
               ) : null}
               <span className="closed-positions-detail-leg-vol">
-                {formatLot(leg.volume)} @{" "}
+                {formatLot(leg.volume, locale)} @{" "}
                 {formatNumber(leg.price, { locale, maximumFractionDigits: 5 })}
               </span>
               <span className={`closed-positions-detail-leg-pnl ${tone}`}>

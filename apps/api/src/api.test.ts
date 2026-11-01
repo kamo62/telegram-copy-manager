@@ -2323,6 +2323,41 @@ describe("Telegram TC API", () => {
     expect(enabled.guardian).toMatchObject({ enabled: true, threshold: 10 });
   });
 
+  test("rejects invalid or unknown Equity Guardian patches without mutation", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    await app.request("/api/mt5/register", {
+      method: "POST",
+      body: JSON.stringify({
+        accountNumber: "900100201",
+        server: "MetaQuotes-Demo",
+        company: "MetaQuotes Ltd",
+        currency: "USD",
+        balance: 100,
+        equity: 100,
+        marginMode: "HEDGING",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    const before = await json<{ guardians: unknown[] }>(await app.request("/api/equity-guardian"));
+    for (const threshold of [0, 100.1, null, "10"]) {
+      const response = await app.request("/api/equity-guardian/mt5-900100201", {
+        method: "PATCH",
+        body: JSON.stringify({ threshold }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(response.status).toBe(400);
+    }
+    const after = await json<{ guardians: unknown[] }>(await app.request("/api/equity-guardian"));
+    expect(after).toEqual(before);
+
+    const unknown = await app.request("/api/equity-guardian/mt5-unknown", {
+      method: "PATCH",
+      body: JSON.stringify({ threshold: 10 }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(unknown.status).toBe(404);
+  });
+
   test("releases guardian-held work at market on safe unpause when configured", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const approved = await approveGoldBuyLimit(app);
@@ -13044,6 +13079,435 @@ describe("Telegram TC API", () => {
         .get("9007199254740996") as { action: string } | null;
       reader.close();
       expect(row?.action).toBe("FULL_CLOSE");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("compact dashboard keeps live projections, exact pending count, and focused curve", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-dashboard-compact-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+        seedDemoData: true,
+      });
+      const registered = await json<{ accountId: string }>(
+        await app.request("/api/mt5/register", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            accountNumber: "900200300",
+            server: "MetaQuotes-Demo",
+            company: "MetaQuotes Ltd",
+            currency: "USD",
+            balance: 5000,
+            equity: 5000,
+            marginMode: "HEDGING",
+            availableSymbols: ["EURUSD.raw"],
+          }),
+        }),
+      );
+
+      const db = new Database(databasePath);
+      try {
+        const parsed = db.query("SELECT id FROM parsed_signals LIMIT 1").get() as { id: string };
+        const tradeRow = db
+          .query("SELECT provider_id, account_id, data_json FROM logical_trades WHERE id = ?")
+          .get("trade-demo-1") as { provider_id: string; account_id: string; data_json: string };
+        const terminalTrade = {
+          ...JSON.parse(tradeRow.data_json),
+          id: "trade-terminal",
+          status: "CLOSED",
+        };
+        db.query(
+          "INSERT INTO logical_trades (id, provider_id, account_id, status, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        ).run(
+          "trade-terminal",
+          tradeRow.provider_id,
+          tradeRow.account_id,
+          "CLOSED",
+          JSON.stringify(terminalTrade),
+          "2026-08-24T00:00:00.000Z",
+        );
+        db.query(
+          `INSERT INTO queue_items
+             (id, parsed_signal_id, logical_trade_id, account_id, status, payload_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          "queue-terminal",
+          parsed.id,
+          "trade-terminal",
+          tradeRow.account_id,
+          "EXECUTED",
+          JSON.stringify({
+            id: "queue-terminal",
+            commandType: "OPEN_TRADE",
+            canonicalSymbol: "EURUSD",
+          }),
+          "2026-08-24T00:00:00.000Z",
+          "2026-08-24T00:00:00.000Z",
+        );
+      } finally {
+        db.close();
+      }
+
+      const legacy = await json<{
+        accountPerformance?: { accountId?: string };
+        signalQueue: Array<{ id: string; status: string }>;
+        logicalTrades: Array<{ id: string; source?: unknown; legs?: unknown[] }>;
+      }>(await app.request("/api/dashboard"));
+      const originalQuery = Database.prototype.query;
+      let accountCurveQueries = 0;
+      let accountOrderQueries = 0;
+      Database.prototype.query = function (this: Database, sql: string) {
+        if (
+          sql.includes("SELECT bucket_start, close_value, drawdown_pct") &&
+          sql.includes("scope = 'account'") &&
+          sql.includes("provider_id = ''")
+        ) {
+          accountCurveQueries += 1;
+        }
+        if (sql.includes("FROM broker_orders WHERE account_id = ?")) accountOrderQueries += 1;
+        return originalQuery.call(this, sql);
+      } as typeof originalQuery;
+      try {
+        const unscoped = await json<{
+          accountPerformance?: {
+            accountId?: string;
+            equityCurve?: unknown[];
+            monthlyReturns?: unknown[];
+          };
+          accountPerformanceByAccount?: Record<
+            string,
+            { equityCurve?: unknown[]; monthlyReturns?: unknown[]; today: number | null }
+          >;
+        }>(await app.request("/api/dashboard?compact=1"));
+        expect(accountCurveQueries).toBe(0);
+        expect(unscoped.accountPerformance?.equityCurve).toBeUndefined();
+        expect(unscoped.accountPerformance?.monthlyReturns).toBeUndefined();
+        expect(
+          unscoped.accountPerformanceByAccount?.[registered.accountId]?.equityCurve,
+        ).toBeUndefined();
+        expect(
+          unscoped.accountPerformanceByAccount?.[registered.accountId]?.monthlyReturns,
+        ).toBeUndefined();
+
+        const compact = await json<{
+          accountPerformance?: {
+            accountId?: string;
+            equityCurve?: unknown[];
+            monthlyReturns?: unknown[];
+          };
+          accountPerformanceByAccount?: Record<
+            string,
+            { equityCurve?: unknown[]; monthlyReturns?: unknown[]; today: number | null }
+          >;
+          signalQueue: Array<{ id: string; status: string }>;
+          signalQueuePendingCount?: number;
+          logicalTrades: Array<{
+            id: string;
+            source?: unknown;
+            legs?: unknown[];
+            outOfSyncReason?: string;
+          }>;
+        }>(await app.request("/api/dashboard?compact=1&accountId=mt5-100200300"));
+        expect(accountCurveQueries).toBe(1);
+
+        const compactOther = await json<{
+          accountPerformance?: { accountId?: string; equityCurve?: unknown[] };
+        }>(await app.request(`/api/dashboard?compact=1&accountId=${registered.accountId}`));
+        expect(compactOther.accountPerformance?.accountId).toBe(registered.accountId);
+        expect(accountCurveQueries).toBe(2);
+        const accountOrderQueriesBeforeReturningToFirst = accountOrderQueries;
+        const compactAgain = await json<{
+          accountPerformance?: { accountId?: string; equityCurve?: unknown[] };
+        }>(await app.request("/api/dashboard?compact=1&accountId=mt5-100200300"));
+        expect(compactAgain.accountPerformance).toEqual(compact.accountPerformance);
+        expect(accountCurveQueries).toBe(2);
+        expect(accountOrderQueries).toBe(accountOrderQueriesBeforeReturningToFirst);
+
+        expect(legacy.accountPerformance?.accountId).toBe(registered.accountId);
+        expect(legacy.signalQueue.some((item) => item.id === "queue-terminal")).toBe(true);
+        const legacyTrade = legacy.logicalTrades.find((trade) => trade.id === "trade-demo-1");
+        expect(legacyTrade).toHaveProperty("source");
+        expect(legacyTrade).toHaveProperty("legs");
+        expect(compact.accountPerformance?.accountId).toBe("mt5-100200300");
+        expect(compact.accountPerformance?.equityCurve).toEqual(expect.any(Array));
+        expect(compact.accountPerformance?.monthlyReturns).toEqual(expect.any(Array));
+        expect(compact.accountPerformanceByAccount?.[registered.accountId]?.today).toBe(0);
+        expect(
+          compact.accountPerformanceByAccount?.[registered.accountId]?.equityCurve,
+        ).toBeUndefined();
+        expect(
+          compact.accountPerformanceByAccount?.[registered.accountId]?.monthlyReturns,
+        ).toBeUndefined();
+        expect(compact.signalQueuePendingCount).toBe(1);
+        expect(compact.signalQueue.some((item) => item.id === "queue-terminal")).toBe(false);
+        expect(
+          compact.signalQueue.every((item) =>
+            ["PENDING", "LEASED", "HELD", "DUPLICATE"].includes(item.status),
+          ),
+        ).toBe(true);
+        expect(compact.logicalTrades.some((trade) => trade.id === "trade-terminal")).toBe(false);
+        const compactTrade = compact.logicalTrades.find((trade) => trade.id === "trade-demo-1");
+        expect(compactTrade).toBeDefined();
+        expect(compactTrade).not.toHaveProperty("source");
+        expect(compactTrade).not.toHaveProperty("legs");
+      } finally {
+        Database.prototype.query = originalQuery;
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("account statistics and attribution avoid per-trade broker order queries", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const originalQuery = Database.prototype.query;
+    let perTradeQueries = 0;
+    Database.prototype.query = function (this: Database, sql: string) {
+      if (/FROM broker_orders WHERE logical_trade_id = \?/i.test(sql)) perTradeQueries += 1;
+      return originalQuery.call(this, sql);
+    } as typeof originalQuery;
+    try {
+      const stats = await json<{
+        currency: string;
+        profitReturn: { totalPnl: number };
+        riskThresholds: { warnPct: number; dangerPct: number };
+      }>(await app.request("/api/accounts/mt5-100200300/stats?range=30d"));
+      const attribution = await json<{
+        currency: string;
+        totals: { totalPnl: number };
+        attributionRows: unknown[];
+        topTrades: unknown[];
+      }>(await app.request("/api/accounts/mt5-100200300/attribution?range=30d"));
+
+      expect(stats).toMatchObject({
+        currency: "USD",
+        profitReturn: { totalPnl: expect.any(Number) },
+        riskThresholds: { warnPct: expect.any(Number), dangerPct: expect.any(Number) },
+      });
+      expect(attribution).toMatchObject({
+        currency: "USD",
+        totals: { totalPnl: expect.any(Number) },
+        attributionRows: expect.any(Array),
+        topTrades: expect.any(Array),
+      });
+      expect(perTradeQueries).toBe(0);
+    } finally {
+      Database.prototype.query = originalQuery;
+    }
+  });
+
+  test("observational audit events leave compact performance cache warm", async () => {
+    const telegram: TelegramAdapter = {
+      ...createQueuedTelegramAdapter([]),
+      async fetchRecentMessages() {
+        throw new Error("transient provider failure");
+      },
+    };
+    const app = createApi({
+      databasePath: ":memory:",
+      seedDemoData: true,
+      telegram,
+      telegramPollingEnabled: false,
+    });
+    await connectSessionWithEnabledProvider(app);
+
+    const originalQuery = Database.prototype.query;
+    let curveQueries = 0;
+    Database.prototype.query = function (this: Database, sql: string) {
+      if (
+        sql.includes("SELECT bucket_start, close_value, drawdown_pct") &&
+        sql.includes("scope = 'account'") &&
+        sql.includes("provider_id = ''")
+      ) {
+        curveQueries += 1;
+      }
+      return originalQuery.call(this, sql);
+    } as typeof originalQuery;
+    try {
+      await app.request("/api/dashboard?compact=1&accountId=mt5-100200300");
+      const primedQueries = curveQueries;
+      expect(primedQueries).toBeGreaterThan(0);
+
+      const ingestion = await app.runTelegramIngestionOnce();
+      expect(ingestion.errors).toBeGreaterThan(0);
+      const observational = await json<{ logs: unknown[] }>(
+        await app.request("/api/audit-logs?event=telegram.ingest.error"),
+      );
+      expect(observational.logs.length).toBeGreaterThan(0);
+
+      await app.request("/api/dashboard?compact=1&accountId=mt5-100200300");
+      expect(curveQueries).toBe(primedQueries);
+
+      await app.request("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({ pollingIntervalSeconds: 31 }),
+        headers: { "content-type": "application/json" },
+      });
+      await app.request("/api/dashboard?compact=1&accountId=mt5-100200300");
+      expect(curveQueries).toBeGreaterThan(primedQueries);
+    } finally {
+      Database.prototype.query = originalQuery;
+    }
+  });
+
+  test("account statistics use balance when persisted initial balance is zero", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-stats-zero-initial-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const registered = await json<{ accountId: string }>(
+        await app.request("/api/mt5/register", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            accountNumber: "900300400",
+            server: "MetaQuotes-Demo",
+            company: "MetaQuotes Ltd",
+            currency: "USD",
+            balance: 1000,
+            equity: 1000,
+            marginMode: "HEDGING",
+          }),
+        }),
+      );
+      const db = new Database(databasePath);
+      try {
+        db.query("UPDATE mt5_accounts SET initial_balance = 0 WHERE id = ?").run(
+          registered.accountId,
+        );
+        db.query(
+          `INSERT INTO broker_orders
+             (id, logical_trade_id, leg_id, action, queue_item_id, account_id, retcode, retcode_external,
+              broker_comment, pnl_currency, pnl_pips, source, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          "legacy-zero-close",
+          "legacy-zero-trade",
+          "trade",
+          "FULL_CLOSE",
+          "legacy-zero-queue",
+          registered.accountId,
+          10009,
+          0,
+          "legacy",
+          100,
+          0,
+          "manual",
+          new Date().toISOString(),
+        );
+      } finally {
+        db.close();
+      }
+
+      const stats = await json<{ profitReturn: { roiPercent: number } }>(
+        await app.request(`/api/accounts/${registered.accountId}/stats?range=all`),
+      );
+      expect(stats.profitReturn.roiPercent).toBe(10);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("retains recent audits, prunes old rows, and creates both audit indexes", async () => {
+    const migration = await readFile(join(process.cwd(), "migrations/0001_initial.sql"), "utf8");
+    const migrationDb = new Database(":memory:");
+    try {
+      migrationDb.exec(migration);
+      const migrationIndexes = (
+        migrationDb
+          .query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'audit_logs'")
+          .all() as Array<{ name: string }>
+      ).map((row) => row.name);
+      expect(migrationIndexes).toEqual(
+        expect.arrayContaining(["idx_audit_logs_created_id", "idx_audit_logs_event_created_id"]),
+      );
+    } finally {
+      migrationDb.close();
+    }
+
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-audit-retention-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const app = createApi({
+        databasePath,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+        seedDemoData: false,
+      });
+      const db = new Database(databasePath);
+      const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+      const recent = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      try {
+        for (const [id, eventType, createdAt] of [
+          ["audit-old", "old.event", old],
+          ["audit-recent", "recent.event", recent],
+          ["audit-exact", "filter.exact", recent],
+          ["audit-prefix", "filter.exact.child", recent],
+        ] as const) {
+          db.query(
+            "INSERT INTO audit_logs (id, event_type, level, message, data_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          ).run(id, eventType, "info", eventType, "{}", createdAt);
+        }
+      } finally {
+        db.close();
+      }
+
+      await app.request("/api/mt5/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          accountNumber: "900200301",
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes Ltd",
+          currency: "USD",
+          balance: 1000,
+          equity: 1000,
+          marginMode: "HEDGING",
+        }),
+      });
+
+      const reader = new Database(databasePath, { readonly: true });
+      try {
+        expect(reader.query("SELECT id FROM audit_logs WHERE id = ?").get("audit-old")).toBeNull();
+        expect(reader.query("SELECT id FROM audit_logs WHERE id = ?").get("audit-recent")).toEqual({
+          id: "audit-recent",
+        });
+        const indexes = (
+          reader
+            .query(
+              "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'audit_logs'",
+            )
+            .all() as Array<{ name: string }>
+        ).map((row) => row.name);
+        expect(indexes).toEqual(
+          expect.arrayContaining(["idx_audit_logs_created_id", "idx_audit_logs_event_created_id"]),
+        );
+      } finally {
+        reader.close();
+      }
+
+      const exact = await json<{ logs: Array<{ eventType: string }> }>(
+        await app.request("/api/audit-logs?event=filter.exact"),
+      );
+      expect(exact.logs.map((log) => log.eventType)).toEqual(["filter.exact"]);
+      const prefix = await json<{ logs: Array<{ eventType: string }> }>(
+        await app.request("/api/audit-logs?event=filter.*"),
+      );
+      expect(prefix.logs.map((log) => log.eventType).sort()).toEqual([
+        "filter.exact",
+        "filter.exact.child",
+      ]);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

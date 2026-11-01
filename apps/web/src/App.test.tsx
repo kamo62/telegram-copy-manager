@@ -11,6 +11,7 @@ import {
 import { createBrowserRouter, MemoryRouter, RouterProvider } from "react-router-dom";
 import packageJson from "../../../package.json";
 import { App, type DashboardSnapshot, dashboardSnapshotsEqual, heldReleaseToast } from "./App";
+import { EquityGuardianPage } from "./pages/EquityGuardianPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 // App now reads its view/tab/account from the URL, so every render needs Router context.
@@ -318,7 +319,7 @@ async function renderEventSourceApp(initial: DashboardSnapshot, refreshed = init
   let dashboardLoads = 0;
   globalThis.fetch = (async (url: string | URL | Request) => {
     const requestUrl = String(url);
-    if (requestUrl === "/api/dashboard") {
+    if (requestUrl === "/api/dashboard?compact=1") {
       dashboardLoads += 1;
       return Response.json(dashboardLoads === 1 ? initial : refreshed);
     }
@@ -349,46 +350,6 @@ describe("App dashboard", () => {
       ),
     ).toBe(true);
     expect(dashboardSnapshotsEqual({ queue: [1, 2] }, { queue: [1, 3] })).toBe(false);
-  });
-
-  test("coalesces dashboard event bursts while a load is in flight", async () => {
-    const { instances, restore } = installFakeEventSource();
-    let resolveDashboard: (response: Response) => void = () => {};
-    const dashboardResponse = new Promise<Response>((resolve) => {
-      resolveDashboard = resolve;
-    });
-    let dashboardLoads = 0;
-    globalThis.fetch = (async (url: string | URL | Request) => {
-      if (String(url) === "/api/dashboard") {
-        dashboardLoads += 1;
-        return dashboardResponse;
-      }
-      if (String(url) === "/api/telegram/status") {
-        return Response.json({
-          connected: true,
-          telegramAdapter: "mock",
-          telegramSessions: snapshot.telegramSessions,
-        });
-      }
-      return fixtureResponse(url);
-    }) as typeof fetch;
-
-    try {
-      const view = render(<App />);
-      await waitFor(() => expect(instances).toHaveLength(1));
-      act(() => {
-        instances[0]?.emit("queue");
-        instances[0]?.emit("trade");
-        instances[0]?.emit("heartbeat");
-      });
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      expect(dashboardLoads).toBe(1);
-
-      resolveDashboard(Response.json(snapshot));
-      await view.findByRole("heading", { level: 1, name: "Operations" });
-    } finally {
-      restore();
-    }
   });
 
   test("applies heartbeat deltas without fetching the dashboard", async () => {
@@ -450,12 +411,19 @@ describe("App dashboard", () => {
     }
   });
 
-  test("keeps queue events on the full dashboard reload path", async () => {
+  test("reloads only for reconciliation and ignores audit or unsupported events", async () => {
     const app = await renderEventSourceApp(heartbeatDashboard());
 
     try {
       expect(app.dashboardLoads()).toBe(1);
-      act(() => app.instances[0]?.emit("queue"));
+      act(() => {
+        for (const type of ["audit", "queue", "trade", "snapshot", "score"]) {
+          app.instances[0]?.emit(type);
+        }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(app.dashboardLoads()).toBe(1);
+      act(() => app.instances[0]?.emit("reconciliation"));
       await waitFor(() => expect(app.dashboardLoads()).toBe(2));
     } finally {
       app.restore();
@@ -672,7 +640,7 @@ describe("App dashboard", () => {
           telegramSessions: snapshot.telegramSessions,
         });
       }
-      if (requestUrl === "/api/dashboard") {
+      if (requestUrl === "/api/dashboard?compact=1") {
         return dashboardResponse;
       }
       return Response.json({});
@@ -1112,7 +1080,7 @@ describe("App dashboard", () => {
     const toggleCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
     expect(toggleCall?.init?.method).toBe("PATCH");
     expect(JSON.parse(String(toggleCall?.init?.body))).toEqual({ enabled: true });
-    expect(calls.some((call) => call.url === "/api/dashboard")).toBe(true);
+    expect(calls.some((call) => call.url === "/api/dashboard?compact=1")).toBe(true);
   });
 
   test("removes a provider from the Providers page after confirmation", async () => {
@@ -1310,6 +1278,35 @@ describe("App dashboard", () => {
     expect(within(guardianPanel).queryByText("200300400")).toBeNull();
   });
 
+  test("keeps a disabled persisted guardian threshold consistent and bounded", () => {
+    const view = rtlRender(
+      <EquityGuardianPage
+        guardians={[
+          {
+            accountId: "mt5-demo-1",
+            accountNumber: "100200300",
+            threshold: 0,
+            currentDrawdown: 0,
+            paused: false,
+            enabled: false,
+          },
+        ]}
+        onSave={() => {}}
+        onUnpause={() => {}}
+      />,
+    );
+    const input = view.getByRole("spinbutton", { name: "Threshold percent" }) as HTMLInputElement;
+    expect(input.value).toBe("0");
+    expect(input.max).toBe("100");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(
+      view.getByText("Stored threshold must be between 0.1% and 100%. Correct it before enabling."),
+    ).toBeTruthy();
+    expect(
+      view.container.querySelector(".guardian-numbers span:nth-child(2) strong")?.textContent,
+    ).toBe("0.00%");
+  });
+
   test("lets the operator update provider parser mode and channel lot size from the modal", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -1341,7 +1338,9 @@ describe("App dashboard", () => {
       view.getByRole("button", { name: "Save provider settings for Alpha FX Signals" }),
     );
 
-    await waitFor(() => expect(calls.some((call) => call.url === "/api/dashboard")).toBe(true));
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/dashboard?compact=1")).toBe(true),
+    );
     const settingsCall = calls.find((call) => call.url === "/api/providers/provider-alpha");
     expect(settingsCall?.init?.method).toBe("PATCH");
     expect(JSON.parse(String(settingsCall?.init?.body))).toMatchObject({
