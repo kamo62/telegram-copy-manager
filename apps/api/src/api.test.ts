@@ -192,11 +192,13 @@ async function postVirtualTpSnapshot(
     point?: number;
     openPrice?: number;
     type?: number;
+    tickAgeMs?: number;
   },
 ) {
   return app.request("/api/mt5/snapshot", {
     method: "POST",
     body: JSON.stringify({
+      brokerReady: true,
       accountId: "mt5-63442826",
       positions: [
         {
@@ -219,6 +221,7 @@ async function postVirtualTpSnapshot(
           symbol: input.symbol ?? "EURUSD.raw",
           bid: input.bid,
           ask: input.ask,
+          tickAgeMs: input.tickAgeMs ?? 0,
           point: input.point ?? 0.00001,
         },
       ],
@@ -313,6 +316,7 @@ async function configureProviderWithAccount(
   await app.request("/api/mt5/register", {
     method: "POST",
     body: JSON.stringify({
+      brokerReady: true,
       accountNumber: "63442826",
       server: "OctaFX-Real",
       company: "OctaFX",
@@ -333,6 +337,7 @@ async function heartbeatConfiguredAccount(app: ReturnType<typeof createApi>) {
   return app.request("/api/mt5/heartbeat", {
     method: "POST",
     body: JSON.stringify({
+      brokerReady: true,
       accountId: "mt5-63442826",
       balance: 10000,
       equity: 10000,
@@ -525,6 +530,7 @@ async function sendGoldSnapshot(
   await app.request("/api/mt5/snapshot", {
     method: "POST",
     body: JSON.stringify({
+      brokerReady: true,
       accountId: "mt5-63442826",
       positions: input.positions ?? [
         {
@@ -542,7 +548,7 @@ async function sendGoldSnapshot(
         },
       ],
       orders: input.orders ?? [],
-      symbols: [{ symbol: "XAUUSD", bid: input.bid, ask: input.bid + 0.3 }],
+      symbols: [{ symbol: "XAUUSD", bid: input.bid, ask: input.bid + 0.3, tickAgeMs: 0 }],
     }),
     headers: { "content-type": "application/json" },
   });
@@ -614,6 +620,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "300400500",
           server: "MetaQuotes-Demo",
           company: "MetaQuotes Ltd",
@@ -1141,6 +1148,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "700800900",
           server: "MetaQuotes-Demo",
           company: "MetaQuotes Ltd",
@@ -1170,6 +1178,7 @@ describe("Telegram TC API", () => {
       app.request("/api/mt5/snapshot", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountId: registered.accountId,
           positions: [],
           orders: [{ ticket: "555001", symbol: "XAUUSD", type: 2, volume: 0.04, price: 4500 }],
@@ -1301,6 +1310,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "54870107",
         server: "HFMarketsSA",
         company: "HF Markets SA (Pty) Ltd",
@@ -1395,6 +1405,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "54870107",
         server: "HFMarketsSA",
         company: "HF Markets SA (Pty) Ltd",
@@ -1529,10 +1540,13 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [],
         orders: [],
-        symbols: [{ symbol: "EURUSD.raw", bid: 1.1, ask: 1.1001, point: 0.00001, digits: 5 }],
+        symbols: [
+          { symbol: "EURUSD.raw", bid: 1.1, ask: 1.1001, tickAgeMs: 0, point: 0.00001, digits: 5 },
+        ],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -1685,6 +1699,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "200300400",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -1759,6 +1774,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "63442826",
         server: "OctaFX-Real",
         company: "OctaFX",
@@ -1773,12 +1789,13 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [],
         orders: [],
         symbols: [
-          { symbol: "XAUUSD.raw", bid: 2450, ask: 2450.2, point: 0.01, digits: 2 },
-          { symbol: "XAUUSD.pro", bid: 0, ask: 0, point: 0.01, digits: 2 },
+          { symbol: "XAUUSD.raw", bid: 2450, ask: 2450.2, tickAgeMs: 0, point: 0.01, digits: 2 },
+          { symbol: "XAUUSD.pro", bid: 0, ask: 0, tickAgeMs: 0, point: 0.01, digits: 2 },
         ],
       }),
       headers: { "content-type": "application/json" },
@@ -1797,6 +1814,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "63442826",
         server: "OctaFX-Real",
         company: "OctaFX",
@@ -1824,6 +1842,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/heartbeat", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         balance: 10000,
         equity: 10000,
@@ -2059,6 +2078,7 @@ describe("Telegram TC API", () => {
     const register = await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "100200300",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -2243,6 +2263,7 @@ describe("Telegram TC API", () => {
     const badRegister = await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "777",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -2259,6 +2280,7 @@ describe("Telegram TC API", () => {
     const register = await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "777",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -2292,11 +2314,103 @@ describe("Telegram TC API", () => {
     expect(dashboard.signalQueue.some((item) => item.status === "HELD")).toBe(true);
   });
 
+  test("rejects zero registrations and unknown heartbeats without binding an account slot", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const slot = await json<{ slot: { id: string; linkCode: string } }>(
+      await app.request("/api/account-slots", {
+        method: "POST",
+        body: JSON.stringify({ name: "Unclaimed" }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    for (const accountNumber of ["0", ""]) {
+      const response = await app.request("/api/mt5/register", {
+        method: "POST",
+        body: JSON.stringify({
+          brokerReady: true,
+          accountNumber,
+          server: "MetaQuotes-Demo",
+          company: "MetaQuotes Ltd",
+          currency: "USD",
+          balance: 10000,
+          equity: 10000,
+          marginMode: "HEDGING",
+          linkCode: slot.slot.linkCode,
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      expect(response.status).toBe(400);
+    }
+
+    const heartbeat = await app.request("/api/mt5/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({
+        brokerReady: true,
+        accountId: "mt5-777",
+        balance: 10000,
+        equity: 10000,
+        linkCode: slot.slot.linkCode,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(heartbeat.status).toBe(404);
+    expect((await json<{ error: string }>(heartbeat)).error).toBe("MT5 account not found");
+    const currentSlot = await json<{
+      slots: Array<{ id: string; accountId: string; accountNumber: string; status: string }>;
+    }>(await app.request("/api/account-slots"));
+    expect(currentSlot.slots.find((item) => item.id === slot.slot.id)).toMatchObject({
+      accountId: "",
+      accountNumber: "",
+      status: "waiting",
+    });
+  });
+
+  test("readiness rejection and unknown accounts do not write MT5 snapshots", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: true });
+    const notReady = await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        brokerReady: false,
+        accountId: "mt5-100200300",
+        positions: [{ ticket: "must-not-save" }],
+        orders: [],
+        symbols: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(notReady.status).toBe(409);
+
+    const unknown = await app.request("/api/mt5/snapshot", {
+      method: "POST",
+      body: JSON.stringify({
+        brokerReady: true,
+        accountId: "mt5-999999999",
+        positions: [],
+        orders: [],
+        symbols: [],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(unknown.status).toBe(404);
+
+    const accounts = await json<{
+      accounts: Array<{ id: string; lastSnapshotAt?: string; openPositionCount: number }>;
+    }>(await app.request("/api/mt5/accounts"));
+    expect(accounts.accounts.find((account) => account.id === "mt5-100200300")).toMatchObject({
+      openPositionCount: 0,
+    });
+    expect(
+      accounts.accounts.find((account) => account.id === "mt5-100200300")?.lastSnapshotAt,
+    ).toBe(undefined);
+  });
+
   test("defaults a new Equity Guardian to off until an operator sets a threshold", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "900100200",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -2328,6 +2442,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "900100201",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -2365,10 +2480,11 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [],
         orders: [],
-        symbols: [{ symbol: "XAUUSD", bid: 4540, ask: 4540.2 }],
+        symbols: [{ symbol: "XAUUSD", bid: 4540, ask: 4540.2, tickAgeMs: 0 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -2468,7 +2584,12 @@ describe("Telegram TC API", () => {
     });
     await app.request("/api/mt5/heartbeat", {
       method: "POST",
-      body: JSON.stringify({ accountId: "mt5-63442826", balance: 10000, equity: 8000 }),
+      body: JSON.stringify({
+        brokerReady: true,
+        accountId: "mt5-63442826",
+        balance: 10000,
+        equity: 8000,
+      }),
       headers: { "content-type": "application/json" },
     });
 
@@ -2507,7 +2628,12 @@ describe("Telegram TC API", () => {
 
     await app.request("/api/mt5/heartbeat", {
       method: "POST",
-      body: JSON.stringify({ accountId: "mt5-63442826", balance: 10000, equity: 10000 }),
+      body: JSON.stringify({
+        brokerReady: true,
+        accountId: "mt5-63442826",
+        balance: 10000,
+        equity: 10000,
+      }),
       headers: { "content-type": "application/json" },
     });
     const unpause = await app.request("/api/equity-guardian/mt5-63442826/unpause", {
@@ -2527,7 +2653,12 @@ describe("Telegram TC API", () => {
       const app = createApi({ databasePath: ":memory:", seedDemoData: true });
       await app.request("/api/mt5/heartbeat", {
         method: "POST",
-        body: JSON.stringify({ accountId: "mt5-100200300", balance: 10000, equity: 10000 }),
+        body: JSON.stringify({
+          brokerReady: true,
+          accountId: "mt5-100200300",
+          balance: 10000,
+          equity: 10000,
+        }),
         headers: { "content-type": "application/json" },
       });
       Date.now = () => now + 31_000;
@@ -2550,6 +2681,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "100200300",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -2637,7 +2769,12 @@ describe("Telegram TC API", () => {
       Date.now = () => now + 61_000;
       await app.request("/api/mt5/heartbeat", {
         method: "POST",
-        body: JSON.stringify({ accountId: "mt5-63442826", balance: 10000, equity: 10000 }),
+        body: JSON.stringify({
+          brokerReady: true,
+          accountId: "mt5-63442826",
+          balance: 10000,
+          equity: 10000,
+        }),
         headers: { "content-type": "application/json" },
       });
       await app.request("/api/settings", {
@@ -2671,6 +2808,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442826",
           server: "OctaFX-Real",
           company: "OctaFX",
@@ -2812,6 +2950,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "777",
           server: "MetaQuotes-Demo",
           company: "MetaQuotes Ltd",
@@ -2851,6 +2990,7 @@ describe("Telegram TC API", () => {
       const expiredRegister = await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "778",
           server: "MetaQuotes-Demo",
           company: "MetaQuotes Ltd",
@@ -2898,6 +3038,7 @@ describe("Telegram TC API", () => {
   test("accepts MT5 JSON requests with trailing null bytes and rejects malformed MT5 JSON cleanly", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: false });
     const registerPayload = {
+      brokerReady: true,
       accountNumber: "777",
       server: "MetaQuotes-Demo",
       company: "MetaQuotes Ltd",
@@ -2942,6 +3083,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber,
           server: "MetaQuotes-Demo",
           company: "MetaQuotes Ltd",
@@ -3007,6 +3149,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber,
           server: "MetaQuotes-Demo",
           company: "MetaQuotes Ltd",
@@ -3081,6 +3224,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "100200300",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -3123,6 +3267,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "100200300",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -3232,6 +3377,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber,
           server: "MetaQuotes-Demo",
           company: "MetaQuotes Ltd",
@@ -3460,6 +3606,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "54945785",
           server: "HFMarkets-Demo",
           company: "HF Markets",
@@ -3575,6 +3722,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "54945785",
           server: "HFMarkets-Demo",
           company: "HF Markets",
@@ -3596,6 +3744,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/heartbeat", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-54945785",
           balance: 10000,
           equity: 10000,
@@ -3855,10 +4004,11 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [],
         orders: [],
-        symbols: [{ symbol: "EURUSD", bid: 1.08, ask: 1.0802, point: 0.00001 }],
+        symbols: [{ symbol: "EURUSD", bid: 1.08, ask: 1.0802, tickAgeMs: 0, point: 0.00001 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -3903,10 +4053,11 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/snapshot", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-63442826",
           positions: [],
           orders: [],
-          symbols: [{ symbol: "XAUUSD", bid: 4050, ask: 4050.2, point: 0.01 }],
+          symbols: [{ symbol: "XAUUSD", bid: 4050, ask: 4050.2, tickAgeMs: 0, point: 0.01 }],
         }),
         headers: { "content-type": "application/json" },
       });
@@ -3920,10 +4071,11 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/snapshot", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-63442826",
           positions: [],
           orders: [],
-          symbols: [{ symbol: "XAUUSD", bid: 4051, ask: 4051.2, point: 0.01 }],
+          symbols: [{ symbol: "XAUUSD", bid: 4051, ask: 4051.2, tickAgeMs: 0, point: 0.01 }],
         }),
         headers: { "content-type": "application/json" },
       });
@@ -3948,6 +4100,159 @@ describe("Telegram TC API", () => {
       Date.now = originalDateNow;
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test("persists changed quotes with the receipt time when snapshot structure is unchanged", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-quote-restart-"));
+    const databasePath = join(tempDir, "app.db");
+    try {
+      const options = {
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock" as const,
+        telegramPollingEnabled: false,
+      };
+      const app = createApi(options);
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      // Same structural signature and tick age, but prices cross the intended entry.
+      for (const bid of [4050, 4020]) {
+        const response = await app.request("/api/mt5/snapshot", {
+          method: "POST",
+          body: JSON.stringify({
+            brokerReady: true,
+            accountId: "mt5-63442826",
+            positions: [],
+            orders: [],
+            symbols: [{ symbol: "XAUUSD", bid, ask: bid + 0.2, tickAgeMs: 0, point: 0.01 }],
+          }),
+          headers: { "content-type": "application/json" },
+        });
+        expect(response.status).toBe(200);
+      }
+      const db = new Database(databasePath);
+      const row = db
+        .query("SELECT symbols_json FROM mt5_snapshots WHERE account_id = ?")
+        .get("mt5-63442826") as { symbols_json: string };
+      expect(JSON.parse(row.symbols_json)[0].bid).toBe(4020);
+      db.close();
+      const restarted = createApi(options);
+      const parsed = await json<{ parsedSignalId: string }>(
+        await restarted.request("/api/parser/parse", {
+          method: "POST",
+          body: JSON.stringify({
+            providerId,
+            accountId: "mt5-63442826",
+            rawText: "Gold sell\n\n4028-29\n\nSl 4034\n\nTp 4023\nTp 4016\nTp 4010",
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const response = await restarted.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+        method: "POST",
+      });
+      expect(response.status).toBe(200);
+      const approved = await json<{ queueItemId: string }>(response);
+      const { queue } = await json<{
+        queue: Array<{ id: string; payload: { orderType: string } }>;
+      }>(await restarted.request("/api/signals"));
+      expect(queue.find((item) => item.id === approved.queueItemId)?.payload.orderType).toBe(
+        "LIMIT",
+      );
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects stale tick quotes during classification and after reopening the API", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-stale-tick-"));
+    const databasePath = join(tempDir, "app.db");
+    const rawText = "Gold sell\n\n4028-29\n\nSl 4034\n\nTp 4023\nTp 4016\nTp 4010";
+    const parse = (app: ReturnType<typeof createApi>, providerId: string) =>
+      app.request("/api/parser/parse", {
+        method: "POST",
+        body: JSON.stringify({ providerId, accountId: "mt5-63442826", rawText }),
+        headers: { "content-type": "application/json" },
+      });
+    try {
+      const app = createApi({
+        databasePath,
+        seedDemoData: false,
+        telegramAdapter: "mock",
+        telegramPollingEnabled: false,
+      });
+      const providerId = await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          brokerReady: true,
+          accountId: "mt5-63442826",
+          positions: [],
+          orders: [],
+          symbols: [{ symbol: "XAUUSD", bid: 4020, ask: 4020.2, tickAgeMs: 15001, point: 0.01 }],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      const parsed = await json<{ parsedSignalId: string }>(await parse(app, providerId));
+      const staleTick = await app.request(`/api/signals/${parsed.parsedSignalId}/approve`, {
+        method: "POST",
+      });
+      expect(staleTick.status).toBe(422);
+
+      await app.request("/api/mt5/snapshot", {
+        method: "POST",
+        body: JSON.stringify({
+          brokerReady: true,
+          accountId: "mt5-63442826",
+          positions: [],
+          orders: [],
+          symbols: [{ symbol: "XAUUSD", bid: 4020, ask: 4020.2, tickAgeMs: 0, point: 0.01 }],
+        }),
+        headers: { "content-type": "application/json" },
+      });
+      for (const offset of [-16_000, 60_000]) {
+        const db = new Database(databasePath);
+        db.query("UPDATE mt5_snapshots SET updated_at = ? WHERE account_id = ?").run(
+          new Date(Date.now() + offset).toISOString(),
+          "mt5-63442826",
+        );
+        db.close();
+        const restarted = createApi({
+          databasePath,
+          seedDemoData: false,
+          telegramAdapter: "mock",
+          telegramPollingEnabled: false,
+        });
+        const staleStoredQuote = await restarted.request(
+          `/api/signals/${parsed.parsedSignalId}/approve`,
+          { method: "POST" },
+        );
+        expect(staleStoredQuote.status).toBe(422);
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("does not trigger virtual TP from a stale broker tick", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldSellSmallRunnerLimit(app);
+    await reportExecutedQueue(app, {
+      queueItemId: approved.queueItemId,
+      ticket: "stale-tick-position",
+      price: 4488.5,
+      volume: 0.02,
+    });
+    await postVirtualTpSnapshot(app, approved, {
+      ticket: "stale-tick-position",
+      symbol: "XAUUSD",
+      bid: 4470,
+      ask: 4470.2,
+      tickAgeMs: 15001,
+      sl: 4494,
+    });
+
+    const work = await (await app.request("/api/mt5/poll-line?accountId=mt5-63442826")).text();
+    expect(work).toContain("status=NO_WORK");
   });
 
   test("fans a provider CLOSE out to every active logical trade for its order id", async () => {
@@ -4241,6 +4546,352 @@ describe("Telegram TC API", () => {
     ]);
   });
 
+  test("reconciles mixed split-order executions per leg and preserves ticket evidence", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    const approved = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request("/api/signals/manual", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          direction: "SELL",
+          orderType: "MARKET",
+          brokerSymbol: "XAUUSD",
+          stopLoss: 4494,
+          takeProfits: [{ price: 4483 }, { price: 4476 }, { price: 4468 }, { price: 4454 }],
+          volume: 0.04,
+          executionMode: "SPLIT_ORDER",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const report = await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "PARTIAL",
+        retcode: 10010,
+        retcodeExternal: 0,
+        brokerComment: "Mixed split order result",
+        requestedVolume: 0.04,
+        filledVolume: 0.02,
+        remainingVolume: 0.02,
+        executions: [
+          {
+            leg: 1,
+            status: "EXECUTED",
+            retcode: 10009,
+            retcodeExternal: 0,
+            brokerComment: "Leg 1 market order filled",
+            positionTicket: "90001",
+            dealTicket: "70001",
+            requestedVolume: 0.01,
+            filledVolume: 0.01,
+            remainingVolume: 0,
+          },
+          {
+            leg: 2,
+            status: "FAILED",
+            retcode: 10030,
+            retcodeExternal: 0,
+            brokerComment: "Leg 2 rejected",
+          },
+          {
+            leg: 3,
+            status: "EXECUTED",
+            retcode: 10009,
+            retcodeExternal: 0,
+            brokerComment: "Leg 3 market order filled",
+            positionTicket: "90003",
+            dealTicket: "70003",
+            requestedVolume: 0.01,
+            filledVolume: 0.01,
+            remainingVolume: 0,
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(report.status).toBe(200);
+    expect(await report.json()).toMatchObject({ status: "HELD" });
+
+    const signalQueue = await json<{
+      queue: Array<{
+        id: string;
+        status: string;
+        heldReason?: string;
+        payload: { volume?: number };
+      }>;
+    }>(await app.request("/api/signals"));
+    expect(signalQueue.queue.find((item) => item.id === approved.queueItemId)).toMatchObject({
+      status: "HELD",
+      heldReason: "PARTIAL_FILL",
+      payload: { volume: 0.04 },
+    });
+
+    const dashboard = await json<{
+      logicalTrades: Array<{
+        id: string;
+        status: string;
+        livePositionExists?: boolean;
+        matchedBrokerTickets?: string[];
+        legs: Array<{ leg: number; status: string }>;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    const trade = dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId);
+    expect(trade).toMatchObject({
+      status: "OUT_OF_SYNC",
+      livePositionExists: true,
+      matchedBrokerTickets: ["90001", "90003"],
+    });
+    expect(trade?.legs.map((leg) => [leg.leg, leg.status])).toEqual([
+      [1, "OPEN"],
+      [2, "FAILED"],
+      [3, "OPEN"],
+      [4, "PLANNED"],
+    ]);
+
+    const brokerOrders = await json<{
+      orders: Array<{
+        legId: string;
+        action: string;
+        orderTicket: string;
+        positionTicket: string;
+        dealTicket: string;
+        requestedVolume?: number;
+        filledVolume?: number;
+        brokerComment: string;
+        retcode: number;
+      }>;
+    }>(await app.request(`/api/trades/${approved.logicalTradeId}/broker-orders`));
+    expect(brokerOrders.orders).toHaveLength(3);
+    expect(brokerOrders.orders).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          legId: "tp1",
+          action: "OPEN",
+          orderTicket: "",
+          positionTicket: "90001",
+          dealTicket: "70001",
+          requestedVolume: 0.01,
+          filledVolume: 0.01,
+        }),
+        expect.objectContaining({
+          legId: "tp2",
+          orderTicket: "",
+          positionTicket: "",
+          brokerComment: "Leg 2 rejected",
+          retcode: 10030,
+        }),
+        expect.objectContaining({
+          legId: "tp3",
+          action: "OPEN",
+          orderTicket: "",
+          positionTicket: "90003",
+          dealTicket: "70003",
+          requestedVolume: 0.01,
+          filledVolume: 0.01,
+        }),
+      ]),
+    );
+    const failedOrder = brokerOrders.orders.find((order) => order.legId === "tp2");
+    expect(failedOrder?.requestedVolume).toBeUndefined();
+    expect(failedOrder?.filledVolume).toBeUndefined();
+
+    const logs = await json<{ logs: Array<{ status: string; orderTicket: string }> }>(
+      await app.request("/api/execution-logs?accountId=mt5-63442826"),
+    );
+    expect(logs.logs).toHaveLength(1);
+    expect(logs.logs[0]).toMatchObject({ status: "PARTIAL", orderTicket: "" });
+  });
+
+  test("maps accepted pending split executions to PLANNED trade legs", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    await configureProviderWithAccount(app, { availableSymbols: ["XAUUSD"] });
+    const approved = await json<{ queueItemId: string; logicalTradeId: string }>(
+      await app.request("/api/signals/manual", {
+        method: "POST",
+        body: JSON.stringify({
+          accountId: "mt5-63442826",
+          direction: "SELL",
+          orderType: "LIMIT",
+          brokerSymbol: "XAUUSD",
+          entry: { from: 4488, to: 4489 },
+          stopLoss: 4494,
+          takeProfits: [{ price: 4483 }, { price: 4476 }],
+          volume: 0.02,
+          executionMode: "SPLIT_ORDER",
+        }),
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const report = await app.request("/api/mt5/report", {
+      method: "POST",
+      body: JSON.stringify({
+        accountId: "mt5-63442826",
+        queueItemId: approved.queueItemId,
+        status: "EXECUTED",
+        retcode: 10008,
+        retcodeExternal: 0,
+        brokerComment: "Pending entries accepted",
+        requestedVolume: 0.02,
+        filledVolume: 0,
+        remainingVolume: 0.02,
+        executions: [
+          {
+            leg: 1,
+            status: "EXECUTED",
+            retcode: 10008,
+            retcodeExternal: 0,
+            brokerComment: "Leg 1 pending order accepted",
+            orderTicket: "81001",
+            requestedVolume: 0.01,
+            filledVolume: 0,
+            remainingVolume: 0.01,
+          },
+          {
+            leg: 2,
+            status: "EXECUTED",
+            retcode: 10008,
+            retcodeExternal: 0,
+            brokerComment: "Leg 2 pending order accepted",
+            orderTicket: "81002",
+            requestedVolume: 0.01,
+            filledVolume: 0,
+            remainingVolume: 0.01,
+          },
+        ],
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(report.status).toBe(200);
+    expect(await report.json()).toMatchObject({ status: "EXECUTED" });
+
+    const dashboard = await json<{
+      logicalTrades: Array<{
+        id: string;
+        status: string;
+        livePositionExists?: boolean;
+        matchedBrokerTickets?: string[];
+        legs: Array<{ leg: number; status: string }>;
+      }>;
+    }>(await app.request("/api/dashboard"));
+    const trade = dashboard.logicalTrades.find((item) => item.id === approved.logicalTradeId);
+    expect(trade).toMatchObject({
+      status: "PENDING",
+      livePositionExists: false,
+      matchedBrokerTickets: ["81001", "81002"],
+    });
+    expect(trade?.legs.map((leg) => [leg.leg, leg.status])).toEqual([
+      [1, "PLANNED"],
+      [2, "PLANNED"],
+    ]);
+
+    const brokerOrders = await json<{
+      orders: Array<{
+        legId: string;
+        action: string;
+        orderTicket: string;
+        positionTicket: string;
+        retcode: number;
+        filledVolume?: number;
+      }>;
+    }>(await app.request(`/api/trades/${approved.logicalTradeId}/broker-orders`));
+    expect(brokerOrders.orders).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          legId: "tp1",
+          action: "PENDING_OPEN",
+          orderTicket: "81001",
+          positionTicket: "",
+          retcode: 10008,
+          filledVolume: 0,
+        }),
+        expect.objectContaining({
+          legId: "tp2",
+          action: "PENDING_OPEN",
+          orderTicket: "81002",
+          positionTicket: "",
+          retcode: 10008,
+          filledVolume: 0,
+        }),
+      ]),
+    );
+  });
+
+  test("rejects invalid batched execution reports before recording any evidence", async () => {
+    const app = createApi({ databasePath: ":memory:", seedDemoData: false });
+    const approved = await approveGoldSellSmallRunnerLimit(app, {
+      executionMode: "SPLIT_ORDER",
+      enableRunner: false,
+    });
+    const child = {
+      leg: 1,
+      status: "EXECUTED",
+      retcode: 10009,
+      retcodeExternal: 0,
+      brokerComment: "Accepted",
+      orderTicket: "80001",
+      requestedVolume: 0.01,
+      filledVolume: 0.01,
+      remainingVolume: 0,
+    };
+    const base = {
+      accountId: "mt5-63442826",
+      queueItemId: approved.queueItemId,
+      status: "PARTIAL",
+      retcode: 10010,
+      retcodeExternal: 0,
+      brokerComment: "Aggregate result",
+      executions: [child],
+    };
+    const invalidBodies: unknown[] = [
+      { ...base, status: "SUCCESS" },
+      { ...base, executions: [{ ...child, status: "SUCCESS" }] },
+      { ...base, executions: [[child]] },
+      { ...base, executions: [{ ...child, accountId: "mt5-63442827" }] },
+      { ...base, executions: [{ ...child, queueItemId: "queue-other" }] },
+      { ...base, executions: [{ ...child, filledVolume: -0.01 }] },
+      { ...base, accountId: "mt5-63442827" },
+      { ...base, executions: Array.from({ length: 101 }, () => child) },
+    ];
+    for (const body of invalidBodies) {
+      const response = await app.request("/api/mt5/report", {
+        method: "POST",
+        body: JSON.stringify(body),
+        headers: { "content-type": "application/json" },
+      });
+      expect(response.status).toBe(400);
+    }
+    const nonFiniteVolume = JSON.stringify(base).replace(
+      '"filledVolume":0.01',
+      '"filledVolume":1e400',
+    );
+    expect(nonFiniteVolume).not.toBe(JSON.stringify(base));
+    const nonFiniteResponse = await app.request("/api/mt5/report", {
+      method: "POST",
+      body: nonFiniteVolume,
+      headers: { "content-type": "application/json" },
+    });
+    expect(nonFiniteResponse.status).toBe(400);
+
+    const logs = await json<{ logs: unknown[] }>(
+      await app.request("/api/execution-logs?accountId=mt5-63442826"),
+    );
+    expect(logs.logs).toHaveLength(0);
+    const brokerOrders = await json<{ orders: unknown[] }>(
+      await app.request(`/api/trades/${approved.logicalTradeId}/broker-orders`),
+    );
+    expect(brokerOrders.orders).toHaveLength(0);
+    const signalQueue = await json<{ queue: Array<{ id: string; status: string }> }>(
+      await app.request("/api/signals"),
+    );
+    expect(signalQueue.queue.find((item) => item.id === approved.queueItemId)?.status).toBe(
+      "PENDING",
+    );
+  });
+
   test("classifies generic virtual TP execution reports as partial closes by intended leg", async () => {
     const app = createApi({ databasePath: ":memory:", seedDemoData: true });
 
@@ -4341,6 +4992,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [{ ticket: "70001", symbol: "EURUSD.raw", volume: 0.07 }],
         orders: [],
@@ -5773,7 +6425,7 @@ describe("Telegram TC API", () => {
     expect(noWork).toContain("status=NO_WORK");
   });
 
-  test("keeps live PnL in memory while persisting only structural snapshot changes", async () => {
+  test("keeps live PnL in memory while persisting current quotes and structural changes", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "telegram-tc-live-snapshot-"));
     const databasePath = join(tempDir, "app.db");
     try {
@@ -5782,6 +6434,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "100200300",
           server: "MetaQuotes-Demo",
           company: "MetaQuotes",
@@ -5792,11 +6445,18 @@ describe("Telegram TC API", () => {
           availableSymbols: ["XAUUSD"],
         }),
       });
-      const sendSnapshot = (profit: number, bid: number, stopLoss: number, point = 0.01) =>
+      const sendSnapshot = (
+        profit: number,
+        bid: number,
+        stopLoss: number,
+        point = 0.01,
+        tickAgeMs = 0,
+      ) =>
         app.request("/api/mt5/snapshot", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
+            brokerReady: true,
             accountId: "mt5-100200300",
             positions: [
               {
@@ -5816,6 +6476,7 @@ describe("Telegram TC API", () => {
                 symbol: "XAUUSD",
                 bid,
                 ask: bid + 0.02,
+                tickAgeMs,
                 timeMsc: Date.now(),
                 point,
                 digits: point === 0.01 ? 2 : 3,
@@ -5825,7 +6486,7 @@ describe("Telegram TC API", () => {
         });
 
       await sendSnapshot(10, 2410, 2380);
-      await sendSnapshot(25, 2415, 2380);
+      await sendSnapshot(25, 2415, 2380, 0.01, 1000);
 
       let db = new Database(databasePath, { readonly: true });
       let persisted = db
@@ -5833,7 +6494,7 @@ describe("Telegram TC API", () => {
         .get("mt5-100200300") as { positions_json: string; symbols_json: string };
       db.close();
       expect(JSON.parse(persisted.positions_json)[0].profit).toBe(10);
-      expect(JSON.parse(persisted.symbols_json)[0].bid).toBe(2410);
+      expect(JSON.parse(persisted.symbols_json)[0].bid).toBe(2415);
 
       const dashboard = await json<{
         mt5Accounts: Array<{
@@ -5888,6 +6549,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [
           {
@@ -5929,6 +6591,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [
           {
@@ -5969,6 +6632,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [],
         orders: [],
@@ -6742,10 +7406,11 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [],
         orders: [],
-        symbols: [{ symbol: "XAUUSD.r", bid: 4444.1, ask: 4444.5 }],
+        symbols: [{ symbol: "XAUUSD.r", bid: 4444.1, ask: 4444.5, tickAgeMs: 0 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -6939,6 +7604,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "100200300",
           server: "OctaFX-Live",
           company: "OctaFX",
@@ -6954,6 +7620,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "54870107",
           server: "HF-Live",
           company: "HF",
@@ -7044,6 +7711,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "54945785",
           server: "HF-Live",
           company: "HF",
@@ -7132,6 +7800,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442826",
           server: "OctaFX-Real",
           company: "OctaFX",
@@ -7215,6 +7884,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442826",
           server: "OctaFX-Real",
           company: "OctaFX",
@@ -7248,6 +7918,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442826",
           server: "OctaFX-Real",
           company: "OctaFX",
@@ -7275,6 +7946,7 @@ describe("Telegram TC API", () => {
         await raced.app.request("/api/mt5/register", {
           method: "POST",
           body: JSON.stringify({
+            brokerReady: true,
             accountNumber: "63442826",
             server: "OctaFX-Real",
             company: "OctaFX",
@@ -7340,6 +8012,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442826",
           server: "OctaFX-Real",
           company: "OctaFX",
@@ -7376,6 +8049,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442826",
           server: "OctaFX-Real",
           company: "OctaFX",
@@ -7403,7 +8077,12 @@ describe("Telegram TC API", () => {
       const heartbeat = () =>
         app.request("/api/mt5/heartbeat", {
           method: "POST",
-          body: JSON.stringify({ accountId: "mt5-63442826", balance: 10000, equity: 10000 }),
+          body: JSON.stringify({
+            brokerReady: true,
+            accountId: "mt5-63442826",
+            balance: 10000,
+            equity: 10000,
+          }),
           headers: { "content-type": "application/json" },
         });
       expect(
@@ -7430,6 +8109,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442826",
           server: "OctaFX-Real",
           company: "OctaFX",
@@ -7456,6 +8136,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "100200300",
         server: "OctaFX-Live",
         company: "OctaFX",
@@ -7471,6 +8152,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "200300400",
         server: "Broker-EUR",
         company: "Broker",
@@ -7801,6 +8483,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "63442826",
         server: "OctaFX-Real",
         company: "OctaFX",
@@ -7891,10 +8574,11 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [],
         orders: [],
-        symbols: [{ symbol: "XAUUSD.r", bid: 4444.1, ask: 4444.5 }],
+        symbols: [{ symbol: "XAUUSD.r", bid: 4444.1, ask: 4444.5, tickAgeMs: 0 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -8325,6 +9009,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "200300400",
         server: "OctaFX-Real",
         company: "OctaFX",
@@ -8939,10 +9624,11 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [],
         orders: [],
-        symbols: [{ symbol: "XAUUSD", bid: 4019.8, ask: 4020.2, point: 0.01 }],
+        symbols: [{ symbol: "XAUUSD", bid: 4019.8, ask: 4020.2, tickAgeMs: 0, point: 0.01 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -8995,6 +9681,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "54870107",
         server: "HFMarketsSA-Live2",
         company: "HF Markets SA (Pty) Ltd",
@@ -9084,6 +9771,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "700001",
         server: "HF-Markets",
         company: "HF Markets",
@@ -9113,6 +9801,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "700002",
         server: "Trive",
         company: "Trive",
@@ -9161,6 +9850,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [
           {
@@ -9263,6 +9953,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [],
         orders: [],
@@ -9287,6 +9978,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [
           {
@@ -9422,6 +10114,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/heartbeat", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         balance: 10000,
         equity: 10000,
@@ -9673,6 +10366,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/snapshot", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-100200300",
           positions: [
             {
@@ -9975,6 +10669,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [
           {
@@ -9992,7 +10687,7 @@ describe("Telegram TC API", () => {
           },
         ],
         orders: [],
-        symbols: [{ symbol: "EURUSD.raw", bid: 1.106, ask: 1.1062, point: 0.00001 }],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.106, ask: 1.1062, tickAgeMs: 0, point: 0.00001 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -10105,6 +10800,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [
           {
@@ -10122,7 +10818,7 @@ describe("Telegram TC API", () => {
           },
         ],
         orders: [],
-        symbols: [{ symbol: "EURUSD.raw", bid: 1.091, ask: 1.0912, point: 0.00001 }],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.091, ask: 1.0912, tickAgeMs: 0, point: 0.00001 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -10196,6 +10892,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [
           {
@@ -10213,7 +10910,7 @@ describe("Telegram TC API", () => {
           },
         ],
         orders: [],
-        symbols: [{ symbol: "EURUSD.raw", bid: 1.0911, ask: 1.0913, point: 0.00001 }],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.0911, ask: 1.0913, tickAgeMs: 0, point: 0.00001 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -10846,6 +11543,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [
           {
@@ -10863,7 +11561,7 @@ describe("Telegram TC API", () => {
           },
         ],
         orders: [],
-        symbols: [{ symbol: "EURUSD.raw", bid: 1.0896, ask: 1.0898, point: 0.00001 }],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.0896, ask: 1.0898, tickAgeMs: 0, point: 0.00001 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -11719,6 +12417,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/snapshot", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-63442826",
           positions: [
             {
@@ -11736,7 +12435,7 @@ describe("Telegram TC API", () => {
             },
           ],
           orders: [],
-          symbols: [{ symbol: "EURUSD.raw", bid, ask, point: 0.00001 }],
+          symbols: [{ symbol: "EURUSD.raw", bid, ask, tickAgeMs: 0, point: 0.00001 }],
         }),
         headers: { "content-type": "application/json" },
       });
@@ -11826,6 +12525,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/snapshot", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-63442826",
           positions: input.positions ?? [
             {
@@ -11843,7 +12543,9 @@ describe("Telegram TC API", () => {
             },
           ],
           orders: [],
-          symbols: [{ symbol: "EURUSD.raw", bid: input.bid, ask: input.ask, point: 0.00001 }],
+          symbols: [
+            { symbol: "EURUSD.raw", bid: input.bid, ask: input.ask, tickAgeMs: 0, point: 0.00001 },
+          ],
         }),
         headers: { "content-type": "application/json" },
       });
@@ -11970,6 +12672,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [
           {
@@ -11986,7 +12689,7 @@ describe("Telegram TC API", () => {
           },
         ],
         orders: [],
-        symbols: [{ symbol: "EURUSD.raw", bid: 1.095, ask: 1.0952, point: 0.00001 }],
+        symbols: [{ symbol: "EURUSD.raw", bid: 1.095, ask: 1.0952, tickAgeMs: 0, point: 0.00001 }],
       }),
       headers: { "content-type": "application/json" },
     });
@@ -12261,6 +12964,7 @@ describe("Telegram TC API", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "100200300",
         server: "MetaQuotes-Demo",
         company: "MetaQuotes Ltd",
@@ -12397,6 +13101,7 @@ describe("Telegram TC API", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [
           {
@@ -12766,7 +13471,7 @@ describe("Telegram TC API", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        accountId: "mt5-live",
+        accountId: "mt5-100200301",
         deals: [
           {
             dealTicket: "existing-close",
@@ -12811,7 +13516,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          accountId: "mt5-live",
+          accountId: "mt5-100200301",
           deals: [
             ...oldDeals,
             {
@@ -13099,6 +13804,7 @@ describe("Telegram TC API", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
+            brokerReady: true,
             accountNumber: "900200300",
             server: "MetaQuotes-Demo",
             company: "MetaQuotes Ltd",
@@ -13371,6 +14077,7 @@ describe("Telegram TC API", () => {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
+            brokerReady: true,
             accountNumber: "900300400",
             server: "MetaQuotes-Demo",
             company: "MetaQuotes Ltd",
@@ -13467,6 +14174,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "900200301",
           server: "MetaQuotes-Demo",
           company: "MetaQuotes Ltd",
@@ -13741,6 +14449,7 @@ describe("Telegram TC API", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [],
         orders: [],
@@ -13840,11 +14549,9 @@ describe("Telegram TC API", () => {
     });
   });
 
-  test("backfill heals stuck OUT_OF_SYNC trades that have a real close in broker_orders", async () => {
-    // Set up: a logical trade is stuck OUT_OF_SYNC (the pre-fix bug state)
-    // with both a synthetic 'manual' close (snapshot-diff) AND a real sl-hit
-    // close (history sweep) on the same position ticket. On next startup the
-    // backfill should flip status to CLOSED and dedupe the synthetic row.
+  test("empty snapshots do not record manual closes and broker history heals OUT_OF_SYNC trades", async () => {
+    // An empty snapshot is only out-of-sync evidence. The broker history sweep
+    // supplies the authoritative close reason and P/L.
     const app = createApi({
       databasePath: ":memory:",
       telegramAdapter: "mock",
@@ -13875,6 +14582,7 @@ describe("Telegram TC API", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [],
         orders: [],
@@ -13885,12 +14593,13 @@ describe("Telegram TC API", () => {
       logicalTrades: Array<{ id: string; status: string }>;
     }>(await app.request("/api/dashboard"));
     let trade = dash.logicalTrades.find((t) => t.id === "trade-demo-1");
-    // Pre-condition: synthetic 'manual' close was written AND status is now
-    // OUT_OF_SYNC (the stuck state).
     expect(trade!.status).toBe("OUT_OF_SYNC");
-    // Now a real sl-hit deal lands. With the race-fix in place,
-    // reconcileSnapshotState should NOT re-stick it, AND the trade should be
-    // CLOSED on the next dashboard read.
+    const beforeHistory = await json<{
+      orders: Array<{ action: string; source: string }>;
+    }>(await app.request("/api/trades/trade-demo-1/broker-orders"));
+    expect(beforeHistory.orders.some((order) => order.source === "manual")).toBe(false);
+
+    // Once the real SL deal arrives, history closes the trade with its broker evidence.
     await app.request("/api/mt5/history", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -13932,8 +14641,7 @@ describe("Telegram TC API", () => {
     const account = healedDash.mt5Accounts.find((a) => a.id === "mt5-100200300");
     const closed = account!.closedTrades.find((t) => t.tradeId === "trade-demo-1");
     expect(closed).toBeDefined();
-    // The synthetic 'manual' close (pnl=null → 0) should be deduped, so only
-    // the real sl-hit close contributes to realizedPnl (= -50).
+    // Only the real sl-hit close contributes to realizedPnl (= -50).
     expect(closed!.realizedPnl).toBe(-50);
     expect(closed!.legs.every((leg) => leg.source !== "manual")).toBe(true);
   });
@@ -13969,6 +14677,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-100200300",
           positions: [],
           orders: [],
@@ -14067,6 +14776,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-100200300",
           positions: [],
           orders: [],
@@ -14249,6 +14959,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-100200300",
           positions: [],
           orders: [],
@@ -14367,6 +15078,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-100200300",
           positions: [],
           orders: [],
@@ -14573,10 +15285,11 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-63442826",
           positions: [],
           orders: [],
-          symbols: [{ symbol: "XAUUSD", bid: 4529, ask: 4529.3 }],
+          symbols: [{ symbol: "XAUUSD", bid: 4529, ask: 4529.3, tickAgeMs: 0 }],
         }),
       });
 
@@ -14798,6 +15511,7 @@ describe("Telegram TC API", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         balance: 10100,
         equity: 10115,
@@ -14809,6 +15523,7 @@ describe("Telegram TC API", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [
           {
@@ -14862,6 +15577,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "100200300",
           server: "MetaQuotes-Demo",
           company: "MetaQuotes",
@@ -14878,6 +15594,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-100200300",
           balance: 10000,
           equity: 9950,
@@ -14890,6 +15607,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-100200300",
           balance: 10000,
           equity: 9975,
@@ -14978,6 +15696,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-63442826",
           balance: 10000,
           equity: 9470,
@@ -15059,6 +15778,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountId: "mt5-100200300",
           balance: 10000,
           equity: 9990,
@@ -15619,6 +16339,7 @@ describe("Telegram TC API", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "54870107",
         server: "HFMarketsSA-Live",
         company: "HF Markets SA",
@@ -15797,6 +16518,7 @@ describe("Telegram TC API", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [
           {
@@ -15971,6 +16693,7 @@ describe("Telegram TC API", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "100200300",
           server: "MetaQuotes-Demo",
           company: "MetaQuotes",
@@ -16095,6 +16818,7 @@ describe("Telegram TC API", () => {
     await seeded.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [],
         orders: [],
@@ -16239,7 +16963,13 @@ describe("Telegram TC API", () => {
 
       await app.request("/api/mt5/snapshot", {
         method: "POST",
-        body: JSON.stringify({ accountId: "mt5-63442826", positions: [], orders: [], symbols: [] }),
+        body: JSON.stringify({
+          brokerReady: true,
+          accountId: "mt5-63442826",
+          positions: [],
+          orders: [],
+          symbols: [],
+        }),
         headers: { "content-type": "application/json" },
       });
       await app.request("/api/mt5/history", {
@@ -16362,6 +17092,7 @@ describe("Telegram TC API", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber,
           server: "MetaQuotes-Demo",
           company: "MetaQuotes",
@@ -17225,6 +17956,7 @@ describe("step 3 evidence gate wiring", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442827",
           server: "HFMarkets-Real",
           company: "HF Markets",
@@ -17341,6 +18073,7 @@ describe("step 3 evidence gate wiring", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442827",
           server: "HFMarkets-Real",
           company: "HF Markets",
@@ -17605,6 +18338,7 @@ describe("step 3 evidence gate wiring", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442827",
           server: "OctaFX-Real",
           company: "OctaFX",
@@ -18827,6 +19561,7 @@ describe("signal correlation Phase 2a shadow logging", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "63442827",
           server: "OctaFX-Real",
           company: "OctaFX",

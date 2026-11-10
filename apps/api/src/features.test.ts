@@ -76,6 +76,7 @@ async function setupProvider(
   await app.request("/api/mt5/register", {
     method: "POST",
     body: JSON.stringify({
+      brokerReady: true,
       accountNumber: "63442826",
       server: "OctaFX-Real",
       company: "OctaFX",
@@ -210,6 +211,7 @@ describe("SSE event stream (Task 1)", () => {
       await app.request("/api/mt5/register", {
         method: "POST",
         body: JSON.stringify({
+          brokerReady: true,
           accountNumber: "9001",
           server: "MetaQuotes-Demo",
           company: "MetaQuotes",
@@ -252,6 +254,7 @@ describe("SSE event stream (Task 1)", () => {
     await app.request("/api/mt5/heartbeat", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: registered.accountId,
         balance: 1_000,
         equity: 800,
@@ -447,12 +450,13 @@ describe("symbol metadata + unmapped alerts (Task 6)", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-63442826",
         positions: [],
         orders: [],
         symbols: [
-          { symbol: "XAUUSD", bid: 2300, ask: 2300.5, point: 0.01, digits: 2 },
-          { symbol: "EURUSD", bid: 1.1, ask: 1.1001, point: 0.00001, digits: 5 },
+          { symbol: "XAUUSD", bid: 2300, ask: 2300.5, tickAgeMs: 0, point: 0.01, digits: 2 },
+          { symbol: "EURUSD", bid: 1.1, ask: 1.1001, tickAgeMs: 0, point: 0.00001, digits: 5 },
         ],
       }),
       headers: { "content-type": "application/json" },
@@ -526,6 +530,7 @@ describe("symbol metadata + unmapped alerts (Task 6)", () => {
     await app.request("/api/mt5/register", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountNumber: "63442826",
         server: "OctaFX-Real",
         company: "OctaFX",
@@ -632,6 +637,7 @@ describe("self-healing reconciliation audit (Task 9)", () => {
     await app.request("/api/mt5/snapshot", {
       method: "POST",
       body: JSON.stringify({
+        brokerReady: true,
         accountId: "mt5-100200300",
         positions: [
           {
@@ -650,7 +656,13 @@ describe("self-healing reconciliation audit (Task 9)", () => {
     // Now the position disappears → reconciliation transitions the trade.
     await app.request("/api/mt5/snapshot", {
       method: "POST",
-      body: JSON.stringify({ accountId: "mt5-100200300", positions: [], orders: [], symbols: [] }),
+      body: JSON.stringify({
+        brokerReady: true,
+        accountId: "mt5-100200300",
+        positions: [],
+        orders: [],
+        symbols: [],
+      }),
       headers,
     });
 

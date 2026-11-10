@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.0 - 2026-11-09 (Major)
+
+Release impact: Major. EA and API protocol changes require a coordinated API upgrade and manual
+EA compilation and installation. No database migration or deployment environment change is required.
+Native compilation and demo execution remain separate release checks.
+
+- Defer account registration until broker readiness and retry it after startup failures, identity changes or an explicit unknown-account response. Reject invalid and unknown MT5 identities before slot or telemetry updates.
+- Require explicit broker readiness and broker-clock quote age at the EA/API boundary; cached prices no longer become fresh solely through snapshot arrival.
+- Run local trailing protection before bounded network work, retain account-scoped trailing plans through restart, and preserve plans during transient broker-state gaps.
+- Keep snapshot absence uncertain until broker history confirms a closure. Preserve per-ticket execution evidence with one aggregate command outcome, including rejected virtual-TP closes and partial completion when a saved trailing plan remains active after its first adjustment fails.
+- Validate symbol metadata, runner-preserving close sizes, volume precision and stop prices before submitting broker actions.
+
 ## 1.67.3 - 2026-08-24 (Patch)
 
 - Added a compact dashboard response for the web client, 30-day audit retention with supporting indexes, and reconciliation-only full reloads without changing the legacy dashboard response.
