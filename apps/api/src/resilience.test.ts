@@ -47,6 +47,7 @@ async function setupAccountWithQueuedSignal(app: ReturnType<typeof createApi>) {
   await app.request("/api/mt5/register", {
     method: "POST",
     body: JSON.stringify({
+      brokerReady: true,
       accountNumber: "63442826",
       server: "OctaFX-Real",
       company: "OctaFX",
@@ -180,6 +181,7 @@ async function registerAccount(app: ReturnType<typeof createApi>, accountNumber 
   await app.request("/api/mt5/register", {
     method: "POST",
     body: JSON.stringify({
+      brokerReady: true,
       accountNumber,
       server: "OctaFX-Real",
       company: "OctaFX",

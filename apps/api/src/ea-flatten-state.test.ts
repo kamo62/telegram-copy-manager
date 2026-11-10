@@ -253,7 +253,7 @@ describe("EA flatten state machine", () => {
     expect(closeVolumeForRunner(0.05, { enabled: true, lotSize: 0.02 })).toBe(0.03);
   });
 
-  test("falls back to a full close when a 0.01-lot runner has no closable room", () => {
+  test("preserves the runner when there is no valid closable slice", () => {
     const broker = new FakeBroker();
     broker.pending.clear();
     broker.positions.set("position-1", { ticket: "position-1", volume: 0.01 });
@@ -264,10 +264,11 @@ describe("EA flatten state machine", () => {
       volumeStep: 0.01,
     });
 
-    expect(result.status).toBe("EXECUTED");
-    expect(broker.closeCalls).toEqual([{ ticket: "position-1", volume: 0.01 }]);
-    expect(broker.position("position-1")).toBeUndefined();
-    expect(closeVolumeForRunner(0.015, { enabled: true, lotSize: 0.01 })).toBe(0.015);
+    expect(result.status).toBe("PARTIAL");
+    expect(broker.closeCalls).toEqual([]);
+    expect(broker.position("position-1")?.volume).toBe(0.01);
+    expect(closeVolumeForRunner(0.015, { enabled: true, lotSize: 0.01 })).toBe(0);
+    expect(closeVolumeForRunner(0.03, { enabled: true, lotSize: 0.01 }, 0.01, 0)).toBe(0);
   });
 
   test("accepts an observed position delta when the deal reports no filled volume", () => {

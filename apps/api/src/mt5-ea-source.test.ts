@@ -13,7 +13,7 @@ describe("MT5 Expert Advisor source", () => {
     // an EA nobody rebuilds is worse than one legitimately a patch behind.
     const eaVersion = source.match(/#property\s+version\s+"([^"]+)"/)?.[1];
     expect(packageJson.version).toBeTruthy();
-    expect(eaVersion).toBe("1.67.0");
+    expect(eaVersion).toBe("2.0.0");
     const line = (version: string) => version.split(".").slice(0, 2).join(".");
     expect(line(eaVersion!)).toBe(line(packageJson.version!));
   });
@@ -35,11 +35,105 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain('input string LinkCode       = "-UTN4-D6";');
   });
 
+  test("keeps initialization local and gates registration and work on readiness", () => {
+    const init = source.match(/int OnInit\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const identityReady = source.match(/bool LifecycleIdentityReady\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const connected = source.match(/bool AccountConnected\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const ready = source.match(/bool BrokerReady\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const canTrade = source.match(/bool CanTrade\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const register = source.match(/bool RegisterAccount\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const heartbeat = source.match(/void SendHeartbeat\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const snapshot = source.match(/void SendSnapshot\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const accountPayload = source.match(/string AccountPayload\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const onTimer = source.match(/void OnTimer\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    const poll = source.match(/void PollAndExecute\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(init).toContain("EventSetTimer");
+    expect(init).toContain("RehydrateLifecycleMarks()");
+    expect(init).not.toContain("RegisterAccount(");
+    expect(init).not.toContain("WebRequest");
+    for (const readinessCheck of ["ACCOUNT_LOGIN", "ACCOUNT_SERVER", "ACCOUNT_COMPANY"]) {
+      expect(identityReady).toContain(readinessCheck);
+    }
+    expect(connected).toContain("LifecycleIdentityReady()");
+    expect(connected).toContain("TERMINAL_CONNECTED");
+    expect(ready).toContain("if(!AccountConnected())");
+    expect(canTrade).toContain("AccountConnected()");
+    expect(canTrade).not.toContain("BrokerReady()");
+    for (const readinessCheck of ["SymbolIsSynchronized(_Symbol)", "SERIES_SYNCHRONIZED"]) {
+      expect(ready).toContain(readinessCheck);
+    }
+    expect(canTrade).toContain("MQL_TRADE_ALLOWED");
+    expect(canTrade).toContain("TERMINAL_TRADE_ALLOWED");
+    expect(canTrade).toContain("ACCOUNT_TRADE_ALLOWED");
+    expect(register).toContain("if(!BrokerReady())");
+    expect(register).toContain('return HttpPost("/mt5/register", body, response);');
+    expect(accountPayload).toContain('\\"brokerReady\\":true');
+    expect(heartbeat).toContain("if(!BrokerReady())");
+    expect(snapshot).toContain("if(!BrokerReady())");
+    expect(onTimer).toContain("nowMs - LastRegistrationAttemptAtMs >= 5000");
+    expect(onTimer.indexOf("ReclaimLifecycleMarks()")).toBeLessThan(
+      onTimer.indexOf("if(!BrokerReady())"),
+    );
+    expect(onTimer.indexOf("ManageTrailingStops()")).toBeLessThan(
+      onTimer.indexOf("if(!BrokerReady())"),
+    );
+    expect(poll).toMatch(/^void PollAndExecute\(\)\s*\{\s*if\(!CanTrade\(\)\)/);
+  });
+
+  test("recovers registration after unknown-account telemetry and omits empty batches", () => {
+    for (const name of ["SendHeartbeat", "SendSnapshot"]) {
+      const body = source.match(new RegExp(`void ${name}\\(\\)\\s*\\{[\\s\\S]*?\\n}`))?.[0] ?? "";
+      expect(body).toContain("httpStatus");
+      if (name === "SendHeartbeat") {
+        expect(body).toContain(
+          'if(httpStatus == 404 && StringFind(response, "MT5 account not found") >= 0)',
+        );
+        expect(body).not.toContain("if(httpStatus == 404)\n");
+      } else {
+        expect(body).toContain('if(httpStatus == 404)\n      RegisteredLifecycleIdentity = "";');
+      }
+    }
+    expect(source).toContain("httpStatus = status;");
+    expect(source).toContain(
+      'string executions = summary.executionsJson == "" ? "" : "[" + summary.executionsJson + "]";',
+    );
+    const remove = source.match(/bool RemovePendingOrder\([\s\S]*?\n}/)?.[0] ?? "";
+    expect(remove).toContain("if(!CanTrade())");
+    expect(remove).not.toContain("EnsureSymbol");
+  });
+
+  test("limits timer traffic to one round-robin phase and a two-second request", () => {
+    const onTimer = source.match(/void OnTimer\(\)[\s\S]*?\n}/)?.[0] ?? "";
+    expect(onTimer).toContain("(LastHttpPhase + offset) % 4");
+    expect(onTimer).toContain("phase == 0 && !heartbeatDue");
+    expect(onTimer).toContain("phase == 2 && (!CanTrade()");
+    expect(onTimer).toContain("phase == 3 && !historyDue");
+    expect(source).toContain("WebRequest(method, url, headers, 2000,");
+    expect(source).not.toContain("HttpPostRetry");
+    expect(source).not.toContain("HttpRequestRetry");
+    expect(source).not.toContain("Sleep(");
+  });
+
+  test("sends one aggregate report with per-leg and per-ticket broker evidence", () => {
+    const split = source.match(/bool ExecuteSplitOrders\([\s\S]*?\n}\n/)?.[0] ?? "";
+    const modifySl = source.match(/bool ModifyPositionSl\([\s\S]*?\n}\n/)?.[0] ?? "";
+    const modifyTp = source.match(/bool ModifyPositionTp\([\s\S]*?\n}\n/)?.[0] ?? "";
+    const report = source.match(/void ReportWithVolumes\([\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(split.match(/ReportExecutionSummary\(command, summary/g)).toHaveLength(1);
+    expect(split).toContain("int legNumber = leg + 1;");
+    expect(split).toContain("AddExecution(summary,");
+    expect(modifySl).not.toContain("HttpPost");
+    expect(modifyTp).not.toContain("HttpPost");
+    expect(report).toContain('\\"executions\\":');
+    expect(source).toContain('\\"retcodeExternal\\":%d');
+    expect(source).toContain('\\"remainingVolume\\":%.8f');
+  });
+
   test("reports broker history deals for manual close reconciliation", () => {
     expect(source).toContain("SendHistoryDeals()");
     expect(source).toContain("HistorySelect(fromTime, toTime)");
     expect(source).toContain("HistoryDealsJson()");
-    expect(source).toContain('HttpPostRetry("/mt5/history"');
+    expect(source).toContain('HttpPost("/mt5/history"');
     expect(source).toContain("DEAL_POSITION_ID");
     expect(source).toContain("DEAL_PROFIT");
     expect(source).toContain("DEAL_COMMISSION");
@@ -56,14 +150,19 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain('\\"profit\\":%.2f');
   });
 
-  test("refreshes the guardian heartbeat before polling and refuses opens without a fresh quote", () => {
+  test("requires a fresh broker quote before opening and trading", () => {
     const onTimer = source.match(/void OnTimer\(\)[\s\S]*?\n}/)?.[0] ?? "";
     const ensureSymbol = source.match(/bool EnsureSymbol\(string symbol\)[\s\S]*?\n}/)?.[0] ?? "";
     const open =
       source.match(/bool ExecuteOpenTrade\(SignalCommand &command\)[\s\S]*?\n}/)?.[0] ?? "";
     expect(onTimer.indexOf("SendHeartbeat()")).toBeLessThan(onTimer.indexOf("PollAndExecute()"));
-    expect(ensureSymbol).toContain("no fresh tick after 2s — aborting execution");
-    expect(ensureSymbol).toMatch(/no fresh tick after 2s[\s\S]*return false/);
+    expect(ensureSymbol).toContain("SymbolIsSynchronized(symbol)");
+    expect(ensureSymbol).toContain("ReadSymbolTick(symbol, tick, tickAgeMs)");
+    expect(ensureSymbol).toContain("tick.bid > 0.0 && tick.ask >= tick.bid");
+    expect(ensureSymbol).toContain("tickAgeMs >= -1000 && tickAgeMs <= 15000");
+    expect(ensureSymbol).not.toContain("Sleep(");
+    expect(source).toContain("tickAgeMs = (long)serverTime * 1000 - tick.time_msc;");
+    expect(source).toContain("datetime serverTime = TimeTradeServer();");
     expect(open).toContain("ReportUnknown(command.queueItemId");
   });
 
@@ -71,21 +170,19 @@ describe("MT5 Expert Advisor source", () => {
     const historyDealsJson = source.match(
       /string HistoryDealsJson\(\)[\s\S]*?\n}\n\nbool IsTelegramTcHistoryDeal/,
     )?.[0];
-    const postHistoryDeal = source.match(
-      /void PostHistoryDeal\(ulong ticket\)[\s\S]*?\n}\n\nvoid PollAndExecute/,
-    )?.[0];
     expect(historyDealsJson).toBeTruthy();
-    expect(postHistoryDeal).toBeTruthy();
     expect(historyDealsJson).not.toContain("IsTelegramTcHistoryDeal(ticket)");
-    expect(postHistoryDeal).not.toContain("if(!IsTelegramTcHistoryDeal(ticket))");
+    expect(source).toContain('return HttpPost("/mt5/history", body, response);');
   });
 
-  test("posts newly added MT5 deals immediately from OnTradeTransaction", () => {
-    expect(source).toContain("void OnTradeTransaction");
-    expect(source).toContain("TRADE_TRANSACTION_DEAL_ADD");
-    expect(source).toContain("HistoryDealSelect(trans.deal)");
-    expect(source).toContain("PostHistoryDeal(trans.deal)");
-    expect(source).toContain('HttpPostRetry("/mt5/history"');
+  test("defers transaction history upload to the timer", () => {
+    const transaction = source.match(/void OnTradeTransaction\([\s\S]*?\n}/)?.[0] ?? "";
+    expect(transaction).toContain("TRADE_TRANSACTION_DEAL_ADD");
+    expect(transaction).toContain("HistoryUploadDue = true;");
+    expect(transaction).not.toContain("HttpPost");
+    expect(transaction).not.toContain("HistoryDealSelect");
+    expect(source).toContain("if(SendHistoryDeals())");
+    expect(source).not.toContain("PostHistoryDeal");
   });
 
   test("includes DEAL_REASON in the history payload so backend can distinguish TP/SL/manual closes", () => {
@@ -108,7 +205,11 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("SYMBOL_TRADE_STOPS_LEVEL");
     // Safety must be applied to BOTH SL and TP on market orders.
     expect(source).toContain(
-      "SafeStopPrice(command.brokerSymbol, referencePrice, command.stopLoss, command.direction, true)",
+      "SafeStopPrice(command.brokerSymbol, stopReferencePrice, command.stopLoss, command.direction, true)",
+    );
+    const safeStop = source.match(/double SafeStopPrice\([\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(safeStop.indexOf("NormalizePriceToTick(symbol, requestedStop")).toBeLessThan(
+      safeStop.indexOf("normalizedRequestedStop >= referencePrice"),
     );
   });
 
@@ -168,7 +269,7 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("matches broker positions and pending orders by logical trade comments", () => {
-    expect(source).toContain("ulong FindPositionTicket(SignalCommand &command)");
+    expect(source).toContain("ulong ResultPositionTicket(MqlTradeResult &result)");
     expect(source).toContain("OrderMatchesCommand(command)");
     expect(source).toContain("PositionMatchesCommand(command)");
     expect(source).toContain("OrderGetString(ORDER_COMMENT)");
@@ -179,7 +280,7 @@ describe("MT5 Expert Advisor source", () => {
   test("holds lifecycle closes for reconciliation when no live position matches", () => {
     const close =
       source.match(
-        /void ExecuteClose\(SignalCommand &command\)[\s\S]*?\n}\n\nbool ClosePositionTicket/,
+        /void ExecuteClose\(SignalCommand &command\)[\s\S]*?\n}\n\nvoid ExecutePartialClose/,
       )?.[0] ?? "";
     expect(close).toContain("CollectPositionTickets(command, initialPositions)");
     expect(close).toContain("ReportUnknown(command.queueItemId");
@@ -188,7 +289,7 @@ describe("MT5 Expert Advisor source", () => {
 
   test("reports current MT5 position and pending-order snapshots to the backend", () => {
     expect(source).toContain("SendSnapshot()");
-    expect(source).toContain('HttpPostRetry("/mt5/snapshot"');
+    expect(source).toContain('HttpPost("/mt5/snapshot"');
     expect(source).toContain("PositionsJson()");
     expect(source).toContain("OrdersJson()");
     expect(source).toContain("POSITION_PRICE_OPEN");
@@ -198,11 +299,17 @@ describe("MT5 Expert Advisor source", () => {
   test("reports selected symbol market metadata in MT5 snapshots", () => {
     expect(source).toContain('\\"symbols\\":%s');
     expect(source).toContain("SymbolsMarketJson()");
-    expect(source).toContain("SYMBOL_BID");
-    expect(source).toContain("SYMBOL_ASK");
+    expect(source).toContain("tick.bid");
+    expect(source).toContain("tick.ask");
     expect(source).toContain("SYMBOL_VOLUME_MIN");
     expect(source).toContain("SYMBOL_VOLUME_MAX");
     expect(source).toContain("SYMBOL_VOLUME_STEP");
+    expect(source).toContain('\\"tickAgeMs\\":%I64d');
+    expect(source).toContain("ReadSymbolTick(symbol, tick, tickAgeMs)");
+    expect(source).toContain("double bid = hasTick ? tick.bid : 0.0;");
+    expect(source).toContain("double ask = hasTick ? tick.ask : 0.0;");
+    expect(source).not.toContain("SymbolInfoDouble(symbol, SYMBOL_BID)");
+    expect(source).not.toContain("SymbolInfoDouble(symbol, SYMBOL_ASK)");
   });
 
   test("reports terminal symbol inventory instead of only the chart symbol", () => {
@@ -213,11 +320,12 @@ describe("MT5 Expert Advisor source", () => {
   });
 
   test("reports its version and both close capabilities on registration and heartbeat", () => {
-    expect(source).toContain('#property version   "1.67.0"');
-    expect(source.match(/"1\.67\.0"/g)).toHaveLength(3);
+    expect(source).toContain('#property version   "2.0.0"');
+    expect(source.match(/"2\.0\.0"/g)).toHaveLength(3);
     expect(source).toContain("pending-close-flatten-v1");
     expect(source).toContain('\\"eaVersion\\"');
     expect(source).toContain('\\"eaCapabilities\\"');
+    expect(source).toContain('\\"brokerReady\\":true');
     expect(source).toContain('\\"lane2-close-contract\\"');
   });
 
@@ -235,11 +343,11 @@ describe("MT5 Expert Advisor source", () => {
 
   test("keeps partial and async closes retryable until broker state confirms the ticket is gone", () => {
     const close =
-      source.match(/bool ClosePositionTicket\([\s\S]*?\n}\n\nulong FindPositionTicket/)?.[0] ?? "";
+      source.match(/bool ClosePositionTicket\([\s\S]*?\n}\n\nulong ResultPositionTicket/)?.[0] ??
+      "";
     expect(close).toContain("bool positionGone = !PositionSelectByTicket(ticket);");
     // A full close still requires the position to be gone before it is marked
-    // executed, so PLACED and DONE_PARTIAL stay retryable. The partial branch is
-    // covered separately: it completes on DONE because the position survives.
+    // executed. PLACED and DONE_PARTIAL stay uncertain until broker reconciliation.
     expect(close).toContain(
       "result.retcode == TRADE_RETCODE_DONE && filledConfirmed && (positionGone || !fullClose)",
     );
@@ -250,9 +358,8 @@ describe("MT5 Expert Advisor source", () => {
     expect(close).toContain(
       "remainingVolume = positionGone ? 0.0 : PositionGetDouble(POSITION_VOLUME);",
     );
-    expect(source).toContain(
-      "result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED",
-    );
+    expect(source).toContain("if(sent && retcode == TRADE_RETCODE_DONE_PARTIAL)");
+    expect(source).toContain('return "UNKNOWN";');
   });
 
   test("logs incoming lifecycle work with ticket and trade context for MT5 Journal tracing", () => {
@@ -269,8 +376,10 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("ValidatePendingOrderPrice(command)");
     expect(source).toContain("SYMBOL_TRADE_STOPS_LEVEL");
     expect(source).toContain("SYMBOL_POINT");
-    expect(source).toContain("SYMBOL_ASK");
-    expect(source).toContain("SYMBOL_BID");
+    const pending = source.match(/bool ValidatePendingOrderPrice\([\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(pending).toContain("ReadSymbolTick(command.brokerSymbol, tick, tickAgeMs)");
+    expect(pending).toContain("double ask = tick.ask;");
+    expect(pending).toContain("double bid = tick.bid;");
   });
 
   test("selects a broker-supported filling mode for market and close requests", () => {
@@ -300,19 +409,54 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("ManageTrailingStops()");
     expect(source).toMatch(/void\s+OnTimer\(\)[\s\S]*ManageTrailingStops\(\)/);
     expect(source).toContain("TrailingStopImproves");
+    expect(source).toContain("RestoreTrailingStopPlans();");
+    expect(source).toContain("Trailing plan remains active; initial stop adjustment not applied: ");
+    expect(source).toContain("PersistTrailingStopPlan");
   });
 
-  test("recycles trailing-stop slots and never drops tracking silently", () => {
+  test("persists trailing plans by full account identity and ticket", () => {
+    const variable = source.match(/string TrailingStopPlanVariable\([\s\S]*?\n}/)?.[0] ?? "";
+    const persist = source.match(/bool PersistTrailingStopPlan\([\s\S]*?\n}/)?.[0] ?? "";
+    const track = source.match(/bool TrackTrailingStop\([\s\S]*?\n}/)?.[0] ?? "";
+    const restore = source.match(/void RestoreTrailingStopPlans\([\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(variable).toContain(
+      'string scopedKey = identity + "|" + IntegerToString((long)ticket);',
+    );
+    expect(variable).toContain("%08X%08X.%I64u");
+    expect(persist).toContain("GlobalVariableSet(variable, distance)");
+    expect(persist).toContain("GlobalVariablesFlush();");
+    expect(track).toMatch(
+      /PersistTrailingStopPlan\(identity, ticket, distance\)[\s\S]*?SetTrailingStopState/,
+    );
+    expect(track).toContain("bool hadExistingState = slot >= 0;");
+    expect(track).toMatch(
+      /if\(!PersistTrailingStopPlan\(identity, ticket, distance\)\)[\s\S]*?if\(!hadExistingState\)\s*ReleaseTrailingStopSlot\(slot\);/,
+    );
+    expect(restore).toContain("ParseTrailingStopPlanName(name, identity, ticket)");
+    expect(restore).toContain("if(!AccountConnected() || identity != ActiveLifecycleIdentity)");
+    expect(restore.indexOf("if(!BrokerReady())")).toBeLessThan(restore.indexOf("absentPasses++"));
+    expect(restore).toContain("PositionSelectByTicket(ticket)");
+    expect(restore).toContain("PositionGetString(POSITION_SYMBOL)");
+    expect(restore).toContain(
+      'PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY ? "BUY" : "SELL"',
+    );
+    expect(restore).toContain("trailingStopStates[index].absentPasses++;");
+    expect(source).toContain("#define TRAILING_PLAN_ABSENT_PASSES 10");
+    expect(restore).toContain("GlobalVariableDel(variable);");
+    expect(restore).toContain("trailingStopStates[index].identity != identity");
+    expect(restore).not.toContain("HttpPost");
+    expect(restore).not.toContain("Report(");
+  });
+
+  test("recycles trailing-stop slots and reports capacity exhaustion", () => {
     // The slot array is a lifetime budget unless finished positions give their
     // slot back. Exhausting it used to make every later trailing stop a no-op,
     // which leaves a live position with a stop nothing will ever move again.
     const track = source.match(/bool TrackTrailingStop\([\s\S]*?\n}\n/)?.[0] ?? "";
     expect(track).toBeTruthy();
-    expect(track).toContain("if(freeSlot < 0 && !trailingStopStates[index].active)");
-    expect(track).toContain("trailingStopStates[freeSlot].positionTicket = ticket;");
-    // An existing ticket must still update in place: the reuse scan only settles
-    // on a free slot after the whole occupied range failed to match the ticket.
-    expect(track).toMatch(/positionTicket == ticket[\s\S]*?return true;[\s\S]*?freeSlot = index/);
+    expect(track).toContain('errorText = "Trailing stop tracking capacity exhausted";');
+    expect(track).toContain("FindTrailingStopSlot(identity, ticket)");
+    expect(track).toContain("AllocateTrailingStopSlot()");
 
     // Releasing must clear identity, or a recycled slot trails a new ticket with a
     // finished position's queue item, trade id, symbol, direction and distance.
@@ -322,6 +466,7 @@ describe("MT5 Expert Advisor source", () => {
       "active = false",
       'queueItemId = ""',
       'logicalTradeId = ""',
+      'identity = ""',
       'symbol = ""',
       'direction = ""',
       "positionTicket = 0",
@@ -330,20 +475,23 @@ describe("MT5 Expert Advisor source", () => {
       expect(release).toContain(cleared);
     }
 
-    // ManageTrailingStops walks the array by index. Slots are recycled in place and
-    // the count is a high-water mark, so nothing shifts under that loop.
+    // Missing positions remain tracked until ten consecutive broker-ready passes.
     const manage = source.match(/void ManageTrailingStops\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
-    expect(manage).toContain("ReleaseTrailingStopSlot(index);");
+    expect(manage).toContain("trailingStopStates[index].identity != LifecycleAccountIdentity()");
+    expect(manage).toContain("GlobalVariableGet(variable)");
     expect(source).not.toContain("trailingStopStateCount--");
 
-    // A genuinely full array is reported, not swallowed.
+    // A genuinely full array is included in the one aggregate report.
     const executeTrailing = source.slice(
       source.indexOf("void ExecuteTrailingStop("),
       source.indexOf("void ReleaseTrailingStopSlot("),
     );
-    expect(executeTrailing).toContain("if(!TrackTrailingStop(command, tickets[index], distance))");
-    expect(executeTrailing).toContain("untracked++;");
-    expect(executeTrailing).toContain('"Trailing stop tracking capacity exhausted"');
+    expect(executeTrailing).toContain(
+      "if(!TrackTrailingStop(command, ticket, distance, trackError))",
+    );
+    expect(executeTrailing).toContain('AddExecution(summary, "FAILED"');
+    expect(executeTrailing).toContain("ReportExecutionSummary(command, summary");
+    expect(track).toContain('errorText = "Trailing stop tracking capacity exhausted";');
   });
 
   test("uses ticket-led close and modify execution across all matching broker positions and orders", () => {
@@ -360,17 +508,33 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("double partialCloseVolume;");
     expect(source).toContain('ValueFor(body, "partialCloseVolume")');
     expect(source).toContain('command.partialCloseKind == "TP_LEG"');
-    expect(source).toContain("No valid partial-close volume provided");
+    expect(source).toContain("No valid partial-close volume or broker volume metadata");
   });
 
   test("keeps sub-minimum partial slices as held no-ops and escalates only runner closes", () => {
     expect(source).toContain(
       "double NormalizeCloseVolume(string symbol, double requested, double currentVolume)",
     );
-    expect(source).toContain("MathFloor((volume + step * 0.000001) / step) * step");
-    expect(source).toContain("if(volume < minVolume || volume <= 0.0)");
-    expect(source).toContain("if(volume < minVolume || volume <= 0.0)\n      return 0.0;");
-    expect(source).toContain("if(closeVolume <= 0.0)\n         closeVolume = currentVolume;");
+    const closeVolume = source.match(/double NormalizeCloseVolume\([\s\S]*?\n}\n/)?.[0] ?? "";
+    const volume = source.match(/double NormalizeVolume\([\s\S]*?\n}\n/)?.[0] ?? "";
+    expect(closeVolume).toContain("VolumeDigits(step)");
+    expect(closeVolume).toContain("if(minVolume <= 0.0 || maxVolume < minVolume || step <= 0.0");
+    expect(closeVolume).toContain("volume < minVolume - step * 0.000001");
+    expect(closeVolume).toContain("volume > currentVolume + step * 0.000001");
+    expect(volume).toContain(
+      "if(requested <= 0.0 || minVolume <= 0.0 || maxVolume < minVolume || step <= 0.0)",
+    );
+    expect(volume).toContain("volume > maxVolume + step * 0.000001");
+    expect(volume).not.toContain("step = 0.01");
+    expect(source).not.toContain("closeVolume = currentVolume;");
+    const closeTicket =
+      source.match(/bool ClosePositionTicket\([\s\S]*?\n}\n\nulong ResultPositionTicket/)?.[0] ??
+      "";
+    expect(closeTicket).toContain("if(command.runnerVolume >= currentVolume)");
+    expect(closeTicket).toContain(
+      "closeVolume = NormalizeCloseVolume(symbol, currentVolume - command.runnerVolume, currentVolume);",
+    );
+    expect(closeTicket).toContain("if(closeVolume <= 0.0)");
     expect(source).toContain(
       "closeVolume = NormalizeCloseVolume(symbol, currentVolume - command.targetRemainingVolume, currentVolume)",
     );
@@ -379,7 +543,7 @@ describe("MT5 Expert Advisor source", () => {
     );
   });
 
-  test("reports a runner remnant as executed when this pass closed its ticket", () => {
+  test("keeps a flatten report uncertain when a runner or ticket remains", () => {
     const executeClose = source.slice(
       source.indexOf("void ExecuteClose("),
       source.indexOf("void ExecutePartialClose("),
@@ -387,23 +551,34 @@ describe("MT5 Expert Advisor source", () => {
     expect(executeClose).toContain(
       "int remainingPositionMatches = CollectPositionTickets(command, remainingPositionTickets);",
     );
+    expect(executeClose).toContain("if(!LifecycleAlreadyExecuted(command, ticket)");
     expect(executeClose).toContain(
-      "if(!LifecycleAlreadyExecuted(command, remainingPositionTickets[index]))",
+      'bool allRejected = ExecutionSummaryStatus(summary) == "FAILED";',
     );
-    expect(executeClose).toContain("remainingVolume");
+    expect(executeClose).toContain(
+      "!ContainsTicket(pendingTickets, remainingPendingTickets[index])",
+    );
+    expect(executeClose).toContain("!ContainsTicket(positionTickets, ticket)");
+    expect(executeClose).toContain("if(unexplainedRemaining)");
+    expect(executeClose).toContain(
+      'AddExecution(summary, "UNKNOWN", 0, 0, "Tickets remain after flatten attempt"',
+    );
+    expect(executeClose).toContain('ReportExecutionSummary(command, summary, "");');
   });
 
   test("reports actual open and close volumes, pending zero fills, and ticket-scoped lifecycle markers", () => {
     expect(source).toContain('\\"requestedVolume\\":%.8f');
     expect(source).toContain('\\"filledVolume\\":%.8f');
     expect(source).toContain('\\"remainingVolume\\":%.8f');
-    expect(source).toContain('result.retcode == TRADE_RETCODE_DONE_PARTIAL ? "PARTIAL"');
-    expect(source).toContain("request.action == TRADE_ACTION_PENDING ? 0.0 : result.volume");
+    expect(source).toContain("ExecutionStatus(sent, result.retcode)");
+    expect(source).toContain(
+      "request.action == TRADE_ACTION_PENDING || !confirmedDeal ? 0.0 : result.volume",
+    );
     expect(source).toContain("request.action == TRADE_ACTION_PENDING\n      ? request.volume");
     expect(source).toContain("GlobalVariableCheck(LifecycleIdempotencyVariable(command, ticket))");
     expect(source).toContain("MarkLifecycleExecuted(command, ticket)");
     expect(source).toMatch(
-      /for\(int index = 0; index < positionFound; index\+\+\)[\s\S]*?LifecycleAlreadyExecuted\(command, ticket\)[\s\S]*?ClosePositionTicket\(command, ticket, result, requested, filled, remaining\)/,
+      /for\(int index = 0; index < positionFound; index\+\+\)[\s\S]*?LifecycleAlreadyExecuted\(command, ticket\)[\s\S]*?ClosePositionTicket\(command, ticket, result, requested, filled, remaining, requestSent, errorText\)/,
     );
     expect(source).toContain(
       'command.targetRemainingVolume = StringToDouble(ValueFor(body, "targetRemainingVolume"))',
@@ -415,7 +590,9 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("for(int leg = 0; leg < 4; leg++)");
     expect(source).toContain("command.tpAllocation[leg]");
     expect(source).toContain("CompactTradeTpComment(command.logicalTradeId, leg + 1)");
-    expect(source).toContain("SafeStopPrice(command.brokerSymbol, referencePrice, command.tp[leg]");
+    expect(source).toContain(
+      "SafeStopPrice(command.brokerSymbol, stopReferencePrice, command.tp[leg]",
+    );
   });
 
   test("uses compact trade comments for app-side reconciliation", () => {
@@ -457,7 +634,9 @@ describe("MT5 Expert Advisor source", () => {
     expect(source).toContain("CurrentPollSeconds");
     expect(source).toContain("ApplyPollConfig(response)");
     expect(source).toContain('ValueFor(body, "pollSeconds")');
-    expect(source).toContain("EventSetTimer(CurrentPollSeconds)");
+    expect(source).toContain("EventSetTimer(1)");
+    expect(source).toContain("LastPollAttemptAtMs");
+    expect(source).not.toContain("EventSetTimer(CurrentPollSeconds)");
   });
 
   test("offers three broker-comment modes and still records identity locally in every one", () => {
@@ -504,10 +683,8 @@ describe("MT5 Expert Advisor source", () => {
   test("does not retry poll-line because polling leases queue items", () => {
     expect(source).toContain("/mt5/poll-line");
     expect(source).toMatch(/void\s+PollAndExecute\(\)[\s\S]*if\(!HttpGet\(url, response\)\)/);
-    expect(source).not.toMatch(
-      /void\s+PollAndExecute\(\)[\s\S]*HttpGetRetry\(url, response\)[\s\S]*ApplyPollConfig/,
-    );
-    expect(source).toContain("UNSAFE: /poll-line");
+    expect(source).not.toContain("HttpGetRetry");
+    expect(source).not.toContain("HttpRequestRetry");
   });
 
   test("a partial close routes away from the flatten path and never cancels pending orders", () => {
@@ -534,9 +711,13 @@ describe("MT5 Expert Advisor source", () => {
     // A full-volume request only completes once the position is gone, while a
     // confirmed slice can complete with the runner or another position left.
     expect(source).toContain("bool filledConfirmed = filledVolume + 0.000001 >= request.volume;");
-    expect(source).toContain(
-      "if(sent && result.retcode == TRADE_RETCODE_DONE && filledConfirmed && (positionGone || !fullClose))",
+    const close =
+      source.match(/bool ClosePositionTicket\([\s\S]*?\n}\n\nulong ResultPositionTicket/)?.[0] ??
+      "";
+    expect(close).toContain(
+      "if(requestSent && result.retcode == TRADE_RETCODE_DONE && filledConfirmed && (positionGone || !fullClose))",
     );
+    expect(close).toContain("MarkLifecycleExecuted(command, ticket);");
   });
 
   test("builds lifecycle idempotency names that MQL5 cannot truncate", () => {
@@ -639,21 +820,19 @@ describe("MT5 Expert Advisor source", () => {
     );
   });
 
-  test("defers adoption when there is no account login and retries until there is", () => {
-    // A login of zero is not an account. Adopting against it would match every mark
-    // written under the same blank identity. But OnInit is not the only chance: it runs
-    // before the terminal has necessarily resolved an account, and skipping adoption
-    // for the whole session leaves every prior mark unrefreshed until it expires.
+  test("defers lifecycle adoption until the full account identity is available", () => {
+    // A login without server and company is not a complete account identity. The timer
+    // retries adoption while still refreshing marks before broker readiness returns.
     const rehydrate = source.match(/void RehydrateLifecycleMarks\(\)[\s\S]*?\n}\n/)?.[0] ?? "";
     expect(rehydrate).toMatch(
-      /if\(AccountInfoInteger\(ACCOUNT_LOGIN\) == 0\)\s*\n\s*\{[\s\S]{0,240}?return;\s*\n\s*\}/,
+      /if\(!LifecycleIdentityReady\(\)\)\s*\n\s*\{[\s\S]{0,240}?return;\s*\n\s*\}/,
     );
     // The guard must precede both the clearing and the adoption, or a retry with no
     // login would wipe a registry it cannot rebuild.
-    expect(rehydrate.indexOf("ACCOUNT_LOGIN) == 0")).toBeLessThan(
+    expect(rehydrate.indexOf("!LifecycleIdentityReady()")).toBeLessThan(
       rehydrate.indexOf("ReleaseLifecycleMarkSlot"),
     );
-    expect(rehydrate.indexOf("ACCOUNT_LOGIN) == 0")).toBeLessThan(
+    expect(rehydrate.indexOf("!LifecycleIdentityReady()")).toBeLessThan(
       rehydrate.indexOf("GlobalVariablesTotal()"),
     );
     expect(rehydrate).toContain("LifecycleMarksAdopted = untracked == 0;");
@@ -928,22 +1107,19 @@ describe("MT5 Expert Advisor source", () => {
       source.indexOf("void ExecutePartialClose("),
       source.indexOf("bool ClosePositionTicket("),
     );
-    expect(partialBody.match(/ReportWithVolumes\(/g)).toHaveLength(1);
-    expect(partialBody).toContain("int attempted = 0;");
-    expect(partialBody).toContain("int succeeded = 0;");
-    expect(partialBody).toContain("bool partialResult = false;");
+    expect(partialBody.match(/ReportExecutionSummary\(command, summary/g)).toHaveLength(1);
+    expect(partialBody).toContain("ExecutionSummary summary;");
+    expect(partialBody).toContain("IsProvenOrderRejection(result.retcode)");
     expect(partialBody).toContain(
-      "if(ClosePositionTicket(command, ticket, result, requested, filled, remaining))",
+      'result.retcode == TRADE_RETCODE_DONE_PARTIAL && filled > 0.0 ? "PARTIAL"',
     );
-    expect(partialBody).toContain("succeeded++;");
-    expect(partialBody).toContain(
-      "result.retcode == TRADE_RETCODE_DONE_PARTIAL || result.retcode == TRADE_RETCODE_PLACED",
+    expect(partialBody).toContain("AddExecution(summary, status");
+    expect(source).toContain(
+      "if(summary.rejected == summary.attempted && summary.filledVolume <= 0.00000001)",
     );
-    expect(partialBody).toContain(
-      'string status = (succeeded == attempted && !partialResult) ? "EXECUTED" : "PARTIAL";',
-    );
-    expect(partialBody).toContain("if(attempted == 0)");
-    expect(partialBody).toContain("ReportUnknown(command.queueItemId");
+    const rejected = source.match(/bool IsProvenOrderRejection\([\s\S]*?\n}/)?.[0] ?? "";
+    expect(rejected).toContain("TRADE_RETCODE_INVALID_VOLUME");
+    expect(rejected).not.toContain("if(!sent)");
   });
 });
 

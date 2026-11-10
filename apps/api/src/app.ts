@@ -114,7 +114,7 @@ const EQUITY_CURVE_MAX_POINTS = 500;
 const MAX_EXECUTION_LOG_LIMIT = 500;
 // Snapshots arrive with each heartbeat, seconds apart. Anything older than this is a
 // silent EA, not a market price, and must not drive an execution decision.
-const QUOTE_FRESHNESS_MAX_AGE_MS = 5 * 60_000;
+const QUOTE_FRESHNESS_MAX_AGE_MS = 15_000;
 const LANE2_CLOSE_CAPABILITY = "lane2-close-contract";
 const PENDING_CLOSE_FLATTEN_CAPABILITY = "pending-close-flatten-v1";
 const OBSERVATIONAL_AUDIT_EVENT_TYPES = new Set([
@@ -1061,6 +1061,7 @@ export function createApi(options: ApiOptions = {}) {
   app.post("/api/mt5/register", async (c) => {
     const parsed = await mt5Json<{
       accountNumber: string;
+      brokerReady: boolean;
       server: string;
       company: string;
       currency: string;
@@ -1075,6 +1076,12 @@ export function createApi(options: ApiOptions = {}) {
     }>(c.req.raw);
     if ("error" in parsed) return c.json({ error: parsed.error }, 400);
     const body = parsed.body;
+    if (!isPositiveDecimalAccountNumber(body?.accountNumber)) {
+      return c.json({ error: "accountNumber must be a positive decimal MT5 account number" }, 400);
+    }
+    if (body.brokerReady !== true) {
+      return c.json({ error: "MT5 broker is not ready" }, 409);
+    }
     const registered = store.registerMt5Account(body);
     if ("error" in registered) return c.json({ error: registered.error }, registered.statusCode);
     return c.json(registered);
@@ -1083,6 +1090,7 @@ export function createApi(options: ApiOptions = {}) {
   app.post("/api/mt5/heartbeat", async (c) => {
     const parsed = await mt5Json<{
       accountId: string;
+      brokerReady: boolean;
       balance: number;
       equity: number;
       profit?: number;
@@ -1093,17 +1101,31 @@ export function createApi(options: ApiOptions = {}) {
     }>(c.req.raw);
     if ("error" in parsed) return c.json({ error: parsed.error }, 400);
     const body = parsed.body;
+    if (!isPositiveDecimalMt5AccountId(body?.accountId)) {
+      return c.json({ error: "accountId must identify a positive decimal MT5 account" }, 400);
+    }
+    if (body.brokerReady !== true) {
+      return c.json({ error: "MT5 broker is not ready" }, 409);
+    }
     const heartbeat = store.heartbeat(body);
     if ("error" in heartbeat) return c.json({ error: heartbeat.error }, heartbeat.statusCode);
     return c.json(heartbeat);
   });
 
-  app.get("/api/mt5/poll", (c) =>
-    c.json({ item: store.leaseNextQueueItem(c.req.query("accountId")) }),
-  );
+  app.get("/api/mt5/poll", (c) => {
+    const accountId = c.req.query("accountId");
+    if (!isPositiveDecimalMt5AccountId(accountId)) {
+      return c.json({ error: "accountId must identify a positive decimal MT5 account" }, 400);
+    }
+    return c.json({ item: store.leaseNextQueueItem(accountId) });
+  });
 
   app.get("/api/mt5/poll-line", (c) => {
-    const item = store.leaseNextQueueItem(c.req.query("accountId"));
+    const accountId = c.req.query("accountId");
+    if (!isPositiveDecimalMt5AccountId(accountId)) {
+      return c.text("error=accountId must identify a positive decimal MT5 account\n", 400);
+    }
+    const item = store.leaseNextQueueItem(accountId);
     const settings = store.appSettings();
     return c.text(item ? toMt5LinePayload(item, settings) : toMt5NoWorkPayload(settings), 200, {
       "content-type": "text/plain; charset=utf-8",
@@ -1111,20 +1133,40 @@ export function createApi(options: ApiOptions = {}) {
   });
 
   app.post("/api/mt5/report", async (c) => {
-    const parsed = await mt5Json<ExecutionReportInput>(c.req.raw);
+    const parsed = await mt5Json<unknown>(c.req.raw);
     if ("error" in parsed) return c.json({ error: parsed.error }, 400);
-    return c.json(store.executionReport(parsed.body));
+    const validated = validateExecutionReportPayload(parsed.body);
+    if ("error" in validated) return c.json({ error: validated.error }, 400);
+    const report = store.executionReport(validated.body);
+    if ("error" in report) return c.json({ error: report.error }, report.statusCode);
+    return c.json(report);
   });
 
   app.post("/api/mt5/snapshot", async (c) => {
     const parsed = await mt5Json<{
       accountId: string;
+      brokerReady: boolean;
       positions: unknown[];
       orders: unknown[];
       symbols?: unknown[];
     }>(c.req.raw);
     if ("error" in parsed) return c.json({ error: parsed.error }, 400);
-    return c.json(store.saveSnapshot(parsed.body));
+    const body = parsed.body;
+    if (!isPositiveDecimalMt5AccountId(body?.accountId)) {
+      return c.json({ error: "accountId must identify a positive decimal MT5 account" }, 400);
+    }
+    if (body.brokerReady !== true) {
+      return c.json({ error: "MT5 broker is not ready" }, 409);
+    }
+    if (!Array.isArray(body.positions) || !Array.isArray(body.orders)) {
+      return c.json({ error: "positions and orders must be arrays" }, 400);
+    }
+    if (body.symbols !== undefined && !Array.isArray(body.symbols)) {
+      return c.json({ error: "symbols must be an array" }, 400);
+    }
+    const snapshot = store.saveSnapshot(body);
+    if ("error" in snapshot) return c.json({ error: snapshot.error }, snapshot.statusCode);
+    return c.json(snapshot);
   });
 
   app.post("/api/mt5/history", async (c) => {
@@ -1133,6 +1175,12 @@ export function createApi(options: ApiOptions = {}) {
       deals: Mt5HistoryDealInput[];
     }>(c.req.raw);
     if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+    if (!isPositiveDecimalMt5AccountId(parsed.body?.accountId)) {
+      return c.json({ error: "accountId must identify a positive decimal MT5 account" }, 400);
+    }
+    if (!Array.isArray(parsed.body.deals)) {
+      return c.json({ error: "deals must be an array" }, 400);
+    }
     return c.json(store.saveBrokerHistory(parsed.body));
   });
 
@@ -1438,10 +1486,10 @@ function manualTicketSummary(
   return `Manual: ${parts.join(" ")}`;
 }
 
-interface ExecutionReportInput {
-  accountId: string;
-  queueItemId: string;
-  status: "EXECUTED" | "PARTIAL" | "FAILED" | "UNKNOWN";
+type ExecutionReportStatus = "EXECUTED" | "PARTIAL" | "FAILED" | "UNKNOWN";
+
+interface ExecutionReportExecutionInput {
+  status: ExecutionReportStatus;
   retcode: number;
   retcodeExternal: number;
   brokerComment: string;
@@ -1456,6 +1504,13 @@ interface ExecutionReportInput {
   /** Legacy EA compatibility; replaced by requestedVolume/filledVolume. */
   volume?: number;
   errorText?: string;
+  leg?: number;
+}
+
+interface ExecutionReportInput extends Omit<ExecutionReportExecutionInput, "leg"> {
+  accountId: string;
+  queueItemId: string;
+  executions?: ExecutionReportExecutionInput[];
 }
 
 interface AiSignalReview {
@@ -1647,7 +1702,7 @@ interface Mt5SnapshotState {
 }
 
 const volatilePositionFields = new Set(["profit"]);
-const volatileSymbolFields = new Set(["ask", "bid", "timeMsc"]);
+const volatileSymbolFields = new Set(["ask", "bid", "timeMsc", "tickAgeMs"]);
 const noVolatileSnapshotFields = new Set<string>();
 
 function stableSnapshotRecords(records: unknown[], volatileFields: ReadonlySet<string>) {
@@ -1680,12 +1735,12 @@ class AppStore {
   private readonly databasePath: string;
   private readonly allowDemoData: boolean;
   // Tick-level P/L and quotes are live telemetry, not durable business events.
-  // Keep the latest full snapshot in memory while SQLite stores only structural changes.
+  // Keep full telemetry in memory; persist quote values with their receipt timestamp.
+  // Unchanged positions/orders and symbol metadata avoid full reconciliation writes.
   private readonly liveMt5Snapshots = new Map<string, Mt5SnapshotState>();
   private readonly persistedMt5SnapshotSignatures = new Map<string, string>();
-  // When the last snapshot POST arrived per account, whether or not its
-  // durable content changed. mt5_snapshots.updated_at moves only on structural
-  // change, so this map is what answers "are snapshots flowing".
+  // When the last snapshot POST arrived per account. SQLite also updates the
+  // snapshot receipt timestamp so quote age remains correct after a restart.
   private readonly mt5SnapshotReceivedAt = new Map<string, string>();
   // History deals that matched their stored broker_orders row, keyed by
   // account:dealTicket. The EA resends ~7 days of deals every minute, so
@@ -5952,10 +6007,10 @@ class AppStore {
     });
     if (!record || typeof record !== "object") return undefined;
     const quote = record as Record<string, unknown>;
-    const bid = Number(quote.bid ?? 0);
-    const ask = Number(quote.ask ?? 0);
-    const price = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid > 0 ? bid : ask > 0 ? ask : undefined;
-    return price === undefined ? undefined : { price, updatedAt: snapshot.updatedAt };
+    const current = this.latestQuote(accountId, String(quote.symbol ?? quote.name ?? "")).quote;
+    return current
+      ? { price: (current.bid + current.ask) / 2, updatedAt: snapshot.updatedAt }
+      : undefined;
   }
 
   private supportsLane2CloseContract(accountId: string) {
@@ -5994,6 +6049,7 @@ class AppStore {
 
   registerMt5Account(input: {
     accountNumber: string;
+    brokerReady: boolean;
     server: string;
     company: string;
     currency: string;
@@ -6005,7 +6061,16 @@ class AppStore {
     eaVersion?: string;
     eaCapabilities?: string[];
     linkCode?: string;
-  }): { accountId: string; status: "REGISTERED" } | { statusCode: 404 | 409; error: string } {
+  }): { accountId: string; status: "REGISTERED" } | { statusCode: 400 | 404 | 409; error: string } {
+    if (!isPositiveDecimalAccountNumber(input.accountNumber)) {
+      return {
+        statusCode: 400,
+        error: "accountNumber must be a positive decimal MT5 account number",
+      };
+    }
+    if (input.brokerReady !== true) {
+      return { statusCode: 409, error: "MT5 broker is not ready" };
+    }
     const slot = input.linkCode ? this.accountSlotByCode(input.linkCode) : undefined;
     if (input.linkCode && !slot) {
       return { statusCode: 404, error: "Account slot link code was not found" };
@@ -6073,6 +6138,7 @@ class AppStore {
 
   heartbeat(input: {
     accountId: string;
+    brokerReady: boolean;
     balance: number;
     equity: number;
     profit?: number;
@@ -6081,6 +6147,21 @@ class AppStore {
     eaCapabilities?: string[];
     linkCode?: string;
   }) {
+    if (!isPositiveDecimalMt5AccountId(input.accountId)) {
+      return {
+        error: "accountId must identify a positive decimal MT5 account",
+        statusCode: 400 as const,
+      };
+    }
+    if (input.brokerReady !== true) {
+      return { error: "MT5 broker is not ready", statusCode: 409 as const };
+    }
+    const account = this.db
+      .query("SELECT id FROM mt5_accounts WHERE id = ?")
+      .get(input.accountId) as Row | null;
+    if (!account) {
+      return { error: "MT5 account not found", statusCode: 404 as const };
+    }
     if (input.linkCode) {
       const slot = this.accountSlotByCode(input.linkCode);
       if (!slot || (slot.accountId && slot.accountId !== input.accountId)) {
@@ -6696,7 +6777,17 @@ class AppStore {
     return Boolean(guardian?.enabled && guardian.paused);
   }
 
-  executionReport(input: ExecutionReportInput) {
+  executionReport(
+    input: ExecutionReportInput,
+  ): { reportId: string; status: string } | { error: string; statusCode: 400 } {
+    if (input.executions !== undefined) {
+      const queueItem = this.db
+        .query("SELECT account_id FROM queue_items WHERE id = ?")
+        .get(input.queueItemId) as Row | null;
+      if (!queueItem || String(queueItem.account_id) !== input.accountId) {
+        return { error: "Execution queue item does not belong to this account", statusCode: 400 };
+      }
+    }
     const verifiedInput = this.verifyRunnerCloseReport(input);
     const id = `report_${nanoid(10)}`;
     const now = new Date().toISOString();
@@ -6726,20 +6817,43 @@ class AppStore {
         verifiedInput.errorText ?? "",
         now,
       );
-    const queueStatus =
-      verifiedInput.status === "PARTIAL" || verifiedInput.status === "UNKNOWN"
-        ? "HELD"
-        : verifiedInput.status;
-    const heldReason =
-      verifiedInput.status === "PARTIAL"
-        ? "PARTIAL_FILL"
-        : verifiedInput.status === "UNKNOWN"
-          ? "DELIVERY_UNKNOWN"
-          : null;
+    const executions = verifiedInput.executions ?? [];
+    const hasSuccess = executions.some((execution) => execution.status === "EXECUTED");
+    const hasFailure = executions.some((execution) => execution.status === "FAILED");
+    const hasUnconfirmed = executions.some(
+      (execution) => execution.status === "PARTIAL" || execution.status === "UNKNOWN",
+    );
+    const mixedExecutionOutcome =
+      (hasSuccess && (hasFailure || hasUnconfirmed)) || (hasFailure && hasUnconfirmed);
+    const mustHoldQueue =
+      verifiedInput.status === "PARTIAL" ||
+      verifiedInput.status === "UNKNOWN" ||
+      hasUnconfirmed ||
+      mixedExecutionOutcome;
+    const queueStatus = mustHoldQueue ? "HELD" : verifiedInput.status;
+    const heldReason = mustHoldQueue
+      ? verifiedInput.status === "UNKNOWN" ||
+        executions.some((execution) => execution.status === "UNKNOWN")
+        ? "DELIVERY_UNKNOWN"
+        : "PARTIAL_FILL"
+      : null;
     this.db
       .query("UPDATE queue_items SET status = ?, held_reason = ?, updated_at = ? WHERE id = ?")
       .run(queueStatus, heldReason, now, input.queueItemId);
-    this.recordBrokerOrder(verifiedInput);
+    if (verifiedInput.executions !== undefined) {
+      for (const execution of verifiedInput.executions) {
+        this.recordBrokerOrder(
+          {
+            ...execution,
+            accountId: verifiedInput.accountId,
+            queueItemId: verifiedInput.queueItemId,
+          },
+          true,
+        );
+      }
+    } else {
+      this.recordBrokerOrder(verifiedInput);
+    }
     this.reconcileExecutionReport(verifiedInput);
     this.audit(
       "mt5.report",
@@ -6835,11 +6949,31 @@ class AppStore {
 
   saveSnapshot(input: {
     accountId: string;
+    brokerReady: boolean;
     positions: unknown[];
     orders: unknown[];
     symbols?: unknown[];
-  }) {
-    const now = new Date().toISOString();
+  }):
+    | {
+        accountId: string;
+        status: "RECORDED";
+        openPositionCount: number;
+        pendingOrderCount: number;
+      }
+    | { error: string; statusCode: 400 | 404 | 409 } {
+    if (!isPositiveDecimalMt5AccountId(input.accountId)) {
+      return {
+        error: "accountId must identify a positive decimal MT5 account",
+        statusCode: 400,
+      };
+    }
+    if (input.brokerReady !== true) return { error: "MT5 broker is not ready", statusCode: 409 };
+    const account = this.db
+      .query("SELECT id FROM mt5_accounts WHERE id = ?")
+      .get(input.accountId) as Row | null;
+    if (!account) return { error: "MT5 account not found", statusCode: 404 };
+
+    const now = new Date(Date.now()).toISOString();
     const snapshot = {
       positions: input.positions,
       orders: input.orders,
@@ -6847,8 +6981,8 @@ class AppStore {
       updatedAt: now,
     };
     this.liveMt5Snapshots.set(input.accountId, snapshot);
-    // Record arrival unconditionally: the durable write below is deduped by
-    // content signature and legitimately stands still on idle accounts.
+    // Keep in-process arrival telemetry and the durable quote age current even
+    // when prices and structural state are unchanged.
     this.mt5SnapshotReceivedAt.set(input.accountId, now);
 
     const signature = durableMt5SnapshotSignature(snapshot);
@@ -6889,13 +7023,17 @@ class AppStore {
         );
       this.persistSymbolMetadata(input.accountId, input.symbols ?? []);
       this.persistedMt5SnapshotSignatures.set(input.accountId, signature);
+    } else {
+      this.db
+        .query("UPDATE mt5_snapshots SET symbols_json = ?, updated_at = ? WHERE account_id = ?")
+        .run(JSON.stringify(input.symbols ?? []), now, input.accountId);
     }
     this.reconcileSnapshotState(input.accountId, input.positions, input.orders);
-    this.reconcileManualBrokerClosures(input.accountId, input.positions, input.orders);
     this.evaluateVirtualTakeProfits({
       accountId: input.accountId,
       positions: input.positions,
       symbols: input.symbols,
+      receivedAt: now,
     });
     this.invalidateDashboardCaches();
     // Snapshot telemetry arrives every second; auditing each poll would add
@@ -6925,16 +7063,18 @@ class AppStore {
     // gone quiet — an account sat 145 minutes silent while still reading "online" — and a
     // two-hour-old price must not be used to decide whether an entry is away from market.
     // Treat it as unpriceable so the caller holds rather than firing at market.
-    const updatedAt = Date.parse(String(live?.updatedAt ?? row?.updated_at ?? ""));
-    const fresh =
-      Number.isFinite(updatedAt) && Date.now() - updatedAt <= QUOTE_FRESHNESS_MAX_AGE_MS;
-    const quotes = fresh
-      ? quotesBySymbol(live?.symbols ?? (row ? parseJson<unknown[]>(String(row.symbols_json)) : []))
-      : null;
+    const updatedAt = String(live?.updatedAt ?? row?.updated_at ?? "");
+    const receiptAgeMs = elapsedReceiptAgeMs(updatedAt);
+    const fresh = Number.isFinite(receiptAgeMs) && receiptAgeMs <= QUOTE_FRESHNESS_MAX_AGE_MS;
+    const symbols = live?.symbols ?? (row ? parseJson<unknown[]>(String(row.symbols_json)) : []);
+    const quotes = fresh ? quotesBySymbol(symbols, receiptAgeMs) : null;
     return {
-      // A stale snapshot still counts as "this account quotes things", so an unpriceable
-      // entry is held for review instead of silently falling through to MARKET.
-      hasQuoteData: (quotes?.size ?? 0) > 0 || ((live !== undefined || row !== null) && !fresh),
+      // Invalid or stale quote records still mean the account sent market data;
+      // they are unpriceable and must not be treated as a fresh market.
+      hasQuoteData:
+        (quotes?.size ?? 0) > 0 ||
+        symbols.length > 0 ||
+        ((live !== undefined || row !== null) && !fresh),
       quote: brokerSymbol ? quotes?.get(brokerSymbol.toUpperCase()) : undefined,
     };
   }
@@ -7248,8 +7388,9 @@ class AppStore {
     accountId: string;
     positions: unknown[];
     symbols?: unknown[];
+    receivedAt: string;
   }) {
-    const quotes = quotesBySymbol(input.symbols ?? []);
+    const quotes = quotesBySymbol(input.symbols ?? [], elapsedReceiptAgeMs(input.receivedAt));
     for (const trade of this.logicalTrades().filter(
       (item) =>
         item.accountId === input.accountId &&
@@ -7793,7 +7934,10 @@ class AppStore {
 
   private brokerPointForTrade(trade: LogicalTrade) {
     const symbol = trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "";
-    return this.latestQuote(trade.accountId ?? "", symbol).quote?.point;
+    const point = this.symbolMetadata(trade.accountId ?? "").find(
+      (item) => item.symbol.toUpperCase() === symbol.toUpperCase(),
+    )?.point;
+    return typeof point === "number" && Number.isFinite(point) && point > 0 ? point : undefined;
   }
 
   private activeModifySlFloor(trade: LogicalTrade, positionTicket: string) {
@@ -11324,6 +11468,7 @@ class AppStore {
     this.ensureMockProvider("profile-demo");
     this.registerMt5Account({
       accountNumber: "100200300",
+      brokerReady: true,
       server: "MetaQuotes-Demo",
       company: "MetaQuotes Ltd",
       currency: "USD",
@@ -13409,18 +13554,12 @@ class AppStore {
     const broker = positionTicket
       ? this.latestPositionStop(trade, positionTicket)
       : { known: false, stopLoss: undefined };
-    const quote = this.liveMt5Snapshots
-      .get(trade.accountId ?? "")
-      ?.symbols.find(
-        (item) =>
-          item &&
-          typeof item === "object" &&
-          String((item as Record<string, unknown>).symbol ?? "").toUpperCase() ===
-            (trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol ?? "").toUpperCase(),
-      ) as Record<string, unknown> | undefined;
+    const quote = this.latestQuote(
+      trade.accountId ?? "",
+      trade.symbol.brokerSymbol ?? trade.symbol.canonicalSymbol,
+    ).quote;
     const marketPrice = Number(trade.direction === "BUY" ? (quote?.bid ?? 0) : (quote?.ask ?? 0));
-    const brokerPoint = Number(quote?.point ?? 0);
-    const point = brokerPoint > 0 ? brokerPoint : undefined;
+    const point = this.brokerPointForTrade(trade);
 
     this.db.transaction(() => {
       const resolvedReference =
@@ -13580,7 +13719,9 @@ class AppStore {
     const virtualTpLeg = virtualTpLegFromExecutionReport(payload, input);
     let updated: LogicalTrade = trade;
 
-    if (
+    if (payload.commandType === "OPEN_TRADE" && input.executions !== undefined) {
+      updated = this.reconcileOpenTradeExecutionBatch(trade, payload, input);
+    } else if (
       input.status === "PARTIAL" &&
       payload.commandType === "OPEN_TRADE" &&
       Number(input.filledVolume ?? 0) > 0
@@ -13782,7 +13923,122 @@ class AppStore {
       .run(updated.status, JSON.stringify(updated), trade.id);
   }
 
-  private recordBrokerOrder(input: ExecutionReportInput) {
+  private reconcileOpenTradeExecutionBatch(
+    trade: LogicalTrade,
+    payload: ExecutionQueueItem["payload"],
+    input: ExecutionReportInput,
+  ): LogicalTrade {
+    const executions = input.executions ?? [];
+    const rows = executions.map((execution) => ({
+      ...execution,
+      accountId: input.accountId,
+      queueItemId: input.queueItemId,
+    }));
+    const outcomes = rows.map((row) => ({
+      row,
+      pending: isPendingOrderAcceptance(payload, row),
+    }));
+    const hasUnconfirmed = outcomes.some(
+      ({ row }) => row.status === "PARTIAL" || row.status === "UNKNOWN",
+    );
+    const hasMarketFill = outcomes.some(
+      ({ row, pending }) => row.status === "EXECUTED" && !pending,
+    );
+    const hasPendingAcceptance = outcomes.some(
+      ({ row, pending }) => row.status === "EXECUTED" && pending,
+    );
+    const mixedEntryKinds = hasMarketFill && hasPendingAcceptance;
+    const unresolved =
+      input.status !== "EXECUTED" ||
+      rows.some((row) => row.status !== "EXECUTED") ||
+      mixedEntryKinds;
+    const nextStatus = unresolved
+      ? "OUT_OF_SYNC"
+      : hasPendingAcceptance
+        ? "PENDING"
+        : hasMarketFill
+          ? "OPEN"
+          : "OUT_OF_SYNC";
+    const hasExplicitLegs = executions.some((execution) => execution.leg !== undefined);
+    const byLeg = new Map<number, typeof outcomes>();
+    for (const outcome of outcomes) {
+      const leg = outcome.row.leg;
+      if (leg === undefined) continue;
+      const current = byLeg.get(leg) ?? [];
+      current.push(outcome);
+      byLeg.set(leg, current);
+    }
+    const canMapAllRows =
+      !hasExplicitLegs &&
+      ((input.status === "EXECUTED" &&
+        rows.every((row) => row.status === "EXECUTED") &&
+        !mixedEntryKinds) ||
+        (input.status === "FAILED" && rows.every((row) => row.status === "FAILED")));
+    const legs = trade.legs.map((leg) => {
+      if (leg.status === "CLOSED" || leg.status === "HIT") return leg;
+      const legRows = hasExplicitLegs ? byLeg.get(leg.leg) : canMapAllRows ? outcomes : undefined;
+      if (!legRows?.length) return leg;
+      const evidence = legRows
+        .map(({ row }) => `${row.status}: ${batchExecutionEvidence(row)}`)
+        .filter(Boolean)
+        .join("; ");
+      const hasLegSuccess = legRows.some(({ row }) => row.status === "EXECUTED");
+      const hasLegFailure = legRows.some(({ row }) => row.status === "FAILED");
+      const hasLegUnconfirmed = legRows.some(
+        ({ row }) => row.status === "PARTIAL" || row.status === "UNKNOWN",
+      );
+      const kinds = new Set(
+        legRows.filter(({ row }) => row.status === "EXECUTED").map(({ pending }) => pending),
+      );
+      if (hasLegUnconfirmed || (hasLegSuccess && (hasLegFailure || kinds.size > 1))) {
+        return evidence ? { ...leg, brokerEvidence: evidence } : leg;
+      }
+      if (hasLegSuccess) {
+        const pending = legRows.some(({ row, pending }) => row.status === "EXECUTED" && pending);
+        return {
+          ...leg,
+          status: pending ? ("PLANNED" as const) : ("OPEN" as const),
+          brokerEvidence: evidence,
+        };
+      }
+      if (hasLegFailure && (!hasLegSuccess || !hasExplicitLegs)) {
+        return { ...leg, status: "FAILED" as const, brokerEvidence: evidence };
+      }
+      return leg;
+    });
+    const reportedTickets = outcomes
+      .filter(({ row }) => row.status !== "FAILED")
+      .flatMap(({ row }) => [row.positionTicket, row.orderTicket])
+      .filter(truthyBrokerTicket);
+    const matchedBrokerTickets = [
+      ...new Set([...(trade.matchedBrokerTickets ?? []), ...reportedTickets]),
+    ];
+    const hasLiveTicketEvidence = outcomes.some(
+      ({ row, pending }) =>
+        (row.status === "EXECUTED" && !pending && truthyBrokerTicket(row.positionTicket)) ||
+        ((row.status === "PARTIAL" || row.status === "UNKNOWN") &&
+          truthyBrokerTicket(row.positionTicket)),
+    );
+    const livePositionExists = hasLiveTicketEvidence
+      ? true
+      : hasPendingAcceptance && !hasMarketFill && !hasUnconfirmed
+        ? false
+        : trade.livePositionExists;
+    const outOfSyncReason = unresolved
+      ? `MT5 batch open needs snapshot/history reconciliation (${rows.length} ticket reports)`
+      : undefined;
+    return {
+      ...trade,
+      status: nextStatus,
+      outOfSyncReason,
+      livePositionExists,
+      matchedBrokerTickets: matchedBrokerTickets.length > 0 ? matchedBrokerTickets : undefined,
+      brokerComment: input.brokerComment,
+      legs,
+    };
+  }
+
+  private recordBrokerOrder(input: ExecutionReportInput & { leg?: number }, perTicket = false) {
     const row = this.db
       .query("SELECT logical_trade_id, payload_json FROM queue_items WHERE id = ?")
       .get(input.queueItemId) as Row | null;
@@ -13810,7 +14066,7 @@ class AppStore {
         input.orderTicket ?? "",
         input.positionTicket ?? "",
         input.dealTicket ?? "",
-        input.requestedVolume ?? payload.volume ?? null,
+        input.requestedVolume ?? (perTicket ? null : (payload.volume ?? null)),
         input.filledVolume ?? input.volume ?? null,
         input.requestedPrice ?? null,
         input.filledPrice ?? null,
@@ -13870,79 +14126,6 @@ class AppStore {
       ...signal,
       partialClose: { ...signal.partialClose, targetRemainingVolume },
     };
-  }
-
-  private reconcileManualBrokerClosures(
-    accountId: string,
-    positions: unknown[],
-    orders: unknown[],
-  ) {
-    const liveTickets = new Set(
-      [...positions, ...orders]
-        .map((record) => brokerTicketFromSnapshot(record))
-        .filter((value): value is string => Boolean(value)),
-    );
-    const rows = this.db
-      .query(
-        `SELECT logical_trade_id, leg_id, position_ticket, order_ticket
-         FROM broker_orders
-         WHERE account_id = ?
-           AND action = 'OPEN'
-           AND position_ticket IS NOT NULL
-           AND position_ticket NOT IN ('','0')`,
-      )
-      .all(accountId) as Row[];
-    for (const row of rows) {
-      const ticket = String(row.position_ticket || row.order_ticket || "");
-      if (!ticket || liveTickets.has(ticket)) continue;
-      // Skip if a snapshot-diff manual row already exists, OR if the broker
-      // history sweep has already recorded the close with a real reason
-      // (sl-hit, tp-hit, expert, manual-mobile, etc). Without this guard,
-      // every TP/SL close would also get a duplicate `source='manual'` row
-      // from the snapshot diff, polluting the History trail.
-      const duplicate = this.db
-        .query(
-          `SELECT id FROM broker_orders
-           WHERE account_id = ? AND (position_ticket = ? OR order_ticket = ?)
-             AND (
-               (action = 'FULL_CLOSE' AND source = 'manual')
-               OR (action IN ('FULL_CLOSE','PARTIAL_CLOSE') AND source IN
-                   ('sl-hit','tp-hit','expert','manual-terminal','manual-mobile','manual-web','stop-out','history'))
-             )
-           LIMIT 1`,
-        )
-        .get(accountId, ticket, ticket) as Row | null;
-      if (duplicate) continue;
-      this.db
-        .query(
-          `INSERT INTO broker_orders
-            (id, logical_trade_id, leg_id, action, queue_item_id, account_id, order_ticket, position_ticket, deal_ticket,
-             requested_volume, filled_volume, requested_price, filled_price, retcode, retcode_external, broker_comment, pnl_currency, pnl_pips, source, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          `broker_${nanoid(10)}`,
-          String(row.logical_trade_id),
-          String(row.leg_id || "trade"),
-          "FULL_CLOSE",
-          "manual",
-          accountId,
-          String(row.order_ticket ?? ""),
-          String(row.position_ticket ?? ""),
-          "",
-          null,
-          null,
-          null,
-          null,
-          0,
-          0,
-          "Manual terminal intervention detected from snapshot diff",
-          null,
-          null,
-          "manual",
-          new Date().toISOString(),
-        );
-    }
   }
 
   private logicalTradeIdForHistoryDeal(deal: Mt5HistoryDealInput) {
@@ -14408,6 +14591,15 @@ function executionEvidence(input: ExecutionReportInput) {
     .join(" | ");
 }
 
+function batchExecutionEvidence(input: ExecutionReportInput & { positionTicket?: string }) {
+  return [
+    executionEvidence(input),
+    truthyBrokerTicket(input.positionTicket) ? `position:${input.positionTicket}` : "",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
 function nullableNumber(value: unknown) {
   return value === null || value === undefined || value === "" ? undefined : Number(value);
 }
@@ -14548,7 +14740,11 @@ function brokerOrderSourceForPayload(
   }
 }
 
-function brokerLegId(payload: ExecutionQueueItem["payload"], input: ExecutionReportInput) {
+function brokerLegId(
+  payload: ExecutionQueueItem["payload"],
+  input: ExecutionReportInput & { leg?: number },
+) {
+  if (input.leg !== undefined) return `tp${input.leg}`;
   const virtualTp = virtualTpLegFromExecutionReport(payload, input);
   if (virtualTp !== undefined) return `tp${virtualTp}`;
   if (payload.partialClose?.kind === "TP_LEG") return `tp${payload.partialClose.value}`;
@@ -14672,17 +14868,37 @@ function brokerStopLossFromSnapshot(record: unknown) {
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-function quotesBySymbol(symbols: unknown[]) {
+function quotesBySymbol(symbols: unknown[], elapsedReceiptAge = 0) {
   const quotes = new Map<string, { bid: number; ask: number; point?: number }>();
   for (const record of symbols) {
     if (!record || typeof record !== "object") continue;
     const item = record as Record<string, unknown>;
     const symbol = String(item.symbol ?? "").toUpperCase();
-    const bid = Number(item.bid ?? 0);
-    const ask = Number(item.ask ?? 0);
-    const point = Number(item.point ?? 0);
-    if (!symbol || !bid || !ask) continue;
-    quotes.set(symbol, { bid, ask, point: point > 0 ? point : undefined });
+    const tickAgeMs = item.tickAgeMs;
+    const bid = item.bid;
+    const ask = item.ask;
+    const point = item.point;
+    if (
+      !symbol ||
+      typeof tickAgeMs !== "number" ||
+      !Number.isFinite(tickAgeMs) ||
+      tickAgeMs < 0 ||
+      tickAgeMs + elapsedReceiptAge > QUOTE_FRESHNESS_MAX_AGE_MS ||
+      typeof bid !== "number" ||
+      !Number.isFinite(bid) ||
+      bid <= 0 ||
+      typeof ask !== "number" ||
+      !Number.isFinite(ask) ||
+      ask <= 0 ||
+      bid > ask
+    ) {
+      continue;
+    }
+    quotes.set(symbol, {
+      bid,
+      ask,
+      point: typeof point === "number" && Number.isFinite(point) && point > 0 ? point : undefined,
+    });
   }
   return quotes;
 }
@@ -16447,6 +16663,149 @@ async function mt5Json<T>(request: Request): Promise<{ body: T } | { error: stri
   } catch {
     return { error: "Malformed MT5 JSON payload" };
   }
+}
+
+function isPositiveDecimalAccountNumber(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
+  try {
+    return BigInt(value) > 0n;
+  } catch {
+    return false;
+  }
+}
+
+function isPositiveDecimalMt5AccountId(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^mt5-(\d+)$/.exec(value);
+  return Boolean(match && isPositiveDecimalAccountNumber(match[1]));
+}
+
+function elapsedReceiptAgeMs(receivedAt: string, now = Date.now()) {
+  const timestamp = Date.parse(receivedAt);
+  return Number.isFinite(timestamp) && timestamp <= now
+    ? now - timestamp
+    : Number.POSITIVE_INFINITY;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateExecutionReportPayload(
+  value: unknown,
+): { body: ExecutionReportInput } | { error: string } {
+  if (!isRecord(value)) return { error: "Execution report must be a JSON object" };
+  const allowedParentKeys = new Set([
+    "accountId",
+    "queueItemId",
+    "status",
+    "retcode",
+    "retcodeExternal",
+    "brokerComment",
+    "orderTicket",
+    "positionTicket",
+    "dealTicket",
+    "requestedPrice",
+    "filledPrice",
+    "requestedVolume",
+    "filledVolume",
+    "remainingVolume",
+    "volume",
+    "errorText",
+    "executions",
+  ]);
+  const allowedExecutionKeys = new Set([...allowedParentKeys, "leg"]);
+  if (Object.keys(value).some((key) => !allowedParentKeys.has(key))) {
+    return { error: "Execution report contains an unsupported field" };
+  }
+  if (typeof value.accountId !== "string" || !value.accountId) {
+    return { error: "accountId is required" };
+  }
+  if (typeof value.queueItemId !== "string" || !value.queueItemId) {
+    return { error: "queueItemId is required" };
+  }
+  const validateFields = (record: Record<string, unknown>, child: boolean) => {
+    const allowed = child ? allowedExecutionKeys : allowedParentKeys;
+    if (Object.keys(record).some((key) => !allowed.has(key))) return "unsupported field";
+    if (child && Object.hasOwn(record, "executions")) return "nested executions are not allowed";
+    if (child && record.accountId !== undefined && record.accountId !== value.accountId) {
+      return "execution accountId must match the parent report";
+    }
+    if (child && record.queueItemId !== undefined && record.queueItemId !== value.queueItemId) {
+      return "execution queueItemId must match the parent report";
+    }
+    if (
+      !["EXECUTED", "PARTIAL", "FAILED", "UNKNOWN"].includes(String(record.status)) ||
+      typeof record.brokerComment !== "string" ||
+      typeof record.retcode !== "number" ||
+      !Number.isInteger(record.retcode) ||
+      typeof record.retcodeExternal !== "number" ||
+      !Number.isInteger(record.retcodeExternal)
+    ) {
+      return "execution status, retcodes, or brokerComment are invalid";
+    }
+    for (const key of ["orderTicket", "positionTicket", "dealTicket", "errorText"]) {
+      if (record[key] !== undefined && typeof record[key] !== "string") {
+        return `${key} must be a string`;
+      }
+    }
+    for (const key of ["requestedPrice", "filledPrice"]) {
+      const price = record[key];
+      if (price !== undefined && (typeof price !== "number" || !Number.isFinite(price))) {
+        return `${key} must be finite`;
+      }
+    }
+    for (const key of ["requestedVolume", "filledVolume", "remainingVolume", "volume"]) {
+      const volume = record[key];
+      if (
+        volume !== undefined &&
+        (typeof volume !== "number" || !Number.isFinite(volume) || volume < 0)
+      ) {
+        return `${key} must be a finite non-negative number`;
+      }
+    }
+    if (
+      child &&
+      record.leg !== undefined &&
+      (typeof record.leg !== "number" ||
+        !Number.isInteger(record.leg) ||
+        record.leg < 1 ||
+        record.leg > 4)
+    ) {
+      return "leg must be an integer from 1 to 4";
+    }
+    if (
+      Object.entries(record).some(
+        ([key, field]) =>
+          !(key === "executions" && !child) && field !== null && typeof field === "object",
+      )
+    ) {
+      return "nested arrays and objects are not allowed";
+    }
+    return undefined;
+  };
+  const parentError = validateFields(value, false);
+  if (parentError) return { error: parentError };
+
+  if (value.executions === undefined) return { body: value as unknown as ExecutionReportInput };
+  if (
+    !Array.isArray(value.executions) ||
+    value.executions.length < 1 ||
+    value.executions.length > 100
+  ) {
+    return { error: "executions must be an array of 1 to 100 entries" };
+  }
+  const executions: ExecutionReportExecutionInput[] = [];
+  for (const entry of value.executions) {
+    if (!isRecord(entry)) return { error: "each execution must be a JSON object" };
+    const entryError = validateFields(entry, true);
+    if (entryError) return { error: entryError };
+    const inherited = { ...entry };
+    delete inherited.accountId;
+    delete inherited.queueItemId;
+    executions.push(inherited as unknown as ExecutionReportExecutionInput);
+  }
+  return { body: { ...(value as unknown as ExecutionReportInput), executions } };
 }
 
 function enrichLifecycleSignalFromTrade(signal: ParsedSignal, trade: LogicalTrade): ParsedSignal {

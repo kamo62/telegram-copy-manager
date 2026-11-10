@@ -149,13 +149,21 @@ export function closeVolumeForRunner(
   minVolume = 0.01,
   volumeStep = 0.01,
 ) {
-  if (!runner?.enabled || runner.lotSize <= 0 || currentVolume <= runner.lotSize) {
-    return currentVolume;
-  }
+  if (!runner?.enabled) return currentVolume;
+  if (
+    !Number.isFinite(currentVolume) ||
+    !Number.isFinite(runner.lotSize) ||
+    runner.lotSize <= 0 ||
+    currentVolume <= runner.lotSize ||
+    minVolume <= 0 ||
+    volumeStep <= 0
+  )
+    return 0;
   const candidate = currentVolume - runner.lotSize;
-  const step = volumeStep > 0 ? volumeStep : 0.01;
-  const normalized = Number((Math.floor((candidate + step * 0.000001) / step) * step).toFixed(8));
-  return normalized >= minVolume && normalized > 0 ? normalized : currentVolume;
+  const normalized = Number(
+    (Math.floor((candidate + volumeStep * 0.000001) / volumeStep) * volumeStep).toFixed(8),
+  );
+  return normalized >= minVolume && normalized > 0 && normalized < currentVolume ? normalized : 0;
 }
 
 function partialCloseVolume(

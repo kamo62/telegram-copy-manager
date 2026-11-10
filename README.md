@@ -188,6 +188,20 @@ Optional script knobs include `TELEGRAM_TC_API_URL`, `TELEGRAM_TARGET_DIALOG`,
 
 ## MT5 Workflow
 
+Version 2.0.0 changes the EA/API contract. Upgrade the API and manually compiled EA together;
+the old EX5 does not supply the required readiness and quote-age fields. Keep copying paused
+through that coordinated upgrade. Existing trailing plans created by an older EA were not
+persisted, so review surviving positions and re-establish those plans manually on demo before
+returning to live use. The source does not establish the cause of the server's native symbol-sync
+timeout; check broker login and the configured chart symbol separately.
+
+The EA registers after broker identity and chart synchronisation are ready, retries registration
+on later timer passes, and manages restored trailing plans before network telemetry. Quote age is
+measured against the broker clock; quotes older than 15 seconds are unpriceable. Snapshot absence
+can flag a trade as out of sync, but broker history supplies closure evidence. A saved trailing
+plan remains active when its first stop adjustment is rejected; the command reports partial
+completion and stays held for reconciliation.
+
 1. Build or compile `mt5/TelegramTC_EA.mq5` in MetaEditor.
 2. Start the API or Docker service.
 3. In the app, create a link slot from `Linked Accounts`.
